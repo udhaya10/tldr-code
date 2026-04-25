@@ -480,7 +480,10 @@ fn truncate_docstring(doc: &str) -> String {
     if cleaned.len() <= 200 {
         cleaned
     } else {
-        format!("{}...", &cleaned[..197])
+        format!(
+            "{}...",
+            crate::util::truncate_at_char_boundary(&cleaned, 197)
+        )
     }
 }
 
@@ -534,6 +537,18 @@ mod tests {
             std::fs::create_dir_all(parent).unwrap();
         }
         std::fs::write(path, source).unwrap();
+    }
+
+    #[test]
+    fn test_truncate_docstring_handles_unicode_char_boundaries() {
+        // 67 × 3-byte char (U+2500) = 201 bytes. Pre-fix: panic at
+        // `&cleaned[..197]` (197 % 3 = 2 → mid-codepoint). Post-fix: snap
+        // down to the largest char-boundary <= 197 (= 195 bytes = 65 chars).
+        let doc = "─".repeat(67);
+        let truncated = truncate_docstring(&doc);
+        assert!(truncated.ends_with("..."));
+        assert!(std::str::from_utf8(truncated.as_bytes()).is_ok());
+        assert_eq!(truncated, format!("{}...", "─".repeat(65)));
     }
 
     #[test]

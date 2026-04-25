@@ -15,6 +15,7 @@ use std::path::Path;
 use colored::Colorize;
 use comfy_table::{presets::UTF8_FULL, Cell, Color, ContentArrangement, Table};
 use serde::Serialize;
+use tldr_core::util::{truncate_at_char_boundary, truncate_at_char_boundary_from_end};
 
 /// Compute the common directory prefix of a list of paths.
 /// Returns the longest shared directory ancestor (never a partial component).
@@ -634,9 +635,9 @@ pub fn format_cognitive_text(report: &tldr_core::metrics::CognitiveReport) -> St
             _ => "ok".green().to_string(),
         };
 
-        // Truncate function name to 28 chars
+        // Truncate function name to 28 chars (char-boundary safe; #16)
         let name = if f.name.len() > 28 {
-            format!("{}...", &f.name[..25])
+            format!("{}...", truncate_at_char_boundary(&f.name, 25))
         } else {
             f.name.clone()
         };
@@ -946,9 +947,9 @@ pub fn format_smells_text(report: &tldr_core::SmellsReport) -> String {
             colored.to_string()
         };
 
-        // Truncate name to 28 chars
+        // Truncate name to 28 chars (char-boundary safe; #16)
         let name = if smell.name.len() > 28 {
-            format!("{}...", &smell.name[..25])
+            format!("{}...", truncate_at_char_boundary(&smell.name, 25))
         } else {
             smell.name.clone()
         };
@@ -1043,9 +1044,12 @@ pub fn format_secrets_text(report: &tldr_core::SecretsReport) -> String {
 
         let rel_file = strip_prefix_display(&finding.file, &prefix);
 
-        // Truncate file path to 40 chars
+        // Truncate file path to 40 chars (char-boundary safe; #16)
         let file_display = if rel_file.len() > 40 {
-            format!("...{}", &rel_file[rel_file.len() - 37..])
+            format!(
+                "...{}",
+                truncate_at_char_boundary_from_end(&rel_file, 37)
+            )
         } else {
             rel_file
         };
@@ -1636,14 +1640,21 @@ pub fn format_clones_text(report: &tldr_core::analysis::ClonesReport) -> String 
         let lines_a = format!("{}-{}", pair.fragment1.start_line, pair.fragment1.end_line);
         let lines_b = format!("{}-{}", pair.fragment2.start_line, pair.fragment2.end_line);
 
-        // Truncate file names if too long (show tail for readability)
+        // Truncate file names if too long (show tail for readability;
+        // char-boundary safe; #16).
         let file_a_display = if file_a.len() > 30 {
-            format!("...{}", &file_a[file_a.len() - 27..])
+            format!(
+                "...{}",
+                truncate_at_char_boundary_from_end(&file_a, 27)
+            )
         } else {
             file_a
         };
         let file_b_display = if file_b.len() > 30 {
-            format!("...{}", &file_b[file_b.len() - 27..])
+            format!(
+                "...{}",
+                truncate_at_char_boundary_from_end(&file_b, 27)
+            )
         } else {
             file_b
         };
@@ -2200,10 +2211,10 @@ pub fn format_module_info_text(info: &tldr_core::types::ModuleInfo) -> String {
         info.language.as_str().cyan()
     ));
 
-    // Docstring (truncated to 80 chars)
+    // Docstring (truncated to 80 chars; char-boundary safe; #9)
     if let Some(ref doc) = info.docstring {
         let truncated = if doc.len() > 80 {
-            format!("{}...", &doc[..77])
+            format!("{}...", truncate_at_char_boundary(doc, 77))
         } else {
             doc.clone()
         };
@@ -2255,10 +2266,10 @@ pub fn format_module_info_text(info: &tldr_core::types::ModuleInfo) -> String {
                 class.line_number
             ));
 
-            // Class docstring
+            // Class docstring (char-boundary safe; #9)
             if let Some(ref doc) = class.docstring {
                 let truncated = if doc.len() > 80 {
-                    format!("{}...", &doc[..77])
+                    format!("{}...", truncate_at_char_boundary(doc, 77))
                 } else {
                     doc.clone()
                 };
@@ -2388,10 +2399,10 @@ fn format_function_line(output: &mut String, func: &tldr_core::types::FunctionIn
         func.line_number
     ));
 
-    // Docstring preview (truncated)
+    // Docstring preview (char-boundary safe truncation; #9)
     if let Some(ref doc) = func.docstring {
         let truncated = if doc.len() > 60 {
-            format!("{}...", &doc[..57])
+            format!("{}...", truncate_at_char_boundary(doc, 57))
         } else {
             doc.clone()
         };

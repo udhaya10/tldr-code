@@ -1011,7 +1011,10 @@ fn truncate_docstring(doc: &str) -> String {
     if first_para.len() <= 200 {
         first_para
     } else {
-        format!("{}...", &first_para[..197])
+        format!(
+            "{}...",
+            crate::util::truncate_at_char_boundary(&first_para, 197)
+        )
     }
 }
 
@@ -1246,6 +1249,18 @@ mod tests {
         let result = truncate_docstring(&long_doc);
         assert!(result.len() <= 200);
         assert!(result.ends_with("..."));
+    }
+
+    #[test]
+    fn test_truncate_docstring_handles_unicode_char_boundaries() {
+        // 67 × 3-byte char (U+2500) = 201 bytes. Pre-fix: panic at
+        // `&first_para[..197]` (197 % 3 = 2 → mid-codepoint). Post-fix: snap
+        // down to the largest char-boundary <= 197 (= 195 bytes = 65 chars).
+        let doc = "─".repeat(67);
+        let truncated = truncate_docstring(&doc);
+        assert!(truncated.ends_with("..."));
+        assert!(std::str::from_utf8(truncated.as_bytes()).is_ok());
+        assert_eq!(truncated, format!("{}...", "─".repeat(65)));
     }
 
     #[test]

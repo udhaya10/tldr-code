@@ -45,6 +45,9 @@ pub mod walker;
 pub mod encoding;
 pub mod limits;
 
+// Generic helpers
+pub mod util;
+
 // Phase 2: AST Layer (L1) - implemented
 pub mod ast;
 pub mod fs;
