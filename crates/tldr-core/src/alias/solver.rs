@@ -79,6 +79,17 @@ pub struct AliasSolver {
     /// Field store constraints: base -> (field, source).
     field_stores: HashMap<String, Vec<(String, String)>>,
 
+    /// Reverse field-store index: source -> [(base, field)].
+    ///
+    /// Andersen's points-to inclusion `pts(loc.field) ⊇ pts(source)` for
+    /// every `loc ∈ pts(base)` in a constraint `base.field = source`
+    /// requires re-applying the field store whenever `pts(source)` grows
+    /// — not only when `pts(base)` grows. This index maps each
+    /// field-store source variable to the list of `(base, field)` pairs
+    /// whose store must be re-evaluated when the source changes.
+    /// See `propagate_variable` and issue #13 (VAL-005).
+    reverse_field_stores: HashMap<String, Vec<(String, String)>>,
+
     /// Allocation sites: target -> AbstractLocation.
     alloc_sites: HashMap<String, AbstractLocation>,
 
@@ -112,6 +123,7 @@ impl AliasSolver {
             reverse_copy: HashMap::new(),
             field_loads: HashMap::new(),
             field_stores: HashMap::new(),
+            reverse_field_stores: HashMap::new(),
             alloc_sites: HashMap::new(),
             phi_targets: extractor.phi_targets().clone(),
             parameters: extractor.parameters().clone(),
@@ -174,11 +186,18 @@ impl AliasSolver {
                         .entry(base.clone())
                         .or_default()
                         .push((field.clone(), source.clone()));
-                    // Track reverse for both base and source
-                    self.reverse_copy
+                    // Track reverse: when `source` changes, the field store
+                    // must be re-applied so `pts(loc.field) ⊇ pts(source)`
+                    // for every `loc ∈ pts(base)`. The previous `reverse_copy`
+                    // mapping was indexed but never acted upon for field
+                    // stores (issue #13). The dedicated `reverse_field_stores`
+                    // index records the (base, field) pair so
+                    // `propagate_variable` can re-run `propagate_field_store`
+                    // when the source variable's points-to set grows.
+                    self.reverse_field_stores
                         .entry(source.clone())
                         .or_default()
-                        .push(base.clone());
+                        .push((base.clone(), field.clone()));
                 }
             }
         }
@@ -280,6 +299,24 @@ impl AliasSolver {
         if let Some(stores) = self.field_stores.get(var).cloned() {
             for (field, source) in stores {
                 self.propagate_field_store(&current_pts, &field, &source);
+            }
+        }
+
+        // Source-triggered field-store propagation (issue #13 / VAL-005).
+        //
+        // For every constraint `base.field = var` (i.e. `var` is the
+        // source of a field store), Andersen's inclusion requires
+        // `pts(loc.field) ⊇ pts(var)` for every `loc ∈ pts(base)`. When
+        // `pts(var)` grows we must re-run the field store with the
+        // current `pts(base)` so the heap field location picks up the
+        // new pointees. The bug fixed here was that this re-propagation
+        // never happened — leaving heap field locations empty whenever
+        // the source variable's points-to set arrived after the base
+        // variable was first processed (e.g. through a phi target).
+        if let Some(stores) = self.reverse_field_stores.get(var).cloned() {
+            for (base, field) in stores {
+                let base_pts = self.points_to.get(&base).cloned().unwrap_or_default();
+                self.propagate_field_store(&base_pts, &field, var);
             }
         }
     }
@@ -798,5 +835,178 @@ mod tests {
 
         // Parameters should may-alias each other (conservative)
         assert!(info.may_alias_check("a_0", "b_0"));
+    }
+
+    // -------------------------------------------------------------------------
+    // VAL-005 / Issue #13: Field-store source-propagation tests.
+    //
+    // Andersen's points-to semantics require that for a field-store constraint
+    // `base.field = source`, whenever `pts(source)` grows the heap field
+    // location `pts(loc.field)` (for every `loc in pts(base)`) must also
+    // include those new pointees.
+    //
+    // The solver indexes `reverse_copy[source] = [base]` for every FieldStore
+    // (see index_constraints) but `propagate_variable` previously had no
+    // branch that, when the source variable changed, re-ran
+    // `propagate_field_store` for the (base, field) pairs whose source is the
+    // var being propagated. These two tests exercise that gap.
+    // -------------------------------------------------------------------------
+
+    /// Build a fresh AliasSolver seeded with the given constraints and
+    /// initial points-to allocations. This bypasses
+    /// `ConstraintExtractor::extract_from_ssa` (and the source-text parser
+    /// it relies on) so the tests can construct precise constraint shapes
+    /// — in particular FieldStore constraints whose `base` matches a
+    /// variable that has a points-to set (the SSA-driven extractor uses
+    /// the unversioned base name from `parse_field_store`, which is its
+    /// own pre-existing limitation orthogonal to this bug).
+    fn solver_from_raw(
+        constraints: Vec<Constraint>,
+        initial_pts: &[(&str, &str)],
+    ) -> AliasSolver {
+        let mut solver = AliasSolver {
+            points_to: HashMap::new(),
+            worklist: VecDeque::new(),
+            in_worklist: HashSet::new(),
+            copy_constraints: HashMap::new(),
+            reverse_copy: HashMap::new(),
+            field_loads: HashMap::new(),
+            field_stores: HashMap::new(),
+            reverse_field_stores: HashMap::new(),
+            alloc_sites: HashMap::new(),
+            phi_targets: HashSet::new(),
+            parameters: HashSet::new(),
+            last_changed: Vec::new(),
+            iterations: 0,
+        };
+        solver.index_constraints(&constraints);
+        for (var, loc) in initial_pts {
+            solver
+                .points_to
+                .entry((*var).to_string())
+                .or_default()
+                .insert((*loc).to_string());
+            solver.add_to_worklist(var);
+        }
+        solver
+    }
+
+    /// Test: `obj.field = a` with both as parameters (no phi).
+    ///
+    /// Constraints: FieldStore(obj, field, a). Initial points-to:
+    /// `pts(obj) = {param_obj}`, `pts(a) = {param_a}`. After solve,
+    /// Andersen's inclusion requires `pts(param_obj.field) ⊇ pts(a)`,
+    /// i.e. `param_obj.field` must contain `param_a`.
+    ///
+    /// Worklist order matters here: when `obj` is popped from the
+    /// worklist, `propagate_variable` runs `propagate_field_store` with
+    /// the current `pts(a)`. Because both params are seeded together,
+    /// this case may pass even with the bug — UNLESS `obj` is popped
+    /// strictly first AND `pts(a)` later changes. To force the failure
+    /// even in the no-phi case, we seed `pts(a)` AFTER `obj` so the
+    /// initial worklist order forces the bug: process `obj` first
+    /// (with empty `pts(a)`), then later `a` gets its alloc and changes
+    /// — at which point the missing reverse-field-store propagation
+    /// leaves `param_obj.field` empty.
+    #[test]
+    fn test_field_store_simple_no_phi() {
+        // Constraint: obj.field = a
+        let constraints = vec![Constraint::field_store("obj", "field", "a")];
+
+        // Seed obj only initially. Then push pts(a) after, simulating a
+        // worklist-ordering scenario where the source variable's points-to
+        // set arrives after the base has been processed.
+        let mut solver = solver_from_raw(constraints, &[("obj", "param_obj")]);
+
+        // Drain and run one round so `obj` propagates; this populates
+        // `pts(param_obj.field)` from `pts(a)` — currently empty.
+        solver.solve().unwrap();
+
+        // Now `a` gains its points-to set (e.g. pts(a) = {param_a}).
+        // Add `a` to the worklist so the solver re-runs on the change.
+        solver
+            .points_to
+            .entry("a".to_string())
+            .or_default()
+            .insert("param_a".to_string());
+        solver.add_to_worklist("a");
+        solver.solve().unwrap();
+
+        // pts(param_obj.field) should now include param_a.
+        let field_pts = solver.get_points_to("param_obj.field");
+        assert!(
+            field_pts.contains("param_a"),
+            "expected points-to set for param_obj.field to contain {{param_a}}; \
+             got: {:?} (alias-set mismatch — VAL-005/issue #13: \
+             source-propagation through field store missing)",
+            field_pts
+        );
+    }
+
+    /// Test: `obj.field = a` where `a` is a phi target whose points-to
+    /// set arrives via copy constraints from two allocation-target
+    /// predecessors (a_0, a_1). This is the canonical case from issue #13.
+    ///
+    /// Constraints:
+    ///   Copy(a_2, a_0)         // phi source from then-branch
+    ///   Copy(a_2, a_1)         // phi source from else-branch
+    ///   FieldStore(obj_0, field, a_2)
+    ///
+    /// Initial points-to:
+    ///   pts(obj_0) = {param_obj}
+    ///   pts(a_0)   = {alloc_3}
+    ///   pts(a_1)   = {alloc_5}
+    ///
+    /// Convergence behavior: pts(a_2) gains {alloc_3, alloc_5} via the
+    /// reverse_copy index (a_0 → a_2 and a_1 → a_2). When pts(a_2)
+    /// changes, the FieldStore must be re-applied so that
+    /// pts(param_obj.field) ⊇ {alloc_3, alloc_5}. Without the
+    /// reverse_field_stores branch in propagate_variable, that
+    /// re-application never happens and pts(param_obj.field) stays empty.
+    #[test]
+    fn test_field_store_source_propagation_through_phi() {
+        let constraints = vec![
+            Constraint::copy("a_2", "a_0"),
+            Constraint::copy("a_2", "a_1"),
+            Constraint::field_store("obj_0", "field", "a_2"),
+        ];
+        let mut solver = solver_from_raw(
+            constraints,
+            &[
+                ("obj_0", "param_obj"),
+                ("a_0", "alloc_3"),
+                ("a_1", "alloc_5"),
+            ],
+        );
+
+        solver.solve().unwrap();
+
+        // Sanity: pts(a_2) propagated correctly via Copy constraints
+        // (the bug is specific to the FieldStore re-propagation branch,
+        // not the Copy branch).
+        let a2_pts = solver.get_points_to("a_2");
+        assert!(
+            a2_pts.contains("alloc_3") && a2_pts.contains("alloc_5"),
+            "sanity precondition failed: pts(a_2) should be \
+             {{alloc_3, alloc_5}}; got: {:?}",
+            a2_pts
+        );
+
+        // Andersen's inclusion: pts(param_obj.field) ⊇ pts(a_2).
+        let field_pts = solver.get_points_to("param_obj.field");
+        assert!(
+            field_pts.contains("alloc_3"),
+            "expected points-to set for param_obj.field to contain alloc_3; \
+             got: {:?} (alias-set mismatch — VAL-005/issue #13: \
+             source-propagation through phi missing)",
+            field_pts
+        );
+        assert!(
+            field_pts.contains("alloc_5"),
+            "expected points-to set for param_obj.field to contain alloc_5; \
+             got: {:?} (alias-set mismatch — VAL-005/issue #13: \
+             source-propagation through phi missing)",
+            field_pts
+        );
     }
 }
