@@ -50,11 +50,19 @@ pub struct DaemonState {
     idle_timeout: Duration,
 
     /// Call graph cache (lazy, built on first request)
-    /// M12: OnceCell ensures single build even with concurrent requests
-    call_graph_cache: RwLock<HashMap<Language, OnceCell<Arc<ProjectCallGraph>>>>,
+    ///
+    /// M12: OnceCell ensures single build even with concurrent requests.
+    /// VAL-004 (#10): the value MUST be `Arc<OnceCell<...>>` rather than
+    /// `OnceCell<...>` directly — `OnceCell::clone` produces an INDEPENDENT
+    /// uninitialized cell, so cloning the bare cell out of the map and then
+    /// `get_or_init`-ing the clone leaves the map's cell empty and rebuilds on
+    /// every request. Wrapping in `Arc` makes `clone()` share the same cell.
+    call_graph_cache: RwLock<HashMap<Language, Arc<OnceCell<Arc<ProjectCallGraph>>>>>,
 
     /// BM25 index cache (lazy, built on first search)
-    bm25_cache: RwLock<HashMap<Language, OnceCell<Arc<Bm25Index>>>>,
+    ///
+    /// VAL-004 (#10): see `call_graph_cache` rationale for the `Arc<OnceCell<...>>` shape.
+    bm25_cache: RwLock<HashMap<Language, Arc<OnceCell<Arc<Bm25Index>>>>>,
 
     /// Request counter for metrics
     request_count: AtomicU64,
@@ -156,28 +164,36 @@ impl DaemonState {
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = ProjectCallGraph>,
     {
-        // First, get or insert the OnceCell for this language
-        let cell = {
+        // First, get or insert the shared OnceCell for this language.
+        // The cell is wrapped in Arc so cloning it shares the underlying cell
+        // (a bare `OnceCell::clone` would produce an independent uninitialized
+        // copy — the VAL-004 / #10 bug).
+        let cell: Arc<OnceCell<Arc<ProjectCallGraph>>> = {
             let read_guard = self.call_graph_cache.read().await;
             if let Some(cell) = read_guard.get(&language) {
                 if let Some(graph) = cell.get() {
                     return Arc::clone(graph);
                 }
-            }
-            drop(read_guard);
+                Arc::clone(cell)
+            } else {
+                drop(read_guard);
 
-            // Need to insert new OnceCell
-            let mut write_guard = self.call_graph_cache.write().await;
-            write_guard
-                .entry(language)
-                .or_insert_with(OnceCell::new)
-                .clone()
+                let mut write_guard = self.call_graph_cache.write().await;
+                Arc::clone(
+                    write_guard
+                        .entry(language)
+                        .or_insert_with(|| Arc::new(OnceCell::new())),
+                )
+            }
         };
 
-        // Now initialize the OnceCell (only one caller will actually build)
-        cell.get_or_init(|| async { Arc::new(builder().await) })
-            .await
-            .clone()
+        // Now initialize the OnceCell (only one caller will actually build).
+        // Because `cell` shares the cell stored in the HashMap, this initialization
+        // is observable by every subsequent reader.
+        Arc::clone(
+            cell.get_or_init(|| async { Arc::new(builder().await) })
+                .await,
+        )
     }
 
     /// Get or build BM25 index for a language
@@ -186,25 +202,30 @@ impl DaemonState {
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = Bm25Index>,
     {
-        let cell = {
+        // See `get_or_build_call_graph` for the Arc<OnceCell<...>> rationale (VAL-004 / #10).
+        let cell: Arc<OnceCell<Arc<Bm25Index>>> = {
             let read_guard = self.bm25_cache.read().await;
             if let Some(cell) = read_guard.get(&language) {
                 if let Some(index) = cell.get() {
                     return Arc::clone(index);
                 }
-            }
-            drop(read_guard);
+                Arc::clone(cell)
+            } else {
+                drop(read_guard);
 
-            let mut write_guard = self.bm25_cache.write().await;
-            write_guard
-                .entry(language)
-                .or_insert_with(OnceCell::new)
-                .clone()
+                let mut write_guard = self.bm25_cache.write().await;
+                Arc::clone(
+                    write_guard
+                        .entry(language)
+                        .or_insert_with(|| Arc::new(OnceCell::new())),
+                )
+            }
         };
 
-        cell.get_or_init(|| async { Arc::new(builder().await) })
-            .await
-            .clone()
+        Arc::clone(
+            cell.get_or_init(|| async { Arc::new(builder().await) })
+                .await,
+        )
     }
 
     /// Invalidate all caches (e.g., when files change)
