@@ -4,7 +4,7 @@
   "issue": "parcadei/tldr-code#10",
   "status": "passed",
   "starting_head": "88ddac6",
-  "commit": null,
+  "commit": "62ae258",
   "worker": "kraken (M4 VAL-004, v0.2.2-quality wave 2)",
   "fix_strategy": "Arc<OnceCell<T>> wrap (chosen over entry-based init because the existing code intentionally drops the write lock before awaiting the builder; an entry-based init would require either holding the write lock across .await or restructuring the builder signature)",
   "files_modified": [

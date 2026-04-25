@@ -155,7 +155,7 @@
       "depends": [],
       "worker": "kraken (M4 VAL-004, v0.2.2-quality wave 2)",
       "evidence": {
-        "commit": "PENDING_COMMIT_SHA",
+        "commit": "62ae258",
         "fix_strategy": "Arc<OnceCell<T>> wrap (preferred over entry-based init because the existing pattern intentionally drops the write lock before awaiting the builder; entry-based init would require holding the lock across .await)",
         "tests": [
           "crates/tldr-daemon/tests/val004_cache_oncecell_test.rs::call_graph_cache_serves_cached_result_on_second_request",
