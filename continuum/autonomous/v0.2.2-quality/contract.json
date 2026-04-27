@@ -86,7 +86,7 @@
     },
     {
       "name": "cargo-build-duplicate-targets",
-      "status": "pending",
+      "status": "shipped",
       "assertions": [
         "VAL-012"
       ]
@@ -552,10 +552,44 @@
       "id": "VAL-012",
       "type": "invariant",
       "milestone": "cargo-build-duplicate-targets",
-      "status": "pending",
+      "status": "shipped",
       "depends": [],
-      "worker": null,
-      "evidence": null,
+      "worker": "kraken (M13 VAL-012, v0.2.2-hotfix-bundle)",
+      "evidence": {
+        "commit": "PENDING",
+        "starting_head": "451036d",
+        "files_modified": [
+          "crates/tldr-daemon/Cargo.toml",
+          "crates/tldr-mcp/Cargo.toml"
+        ],
+        "files_modified_count": 2,
+        "source_files_touched": 0,
+        "fix_summary": "Removed the [[bin]] section from crates/tldr-daemon/Cargo.toml and crates/tldr-mcp/Cargo.toml AND set autobins = false on each [package] block. Just removing [[bin]] is insufficient because Cargo's auto-bin discovery would find the orphaned src/main.rs and silently re-create the colliding bin target; autobins = false suppresses that. The orphaned src/main.rs files remain on disk untouched (Cargo.toml-only constraint preserved). The tldr-cli package's explicit [[bin]] shims (src/bin/tldr_daemon.rs, src/bin/tldr_mcp.rs) continue to compile and produce target/release/tldr-daemon + target/release/tldr-mcp.",
+        "red_evidence": {
+          "command": "cargo build --workspace --release 2>&1 | grep -c 'output filename collision'",
+          "pre_fix_count": 4,
+          "warning_outputs": [
+            "target/release/tldr-daemon",
+            "target/release/tldr-daemon.dSYM",
+            "target/release/tldr-mcp",
+            "target/release/tldr-mcp.dSYM"
+          ]
+        },
+        "green_evidence": {
+          "post_fix_collision_count": 0,
+          "post_fix_total_warnings": 0,
+          "binaries_produced": ["target/release/tldr", "target/release/tldr-daemon", "target/release/tldr-mcp"],
+          "standalone_lib_builds": "cargo build -p tldr-daemon: ok; cargo build -p tldr-mcp: ok",
+          "exhaustive_matrix_release_st1": "730/730",
+          "language_command_matrix_release": "234/234",
+          "matrix_total": "964/964",
+          "tldr_daemon_tests": "39 passed; 0 failed; 2 ignored (10+17+7+2+3)",
+          "tldr_mcp_tests": "57 passed; 0 failed (45+5+4+3)"
+        },
+        "clippy": "cargo clippy -p tldr-daemon --all-features --tests -- -D warnings: clean. cargo clippy -p tldr-mcp --all-features --tests -- -D warnings: clean. Workspace-wide clippy fails in tldr-cli/commands/daemon/status.rs (cmp_owned) and tldr-core/analysis/change_impact.rs (unused fn) — both files owned by sibling M11 (VAL-010) and M14 (VAL-013) per disjointness rule; out of M13 scope.",
+        "report": "continuum/autonomous/v0.2.2-quality/reports/m13-issue-21-build-duplicates.md",
+        "validation": "continuum/autonomous/v0.2.2-quality/validation/m13-build-duplicates.json"
+      },
       "issue": "parcadei/tldr-code#21",
       "text": "`cargo build --workspace --release` produces zero 'output filename collision' warnings. Triage: tldr-cli declares `[[bin]] name = \"tldr-daemon\"` (Cargo.toml:17-19) and `[[bin]] name = \"tldr-mcp\"` (:21-23) as thin shims (src/bin/tldr_daemon.rs, tldr_mcp.rs); standalone tldr-daemon and tldr-mcp crates ALSO declare identical `[[bin]]` targets while carrying `[package.metadata.dist] dist = false`. Cargo emits 4 duplicate-target warnings. Fix: remove the `[[bin]]` sections from crates/tldr-daemon/Cargo.toml and crates/tldr-mcp/Cargo.toml. Keep `[lib]` so the shims continue calling tldr_daemon::run() / tldr_mcp::run(). Reproduction (regression guard): capture `cargo build --workspace --release 2>&1 | grep -c 'output filename collision'` BEFORE and AFTER. Pre-fix: 4. Post-fix: 0. Worker writes a small validation captured in milestone report (no Rust test file required for a packaging-config fix). Also verify: `cargo build -p tldr-daemon` and `cargo build -p tldr-mcp` after fix must both succeed and produce libs (no regression of standalone-crate functionality). RED-REASON GATE: pre-fix grep count MUST be > 0 (proof warnings exist); post-fix MUST be 0. STOP: standalone crates lose lib functionality; warnings persist after fix (means another duplicate not in these two files)."
     },

@@ -5,14 +5,11 @@ edition = "2021"
 description = "Background daemon for TLDR code analysis tool"
 repository = "https://github.com/parcadei/tldr-code"
 license = "AGPL-3.0"
+autobins = false
 
 [lib]
 name = "tldr_daemon"
 path = "src/lib.rs"
-
-[[bin]]
-name = "tldr-daemon"
-path = "src/main.rs"
 
 [package.metadata.dist]
 dist = false
