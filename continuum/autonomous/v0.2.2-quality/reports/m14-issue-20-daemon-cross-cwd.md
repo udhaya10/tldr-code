@@ -128,5 +128,5 @@ Matrix sum: **964/964** — locked, no regression vs. M1/M3/M4/M5/M6 baseline.
 
 ## Commit
 
-- SHA: `3139921`
+- SHA: `1a96285`
 - Message: `fix(M14 VAL-013): close #20 — daemon status cross-cwd discovery`

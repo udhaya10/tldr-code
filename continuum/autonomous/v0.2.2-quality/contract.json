@@ -567,7 +567,7 @@
       "depends": [],
       "worker": "kraken (M14 VAL-013)",
       "evidence": {
-        "commit": "3139921",
+        "commit": "1a96285",
         "tests": [
           "crates/tldr-cli/tests/val013_daemon_status_cross_cwd_test.rs::daemon_status_from_other_cwd_reports_running",
           "crates/tldr-cli/tests/val013_daemon_status_cross_cwd_test.rs::daemon_status_with_explicit_project_still_works_from_other_cwd"
