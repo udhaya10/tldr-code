@@ -51,13 +51,14 @@
 //! println!("Direct callers: {}", report.summary.direct_caller_count);
 //! ```
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
 use crate::analysis::change_impact::change_impact;
+use crate::analysis::clones::is_test_file;
 use crate::analysis::impact::impact_analysis_with_ast_fallback;
 use crate::analysis::importers::find_importers;
 use crate::callgraph::build_project_call_graph;
@@ -379,11 +380,23 @@ fn run_impact_analysis(
             let transitive_count: usize =
                 report.targets.values().map(count_transitive_callers).sum();
 
+            // VAL-002 (#1.E): collect unique test-file paths across all caller
+            // trees so the Function-target branch in `whatbreaks_analysis` can
+            // populate `summary.affected_test_count`. Walking the typed
+            // ImpactReport here matches `transitive_count`'s depth semantics
+            // exactly (same tree, same nodes). De-duped via HashSet<PathBuf>.
+            let mut test_files: HashSet<PathBuf> = HashSet::new();
+            for tree in report.targets.values() {
+                collect_test_files_from_tree(tree, &mut test_files);
+            }
+            let test_file_count = test_files.len();
+
             SubResult::success(
                 serde_json::json!({
                     "targets": report.targets.len(),
                     "direct_callers": direct_count,
                     "transitive_callers": transitive_count,
+                    "affected_test_count": test_file_count,
                     "report": report,
                 }),
                 start.elapsed().as_secs_f64() * 1000.0,
@@ -400,6 +413,26 @@ fn count_transitive_callers(tree: &crate::types::CallerTree) -> usize {
         count += count_transitive_callers(caller);
     }
     count
+}
+
+/// Recursively walk a caller tree and accumulate unique test-file paths into
+/// `acc`. A node is considered a test file iff
+/// [`crate::analysis::clones::is_test_file`] returns true for `tree.file`.
+///
+/// Used by [`run_impact_analysis`] (VAL-002) to compute the
+/// `affected_test_count` JSON field that
+/// [`whatbreaks_analysis`]'s Function-target branch reads back into
+/// [`WhatbreaksSummary::affected_test_count`].
+fn collect_test_files_from_tree(
+    tree: &crate::types::CallerTree,
+    acc: &mut HashSet<PathBuf>,
+) {
+    if is_test_file(&tree.file) {
+        acc.insert(tree.file.clone());
+    }
+    for child in &tree.callers {
+        collect_test_files_from_tree(child, acc);
+    }
 }
 
 /// Run importers analysis for a file or module target
@@ -550,6 +583,17 @@ pub fn whatbreaks_analysis(
                         data.get("transitive_callers").and_then(|v| v.as_u64())
                     {
                         summary.transitive_caller_count = transitive as usize;
+                    }
+                    // VAL-002 (#1.E): read the test-file count emitted by
+                    // run_impact_analysis. Mirrors the direct/transitive
+                    // pattern above. The File-target branch populates this
+                    // same field via change_impact, but the Function path
+                    // had been silently leaving it at the
+                    // WhatbreaksSummary::default() value of 0.
+                    if let Some(test_count) =
+                        data.get("affected_test_count").and_then(|v| v.as_u64())
+                    {
+                        summary.affected_test_count = test_count as usize;
                     }
                 }
             }
