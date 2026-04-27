@@ -123,4 +123,4 @@ Note: pre-existing failures unrelated to M1 exist in ssa_cli_tests, gvn_cli_test
 
 ## Commit SHA
 
-(filled in after commit)
+`4e0b312b46a744d8fe10d4ebc5be2fbbc4cacec5`

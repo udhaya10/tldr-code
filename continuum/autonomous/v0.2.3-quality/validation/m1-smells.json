@@ -3,7 +3,7 @@
   "assertion": "VAL-001",
   "issue": "parcadei/tldr-code#1.D",
   "starting_head": "69fe94c",
-  "commit_sha": "TBD",
+  "commit_sha": "4e0b312b46a744d8fe10d4ebc5be2fbbc4cacec5",
   "result": "success",
   "tests": {
     "added": [
@@ -40,5 +40,5 @@
   ],
   "is_test_file_helper": "REUSED public helper crate::analysis::clones::is_test_file (full path; not re-exported via analysis::mod.rs); util.rs NOT touched",
   "smells_walker_opts_copy_drop": "Confirmed; switched to Clone only. Audit: 3 caller sites, 1 needed .clone() (analyze_smells_aggregated_with_walker_opts at smells.rs:2552 because we read walker_opts.include_tests after passing).",
-  "staging_check": "TBD (post-commit)"
+  "staging_check": "STAGING-OK"
 }
