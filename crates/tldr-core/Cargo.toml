@@ -98,6 +98,9 @@ md5 = { workspace = true }
 # Phase 5: File locking for embedding cache (P0 mitigation)
 fs2 = { workspace = true }
 
+# M11 VAL-010: PATH lookup for git binary in change-impact resolver
+which = { workspace = true }
+
 [features]
 default = []
 semantic = ["dep:fastembed"]

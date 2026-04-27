@@ -97,6 +97,9 @@ fs2 = "0.4"
 # LRU cache
 lru = "0.12"
 
+# Binary lookup on PATH (M11 VAL-010: change-impact git resolver)
+which = "6"
+
 # Testing
 tempfile = "3.0"
 assert_cmd = "2.0"

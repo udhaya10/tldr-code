@@ -19,6 +19,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
 
@@ -26,6 +27,53 @@ use crate::callgraph::build_project_call_graph;
 use crate::fs::tree::{collect_files, get_file_tree};
 use crate::types::{FunctionRef, IgnoreSpec, Language, ProjectCallGraph};
 use crate::TldrResult;
+
+/// Resolved path to the `git` binary, cached for the lifetime of the process.
+///
+/// VAL-010: cargo-built binaries do not always run with the user's full
+/// shell PATH (e.g. when launched via Finder, a CI runner with a stripped
+/// environment, or `env -i`). Bare `Command::new("git")` then fails with
+/// `No such file or directory (os error 2)` and every change-impact mode
+/// returns NoBaseline. Resolution order:
+///
+///   1. `GIT_BINARY` environment variable (explicit user override).
+///   2. `which::which("git")` -- locates git via PATH if PATH is populated.
+///   3. Common absolute paths: /opt/homebrew/bin/git, /usr/local/bin/git,
+///      /usr/bin/git -- covers typical macOS / Linux installs.
+///   4. Bare `"git"` as a last resort so the existing error path
+///      (`Git not available: ...`) surfaces unchanged on systems where
+///      none of the above hit.
+static GIT_BINARY: OnceLock<PathBuf> = OnceLock::new();
+
+fn resolve_git_binary() -> &'static PathBuf {
+    GIT_BINARY.get_or_init(|| {
+        if let Ok(override_path) = std::env::var("GIT_BINARY") {
+            let path = PathBuf::from(override_path);
+            if path.is_file() {
+                return path;
+            }
+        }
+        if let Ok(p) = which::which("git") {
+            return p;
+        }
+        for candidate in [
+            "/opt/homebrew/bin/git",
+            "/usr/local/bin/git",
+            "/usr/bin/git",
+        ] {
+            let path = PathBuf::from(candidate);
+            if path.is_file() {
+                return path;
+            }
+        }
+        PathBuf::from("git")
+    })
+}
+
+/// Construct a `Command` that invokes the resolved git binary.
+fn git_command() -> Command {
+    Command::new(resolve_git_binary())
+}
 
 /// Outcome classification for change-impact analysis.
 ///
@@ -399,8 +447,11 @@ fn make_status_report(
 ///
 /// - "Git not available" / "not a git repository" / missing HEAD
 ///   => NoBaseline (baseline could not be established at all).
-/// - Branch-not-found / unknown-revision => DetectionFailed (git was
-///   queried successfully but the supplied ref was invalid).
+/// - "Branch '<name>' not found" / "unknown revision" => NoBaseline
+///   (VAL-010: the supplied base ref does not resolve, so no baseline
+///   can be drawn against it). The error message already carries an
+///   `origin/<branch>` hint when the remote-tracking ref exists; that
+///   hint propagates verbatim into the NoBaseline reason.
 /// - Everything else => DetectionFailed (git ran but something went
 ///   wrong — surface the detail).
 fn classify_detection_error(err: &crate::error::TldrError) -> ChangeImpactStatus {
@@ -413,7 +464,9 @@ fn classify_detection_error(err: &crate::error::TldrError) -> ChangeImpactStatus
         || lower.contains("does not exist")
         || lower.contains("no such file or directory")
         || lower.contains("unknown revision head")
-        || lower.contains("needed a single revision");
+        || lower.contains("needed a single revision")
+        || lower.contains("not found")
+        || lower.contains("unknown revision");
 
     if baseline_missing {
         ChangeImpactStatus::NoBaseline { reason: msg }
@@ -589,7 +642,7 @@ fn extract_test_functions_from_content(
 
 /// Detect changed files using git diff HEAD (uncommitted changes vs HEAD)
 fn detect_git_changes_head(project: &Path) -> TldrResult<Vec<PathBuf>> {
-    let output = Command::new("git")
+    let output = git_command()
         .args(["diff", "--name-only", "HEAD"])
         .current_dir(project)
         .output();
@@ -601,7 +654,7 @@ fn detect_git_changes_head(project: &Path) -> TldrResult<Vec<PathBuf>> {
 /// Uses merge-base to find common ancestor: git diff $(git merge-base base HEAD)...HEAD
 fn detect_git_changes_base(project: &Path, base: &str) -> TldrResult<Vec<PathBuf>> {
     // First, verify the base branch exists
-    let check_branch = Command::new("git")
+    let check_branch = git_command()
         .args(["rev-parse", "--verify", base])
         .current_dir(project)
         .output();
@@ -609,9 +662,18 @@ fn detect_git_changes_base(project: &Path, base: &str) -> TldrResult<Vec<PathBuf
     match check_branch {
         Ok(output) if !output.status.success() => {
             let stderr = String::from_utf8_lossy(&output.stderr);
+            // VAL-010: if only `origin/<base>` exists locally, append a
+            // remediation hint pointing the user at the qualified ref.
+            let mut message = format!("Branch '{}' not found. {}", base, stderr.trim());
+            if origin_branch_exists(project, base) {
+                message.push_str(&format!(
+                    " (hint: try --base origin/{base})",
+                    base = base
+                ));
+            }
             return Err(crate::error::TldrError::InvalidArgs {
                 arg: "base".to_string(),
-                message: format!("Branch '{}' not found. {}", base, stderr.trim()),
+                message,
                 suggestion: Some("Check branch name with: git branch -a".to_string()),
             });
         }
@@ -626,7 +688,7 @@ fn detect_git_changes_base(project: &Path, base: &str) -> TldrResult<Vec<PathBuf
     }
 
     // Use the three-dot syntax for comparing branches
-    let output = Command::new("git")
+    let output = git_command()
         .args(["diff", "--name-only", &format!("{}...HEAD", base)])
         .current_dir(project)
         .output();
@@ -634,9 +696,23 @@ fn detect_git_changes_base(project: &Path, base: &str) -> TldrResult<Vec<PathBuf
     parse_git_diff_output(output, project)
 }
 
+/// Check whether `refs/remotes/origin/<branch>` resolves locally.
+///
+/// Returns `false` on any git error (including git-not-available, since the
+/// caller is already in a failure path and the hint is best-effort).
+fn origin_branch_exists(project: &Path, branch: &str) -> bool {
+    let qualified = format!("origin/{}", branch);
+    git_command()
+        .args(["rev-parse", "--verify", "--quiet", &qualified])
+        .current_dir(project)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
 /// Detect only staged files (pre-commit workflow)
 fn detect_git_changes_staged(project: &Path) -> TldrResult<Vec<PathBuf>> {
-    let output = Command::new("git")
+    let output = git_command()
         .args(["diff", "--name-only", "--staged"])
         .current_dir(project)
         .output();
@@ -647,13 +723,13 @@ fn detect_git_changes_staged(project: &Path) -> TldrResult<Vec<PathBuf>> {
 /// Detect all uncommitted changes (staged + unstaged)
 fn detect_git_changes_uncommitted(project: &Path) -> TldrResult<Vec<PathBuf>> {
     // Get staged changes
-    let staged = Command::new("git")
+    let staged = git_command()
         .args(["diff", "--name-only", "--staged"])
         .current_dir(project)
         .output();
 
     // Get unstaged changes
-    let unstaged = Command::new("git")
+    let unstaged = git_command()
         .args(["diff", "--name-only"])
         .current_dir(project)
         .output();
