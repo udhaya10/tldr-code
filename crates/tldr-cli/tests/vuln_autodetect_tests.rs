@@ -139,23 +139,36 @@ fn test_vuln_autodetects_python() {
 // VAL-006: autodetect errors helpfully on unsupported language
 // =============================================================================
 
-/// When the user omits `--lang` in a TypeScript project, autodetect
-/// picks TypeScript. TS is not in the taint engine's native-analysis
-/// set (the Python and Rust paths have dedicated tree-sitter / line
-/// analyzers; other languages fall back to the pattern scanner in
-/// tldr-core and have weaker guarantees). To avoid silent "scanned
-/// 0 files" behavior, we error with exit code 2 and a message that
-/// mentions the detected language and points the user at `--lang`.
+/// When the user omits `--lang` in a Java project, autodetect picks
+/// Java. Java is not in the taint engine's autodetect-supported set
+/// (the Python/Rust paths have dedicated tree-sitter / line analyzers,
+/// and VAL-011 of v0.2.2-hotfix-bundle promoted TypeScript+JavaScript
+/// after verifying the engine's `TYPESCRIPT_PATTERNS` is populated;
+/// other languages still fall back to the pattern scanner in tldr-core
+/// and have weaker guarantees). To avoid silent "scanned 0 files"
+/// behavior, we error with exit code 2 and a message that mentions the
+/// detected language and points the user at `--lang`.
+///
+/// Pre-VAL-011 this test used TypeScript as the unsupported example;
+/// once TS was promoted into `is_natively_analyzed`, the test was
+/// switched to Java (still gated; manifest-detected via `pom.xml`).
 #[test]
 fn test_vuln_errors_on_unsupported_autodetected_lang() {
     let dir = tempdir().unwrap();
     let root = dir.path();
 
+    // Maven manifest — `Language::from_directory` resolves Java via
+    // detect_from_manifests before extension counting kicks in.
     write_file(
-        &root.join("tsconfig.json"),
-        "{\"compilerOptions\":{\"strict\":true}}\n",
+        &root.join("pom.xml"),
+        "<project><modelVersion>4.0.0</modelVersion>\
+         <groupId>demo</groupId><artifactId>demo</artifactId>\
+         <version>0.1.0</version></project>\n",
     );
-    write_file(&root.join("src/app.ts"), "export const x: number = 1;\n");
+    write_file(
+        &root.join("src/main/java/App.java"),
+        "public class App { public static void main(String[] a) {} }\n",
+    );
 
     let mut cmd = tldr_cmd();
     cmd.arg("vuln").arg(root).arg("--format").arg("json");
@@ -171,13 +184,16 @@ fn test_vuln_errors_on_unsupported_autodetected_lang() {
     );
     // The error message must identify the problem and point at a fix.
     assert!(
-        stderr.contains("not yet supported") || stderr.contains("typescript"),
-        "stderr should explain TS is not yet supported by autodetect; got:\n{}",
+        stderr.contains("not yet supported") || stderr.contains("java"),
+        "stderr should explain Java is not yet supported by autodetect; got:\n{}",
         stderr
     );
     assert!(
-        stderr.contains("--lang python") || stderr.contains("--lang rust"),
-        "stderr should suggest an explicit --lang; got:\n{}",
+        stderr.contains("--lang python")
+            || stderr.contains("--lang rust")
+            || stderr.contains("--lang typescript")
+            || stderr.contains("--lang javascript"),
+        "stderr should suggest an explicit --lang from the supported set; got:\n{}",
         stderr
     );
 }

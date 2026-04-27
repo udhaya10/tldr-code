@@ -436,8 +436,9 @@ impl VulnArgs {
                     if !is_natively_analyzed(l) {
                         return Err(RemainingError::autodetect_unsupported(format!(
                             "vuln: taint analysis for {} is not yet supported by autodetect; \
-                             use --lang python or --lang rust to scan files of a supported \
-                             language, or omit --lang in a pure Python/Rust project.",
+                             use --lang python, --lang rust, --lang typescript, or --lang javascript \
+                             to scan files of a supported language, or omit --lang in a pure \
+                             Python/Rust/TypeScript/JavaScript project.",
                             l.as_str()
                         ))
                         .into());
@@ -584,7 +585,19 @@ fn collect_files(
 /// An explicit `--lang <L>` bypasses this — the user has signalled
 /// they understand which backend will run.
 fn is_natively_analyzed(lang: Language) -> bool {
-    matches!(lang, Language::Python | Language::Rust)
+    // VAL-011 (M12, v0.2.2-hotfix-bundle): TypeScript and JavaScript
+    // promoted into the autodetect-supported set. The taint engine at
+    // `crates/tldr-core/src/security/taint.rs:909` already routes both
+    // through `TYPESCRIPT_PATTERNS` (sources, sinks, sanitizers all
+    // populated; v0.2.2 M7 expanded the sink set with SSRF). The CLI
+    // gate just hadn't been told. Pre-VAL-011 the gate listed only
+    // Python and Rust, so `tldr vuln <ts-file>` (no `--lang`) exited
+    // 2 with "not yet supported" — issue parcadei/tldr-code#1, sub-
+    // issue #1.C.
+    matches!(
+        lang,
+        Language::Python | Language::Rust | Language::TypeScript | Language::JavaScript
+    )
 }
 
 /// Check whether `path` is a source file the vuln scanner should analyze.
