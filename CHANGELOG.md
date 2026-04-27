@@ -1,5 +1,23 @@
 # Changelog
 
+## v0.2.3 — 2026-04-27
+
+### Fixed
+- **#1.D** — `tldr smells` PR-focused signal filter. New `--files <FILE>...` (repeatable, exact-path-only) for caller-supplied scoping; default behavior excludes test-file findings via existing path-only `is_test_file` helper; new `--include-tests` opts back in. New `excluded_test_smells: usize` counter on `SmellsReport`. Daemon parity (`detect_smells_with_walker_opts`). `--files` entries validated via `tldr_core::validation::validate_file_path` (errors on system dirs). ([commit 4e0b312](https://github.com/parcadei/tldr-code/commit/4e0b312))
+- **#1.E** — `tldr whatbreaks` `affected_test_count` populated for Function-target queries. Bug: the function-target branch in `whatbreaks_analysis` extracted `direct_callers` and `transitive_callers` from impact JSON but never set `affected_test_count` (it stayed at default = 0 even when test modules clearly appeared in the caller tree). Fix: `run_impact_analysis` now walks the `ImpactReport`'s caller trees during JSON serialization and emits `affected_test_count` as a new JSON field; the function-target branch reads it into the summary. ([commit b3d80c9](https://github.com/parcadei/tldr-code/commit/b3d80c9))
+- **#1.F** — `tldr taint` TypeScript pattern expansion: Next.js, Fastify, NestJS support added in addition to the pre-existing Express coverage. Renamed existing `TYPESCRIPT_PATTERNS` → `TYPESCRIPT_EXPRESS_PATTERNS`; added `NEXTJS_PATTERNS` (6 sources / 4 sinks / 1 sanitizer), `FASTIFY_PATTERNS` (3 sources / 3 sinks), `NESTJS_PATTERNS` (5 sources / 2 sinks; sanitizers intentionally empty). Unified `TYPESCRIPT_PATTERNS` is now the merge of all 4 banks (20 sources / 16 sinks / 3 sanitizers total). Engine semantics already supported indirect-flow propagation (CFG worklist) — patterns alone fix the bug. ([commit 191da3b](https://github.com/parcadei/tldr-code/commit/191da3b))
+
+### Known limitations (Next.js / Fastify / NestJS taint)
+- NestJS decorator-injected parameters (`(@Body() body: T)`, `@Query()`, `@Param()`) are invisible to the regex-based source matcher. Coverage focused on `@Req() request: Request` and direct `request.body` access patterns. Future engine-level work could parse decorators properly.
+- NestJS pattern bank intentionally has no sanitizers — `class-validator` decorators (`@IsEmail()`, `@IsUrl()`) validate format but do not escape, so calling them sanitizers would mislead on security. Expect higher flow counts on NestJS controllers than on Express.
+- `reply.send` (Fastify) and `Response.send` (NestJS) sink patterns may produce false positives on unrelated types that happen to expose a `send` method. Acceptable for v0.2.3; could be refined in a future release.
+
+### Test matrix
+- `cargo test -p tldr-cli --test exhaustive_matrix --features semantic --release -- --test-threads=1`: **730/730**
+- `cargo test -p tldr-cli --test language_command_matrix --features semantic --release`: **234/234**
+- Combined: **964/964** + `cargo clippy --workspace --all-features --tests -- -D warnings` clean.
+- Pre-existing: `exhaustive_matrix` produces 676/730 under default parallelism due to fastembed-cache filesystem race (per v0.2.2 M9 investigation). Use `--test-threads=1` for canonical baseline. Real fix queued for v0.3.0.
+
 ## v0.2.2 — 2026-04-25
 
 Quality release closing 9 GitHub issues filed against v0.2.0/v0.2.1, plus implementing the SSRF detection rule that was flagged as latent during v0.2.1 (the `VulnType::Ssrf` arm at `crates/tldr-core/src/security/vuln.rs:609-628` returned `vec![]` for every language, so the rule never fired despite v0.2.1's correct CWE-918 wire labelling). Seven fixes shipped across six fix commits + one feature commit; matrix held at 964/964 (730 exhaustive + 234 language-command, run with `--test-threads=1` per the test-harness embedding-mutex contention noted below); `cargo clippy --workspace --all-features --tests -- -D warnings` clean across all eight commits.
