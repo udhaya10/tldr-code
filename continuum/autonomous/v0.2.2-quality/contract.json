@@ -556,7 +556,7 @@
       "depends": [],
       "worker": "kraken (M13 VAL-012, v0.2.2-hotfix-bundle)",
       "evidence": {
-        "commit": "PENDING",
+        "commit": "867139c",
         "starting_head": "451036d",
         "files_modified": [
           "crates/tldr-daemon/Cargo.toml",

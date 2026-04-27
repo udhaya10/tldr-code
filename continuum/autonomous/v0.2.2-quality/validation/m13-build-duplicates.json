@@ -58,6 +58,6 @@
     "matrix_regressed": false,
     "clippy_warning_in_owned_crate": false
   },
-  "commit": "PENDING",
+  "commit": "867139c",
   "report": "continuum/autonomous/v0.2.2-quality/reports/m13-issue-21-build-duplicates.md"
 }
