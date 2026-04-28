@@ -20,7 +20,7 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
 use crate::commands::daemon::error::{DaemonError, DaemonResult};
 use crate::commands::daemon::pid::compute_hash;
@@ -434,54 +434,69 @@ impl IpcStream {
 
     /// Receive a raw JSON string from the daemon.
     ///
-    /// Reads until newline delimiter.
+    /// Reads until newline delimiter. Returns
+    /// `DaemonError::InvalidMessage` if no newline is found within
+    /// `MAX_MESSAGE_SIZE` bytes, preventing OOM/DoS by bounding the
+    /// allocation BEFORE `read_line` consumes the stream
+    /// (TIGER-P3-03; closes #17 + #25). Both Unix and Windows arms
+    /// delegate to the shared `recv_raw_from` helper.
     pub async fn recv_raw(&mut self) -> DaemonResult<String> {
         let timeout = tokio::time::Duration::from_secs(READ_TIMEOUT_SECS);
+        // limit = MAX + 1 so reading exactly MAX_MESSAGE_SIZE payload bytes
+        // followed by the `\n` delimiter still fits within the bounded reader.
+        let limit = (MAX_MESSAGE_SIZE + 1) as u64;
 
         match &mut self.inner {
             #[cfg(unix)]
-            IpcStreamInner::Unix(stream) => {
-                let mut reader = BufReader::new(stream);
-                let mut line = String::new();
-
-                let read_future = reader.read_line(&mut line);
-
-                match tokio::time::timeout(timeout, read_future).await {
-                    Ok(Ok(0)) => Err(DaemonError::ConnectionRefused), // EOF
-                    Ok(Ok(n)) if n > MAX_MESSAGE_SIZE => Err(DaemonError::InvalidMessage(format!(
-                        "response too large: {} bytes (max {})",
-                        n, MAX_MESSAGE_SIZE
-                    ))),
-                    Ok(Ok(_)) => Ok(line.trim_end().to_string()),
-                    Ok(Err(e)) => Err(DaemonError::Io(e)),
-                    Err(_) => Err(DaemonError::ConnectionTimeout {
-                        timeout_secs: READ_TIMEOUT_SECS,
-                    }),
-                }
-            }
+            IpcStreamInner::Unix(stream) => recv_raw_from(stream, limit, timeout).await,
             #[cfg(windows)]
-            IpcStreamInner::Tcp(stream) => {
-                let mut reader = BufReader::new(stream);
-                let mut line = String::new();
-
-                let read_future = reader.read_line(&mut line);
-
-                match tokio::time::timeout(timeout, read_future).await {
-                    Ok(Ok(0)) => Err(DaemonError::ConnectionRefused), // EOF
-                    Ok(Ok(n)) if n > MAX_MESSAGE_SIZE => Err(DaemonError::InvalidMessage(format!(
-                        "response too large: {} bytes (max {})",
-                        n, MAX_MESSAGE_SIZE
-                    ))),
-                    Ok(Ok(_)) => Ok(line.trim_end().to_string()),
-                    Ok(Err(e)) => Err(DaemonError::Io(e)),
-                    Err(_) => Err(DaemonError::ConnectionTimeout {
-                        timeout_secs: READ_TIMEOUT_SECS,
-                    }),
-                }
-            }
+            IpcStreamInner::Tcp(stream) => recv_raw_from(stream, limit, timeout).await,
             #[cfg(all(not(unix), not(windows)))]
             IpcStreamInner::Dummy => Err(DaemonError::NotRunning),
         }
+    }
+}
+
+/// Shared helper: read a newline-delimited string from any `AsyncRead` stream,
+/// rejecting payloads that exceed `limit` bytes BEFORE allocation grows
+/// unbounded.
+///
+/// `tokio::io::AsyncReadExt::take(stream, limit)` returns a `Take<&mut R>` that
+/// reports EOF once `limit` bytes have been read. If `read_line` returns
+/// without consuming a `\n`, we treat that as a size-limit violation. The
+/// mutable borrow of `stream` is released when the `Take` adapter is dropped at
+/// the end of this helper's scope, so the caller retains exclusive access to
+/// the original stream after `recv_raw_from` returns.
+async fn recv_raw_from<R>(
+    stream: &mut R,
+    limit: u64,
+    timeout: tokio::time::Duration,
+) -> DaemonResult<String>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let limited = AsyncReadExt::take(stream, limit);
+    let mut reader = BufReader::new(limited);
+    let mut line = String::new();
+
+    let read_future = reader.read_line(&mut line);
+
+    match tokio::time::timeout(timeout, read_future).await {
+        // True EOF before any bytes were read → connection closed.
+        Ok(Ok(0)) if line.is_empty() => Err(DaemonError::ConnectionRefused),
+        // Any read that does not end in `\n` means we hit the bounded reader's
+        // EOF without seeing the delimiter — i.e. the payload exceeds the
+        // size limit. (Includes the `0` byte case where `line` is non-empty
+        // because BufReader buffered partial bytes; still oversized.)
+        Ok(Ok(_)) if !line.ends_with('\n') => Err(DaemonError::InvalidMessage(format!(
+            "message exceeds size limit of {} bytes",
+            MAX_MESSAGE_SIZE
+        ))),
+        Ok(Ok(_)) => Ok(line.trim_end().to_string()),
+        Ok(Err(e)) => Err(DaemonError::Io(e)),
+        Err(_) => Err(DaemonError::ConnectionTimeout {
+            timeout_secs: READ_TIMEOUT_SECS,
+        }),
     }
 }
 
@@ -491,19 +506,14 @@ impl IpcStream {
 
 /// Read a command from a client connection.
 ///
-/// Used by the daemon to receive commands from clients.
+/// Used by the daemon to receive commands from clients. Size enforcement
+/// (TIGER-P3-03) happens upstream inside `IpcStream::recv_raw`, which now
+/// bounds the read with `AsyncReadExt::take(MAX_MESSAGE_SIZE + 1)` BEFORE
+/// allocation. Any payload exceeding the limit is rejected with
+/// `DaemonError::InvalidMessage` before this function runs, so no
+/// post-allocation re-check is needed here (#17, #25).
 pub async fn read_command(stream: &mut IpcStream) -> DaemonResult<DaemonCommand> {
     let json = stream.recv_raw().await?;
-
-    // Check message size (TIGER-P3-03)
-    if json.len() > MAX_MESSAGE_SIZE {
-        return Err(DaemonError::InvalidMessage(format!(
-            "command too large: {} bytes (max {})",
-            json.len(),
-            MAX_MESSAGE_SIZE
-        )));
-    }
-
     let cmd: DaemonCommand = serde_json::from_str(&json)?;
     Ok(cmd)
 }
