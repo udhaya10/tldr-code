@@ -169,6 +169,22 @@ pub fn params_with_file(file: &Path) -> serde_json::Value {
     })
 }
 
+/// Build JSON params with file path and optional language hint.
+///
+/// Used by commands (e.g. `imports`) that accept `--lang` and route through the
+/// daemon. JSON key is `"language"` to match the daemon handler's
+/// `ImportsRequest.language` field (handlers/ast.rs:L164) — there is no
+/// `#[serde(rename)]` on that field, so a `"lang"` key would be silently
+/// ignored and the bug would still ship.
+pub fn params_with_file_lang(file: &Path, lang: Option<&str>) -> serde_json::Value {
+    let mut obj = serde_json::Map::new();
+    obj.insert("file".to_string(), serde_json::json!(file));
+    if let Some(l) = lang {
+        obj.insert("language".to_string(), serde_json::json!(l));
+    }
+    serde_json::Value::Object(obj)
+}
+
 /// Build JSON params with file and function.
 pub fn params_with_file_function(file: &Path, function: &str) -> serde_json::Value {
     serde_json::json!({
@@ -335,5 +351,19 @@ mod tests {
         let result: Option<serde_json::Value> =
             try_daemon_route(temp.path(), "ping", serde_json::json!({}));
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_params_with_file_lang_includes_language_key() {
+        let params = params_with_file_lang(Path::new("/tmp/myscript"), Some("python"));
+        assert_eq!(params["language"], "python");
+        assert_eq!(params["file"], "/tmp/myscript");
+    }
+
+    #[test]
+    fn test_params_with_file_lang_omits_language_when_none() {
+        let params = params_with_file_lang(Path::new("/tmp/myscript"), None);
+        assert!(params.get("language").is_none());
+        assert_eq!(params["file"], "/tmp/myscript");
     }
 }

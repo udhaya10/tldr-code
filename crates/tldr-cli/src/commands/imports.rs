@@ -12,7 +12,7 @@ use colored::Colorize;
 use tldr_core::types::ImportInfo;
 use tldr_core::{detect_or_parse_language, get_imports, Language};
 
-use crate::commands::daemon_router::{params_with_file, try_daemon_route};
+use crate::commands::daemon_router::{params_with_file_lang, try_daemon_route};
 use crate::output::{format_imports_text, OutputFormat, OutputWriter};
 
 /// Parse import statements from a file
@@ -33,9 +33,11 @@ impl ImportsArgs {
 
         // Try daemon first for cached result (use file's parent as project root)
         let project = self.file.parent().unwrap_or(&self.file);
-        if let Some(result) =
-            try_daemon_route::<Vec<ImportInfo>>(project, "imports", params_with_file(&self.file))
-        {
+        if let Some(result) = try_daemon_route::<Vec<ImportInfo>>(
+            project,
+            "imports",
+            params_with_file_lang(&self.file, self.lang.as_ref().map(|l| l.as_str())),
+        ) {
             if writer.is_text() {
                 writer.write_text(&format!(
                     "{} ({} imports)\n\n{}",
