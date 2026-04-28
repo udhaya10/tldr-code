@@ -1,5 +1,25 @@
 # Changelog
 
+## v0.2.4 — 2026-04-28
+
+### Fixed
+- **#17 + #25** — IPC message-size enforcement before allocation. `IpcStream::recv_raw` now uses `tokio::io::AsyncReadExt::take` to bound the read at `MAX_MESSAGE_SIZE + 1` BEFORE allocating the destination String. Both Unix and Windows arms delegate to a shared `recv_raw_from<R: AsyncRead + Unpin>` helper. A 100MB no-newline payload no longer OOMs the daemon. Removed redundant post-allocation check at `read_command()`. ([commit 61e3055](https://github.com/parcadei/tldr-code/commit/61e3055))
+- **#26** — `tldr surface` emits C# and Java interface methods regardless of `--include-private`. Interface methods omit `public` per language spec (implicit); the prior visibility predicate required an explicit modifier and silently dropped them. Fix mirrors the Rust trait short-circuit pattern. ([commit bc2fa83](https://github.com/parcadei/tldr-code/commit/bc2fa83))
+- **#29** — `tldr imports <file> --lang <LANG>` now honored in both daemon-routed and direct-compute paths. Daemon path: new `params_with_file_lang` helper emits JSON key `"language"` to match `ImportsRequest.language` field name (was silently dropping `--lang` in the daemon hint payload). Direct-compute path: new `parse_file_with_lang(path, Option<TldrLanguage>)` sibling to `parse_file` honors caller-supplied language hint over path-extension detection; `get_imports` forwards `Some(language)`. End-to-end binary verification: `tldr imports myscript --lang python` (extensionless file, no daemon) now correctly detects imports. ([commit a3dfbc3](https://github.com/parcadei/tldr-code/commit/a3dfbc3) + [commit c034b68](https://github.com/parcadei/tldr-code/commit/c034b68))
+- **#20 + #21** — Issue paperwork. Both code-fixed in v0.2.2 (M14 closed #20; M13 closed #21) and verified live in v0.2.3. Reopened pending artile confirmation; no artile activity since 2026-04-26. Closed with standard shipped-and-please-reopen-if-broken comments. ZERO source-code changes.
+
+### Test matrix
+- `cargo test -p tldr-cli --test exhaustive_matrix --features semantic --release -- --test-threads=1`: **730/730**
+- `cargo test -p tldr-cli --test language_command_matrix --features semantic --release`: **234/234**
+- Combined: **964/964** + `cargo clippy --workspace --all-features --tests -- -D warnings` clean.
+- New tests added: 8 (M1: 3 IPC; M2: 2 surface interface; M3: 2 unit + 1 integration).
+- Pre-existing: `exhaustive_matrix` produces 676/730 under default parallelism due to fastembed-cache filesystem race (per v0.2.2 M9 investigation). Use `--test-threads=1` for canonical baseline. Real fix queued for v0.3.0.
+
+### Issue close-outs
+- **#20** (daemon status wrong project path) — confirmed shipped in v0.2.3, closed with audit comment.
+- **#21** (cargo build duplicate output collisions) — confirmed shipped in v0.2.3, closed with audit comment.
+- **#6, #8, #16, #22** — closed earlier this session (already-fixed-in-v0.2.x housekeeping).
+
 ## v0.2.3 — 2026-04-27
 
 ### Fixed

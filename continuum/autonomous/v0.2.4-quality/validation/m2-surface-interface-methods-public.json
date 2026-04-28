@@ -3,7 +3,7 @@
   "assertion": "VAL-002",
   "issue": "parcadei/tldr-code#26",
   "starting_head": "10f00a9",
-  "commit": "<filled in after commit>",
+  "commit": "bc2fa83",
   "status": "passed",
   "red_capture": "continuum/autonomous/v0.2.4-quality/reports/m2-red-capture.txt",
   "green_capture": "continuum/autonomous/v0.2.4-quality/reports/m2-green-capture.txt",

@@ -179,4 +179,4 @@ None triggered. Specifically:
 
 ## Commit SHA
 
-(filled in after commit)
+`bc2fa83` (fix(M2 VAL-002): close #26 — surface emits interface methods without --include-private)
