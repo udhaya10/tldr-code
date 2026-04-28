@@ -227,6 +227,38 @@ use serde::{Serialize, Deserialize};
             .success()
             .stdout(predicate::str::contains("std::path"));
     }
+
+    /// Contract 1.3 (M3b VAL-003b, closes #29): `--lang` must be honored on
+    /// the direct-compute path even when the file has no extension.
+    ///
+    /// Pre-fix: parser re-detects language from extension and fails with
+    /// `UnsupportedLanguage("unknown")` for an extensionless Python file,
+    /// regardless of `--lang python`.
+    /// Post-fix: parser honors the caller-supplied language hint and
+    /// returns the imports.
+    #[test]
+    fn test_imports_lang_flag_extensionless_file() {
+        let temp = TempDir::new().unwrap();
+        // No extension on purpose: forces the parser to rely on --lang hint.
+        let test_file = temp.path().join("myscript");
+        fs::write(&test_file, "import os\nimport sys\n").unwrap();
+
+        let mut cmd = tldr_cmd();
+        cmd.args([
+            "imports",
+            test_file.to_str().unwrap(),
+            "--lang",
+            "python",
+            "--format",
+            "json",
+            "-q",
+        ]);
+        cmd.assert()
+            .success()
+            .stdout(predicate::str::contains("\"module\""))
+            .stdout(predicate::str::contains("os"))
+            .stdout(predicate::str::contains("sys"));
+    }
 }
 
 // =============================================================================

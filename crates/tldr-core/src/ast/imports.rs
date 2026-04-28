@@ -13,19 +13,24 @@ use tree_sitter::{Node, Tree};
 use crate::types::{ImportInfo, Language};
 use crate::TldrResult;
 
-use super::parser::parse_file;
+use super::parser::parse_file_with_lang;
 
 /// Parse imports from a source file.
 ///
+/// The supplied `language` is forwarded as a hint to the parser, so
+/// extensionless files (e.g. `tldr imports myscript --lang python`)
+/// parse correctly instead of failing path-extension detection inside
+/// the parser pool.
+///
 /// # Arguments
 /// * `file_path` - Path to source file
-/// * `language` - Programming language
+/// * `language` - Programming language; overrides extension detection
 ///
 /// # Returns
 /// * `Ok(Vec<ImportInfo>)` - List of imports
 /// * `Err(TldrError::PathNotFound)` - File doesn't exist
 pub fn get_imports(file_path: &Path, language: Language) -> TldrResult<Vec<ImportInfo>> {
-    let (tree, source, _) = parse_file(file_path)?;
+    let (tree, source, _) = parse_file_with_lang(file_path, Some(language))?;
     extract_imports_from_tree(&tree, &source, language)
 }
 

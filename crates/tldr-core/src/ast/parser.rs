@@ -261,14 +261,58 @@ impl ParserPool {
     /// extension (`.tsx` / `.jsx` route to TSX). Handles encoding with
     /// UTF-8 lossy fallback (M2 mitigation).
     pub fn parse_file(&self, path: &std::path::Path) -> TldrResult<(Tree, String, TldrLanguage)> {
-        // Detect language from extension
-        let lang = TldrLanguage::from_path(path).ok_or_else(|| {
-            let ext = path
-                .extension()
-                .map(|e| e.to_string_lossy().to_string())
-                .unwrap_or_else(|| "unknown".to_string());
-            TldrError::UnsupportedLanguage(ext)
-        })?;
+        self.parse_file_with_lang(path, None)
+    }
+
+    /// Parse a file from disk, optionally honoring a caller-supplied
+    /// language hint over path-extension detection.
+    ///
+    /// When `lang_hint` is `Some(_)`, that language is used directly and
+    /// the file extension is ignored for language selection. This lets
+    /// callers (e.g. `tldr imports myscript --lang python`) parse files
+    /// with non-standard or missing extensions correctly.
+    ///
+    /// When `lang_hint` is `None`, behavior matches [`Self::parse_file`]:
+    /// the language is inferred from the path extension and an
+    /// [`TldrError::UnsupportedLanguage`] is returned if no language can
+    /// be determined.
+    ///
+    /// The path is still threaded into [`Self::parse_with_path`] so the
+    /// TSX/JSX dialect is picked up for `.tsx` / `.jsx` files when the
+    /// caller hint resolves to TypeScript or JavaScript.
+    ///
+    /// # Arguments
+    /// * `path` - Path to the file on disk
+    /// * `lang_hint` - Optional language override that takes precedence
+    ///   over path-extension detection
+    ///
+    /// # Returns
+    /// * `Ok((tree, source, lang))` - Parsed tree plus the language that
+    ///   was actually used (the hint when supplied, else the detected
+    ///   language)
+    /// * `Err(TldrError::UnsupportedLanguage)` - No hint and the
+    ///   extension does not map to a supported language
+    /// * `Err(TldrError::PathNotFound | PermissionDenied | IoError)` -
+    ///   Filesystem errors reading the file
+    /// * `Err(TldrError::ParseError)` - Parsing failed
+    pub fn parse_file_with_lang(
+        &self,
+        path: &std::path::Path,
+        lang_hint: Option<TldrLanguage>,
+    ) -> TldrResult<(Tree, String, TldrLanguage)> {
+        // Resolve language: hint wins over extension detection so that
+        // extensionless files (e.g. `myscript --lang python`) parse
+        // correctly. Falls back to extension detection when no hint.
+        let lang = match lang_hint {
+            Some(l) => l,
+            None => TldrLanguage::from_path(path).ok_or_else(|| {
+                let ext = path
+                    .extension()
+                    .map(|e| e.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "unknown".to_string());
+                TldrError::UnsupportedLanguage(ext)
+            })?,
+        };
 
         // Read file content with UTF-8 lossy fallback - M2 mitigation
         let bytes = std::fs::read(path).map_err(|e| {
@@ -330,6 +374,19 @@ pub fn parse_with_path(source: &str, lang: TldrLanguage, path: Option<&Path>) ->
 /// Parse a file using the global parser pool.
 pub fn parse_file(path: &std::path::Path) -> TldrResult<(Tree, String, TldrLanguage)> {
     PARSER_POOL.parse_file(path)
+}
+
+/// Parse a file using the global parser pool with an optional language hint.
+///
+/// See [`ParserPool::parse_file_with_lang`] for the semantics: when
+/// `lang_hint` is `Some(_)` it overrides path-extension detection, which
+/// is required for extensionless files (e.g. `tldr imports myscript
+/// --lang python`).
+pub fn parse_file_with_lang(
+    path: &std::path::Path,
+    lang_hint: Option<TldrLanguage>,
+) -> TldrResult<(Tree, String, TldrLanguage)> {
+    PARSER_POOL.parse_file_with_lang(path, lang_hint)
 }
 
 #[cfg(test)]
