@@ -55,6 +55,21 @@ fn hash_str_args(parts: &[&str]) -> u64 {
     hasher.finish()
 }
 
+/// Resolve the effective `Language` for a daemon-handler invocation.
+///
+/// v031-cluster-M2: M1 added `language: Option<Language>` to seven
+/// DaemonCommand variants (Context, Calls, Impact, Dead, Arch, Importers,
+/// ChangeImpact). The handler arms that consume those variants previously
+/// passed a hardcoded `Language::Python` to `tldr-core` regardless of what
+/// the client supplied — a forgotten-thread bug. This helper centralises the
+/// `Some(lang) | None -> default` resolution so every handler arm threads
+/// the language consistently. The default-on-`None` is `Language::Python`
+/// to preserve back-compat with v0.2.x clients that never sent a language
+/// hint.
+pub(crate) fn resolve_language(language: Option<Language>) -> Language {
+    language.unwrap_or(Language::Python)
+}
+
 /// Count the number of file nodes in a FileTree recursively.
 fn count_tree_files(tree: &FileTree) -> usize {
     match tree.node_type {
@@ -349,10 +364,8 @@ impl TLDRDaemon {
             } => self.handle_track(hook, success, metrics).await,
 
             DaemonCommand::Warm { language } => {
-                let lang = language
-                    .as_deref()
-                    .and_then(|l| l.parse::<Language>().ok())
-                    .unwrap_or(Language::Python);
+                let parsed = language.as_deref().and_then(|l| l.parse::<Language>().ok());
+                let lang = resolve_language(parsed);
 
                 let mut warmed = Vec::new();
                 let mut errors = Vec::new();
@@ -603,14 +616,15 @@ impl TLDRDaemon {
             DaemonCommand::Context {
                 entry,
                 depth,
-                language: _,
+                language,
             } => {
                 let d = depth.unwrap_or(2);
+                let lang = resolve_language(language);
                 let key = QueryKey::new("context", hash_str_args(&[&entry, &d.to_string()]));
                 if let Some(cached) = self.cache.get::<serde_json::Value>(&key) {
                     return DaemonResponse::Result(cached);
                 }
-                match get_relevant_context(&self.project, &entry, d, Language::Python, true, None) {
+                match get_relevant_context(&self.project, &entry, d, lang, true, None) {
                     Ok(result) => {
                         let val = serde_json::to_value(&result).unwrap_or_default();
                         self.cache.insert(key, &val, vec![]);
@@ -724,17 +738,15 @@ impl TLDRDaemon {
                 }
             }
 
-            DaemonCommand::Calls {
-                path,
-                language: _,
-            } => {
+            DaemonCommand::Calls { path, language } => {
                 let root = path.unwrap_or_else(|| self.project.clone());
+                let lang = resolve_language(language);
                 let root_str = root.to_string_lossy().to_string();
                 let key = QueryKey::new("calls", hash_str_args(&[&root_str]));
                 if let Some(cached) = self.cache.get::<serde_json::Value>(&key) {
                     return DaemonResponse::Result(cached);
                 }
-                match build_project_call_graph(&root, Language::Python, None, true) {
+                match build_project_call_graph(&root, lang, None, true) {
                     Ok(result) => {
                         let val = serde_json::to_value(&result).unwrap_or_default();
                         self.cache.insert(key, &val, vec![]);
@@ -750,23 +762,23 @@ impl TLDRDaemon {
             DaemonCommand::Impact {
                 func,
                 depth,
-                language: _,
+                language,
             } => {
                 let d = depth.unwrap_or(3);
+                let lang = resolve_language(language);
                 let key = QueryKey::new("impact", hash_str_args(&[&func, &d.to_string()]));
                 if let Some(cached) = self.cache.get::<serde_json::Value>(&key) {
                     return DaemonResponse::Result(cached);
                 }
-                let graph =
-                    match build_project_call_graph(&self.project, Language::Python, None, true) {
-                        Ok(g) => g,
-                        Err(e) => {
-                            return DaemonResponse::Error {
-                                status: "error".to_string(),
-                                error: e.to_string(),
-                            }
+                let graph = match build_project_call_graph(&self.project, lang, None, true) {
+                    Ok(g) => g,
+                    Err(e) => {
+                        return DaemonResponse::Error {
+                            status: "error".to_string(),
+                            error: e.to_string(),
                         }
-                    };
+                    }
+                };
                 match impact_analysis(&graph, &func, d, None) {
                     Ok(result) => {
                         let val = serde_json::to_value(&result).unwrap_or_default();
@@ -783,16 +795,17 @@ impl TLDRDaemon {
             DaemonCommand::Dead {
                 path,
                 entry,
-                language: _,
+                language,
             } => {
                 let root = path.unwrap_or_else(|| self.project.clone());
+                let lang = resolve_language(language);
                 let root_str = root.to_string_lossy().to_string();
                 let entry_str = entry.as_ref().map(|v| v.join(",")).unwrap_or_default();
                 let key = QueryKey::new("dead", hash_str_args(&[&root_str, &entry_str]));
                 if let Some(cached) = self.cache.get::<serde_json::Value>(&key) {
                     return DaemonResponse::Result(cached);
                 }
-                let graph = match build_project_call_graph(&root, Language::Python, None, true) {
+                let graph = match build_project_call_graph(&root, lang, None, true) {
                     Ok(g) => g,
                     Err(e) => {
                         return DaemonResponse::Error {
@@ -802,7 +815,7 @@ impl TLDRDaemon {
                     }
                 };
                 // Collect all functions from the project by extracting each file
-                let extensions: HashSet<String> = Language::Python
+                let extensions: HashSet<String> = lang
                     .extensions()
                     .iter()
                     .map(|s| s.to_string())
@@ -839,17 +852,15 @@ impl TLDRDaemon {
                 }
             }
 
-            DaemonCommand::Arch {
-                path,
-                language: _,
-            } => {
+            DaemonCommand::Arch { path, language } => {
                 let root = path.unwrap_or_else(|| self.project.clone());
+                let lang = resolve_language(language);
                 let root_str = root.to_string_lossy().to_string();
                 let key = QueryKey::new("arch", hash_str_args(&[&root_str]));
                 if let Some(cached) = self.cache.get::<serde_json::Value>(&key) {
                     return DaemonResponse::Result(cached);
                 }
-                let graph = match build_project_call_graph(&root, Language::Python, None, true) {
+                let graph = match build_project_call_graph(&root, lang, None, true) {
                     Ok(g) => g,
                     Err(e) => {
                         return DaemonResponse::Error {
@@ -903,15 +914,16 @@ impl TLDRDaemon {
             DaemonCommand::Importers {
                 module,
                 path,
-                language: _,
+                language,
             } => {
                 let root = path.unwrap_or_else(|| self.project.clone());
+                let lang = resolve_language(language);
                 let root_str = root.to_string_lossy().to_string();
                 let key = QueryKey::new("importers", hash_str_args(&[&module, &root_str]));
                 if let Some(cached) = self.cache.get::<serde_json::Value>(&key) {
                     return DaemonResponse::Result(cached);
                 }
-                match find_importers(&root, &module, Language::Python) {
+                match find_importers(&root, &module, lang) {
                     Ok(result) => {
                         let val = serde_json::to_value(&result).unwrap_or_default();
                         self.cache.insert(key, &val, vec![]);
@@ -937,8 +949,9 @@ impl TLDRDaemon {
                 files,
                 session: _,
                 git: _,
-                language: _,
+                language,
             } => {
+                let lang = resolve_language(language);
                 let files_str = files
                     .as_ref()
                     .map(|v| {
@@ -953,7 +966,7 @@ impl TLDRDaemon {
                     return DaemonResponse::Result(cached);
                 }
                 let changed: Option<Vec<PathBuf>> = files;
-                match change_impact(&self.project, changed.as_deref(), Language::Python) {
+                match change_impact(&self.project, changed.as_deref(), lang) {
                     Ok(result) => {
                         let val = serde_json::to_value(&result).unwrap_or_default();
                         self.cache.insert(key, &val, vec![]);

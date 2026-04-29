@@ -393,4 +393,53 @@ mod tests {
         assert_eq!(status.project, PathBuf::from("/tmp/project"));
         assert_eq!(status.requests_served, 2);
     }
+
+    /// v031-cluster-M2 regression: `get_or_build_call_graph` must key its
+    /// cache by `Language`. Building once with `Python` and once with
+    /// `TypeScript` must produce TWO independent cache entries, not one.
+    ///
+    /// This locks the contract that callers in daemon.rs which thread the
+    /// language through (rather than hardcoding `Language::Python`) get
+    /// cache hits scoped to the correct language. A future regression that
+    /// collapses both languages into a single Python bucket would re-surface
+    /// the original 10-hardcode bug class.
+    #[tokio::test]
+    async fn test_get_or_build_call_graph_caches_per_language() {
+        let state = DaemonState::new(
+            PathBuf::from("/tmp/project"),
+            PathBuf::from("/tmp/tldr.sock"),
+        );
+
+        // Build for Python.
+        let _py = state
+            .get_or_build_call_graph(Language::Python, || async {
+                ProjectCallGraph::new()
+            })
+            .await;
+
+        // Build for TypeScript — must take a fresh slot in the cache map.
+        let _ts = state
+            .get_or_build_call_graph(Language::TypeScript, || async {
+                ProjectCallGraph::new()
+            })
+            .await;
+
+        let cache = state.call_graph_cache.read().await;
+        assert_eq!(
+            cache.len(),
+            2,
+            "cache must hold one entry per language — got {} entries, \
+             indicating cross-language cache collapse",
+            cache.len()
+        );
+        assert!(
+            cache.contains_key(&Language::Python),
+            "Python entry missing from cache"
+        );
+        assert!(
+            cache.contains_key(&Language::TypeScript),
+            "TypeScript entry missing from cache — indicates the threaded \
+             language was discarded somewhere in the cache lookup path"
+        );
+    }
 }
