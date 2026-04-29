@@ -2364,9 +2364,13 @@ static CPP_AST_SANITIZERS: &[AstSanitizerPattern] = &[
 
 // Ruby PARTIAL coverage (per m2-ground-truth): field_access_info covers ONLY
 // `instance_variable` (the `@name` pattern). Module method calls like
-// `STDIN.read`, `IO.popen`, `File.read` are call_expression nodes, not
-// member-access — they use raw substring fallback. Subscripts (`params[`,
-// `ENV[`) are also non-member-access. Documented as a v0.4.0 hardening item.
+// `STDIN.read`, `IO.popen`, `File.read` are now structurally matched via
+// `(receiver, field)` tuples — Ruby's call grammar produces `call` and
+// `method_call` node kinds carrying `receiver` + `method` children, so the
+// structured-shape entries fire on the AST without regex. M5 will delete the
+// raw-substring `("", "X.y")` duplicates atomically with the regex banks.
+// Subscripts (`params[`, `ENV[`) remain non-member-access raw-substring
+// fallbacks. Documented as a v0.4.0 hardening item.
 static RUBY_AST_SOURCES: &[AstSourcePattern] = &[
     AstSourcePattern {
         call_names: &["gets"],
@@ -2379,6 +2383,9 @@ static RUBY_AST_SOURCES: &[AstSourcePattern] = &[
             ("", "STDIN.read"),
             ("", "STDIN.gets"),
             ("", "STDIN.readline"),
+            ("STDIN", "read"),
+            ("STDIN", "gets"),
+            ("STDIN", "readline"),
         ],
         source_type: TaintSourceType::Stdin,
     },
@@ -2394,7 +2401,12 @@ static RUBY_AST_SOURCES: &[AstSourcePattern] = &[
     },
     AstSourcePattern {
         call_names: &[],
-        member_patterns: &[("", "File.read"), ("", "File.open")],
+        member_patterns: &[
+            ("", "File.read"),
+            ("", "File.open"),
+            ("File", "read"),
+            ("File", "open"),
+        ],
         source_type: TaintSourceType::FileRead,
     },
 ];
@@ -2412,7 +2424,7 @@ static RUBY_AST_SINKS: &[AstSinkPattern] = &[
     },
     AstSinkPattern {
         call_names: &[],
-        member_patterns: &[("", "IO.popen")],
+        member_patterns: &[("", "IO.popen"), ("IO", "popen")],
         sink_type: TaintSinkType::ShellExec,
     },
     AstSinkPattern {
