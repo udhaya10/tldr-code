@@ -2872,7 +2872,14 @@ static ELIXIR_AST_SANITIZERS: &[AstSanitizerPattern] = &[
 // OCaml PARTIAL coverage (per m2-ground-truth): field_access_info covers ONLY
 // `field_get_expression` (the `record.field` pattern). `Module.function` calls
 // like `Sys.command`, `Unix.execvp`, `Sqlite3.exec` are application_expression
-// nodes, not field-access — raw substring fallback. Documented as v0.4.0 hardening.
+// nodes — extract_call_name_ocaml returns the value-path (e.g. "Sys.command") by
+// walking application_expression's child(0). The W2-pre call-shape path uses
+// rfind('.') to split into a `(receiver, field)` pair, so the structured-shape
+// entries fire on the AST without regex. Bare-call forms (`read_line`,
+// `input_line`) remain in `call_names`. Parenthesised application form
+// `(Sys.command) cmd` is a known limitation per plan §9 risk #3 — not covered.
+// M5 will delete the raw-substring `("", "X.y")` duplicates atomically with the
+// regex banks. Documented as v0.4.0 hardening.
 static OCAML_AST_SOURCES: &[AstSourcePattern] = &[
     AstSourcePattern {
         call_names: &["read_line"],
@@ -2886,12 +2893,17 @@ static OCAML_AST_SOURCES: &[AstSourcePattern] = &[
     },
     AstSourcePattern {
         call_names: &[],
-        member_patterns: &[("", "Sys.getenv")],
+        member_patterns: &[("", "Sys.getenv"), ("Sys", "getenv")],
         source_type: TaintSourceType::EnvVar,
     },
     AstSourcePattern {
         call_names: &[],
-        member_patterns: &[("", "In_channel.read_all"), ("", "In_channel.input_all")],
+        member_patterns: &[
+            ("", "In_channel.read_all"),
+            ("", "In_channel.input_all"),
+            ("In_channel", "read_all"),
+            ("In_channel", "input_all"),
+        ],
         source_type: TaintSourceType::FileRead,
     },
 ];
@@ -2899,17 +2911,17 @@ static OCAML_AST_SOURCES: &[AstSourcePattern] = &[
 static OCAML_AST_SINKS: &[AstSinkPattern] = &[
     AstSinkPattern {
         call_names: &[],
-        member_patterns: &[("", "Sys.command")],
+        member_patterns: &[("", "Sys.command"), ("Sys", "command")],
         sink_type: TaintSinkType::ShellExec,
     },
     AstSinkPattern {
         call_names: &[],
-        member_patterns: &[("", "Unix.execvp")],
+        member_patterns: &[("", "Unix.execvp"), ("Unix", "execvp")],
         sink_type: TaintSinkType::ShellExec,
     },
     AstSinkPattern {
         call_names: &[],
-        member_patterns: &[("", "Sqlite3.exec")],
+        member_patterns: &[("", "Sqlite3.exec"), ("Sqlite3", "exec")],
         sink_type: TaintSinkType::SqlQuery,
     },
 ];
