@@ -1,5 +1,112 @@
 # Changelog
 
+## regex-removal-v1 (internal milestone) — 2026-04-29
+
+**INTERNAL milestone — NOT a published release.** Closes #24 (string-literal
+substring false positive) end-to-end at the `tldr taint` binary path by
+deleting the regex source+sink banks for 13 of 16 supported languages.
+Tagged locally as `regex-removal-v1`. No `cargo publish`, no `git push`.
+External publish remains deferred until the three follow-on internal
+milestones land — `field_access_info-extension-v1`, `sanitizer-removal-v1`,
+and `vuln-migration-v1`.
+
+### Changed
+
+- **AST-only source+sink matching** across 13 languages (Python, TypeScript,
+  JavaScript, Go, Rust, Java, C, C++, Kotlin, Swift, C#, Scala, PHP, plus
+  Lua/Luau which share a single bank). The `sources` and `sinks` Vecs in
+  the corresponding `lazy_static` `LanguagePatterns` banks are now empty;
+  detection runs entirely through the AST path established in engine-v1
+  (M2) and reinforced by Wave-2-pre's AST-native var-extraction fallbacks.
+- **`tldr taint` finding-count delta:** substantial reduction in false
+  positives. String-literal substring matches that previously fired via
+  `text.contains("req.body")` and friends are eliminated. Issue #24 is
+  binary-verified closed end-to-end — `tldr taint
+  /tmp/v030-verify/issue24_string_literal_fp.ts showDocs --format text`
+  reports zero sources, zero sinks, zero vulnerabilities on the
+  string-literal lines that previously produced spurious findings.
+- **`compute_taint` refactored to internal-parse-and-delegate.** The public
+  signature is unchanged; the body now reconstructs source text from the
+  line-keyed `statements` HashMap, calls
+  `crate::ast::parser::parse(&src, language)`, and on `Ok(tree)` delegates
+  to `compute_taint_with_tree(...)`. On parser error it returns
+  `Ok(TaintInfo::default())` for graceful degradation. This eliminates the
+  legacy regex-only branch that would have become a dead path after the
+  bank deletion.
+- **`compute_taint_with_tree` dispatch unchanged.** The additive-merge loop
+  (AST detection ∪ regex detection) naturally degrades to AST-only behavior
+  when the regex banks return empty Vecs for the 13 emptied languages.
+  Wave-2-pre's `extract_first_identifier_arg_ast` and
+  `extract_assignment_rhs_ident` helpers (added at HEAD `256d709`) take
+  over the var-extraction step that previously coupled the AST hit path to
+  the regex bank.
+
+### Retained
+
+- **Ruby, Elixir, OCaml regex source+sink banks.** These three languages
+  use `Module.function` call shapes (`IO.popen`, `System.cmd`,
+  `Sys.command`) that are not yet covered by `field_access_info` for the
+  AST member-access path. Banks remain populated; deferred to the
+  `field_access_info-extension-v1` future internal milestone.
+- **All 16 sanitizer regex banks** across all languages.
+  `detect_sanitizer_ast` is currently unwired (zero call sites at HEAD);
+  removing the regex sanitizer banks would silently drop sanitizer
+  detection. Deferred to the `sanitizer-removal-v1` future internal
+  milestone, which will wire the AST sanitizer path before deleting the
+  regex banks.
+
+### Removed
+
+- `merge_patterns` helper (TS framework bank consolidation no longer
+  needed).
+- 4 TypeScript framework sub-banks: `TYPESCRIPT_EXPRESS_PATTERNS`,
+  `NEXTJS_PATTERNS`, `FASTIFY_PATTERNS`, `NESTJS_PATTERNS`. Sanitizer
+  entries from these sub-banks were consolidated into the surviving
+  `TYPESCRIPT_PATTERNS` bank (`parseInt`/`Number`/`parseFloat`,
+  `encodeURIComponent`/`DOMPurify.sanitize`, `.parse`/`.safeParse`).
+- `find_sinks_in_statement` and `find_sources_in_statement` crate-internal
+  aliases (zero remaining callers after the obsolete-test deletion below).
+- 23 obsolete regex-bank unit tests (one `detect_sources_*` / `detect_sinks_*`
+  per emptied language) in `crates/tldr-core/src/security/taint_tests.rs`,
+  plus 10 obsolete `test_detect_*` integration tests in
+  `crates/tldr-core/tests/security_tests.rs` (Python sources/sinks +
+  TypeScript source/sink + Go sources).
+- `test_ast_patterns_defined_for_all_languages` invariant — obsolete by
+  design after the bank emptying (the 13 emptied languages now have
+  empty regex source/sink Vecs).
+- `test_compute_taint_with_tree_no_tree` — its purpose (regex-only
+  fallback verification) is invalidated by the Python regex bank deletion.
+
+### Issues closed (binary-verified)
+
+- **#24** — string-literal substring false positive at the `tldr taint`
+  path. Verified zero sources / zero sinks / zero vulnerabilities for
+  `req.body` and `req.params.id` substrings inside string literals on
+  `/tmp/v030-verify/issue24_string_literal_fp.ts`. The regex fallback that
+  caused engine-v1 to leave this issue OPEN end-to-end is now gone.
+
+### Standing rules upheld
+
+- **Internal-versioning posture.** External `cargo publish` deferred until
+  all four future internal milestones land: `regex-removal-v1` (this one),
+  `field_access_info-extension-v1`, `sanitizer-removal-v1`, and
+  `vuln-migration-v1`. The next external publish will bundle the four.
+- No push, no `cargo publish`, no `Cargo.toml` version bump in this
+  milestone. `Cargo.lock` not staged. Explicit-add staging only.
+
+### Wave-2-pre note
+
+This milestone built on the Wave-2-pre architectural fixes (commit
+`256d709`), which closed two load-bearing couplings between the AST
+detection path and the regex banks before the atomic deletion: (1) call-shape
+member_pattern matching for tree-sitter languages where `request.getParameter`
+is a single `method_invocation` node rather than a `field_access`, and
+(2) regex-free var-extraction helpers that supply the tainted variable
+name when the regex bank returns empty. Without those, the bank deletion
+in this milestone would have silently dropped 5 baseline-language taint
+flows (C `fgets`, Java `request.getParameter`, Kotlin `Runtime.exec`,
+Swift `Process.run`, NextJS `dangerouslySetInnerHTML`).
+
 ## engine-v1 (internal milestone) — 2026-04-29
 
 **INTERNAL milestone — NOT a published release.** Engine restructure work
