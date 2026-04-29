@@ -35,6 +35,7 @@
 mod fixtures;
 
 use serde_json::Value;
+use serial_test::serial;
 use std::path::Path;
 use std::process::Command;
 use std::sync::{mpsc, Mutex, OnceLock};
@@ -4014,222 +4015,276 @@ fn test_coupling_on_ocaml() {
 
 // ---------------------------------------------------------------- embed
 #[test]
+#[serial(embedding_cache)]
 fn test_embed_on_python() {
     check_embed("python");
 }
 #[test]
+#[serial(embedding_cache)]
 fn test_embed_on_typescript() {
     check_embed("typescript");
 }
 #[test]
+#[serial(embedding_cache)]
 fn test_embed_on_javascript() {
     check_embed("javascript");
 }
 #[test]
+#[serial(embedding_cache)]
 fn test_embed_on_go() {
     check_embed("go");
 }
 #[test]
+#[serial(embedding_cache)]
 fn test_embed_on_rust() {
     check_embed("rust");
 }
 #[test]
+#[serial(embedding_cache)]
 fn test_embed_on_java() {
     check_embed("java");
 }
 #[test]
+#[serial(embedding_cache)]
 fn test_embed_on_c() {
     check_embed("c");
 }
 #[test]
+#[serial(embedding_cache)]
 fn test_embed_on_cpp() {
     check_embed("cpp");
 }
 #[test]
+#[serial(embedding_cache)]
 fn test_embed_on_ruby() {
     check_embed("ruby");
 }
 #[test]
+#[serial(embedding_cache)]
 fn test_embed_on_kotlin() {
     check_embed("kotlin");
 }
 #[test]
+#[serial(embedding_cache)]
 fn test_embed_on_swift() {
     check_embed("swift");
 }
 #[test]
+#[serial(embedding_cache)]
 fn test_embed_on_csharp() {
     check_embed("csharp");
 }
 #[test]
+#[serial(embedding_cache)]
 fn test_embed_on_scala() {
     check_embed("scala");
 }
 #[test]
+#[serial(embedding_cache)]
 fn test_embed_on_php() {
     check_embed("php");
 }
 #[test]
+#[serial(embedding_cache)]
 fn test_embed_on_lua() {
     check_embed("lua");
 }
 #[test]
+#[serial(embedding_cache)]
 fn test_embed_on_luau() {
     check_embed("luau");
 }
 #[test]
+#[serial(embedding_cache)]
 fn test_embed_on_elixir() {
     check_embed("elixir");
 }
 #[test]
+#[serial(embedding_cache)]
 fn test_embed_on_ocaml() {
     check_embed("ocaml");
 }
 
 // ---------------------------------------------------------------- semantic
 #[test]
+#[serial(embedding_cache)]
 fn test_semantic_on_python() {
     check_semantic("python");
 }
 #[test]
+#[serial(embedding_cache)]
 fn test_semantic_on_typescript() {
     check_semantic("typescript");
 }
 #[test]
+#[serial(embedding_cache)]
 fn test_semantic_on_javascript() {
     check_semantic("javascript");
 }
 #[test]
+#[serial(embedding_cache)]
 fn test_semantic_on_go() {
     check_semantic("go");
 }
 #[test]
+#[serial(embedding_cache)]
 fn test_semantic_on_rust() {
     check_semantic("rust");
 }
 #[test]
+#[serial(embedding_cache)]
 fn test_semantic_on_java() {
     check_semantic("java");
 }
 #[test]
+#[serial(embedding_cache)]
 fn test_semantic_on_c() {
     check_semantic("c");
 }
 #[test]
+#[serial(embedding_cache)]
 fn test_semantic_on_cpp() {
     check_semantic("cpp");
 }
 #[test]
+#[serial(embedding_cache)]
 fn test_semantic_on_ruby() {
     check_semantic("ruby");
 }
 #[test]
+#[serial(embedding_cache)]
 fn test_semantic_on_kotlin() {
     check_semantic("kotlin");
 }
 #[test]
+#[serial(embedding_cache)]
 fn test_semantic_on_swift() {
     check_semantic("swift");
 }
 #[test]
+#[serial(embedding_cache)]
 fn test_semantic_on_csharp() {
     check_semantic("csharp");
 }
 #[test]
+#[serial(embedding_cache)]
 fn test_semantic_on_scala() {
     check_semantic("scala");
 }
 #[test]
+#[serial(embedding_cache)]
 fn test_semantic_on_php() {
     check_semantic("php");
 }
 #[test]
+#[serial(embedding_cache)]
 fn test_semantic_on_lua() {
     check_semantic("lua");
 }
 #[test]
+#[serial(embedding_cache)]
 fn test_semantic_on_luau() {
     check_semantic("luau");
 }
 #[test]
+#[serial(embedding_cache)]
 fn test_semantic_on_elixir() {
     check_semantic("elixir");
 }
 #[test]
+#[serial(embedding_cache)]
 fn test_semantic_on_ocaml() {
     check_semantic("ocaml");
 }
 
 // ---------------------------------------------------------------- similar
 #[test]
+#[serial(embedding_cache)]
 fn test_similar_on_python() {
     check_similar("python");
 }
 #[test]
+#[serial(embedding_cache)]
 fn test_similar_on_typescript() {
     check_similar("typescript");
 }
 #[test]
+#[serial(embedding_cache)]
 fn test_similar_on_javascript() {
     check_similar("javascript");
 }
 #[test]
+#[serial(embedding_cache)]
 fn test_similar_on_go() {
     check_similar("go");
 }
 #[test]
+#[serial(embedding_cache)]
 fn test_similar_on_rust() {
     check_similar("rust");
 }
 #[test]
+#[serial(embedding_cache)]
 fn test_similar_on_java() {
     check_similar("java");
 }
 #[test]
+#[serial(embedding_cache)]
 fn test_similar_on_c() {
     check_similar("c");
 }
 #[test]
+#[serial(embedding_cache)]
 fn test_similar_on_cpp() {
     check_similar("cpp");
 }
 #[test]
+#[serial(embedding_cache)]
 fn test_similar_on_ruby() {
     check_similar("ruby");
 }
 #[test]
+#[serial(embedding_cache)]
 fn test_similar_on_kotlin() {
     check_similar("kotlin");
 }
 #[test]
+#[serial(embedding_cache)]
 fn test_similar_on_swift() {
     check_similar("swift");
 }
 #[test]
+#[serial(embedding_cache)]
 fn test_similar_on_csharp() {
     check_similar("csharp");
 }
 #[test]
+#[serial(embedding_cache)]
 fn test_similar_on_scala() {
     check_similar("scala");
 }
 #[test]
+#[serial(embedding_cache)]
 fn test_similar_on_php() {
     check_similar("php");
 }
 #[test]
+#[serial(embedding_cache)]
 fn test_similar_on_lua() {
     check_similar("lua");
 }
 #[test]
+#[serial(embedding_cache)]
 fn test_similar_on_luau() {
     check_similar("luau");
 }
 #[test]
+#[serial(embedding_cache)]
 fn test_similar_on_elixir() {
     check_similar("elixir");
 }
 #[test]
+#[serial(embedding_cache)]
 fn test_similar_on_ocaml() {
     check_similar("ocaml");
 }

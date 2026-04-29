@@ -119,12 +119,32 @@ impl Embedder {
 
         // Initialize the model
         // P0 Mitigation 1.1: fastembed will fail here if ONNX runtime is unavailable
-        let mut embedding = TextEmbedding::try_new(InitOptions::new(fast_model)).map_err(|e| {
-            TldrError::ModelLoadError {
-                model: model.model_name().to_string(),
-                detail: e.to_string(),
-            }
-        })?;
+        //
+        // M4 VAL-004 (v0.3.0): three-tier cache directory resolution. Without
+        // an explicit cache_dir, fastembed defaults to a CWD-relative
+        // `.fastembed_cache/` which (a) duplicates ~416 MB per working
+        // directory and (b) races between parallel test processes on first
+        // touch (`No such file or directory (os error 2)`). Tiers:
+        //   1. `TLDR_FASTEMBED_CACHE` env var (test override / power user)
+        //   2. `dirs::cache_dir().join("tldr/fastembed")` (per-platform XDG)
+        //   3. `std::env::temp_dir().join("tldr/fastembed")` (last resort)
+        let cache_dir: std::path::PathBuf = std::env::var("TLDR_FASTEMBED_CACHE")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| {
+                dirs::cache_dir()
+                    .unwrap_or_else(std::env::temp_dir)
+                    .join("tldr")
+                    .join("fastembed")
+            });
+        // Best-effort create; fastembed will surface a precise error if the
+        // directory cannot be created or is not writable.
+        let _ = std::fs::create_dir_all(&cache_dir);
+        let mut embedding =
+            TextEmbedding::try_new(InitOptions::new(fast_model).with_cache_dir(cache_dir))
+                .map_err(|e| TldrError::ModelLoadError {
+                    model: model.model_name().to_string(),
+                    detail: e.to_string(),
+                })?;
 
         // P0 Mitigation 4.1: Model integrity check
         // Embed a known input and verify dimensions

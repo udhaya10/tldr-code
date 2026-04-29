@@ -95,3 +95,8 @@ assert_cmd = { workspace = true }
 predicates = { workspace = true }
 proptest = "1.4"
 tokio = { version = "1", features = ["net", "io-util", "sync", "rt-multi-thread", "macros", "time", "test-util"] }
+# M4 VAL-004 (v0.3.0): cross-binary serialization of embed/semantic/similar
+# tests. The in-process embedding_mutex serializes within a single test
+# binary; #[serial(embedding_cache)] from serial_test serializes across
+# binaries and across the cargo-test process tree.
+serial_test = "3"
