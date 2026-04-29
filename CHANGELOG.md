@@ -1,5 +1,85 @@
 # Changelog
 
+## v0.3.0 — 2026-04-29
+
+**MAJOR engine restructure release.**
+
+### Engine
+
+- **process_block taint propagation** rewired from substring matching to
+  VarRef-based per-line use lookup (M1a). Eliminates the variable-shadowing
+  false-positive class — short variable names like `x`, `i`, `db` no
+  longer match unrelated tokens. Substring predicate at taint.rs:3761 (Definition
+  arm) and :3780 (Update arm) replaced with `rhs_uses_tainted` helper.
+- **SSA-versioned taint key** layered on top (M1b). `compute_taint_with_tree`
+  accepts an optional `&SsaFunction`; reassignment-through-sanitizer correctly
+  clears taint on the post-sanitizer SSA version. Falls back to VarRef-keyed
+  mode for languages where SSA construction is partial — never panics.
+- **AST member-access matching** is now structural across all 16 language
+  families (M2 — closes #24). Replaces `text.contains(member_pattern)`
+  with `extract_member_access_receiver_and_field` via the existing
+  `field_access_info(language)` schema (covers all 18 Language variants).
+  String literals containing pattern fragments (e.g., `"see req.body for details"`)
+  no longer trigger sources. 217 member_patterns strings migrated from
+  `&[&str]` to `&[(&str, &str)]` across 43 of 48 AST pattern banks.
+  **Note:** Ruby, Elixir, and OCaml have partial `field_access_info` coverage
+  (instance_variable / `@attr` / `field_get_expression` respectively);
+  `Module.function` call patterns in those 3 languages retain
+  `call_names` / substring fallback for v0.3.0. Structural hardening
+  queued for v0.4.0.
+
+### Deferred to v0.4.0
+
+- **Sink dispatch flip** to AST-preferring + AST sink-parity bank work
+  (TypeScript NextJS/Fastify/NestJS = 9 sinks; Python `os.spawn*` = 6
+  variants — currently in regex banks only). v0.3.0 keeps additive
+  dispatch (regex+AST merged) to avoid silent regression of v0.2.3 M3's
+  framework patterns. v0.4.0 closes the parity as part of cross-procedural
+  work — see `thoughts/shared/plans/v0.4.0-cross-procedural-design.md` §7.
+- **DtoTypeIndex** (class-validator awareness for NestJS DTOs) and
+  **cross-procedural taint summaries** — see v0.4.0 design doc Sections 1–2.
+- **detect_sanitizer_ast** wired only via regex detect_sanitizer; AST-based
+  sanitizer detection deferred to v0.4.0.
+
+### Infrastructure
+
+- **Multi-daemon registry** (M3) replaces v0.2.2 single-slot
+  `daemon-active.json`. New commands: `tldr daemon list`,
+  `tldr daemon stop --all`, `tldr daemon stop --project <abs-path>`.
+  `tldr daemon status` (no flag) now errors when multiple daemons are
+  running (`multiple daemons running; use --project <path> or run 'tldr daemon list'`).
+  Concurrency: bounded compare-and-swap retry (3 attempts, no new
+  dependency). One-shot migration shim auto-converts v0.2.x
+  `daemon-active.json` on first registry access; `daemon_active` module
+  marked `#[deprecated(since = "0.3.0")]`.
+- **Fastembed cache fix** (M4 — closes v0.2.2 M9 deferred finding).
+  `embedder.rs` honors `TLDR_FASTEMBED_CACHE` env override and defaults to
+  `dirs::cache_dir().join("tldr/fastembed")`. **Default parallelism now
+  works** for the test matrix; the `--test-threads=1` workaround documented
+  in v0.2.2 is retired. 54 race-prone test cells annotated with
+  `#[serial(embedding_cache)]` via new `serial_test = "3"` dev-dep.
+  Two leaked `.fastembed_cache/` directories (~832 MB total) at workspace
+  root and `crates/tldr-cli/` may be deleted:
+  `rm -rf .fastembed_cache crates/tldr-cli/.fastembed_cache`
+
+### Documentation
+
+- v0.4.0 cross-procedural design queued at
+  `thoughts/shared/plans/v0.4.0-cross-procedural-design.md` (M5).
+  7 sections covering DtoTypeIndex, TaintSummary, sink dispatch flip
+  + parity work, dependency graph, testing strategy, v0.4.0 milestone
+  proposal M1–M7.
+
+### Test Matrix
+
+730/730 (`exhaustive_matrix`) + 234/234 (`language_command_matrix`) =
+**964/964 at DEFAULT parallelism.** `--test-threads=1` no longer required.
+
+### Issue close-outs
+
+- **#24** (substring false positives in AST member-access) — closed by M2
+  structural matching.
+
 ## v0.2.4 — 2026-04-28
 
 ### Fixed
