@@ -3270,6 +3270,19 @@ pub fn compute_taint_with_tree(
         }
     }
 
+    // Per-line source-var index used by process_block to preserve taint at
+    // source-defining lines (e.g., `x = input()` where `x` is freshly tainted
+    // by the source call). Under v0.2.x substring semantics this case was
+    // covered accidentally by `stmt.contains("x")` matching the LHS; under
+    // VarRef semantics (v0.3.0 M1a VAL-001a) we must check sources explicitly.
+    let mut sources_by_line: HashMap<u32, HashSet<String>> = HashMap::new();
+    for source in &result.sources {
+        sources_by_line
+            .entry(source.line)
+            .or_default()
+            .insert(source.var.clone());
+    }
+
     while let Some(block_id) = worklist.pop_front() {
         if iterations >= max_iterations {
             iteration_limit_reached = true;
@@ -3297,6 +3310,7 @@ pub fn compute_taint_with_tree(
             &refs_by_block,
             statements,
             &line_to_block,
+            &sources_by_line,
             &mut result.sanitized_vars,
             language,
         );
@@ -3585,6 +3599,17 @@ pub fn compute_taint(
         }
     }
 
+    // Per-line source-var index used by process_block to preserve taint at
+    // source-defining lines under VarRef semantics (v0.3.0 M1a VAL-001a).
+    // See compute_taint_with_tree for the full rationale.
+    let mut sources_by_line: HashMap<u32, HashSet<String>> = HashMap::new();
+    for source in &result.sources {
+        sources_by_line
+            .entry(source.line)
+            .or_default()
+            .insert(source.var.clone());
+    }
+
     while let Some(block_id) = worklist.pop_front() {
         if iterations >= max_iterations {
             iteration_limit_reached = true;
@@ -3615,6 +3640,7 @@ pub fn compute_taint(
             &refs_by_block,
             statements,
             &line_to_block,
+            &sources_by_line,
             &mut result.sanitized_vars,
             language,
         );
@@ -3743,6 +3769,7 @@ fn process_block(
     refs_by_block: &HashMap<usize, Vec<&VarRef>>,
     statements: &HashMap<u32, String>,
     _line_to_block: &HashMap<u32, usize>,
+    sources_by_line: &HashMap<u32, HashSet<String>>,
     sanitized_vars: &mut HashSet<String>,
     language: Language,
 ) -> HashSet<String> {
@@ -3757,14 +3784,29 @@ fn process_block(
 
         match var_ref.ref_type {
             RefType::Definition => {
-                // Check if RHS uses a tainted variable
-                let rhs_tainted = current_taint.iter().any(|tv| stmt.contains(tv.as_str()));
+                // Check if RHS uses a tainted variable.
+                // VarRef-based per-line use lookup (v0.3.0 M1a VAL-001a) replaces
+                // the v0.2.x `stmt.contains(tv.as_str())` substring check, which
+                // produced false positives whenever a tainted variable's name
+                // appeared as a substring of an unrelated token (method names,
+                // class names, comments).
+                let rhs_tainted = rhs_uses_tainted(var_ref.line, &current_taint, block_refs);
+
+                // Check if this Definition is itself the source line for this
+                // variable (e.g., `x = input()` with `x` registered as a source).
+                // The substring engine preserved this case accidentally because
+                // `stmt.contains("x")` matched the LHS identifier; under VarRef
+                // semantics, the LHS Def is not a Use, so we must check the
+                // sources map explicitly to avoid stripping freshly-seeded taint.
+                let is_source_def = sources_by_line
+                    .get(&var_ref.line)
+                    .is_some_and(|vars| vars.contains(&var_ref.name));
 
                 // Check if sanitized
                 if detect_sanitizer(stmt, language).is_some() {
                     sanitized_vars.insert(var_ref.name.clone());
                     current_taint.remove(&var_ref.name);
-                } else if rhs_tainted {
+                } else if rhs_tainted || is_source_def {
                     current_taint.insert(var_ref.name.clone());
                 } else {
                     // Definition without taint removes taint
@@ -3775,9 +3817,10 @@ fn process_block(
                 // Uses don't change taint state directly
             }
             RefType::Update => {
-                // Update is use-then-def (e.g., x += y)
-                // If RHS is tainted, result is tainted
-                let rhs_tainted = current_taint.iter().any(|tv| stmt.contains(tv.as_str()));
+                // Update is use-then-def (e.g., x += y).
+                // If RHS uses a tainted variable, the result is tainted.
+                // VarRef-based per-line use lookup (v0.3.0 M1a VAL-001a).
+                let rhs_tainted = rhs_uses_tainted(var_ref.line, &current_taint, block_refs);
                 if rhs_tainted {
                     current_taint.insert(var_ref.name.clone());
                 }
@@ -3786,6 +3829,26 @@ fn process_block(
     }
 
     current_taint
+}
+
+/// Check whether any tainted variable appears as a `RefType::Use` VarRef on
+/// the given line within `block_refs`.
+///
+/// Replaces the v0.2.x substring check `stmt.contains(tv.as_str())` which
+/// produced false positives whenever a tainted variable's name appeared as a
+/// substring of an unrelated token (method names, class names, comments).
+/// Uses the DFG's per-line use-reference granularity instead — the DFG already
+/// emits Use refs at correct token boundaries.
+fn rhs_uses_tainted(
+    line: u32,
+    current_taint: &HashSet<String>,
+    block_refs: &[&VarRef],
+) -> bool {
+    block_refs.iter().any(|r| {
+        r.line == line
+            && matches!(r.ref_type, RefType::Use)
+            && current_taint.contains(&r.name)
+    })
 }
 
 #[cfg(test)]
