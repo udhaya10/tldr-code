@@ -2805,22 +2805,32 @@ static LUA_AST_SANITIZERS: &[AstSanitizerPattern] = &[AstSanitizerPattern {
 
 // Elixir PARTIAL coverage (per m2-ground-truth): field_access_info covers ONLY
 // `unary_operator` (the `@module_attribute` pattern). `Module.function` calls
-// like `IO.gets`, `System.cmd`, `Ecto.Adapters.SQL.query` are call_expression
-// nodes, not member-access — raw substring fallback. Documented as v0.4.0 hardening.
+// like `IO.gets`, `System.cmd` are now structurally matched via `(receiver, field)`
+// tuples — the W2-pre call-shape path uses `extract_call_name_elixir` + `rfind('.')`
+// to split into a `(receiver, field)` pair, so the structured-shape entries fire
+// on the AST without regex. Multi-segment receivers (e.g. `Ecto.Adapters.SQL.query`)
+// are supported because `rfind('.')` keeps the full dotted prefix as the receiver.
+// M5 will delete the raw-substring `("", "X.y")` duplicates atomically with the
+// regex banks. Documented as v0.4.0 hardening.
 static ELIXIR_AST_SOURCES: &[AstSourcePattern] = &[
     AstSourcePattern {
         call_names: &[],
-        member_patterns: &[("", "IO.gets")],
+        member_patterns: &[("", "IO.gets"), ("IO", "gets")],
         source_type: TaintSourceType::UserInput,
     },
     AstSourcePattern {
         call_names: &[],
-        member_patterns: &[("", "System.get_env")],
+        member_patterns: &[("", "System.get_env"), ("System", "get_env")],
         source_type: TaintSourceType::EnvVar,
     },
     AstSourcePattern {
         call_names: &[],
-        member_patterns: &[("", "File.read"), ("", "File.read!")],
+        member_patterns: &[
+            ("", "File.read"),
+            ("", "File.read!"),
+            ("File", "read"),
+            ("File", "read!"),
+        ],
         source_type: TaintSourceType::FileRead,
     },
 ];
@@ -2828,17 +2838,20 @@ static ELIXIR_AST_SOURCES: &[AstSourcePattern] = &[
 static ELIXIR_AST_SINKS: &[AstSinkPattern] = &[
     AstSinkPattern {
         call_names: &[],
-        member_patterns: &[("", "System.cmd")],
+        member_patterns: &[("", "System.cmd"), ("System", "cmd")],
         sink_type: TaintSinkType::ShellExec,
     },
     AstSinkPattern {
         call_names: &[],
-        member_patterns: &[("", "Code.eval_string")],
+        member_patterns: &[("", "Code.eval_string"), ("Code", "eval_string")],
         sink_type: TaintSinkType::CodeEval,
     },
     AstSinkPattern {
         call_names: &[],
-        member_patterns: &[("", "Ecto.Adapters.SQL.query")],
+        member_patterns: &[
+            ("", "Ecto.Adapters.SQL.query"),
+            ("Ecto.Adapters.SQL", "query"),
+        ],
         sink_type: TaintSinkType::SqlQuery,
     },
 ];
