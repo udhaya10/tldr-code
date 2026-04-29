@@ -1818,3 +1818,141 @@ mod semantic_tests {
         cleanup_daemon(project_path);
     }
 }
+
+// =============================================================================
+// 11. Language Threading Tests (v031-cluster-M1)
+//
+// These tests exercise the REAL `tldr_cli::commands::daemon::types::DaemonCommand`
+// (not the inline shim in `daemon_types`) and the REAL `tldr_core::Language`.
+// They lock the contract that the 7 threading variants — Calls, Impact, Dead,
+// Arch, Importers, ChangeImpact, Context — each carry a
+// `language: Option<Language>` field with `#[serde(default)]` (so old clients
+// can omit the field) and `#[serde(alias = "lang")]` (so v0.2.x clients
+// sending the legacy `lang` key still deserialize).
+//
+// Pre-fix expectation: compile error. The 7 variants do not declare a
+// `language` field, so the struct-pattern construction below fails with
+// `error[E0559]: variant ... has no field named language`.
+// =============================================================================
+
+mod language_threading {
+    use std::path::PathBuf;
+    use tldr_cli::commands::daemon::types::DaemonCommand;
+    use tldr_core::Language;
+
+    /// Helper: build a Calls variant with an explicit language and round-trip
+    /// it through serde_json. Asserts the language survives the round-trip.
+    #[test]
+    fn test_daemon_command_calls_carries_language() {
+        let cmd = DaemonCommand::Calls {
+            path: Some(PathBuf::from("/tmp/proj")),
+            language: Some(Language::TypeScript),
+        };
+        let json = serde_json::to_string(&cmd).expect("serialize Calls");
+        assert!(
+            json.contains("\"language\":\"typescript\""),
+            "expected canonical `language` key in serialized form, got: {}",
+            json
+        );
+
+        let back: DaemonCommand =
+            serde_json::from_str(&json).expect("deserialize Calls round-trip");
+        match back {
+            DaemonCommand::Calls { path, language } => {
+                assert_eq!(path, Some(PathBuf::from("/tmp/proj")));
+                assert_eq!(language, Some(Language::TypeScript));
+            }
+            other => panic!("expected DaemonCommand::Calls, got {:?}", other),
+        }
+    }
+
+    /// Regression guard: every threading variant must accept a payload that
+    /// OMITS the `language` field and default it to `None`. Locks the
+    /// `#[serde(default)]` annotation against accidental removal.
+    #[test]
+    fn test_daemon_command_all_threading_variants_default_language_none() {
+        // Calls — language omitted
+        let json = r#"{"cmd":"calls","path":"/tmp/p"}"#;
+        let cmd: DaemonCommand = serde_json::from_str(json).expect("calls without language");
+        assert!(
+            matches!(cmd, DaemonCommand::Calls { language: None, .. }),
+            "Calls without language must default to None, got {:?}",
+            cmd
+        );
+
+        // Impact — language omitted
+        let json = r#"{"cmd":"impact","func":"foo","depth":3}"#;
+        let cmd: DaemonCommand = serde_json::from_str(json).expect("impact without language");
+        assert!(
+            matches!(cmd, DaemonCommand::Impact { language: None, .. }),
+            "Impact without language must default to None, got {:?}",
+            cmd
+        );
+
+        // Dead — language omitted
+        let json = r#"{"cmd":"dead","path":"/tmp/p"}"#;
+        let cmd: DaemonCommand = serde_json::from_str(json).expect("dead without language");
+        assert!(
+            matches!(cmd, DaemonCommand::Dead { language: None, .. }),
+            "Dead without language must default to None, got {:?}",
+            cmd
+        );
+
+        // Arch — language omitted
+        let json = r#"{"cmd":"arch","path":"/tmp/p"}"#;
+        let cmd: DaemonCommand = serde_json::from_str(json).expect("arch without language");
+        assert!(
+            matches!(cmd, DaemonCommand::Arch { language: None, .. }),
+            "Arch without language must default to None, got {:?}",
+            cmd
+        );
+
+        // Importers — language omitted
+        let json = r#"{"cmd":"importers","module":"os","path":"/tmp/p"}"#;
+        let cmd: DaemonCommand = serde_json::from_str(json).expect("importers without language");
+        assert!(
+            matches!(cmd, DaemonCommand::Importers { language: None, .. }),
+            "Importers without language must default to None, got {:?}",
+            cmd
+        );
+
+        // ChangeImpact — language omitted
+        let json = r#"{"cmd":"change_impact","files":["/tmp/p/main.py"]}"#;
+        let cmd: DaemonCommand =
+            serde_json::from_str(json).expect("change_impact without language");
+        assert!(
+            matches!(cmd, DaemonCommand::ChangeImpact { language: None, .. }),
+            "ChangeImpact without language must default to None, got {:?}",
+            cmd
+        );
+
+        // Context — language omitted
+        let json = r#"{"cmd":"context","entry":"main"}"#;
+        let cmd: DaemonCommand = serde_json::from_str(json).expect("context without language");
+        assert!(
+            matches!(cmd, DaemonCommand::Context { language: None, .. }),
+            "Context without language must default to None, got {:?}",
+            cmd
+        );
+    }
+
+    /// Back-compat guard: v0.2.x clients send the field name `lang` rather
+    /// than the canonical `language`. The `#[serde(alias = "lang")]` must
+    /// accept both forms. Locks the alias against accidental removal.
+    #[test]
+    fn test_daemon_command_calls_accepts_lang_alias() {
+        let json = r#"{"cmd":"calls","path":"/tmp/p","lang":"rust"}"#;
+        let cmd: DaemonCommand = serde_json::from_str(json).expect("calls with lang alias");
+        match cmd {
+            DaemonCommand::Calls { language, .. } => {
+                assert_eq!(
+                    language,
+                    Some(Language::Rust),
+                    "lang=rust alias must deserialize to Some(Rust)"
+                );
+            }
+            other => panic!("expected DaemonCommand::Calls, got {:?}", other),
+        }
+    }
+}
+

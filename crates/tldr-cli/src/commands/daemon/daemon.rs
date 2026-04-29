@@ -600,7 +600,11 @@ impl TLDRDaemon {
                 }
             }
 
-            DaemonCommand::Context { entry, depth } => {
+            DaemonCommand::Context {
+                entry,
+                depth,
+                language: _,
+            } => {
                 let d = depth.unwrap_or(2);
                 let key = QueryKey::new("context", hash_str_args(&[&entry, &d.to_string()]));
                 if let Some(cached) = self.cache.get::<serde_json::Value>(&key) {
@@ -720,7 +724,10 @@ impl TLDRDaemon {
                 }
             }
 
-            DaemonCommand::Calls { path } => {
+            DaemonCommand::Calls {
+                path,
+                language: _,
+            } => {
                 let root = path.unwrap_or_else(|| self.project.clone());
                 let root_str = root.to_string_lossy().to_string();
                 let key = QueryKey::new("calls", hash_str_args(&[&root_str]));
@@ -740,7 +747,11 @@ impl TLDRDaemon {
                 }
             }
 
-            DaemonCommand::Impact { func, depth } => {
+            DaemonCommand::Impact {
+                func,
+                depth,
+                language: _,
+            } => {
                 let d = depth.unwrap_or(3);
                 let key = QueryKey::new("impact", hash_str_args(&[&func, &d.to_string()]));
                 if let Some(cached) = self.cache.get::<serde_json::Value>(&key) {
@@ -769,7 +780,11 @@ impl TLDRDaemon {
                 }
             }
 
-            DaemonCommand::Dead { path, entry } => {
+            DaemonCommand::Dead {
+                path,
+                entry,
+                language: _,
+            } => {
                 let root = path.unwrap_or_else(|| self.project.clone());
                 let root_str = root.to_string_lossy().to_string();
                 let entry_str = entry.as_ref().map(|v| v.join(",")).unwrap_or_default();
@@ -824,7 +839,10 @@ impl TLDRDaemon {
                 }
             }
 
-            DaemonCommand::Arch { path } => {
+            DaemonCommand::Arch {
+                path,
+                language: _,
+            } => {
                 let root = path.unwrap_or_else(|| self.project.clone());
                 let root_str = root.to_string_lossy().to_string();
                 let key = QueryKey::new("arch", hash_str_args(&[&root_str]));
@@ -882,7 +900,11 @@ impl TLDRDaemon {
                 }
             }
 
-            DaemonCommand::Importers { module, path } => {
+            DaemonCommand::Importers {
+                module,
+                path,
+                language: _,
+            } => {
                 let root = path.unwrap_or_else(|| self.project.clone());
                 let root_str = root.to_string_lossy().to_string();
                 let key = QueryKey::new("importers", hash_str_args(&[&module, &root_str]));
@@ -915,6 +937,7 @@ impl TLDRDaemon {
                 files,
                 session: _,
                 git: _,
+                language: _,
             } => {
                 let files_str = files
                     .as_ref()
@@ -1611,7 +1634,10 @@ mod tests {
         let daemon = TLDRDaemon::new(temp.path().to_path_buf(), config);
 
         let response = daemon
-            .handle_command(DaemonCommand::Calls { path: None })
+            .handle_command(DaemonCommand::Calls {
+                path: None,
+                language: None,
+            })
             .await;
 
         match response {
@@ -1635,7 +1661,10 @@ mod tests {
         let daemon = TLDRDaemon::new(temp.path().to_path_buf(), config);
 
         let response = daemon
-            .handle_command(DaemonCommand::Arch { path: None })
+            .handle_command(DaemonCommand::Arch {
+                path: None,
+                language: None,
+            })
             .await;
 
         match response {
@@ -1692,6 +1721,7 @@ mod tests {
             .handle_command(DaemonCommand::Importers {
                 module: "os".to_string(),
                 path: None,
+                language: None,
             })
             .await;
 
@@ -1719,6 +1749,7 @@ mod tests {
             .handle_command(DaemonCommand::Dead {
                 path: None,
                 entry: None,
+                language: None,
             })
             .await;
 
@@ -1747,6 +1778,7 @@ mod tests {
                 files: Some(vec![temp.path().join("main.py")]),
                 session: None,
                 git: None,
+                language: None,
             })
             .await;
 
@@ -1841,6 +1873,7 @@ mod tests {
             .handle_command(DaemonCommand::Context {
                 entry: "main".to_string(),
                 depth: Some(1),
+                language: None,
             })
             .await;
 
@@ -1870,6 +1903,7 @@ mod tests {
             .handle_command(DaemonCommand::Impact {
                 func: "hello".to_string(),
                 depth: Some(2),
+                language: None,
             })
             .await;
 

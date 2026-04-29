@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+use tldr_core::Language;
 
 // =============================================================================
 // Constants
@@ -357,7 +358,14 @@ pub enum DaemonCommand {
     Structure { path: PathBuf, lang: Option<String> },
 
     /// Get context for entry point
-    Context { entry: String, depth: Option<usize> },
+    Context {
+        entry: String,
+        depth: Option<usize>,
+        /// Optional language override. Falls back to auto-detection when
+        /// `None`. Accepts the legacy `lang` key for v0.2.x clients.
+        #[serde(default, alias = "lang", skip_serializing_if = "Option::is_none")]
+        language: Option<Language>,
+    },
 
     /// Get control flow graph
     Cfg { file: PathBuf, function: String },
@@ -373,19 +381,42 @@ pub enum DaemonCommand {
     },
 
     /// Get call graph
-    Calls { path: Option<PathBuf> },
+    Calls {
+        path: Option<PathBuf>,
+        /// Optional language override. Falls back to auto-detection when
+        /// `None`. Accepts the legacy `lang` key for v0.2.x clients.
+        #[serde(default, alias = "lang", skip_serializing_if = "Option::is_none")]
+        language: Option<Language>,
+    },
 
     /// Get impact analysis
-    Impact { func: String, depth: Option<usize> },
+    Impact {
+        func: String,
+        depth: Option<usize>,
+        /// Optional language override. Falls back to auto-detection when
+        /// `None`. Accepts the legacy `lang` key for v0.2.x clients.
+        #[serde(default, alias = "lang", skip_serializing_if = "Option::is_none")]
+        language: Option<Language>,
+    },
 
     /// Find dead code
     Dead {
         path: Option<PathBuf>,
         entry: Option<Vec<String>>,
+        /// Optional language override. Falls back to auto-detection when
+        /// `None`. Accepts the legacy `lang` key for v0.2.x clients.
+        #[serde(default, alias = "lang", skip_serializing_if = "Option::is_none")]
+        language: Option<Language>,
     },
 
     /// Get architecture analysis
-    Arch { path: Option<PathBuf> },
+    Arch {
+        path: Option<PathBuf>,
+        /// Optional language override. Falls back to auto-detection when
+        /// `None`. Accepts the legacy `lang` key for v0.2.x clients.
+        #[serde(default, alias = "lang", skip_serializing_if = "Option::is_none")]
+        language: Option<Language>,
+    },
 
     /// Get imports for a file
     Imports { file: PathBuf },
@@ -394,6 +425,10 @@ pub enum DaemonCommand {
     Importers {
         module: String,
         path: Option<PathBuf>,
+        /// Optional language override. Falls back to auto-detection when
+        /// `None`. Accepts the legacy `lang` key for v0.2.x clients.
+        #[serde(default, alias = "lang", skip_serializing_if = "Option::is_none")]
+        language: Option<Language>,
     },
 
     /// Run diagnostics
@@ -407,6 +442,10 @@ pub enum DaemonCommand {
         files: Option<Vec<PathBuf>>,
         session: Option<bool>,
         git: Option<bool>,
+        /// Optional language override. Falls back to auto-detection when
+        /// `None`. Accepts the legacy `lang` key for v0.2.x clients.
+        #[serde(default, alias = "lang", skip_serializing_if = "Option::is_none")]
+        language: Option<Language>,
     },
 }
 
