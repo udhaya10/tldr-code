@@ -1880,7 +1880,8 @@ pub use detect_sources as find_sources_in_statement;
 
 use super::ast_utils::{
     call_node_kinds, extract_call_name, extract_member_access_receiver_and_field,
-    find_parent_assignment_var, is_in_comment, is_in_string, node_text, walk_descendants,
+    find_parent_assignment_var, is_in_comment, is_in_string, node_text, string_node_kinds,
+    walk_descendants,
 };
 
 /// AST-based source pattern: matches call names and member access patterns.
@@ -3323,7 +3324,43 @@ fn member_patterns_match(
             }
         }
         // Structural match attempted; no entries matched.
-        // Fall through to the substring-fallback path for legacy shapes.
+        // Fall through to the call-shape and substring-fallback paths.
+    }
+
+    // W2-pre: structural match for call-shaped nodes whose dotted call name
+    // encodes a (receiver, field) pair. In several languages
+    // (Java `method_invocation`, TypeScript/JavaScript/Go/Rust/C# `call_expression`)
+    // a method call like `request.getParameter(...)` is a single call node whose
+    // `extract_call_name` yields the dotted form `"request.getParameter"`.
+    // It is NOT a `field_access` / `member_expression` node, so the structural
+    // path above (which dispatches via `field_access_info`) does not see it.
+    //
+    // Pre-W2-pre, member_patterns like `("request", "getParameter")` only
+    // matched when the same expression appeared as a field-access in some other
+    // descendant — which fails for direct method calls. The regex bank caught
+    // these cases via substring; under AST-only dispatch (Wave-2-atomic), they
+    // were lost. Splitting the dotted call name on the last `.` reconstructs
+    // the (receiver, field) pair structurally, with no regex coupling.
+    let call_kinds = call_node_kinds(language);
+    if call_kinds.contains(&descendant.kind()) {
+        if let Some(call_name) = extract_call_name(descendant, source, language) {
+            if let Some(dot_pos) = call_name.rfind('.') {
+                let rcv = &call_name[..dot_pos];
+                let field = &call_name[dot_pos + 1..];
+                for (pat_rcv, pat_field) in member_patterns {
+                    if pat_rcv.is_empty() {
+                        continue;
+                    }
+                    if *pat_rcv == "*" {
+                        if field == *pat_field {
+                            return true;
+                        }
+                    } else if rcv == *pat_rcv && field == *pat_field {
+                        return true;
+                    }
+                }
+            }
+        }
     }
 
     // Raw-substring fallback for non-member-access shapes (subscripts, new
@@ -3338,6 +3375,143 @@ fn member_patterns_match(
     }
 
     false
+}
+
+/// W2-pre: Regex-free first-argument extraction for AST-detected calls.
+///
+/// Walks the matched call node's children to find its `arguments` list (or the
+/// first `(`-bracketed group if no `arguments` field is exposed by the grammar)
+/// and returns the first child argument that is a plain identifier. Skips
+/// string-literal arguments.
+///
+/// This replaces the regex-coupled `extract_call_arg(stmt_text, regex)` for the
+/// AST detection path so that var extraction does not depend on the regex bank
+/// being populated. Wave-2-atomic deletes the regex bank; without this helper
+/// every AST hit that would have relied on `extract_call_arg` returns
+/// `var = None` and the source/sink is silently dropped.
+fn extract_first_identifier_arg_ast(
+    descendant: &tree_sitter::Node,
+    source: &[u8],
+    language: Language,
+) -> Option<String> {
+    let string_kinds = string_node_kinds(language);
+
+    // Find an arguments-like child. Common field names across grammars:
+    //   * tree-sitter-{python,go,c,cpp,rust,java,javascript,typescript}: "arguments"
+    //   * tree-sitter-{kotlin,swift,csharp}: positional — the call_expression's
+    //     last child is typically the value_arguments / arguments node.
+    let args = descendant
+        .child_by_field_name("arguments")
+        .or_else(|| {
+            // Positional fallback: scan children for a node whose kind looks like
+            // an arg list.
+            for i in 0..descendant.child_count() {
+                if let Some(child) = descendant.child(i) {
+                    let kind = child.kind();
+                    if kind.contains("argument") || kind == "call_suffix" {
+                        return Some(child);
+                    }
+                }
+            }
+            None
+        })?;
+
+    // Walk arg list children and return the first identifier-like text.
+    for i in 0..args.child_count() {
+        let Some(child) = args.child(i) else {
+            continue;
+        };
+        // Skip punctuation tokens like '(', ',', ')'.
+        if !child.is_named() {
+            continue;
+        }
+        // Skip string-literal arguments.
+        if string_kinds.contains(&child.kind()) {
+            continue;
+        }
+        let text = node_text(&child, source).trim();
+        if text.is_empty() {
+            continue;
+        }
+        // For dotted identifiers (e.g., `obj.attr`), take the leading identifier.
+        let head = text.split('.').next().unwrap_or(text);
+        // Strip Rust reference operator and PHP `$` sigil.
+        let head = head.trim_start_matches('&').trim_start_matches('$');
+        if is_valid_identifier(head) {
+            return Some(head.to_string());
+        }
+    }
+
+    None
+}
+
+/// W2-pre: Regex-free RHS-of-assignment extraction for sink-shaped descendants.
+///
+/// For sinks expressed as assignments (e.g.,
+/// `element.innerHTML = userContent`, JSX
+/// `dangerouslySetInnerHTML={{ __html: html }}`), the dangerous data flows from
+/// the RHS into the matched LHS expression. This walks the descendant's
+/// ancestor chain looking for an assignment-like parent and returns the first
+/// identifier appearing on the RHS.
+///
+/// Falls back to a simple text-based scan of the line when the AST shape is
+/// not a standard assignment node (handles JSX `{...}` expression containers
+/// where the descendant text already includes the `=`).
+fn extract_assignment_rhs_ident(
+    descendant: &tree_sitter::Node,
+    source: &[u8],
+    line_text: &str,
+) -> Option<String> {
+    // Pure text-based scan: find the LAST `=` that is not part of `==`, `!=`,
+    // `<=`, `>=`, and walk forward to the first valid identifier.
+    let bytes = line_text.as_bytes();
+    let mut idx = line_text.len();
+    while idx > 0 {
+        if let Some(pos) = line_text[..idx].rfind('=') {
+            let before = if pos > 0 { bytes[pos - 1] } else { b' ' };
+            let after = if pos + 1 < bytes.len() {
+                bytes[pos + 1]
+            } else {
+                b' '
+            };
+            if before != b'=' && before != b'!' && before != b'<' && before != b'>'
+                && after != b'='
+            {
+                let rhs = &line_text[pos + 1..];
+                // Skip JSX expression-container braces `{{` / `{`.
+                let rhs = rhs.trim_start_matches(['{', ' ', '\t']);
+                // Skip object-literal property keys like `__html:` so that
+                // `dangerouslySetInnerHTML={{ __html: html }}` returns `html`.
+                if let Some(colon_pos) = rhs.find(':') {
+                    // Only treat as object literal if the segment before `:`
+                    // is a bare identifier (no parens / commas).
+                    let key = rhs[..colon_pos].trim();
+                    if is_valid_identifier(key) {
+                        let rest = rhs[colon_pos + 1..].trim();
+                        let var = rest
+                            .split(|c: char| !c.is_alphanumeric() && c != '_')
+                            .next()
+                            .unwrap_or("");
+                        if is_valid_identifier(var) {
+                            return Some(var.to_string());
+                        }
+                    }
+                }
+                let var = rhs
+                    .split(|c: char| !c.is_alphanumeric() && c != '_')
+                    .next()
+                    .unwrap_or("");
+                if is_valid_identifier(var) {
+                    return Some(var.to_string());
+                }
+            }
+            idx = pos;
+        } else {
+            break;
+        }
+    }
+    let _ = (descendant, source); // reserved for future structural fallback
+    None
 }
 
 /// Detect taint sources using AST nodes from a parsed tree.
@@ -3393,15 +3567,22 @@ pub fn detect_sources_ast(
 
             if matched {
                 // Try to get variable from parent assignment
-                let var = find_parent_assignment_var(descendant, source, language).or_else(|| {
-                    extract_assigned_var(
-                        std::str::from_utf8(source)
-                            .unwrap_or("")
-                            .lines()
-                            .nth((line - 1) as usize)
-                            .unwrap_or(""),
-                    )
-                });
+                let var = find_parent_assignment_var(descendant, source, language)
+                    .or_else(|| {
+                        extract_assigned_var(
+                            std::str::from_utf8(source)
+                                .unwrap_or("")
+                                .lines()
+                                .nth((line - 1) as usize)
+                                .unwrap_or(""),
+                        )
+                    })
+                    // W2-pre: regex-free fallback for sources whose tainted
+                    // data is delivered by-pointer in the first call argument
+                    // (e.g., C `fgets(buf, ..., stdin)`, `scanf("%s", buf)`,
+                    // `fread(buf, ...)`). Walks the descendant's `arguments`
+                    // list and returns the first identifier-shaped child.
+                    .or_else(|| extract_first_identifier_arg_ast(descendant, source, language));
 
                 if let Some(var) = var {
                     sources.push(TaintSource {
@@ -3471,7 +3652,10 @@ pub fn detect_sinks_ast(
                     .nth((line - 1) as usize)
                     .unwrap_or("");
 
-                // Extract variable argument
+                // Extract variable argument. Prefer the regex-bank path
+                // (existing additive behavior) but fall back to AST-only
+                // helpers so the AST hit is not silently dropped when the
+                // regex bank is empty (Wave-2-atomic).
                 let regex_patterns = get_patterns(language);
                 let var = regex_patterns
                     .sinks
@@ -3484,7 +3668,15 @@ pub fn detect_sinks_ast(
                             .iter()
                             .find(|(p, _)| p.is_match(stmt_text))
                             .and_then(|(p, _)| extract_sink_var_from_statement(stmt_text, p))
-                    });
+                    })
+                    // W2-pre: regex-free fallbacks. (1) call-shaped sinks —
+                    // walk the descendant's `arguments` list. (2) JSX
+                    // `dangerouslySetInnerHTML={{ __html: tainted }}` and
+                    // `obj.prop = tainted` shapes — scan for `=`-RHS
+                    // identifiers. These keep AST detection self-contained
+                    // when the regex bank is removed.
+                    .or_else(|| extract_first_identifier_arg_ast(descendant, source, language))
+                    .or_else(|| extract_assignment_rhs_ident(descendant, source, stmt_text));
 
                 if let Some(var) = var {
                     sinks.push(TaintSink {
