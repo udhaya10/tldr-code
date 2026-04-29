@@ -323,15 +323,15 @@ pub(crate) fn find_js_ts_default_export_name(path: &Path) -> Option<String> {
 
     lazy_static! {
         static ref RE_EXPORT_DEFAULT_FN: Regex =
-            Regex::new(r"(?m)^\\s*export\\s+default\\s+function\\s+([A-Za-z_$][\\w$]*)").unwrap();
+            Regex::new(r"(?m)^\s*export\s+default\s+function\s+([A-Za-z_$][\w$]*)").unwrap();
         static ref RE_EXPORT_DEFAULT_CLASS: Regex =
-            Regex::new(r"(?m)^\\s*export\\s+default\\s+class\\s+([A-Za-z_$][\\w$]*)").unwrap();
+            Regex::new(r"(?m)^\s*export\s+default\s+class\s+([A-Za-z_$][\w$]*)").unwrap();
         static ref RE_EXPORT_DEFAULT_IDENT: Regex =
-            Regex::new(r"(?m)^\\s*export\\s+default\\s+([A-Za-z_$][\\w$]*)").unwrap();
+            Regex::new(r"(?m)^\s*export\s+default\s+([A-Za-z_$][\w$]*)").unwrap();
         static ref RE_EXPORTS_DEFAULT: Regex =
-            Regex::new(r"(?m)^\\s*exports\\.default\\s*=\\s*([A-Za-z_$][\\w$]*)").unwrap();
+            Regex::new(r"(?m)^\s*exports\.default\s*=\s*([A-Za-z_$][\w$]*)").unwrap();
         static ref RE_MODULE_EXPORTS: Regex =
-            Regex::new(r"(?m)^\\s*module\\.exports\\s*=\\s*([A-Za-z_$][\\w$]*)").unwrap();
+            Regex::new(r"(?m)^\s*module\.exports\s*=\s*([A-Za-z_$][\w$]*)").unwrap();
     }
 
     if let Some(caps) = RE_EXPORT_DEFAULT_FN.captures(&source) {
@@ -1132,5 +1132,81 @@ from ...core.base import Base
             Some(&"internal/models".to_string()),
             "Should prefer longest suffix match"
         );
+    }
+
+    // =========================================================================
+    // find_js_ts_default_export_name regex correctness tests (v031-dblesc)
+    //
+    // Guards against re-introduction of double-escaped \\s / \\w in raw-string
+    // regex literals — those produce literal `\s` / `\w` that match nothing in
+    // real JS/TS source.
+    // =========================================================================
+
+    fn write_js_fixture(contents: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("default_export.js");
+        std::fs::write(&path, contents).unwrap();
+        (dir, path)
+    }
+
+    /// Single-form regression: realistic JS source with a leading newline +
+    /// space-separated tokens. Pre-fix this returns None because `\\s` in the
+    /// raw literal compiles to a literal backslash-s, never matching a real
+    /// space character.
+    #[test]
+    fn test_js_export_default_function_recognized_with_whitespace() {
+        let source = "\nexport default function foo() {}\n";
+        let (_dir, path) = write_js_fixture(source);
+        let result = find_js_ts_default_export_name(&path);
+        assert_eq!(
+            result,
+            Some("foo".to_string()),
+            "find_js_ts_default_export_name must recognize a real `export default function` form. \
+             If this returns None the regex literal is double-escaped (`\\\\s` instead of `\\s`)."
+        );
+    }
+
+    /// Comprehensive regression covering every export-default form across a
+    /// variety of realistic whitespace shapes (tabs, multiple spaces, leading
+    /// spaces). Guards copy-paste reintroduction of `\\\\s` / `\\\\w`.
+    #[test]
+    fn test_all_js_export_default_forms_match_with_realistic_whitespace() {
+        // (fixture content, expected captured identifier)
+        let cases: &[(&str, &str)] = &[
+            // export default function — single space
+            ("export default function alpha() {}\n", "alpha"),
+            // export default function — multi-space and leading whitespace
+            ("    export   default   function   beta() {}\n", "beta"),
+            // export default function — tab-separated
+            ("export\tdefault\tfunction\tgamma() {}\n", "gamma"),
+            // export default class — single space
+            ("export default class Delta {}\n", "Delta"),
+            // export default class — leading-tab + multi-space
+            ("\texport  default  class  Epsilon {}\n", "Epsilon"),
+            // export default <ident> — bare identifier form
+            ("export default zeta;\n", "zeta"),
+            // export default <ident> — multi-space
+            ("export   default   eta;\n", "eta"),
+            // exports.default = ident
+            ("exports.default = theta;\n", "theta"),
+            // exports.default = ident — spaces around =
+            ("exports.default   =   iota;\n", "iota"),
+            // module.exports = ident
+            ("module.exports = kappa;\n", "kappa"),
+            // module.exports = ident — tabs
+            ("module.exports\t=\tlambda;\n", "lambda"),
+        ];
+
+        for (idx, (source, expected)) in cases.iter().enumerate() {
+            let (_dir, path) = write_js_fixture(source);
+            let result = find_js_ts_default_export_name(&path);
+            assert_eq!(
+                result.as_deref(),
+                Some(*expected),
+                "case #{idx} failed: source={source:?} expected Some({expected:?}) got {result:?}. \
+                 If this regresses, check for `\\\\s` / `\\\\w` (double-escape) in the lazy_static \
+                 regex block in imports.rs."
+            );
+        }
     }
 }

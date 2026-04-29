@@ -1736,7 +1736,7 @@ fn parse_java_like_package(path: &Path) -> Option<String> {
     let source = fs::read_to_string(path).ok()?;
     lazy_static! {
         static ref RE_PACKAGE: Regex =
-            Regex::new(r"(?m)^\\s*package\\s+([A-Za-z_][\\w\\.]*)\\s*;?").unwrap();
+            Regex::new(r"(?m)^\s*package\s+([A-Za-z_][\w\.]*)\s*;?").unwrap();
     }
     RE_PACKAGE.captures(&source).map(|caps| caps[1].to_string())
 }
@@ -1745,7 +1745,7 @@ fn parse_csharp_namespace(path: &Path) -> Option<String> {
     let source = fs::read_to_string(path).ok()?;
     lazy_static! {
         static ref RE_NAMESPACE: Regex =
-            Regex::new(r"(?m)^\\s*namespace\\s+([A-Za-z_][\\w\\.]*)").unwrap();
+            Regex::new(r"(?m)^\s*namespace\s+([A-Za-z_][\w\.]*)").unwrap();
     }
     RE_NAMESPACE
         .captures(&source)
