@@ -926,46 +926,85 @@ impl CallGraphLanguageSupport for RustLangHandler {
                         let line = node.start_position().row as u32 + 1;
                         let end_line = node.end_position().row as u32 + 1;
 
-                        // Check if inside an impl block
-                        let mut impl_type = None;
+                        // Check if inside an impl block OR a trait block.
+                        //
+                        // Issue #23 fix: Previously only `impl_item` was checked here,
+                        // which meant trait default methods were emitted as
+                        // `FuncDef::function(name)` and collided with free `fn name()`
+                        // under the bare-name key `(module, name)` in `FuncIndex`
+                        // (see builder_v2.rs:148-182). The fix is to ALSO recognize
+                        // `trait_item` parents and emit `FuncDef::method(name, trait_name, ...)`
+                        // so that builder_v2 inserts BOTH the bare-name key and the
+                        // qualified-name key, mirroring the existing impl_item path.
+                        //
+                        // Note: abstract trait method signatures (no body) parse as
+                        // `function_signature_item` in tree-sitter-rust, not as
+                        // `function_item`, so they are naturally excluded here and
+                        // do NOT need an explicit body-presence check.
+                        let mut method_owner: Option<String> = None;
                         let mut parent = node.parent();
                         while let Some(p) = parent {
                             if p.kind() == "declaration_list" {
                                 if let Some(gp) = p.parent() {
-                                    if gp.kind() == "impl_item" {
-                                        // Find the type name
-                                        for i in 0..gp.child_count() {
-                                            if let Some(child) = gp.child(i) {
-                                                match child.kind() {
-                                                    "type_identifier" => {
-                                                        impl_type = Some(
-                                                            get_node_text(&child, source_bytes)
+                                    match gp.kind() {
+                                        "impl_item" => {
+                                            // Find the type name (impl block).
+                                            for i in 0..gp.child_count() {
+                                                if let Some(child) = gp.child(i) {
+                                                    match child.kind() {
+                                                        "type_identifier" => {
+                                                            method_owner = Some(
+                                                                get_node_text(
+                                                                    &child,
+                                                                    source_bytes,
+                                                                )
                                                                 .to_string(),
-                                                        );
-                                                    }
-                                                    "generic_type" => {
-                                                        for j in 0..child.child_count() {
-                                                            if let Some(tc) = child.child(j) {
-                                                                if tc.kind() == "type_identifier" {
-                                                                    impl_type = Some(
-                                                                        get_node_text(
-                                                                            &tc,
-                                                                            source_bytes,
-                                                                        )
-                                                                        .to_string(),
-                                                                    );
-                                                                    break;
+                                                            );
+                                                        }
+                                                        "generic_type" => {
+                                                            for j in 0..child.child_count() {
+                                                                if let Some(tc) = child.child(j) {
+                                                                    if tc.kind()
+                                                                        == "type_identifier"
+                                                                    {
+                                                                        method_owner = Some(
+                                                                            get_node_text(
+                                                                                &tc,
+                                                                                source_bytes,
+                                                                            )
+                                                                            .to_string(),
+                                                                        );
+                                                                        break;
+                                                                    }
                                                                 }
                                                             }
                                                         }
+                                                        _ => {}
                                                     }
-                                                    _ => {}
-                                                }
-                                                if impl_type.is_some() {
-                                                    break;
+                                                    if method_owner.is_some() {
+                                                        break;
+                                                    }
                                                 }
                                             }
                                         }
+                                        "trait_item" => {
+                                            // Find the trait name. trait_item carries
+                                            // a single `type_identifier` child for the
+                                            // trait's own name (no generic_type wrapper
+                                            // at this position).
+                                            for i in 0..gp.child_count() {
+                                                if let Some(child) = gp.child(i) {
+                                                    if child.kind() == "type_identifier" {
+                                                        method_owner = Some(
+                                                            get_node_text(&child, source_bytes)
+                                                                .to_string(),
+                                                        );
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        _ => {}
                                     }
                                 }
                                 break;
@@ -973,8 +1012,8 @@ impl CallGraphLanguageSupport for RustLangHandler {
                             parent = p.parent();
                         }
 
-                        if let Some(type_name) = impl_type {
-                            funcs.push(FuncDef::method(name, type_name, line, end_line));
+                        if let Some(owner_name) = method_owner {
+                            funcs.push(FuncDef::method(name, owner_name, line, end_line));
                         } else {
                             funcs.push(FuncDef::function(name, line, end_line));
                         }
@@ -1780,6 +1819,165 @@ fn greet() {
             let handler = RustLangHandler::new();
             assert!(handler.supports_extension(".rs"));
             assert!(!handler.supports_extension(".py"));
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Trait Default Method Indexing Tests (issue #23)
+    //
+    // These tests cover the FuncDef shape emitted by `extract_definitions`
+    // for methods defined inside `trait_item` declaration blocks.
+    //
+    // Pre-fix bug: trait default methods were emitted as `FuncDef::function(name)`,
+    // colliding with free `fn name()` under the bare-name index key
+    // `(module, name)` in `FuncIndex` (see `builder_v2.rs:148-182`).
+    //
+    // Post-fix invariants:
+    // 1. Default methods (with body) emit `FuncDef::method(name, trait_name, ...)`
+    //    so `is_method == true` and `class_name == Some(trait_name)`.
+    // 2. Abstract trait method signatures (no body) are NOT emitted at all,
+    //    because they are not callable definitions.
+    // 3. The combination of FuncDef::method + builder_v2 indexing yields BOTH a
+    //    bare-name key `(module, "greet")` AND a qualified-name key
+    //    `(module, "Greeter.greet")` in the resulting FuncIndex (parity with
+    //    the existing `impl_item` path).
+    // -------------------------------------------------------------------------
+    mod trait_default_method_extraction_tests {
+        use super::*;
+
+        fn extract_defs(source: &str) -> (Vec<FuncDef>, Vec<ClassDef>) {
+            let handler = RustLangHandler::new();
+            let tree = handler.parse_source(source).unwrap();
+            handler
+                .extract_definitions(source, Path::new("test.rs"), &tree)
+                .unwrap()
+        }
+
+        #[test]
+        fn test_trait_default_methods_indexed_as_functions() {
+            // GIVEN: A trait with a default method body
+            let source = r#"
+trait Greeter {
+    fn greet(&self) -> &'static str {
+        "hi"
+    }
+}
+"#;
+
+            // WHEN: We extract definitions
+            let (funcs, _classes) = extract_defs(source);
+
+            // THEN: The default method must be present and emitted as a
+            // FuncDef::method (is_method=true, class_name=Some("Greeter")),
+            // NOT as a bare FuncDef::function.
+            let greet = funcs
+                .iter()
+                .find(|f| f.name == "greet")
+                .expect("Trait default method 'greet' should be in funcs");
+            assert!(
+                greet.is_method,
+                "Trait default method should have is_method=true, got: {:?}",
+                greet
+            );
+            assert_eq!(
+                greet.class_name.as_deref(),
+                Some("Greeter"),
+                "Trait default method should carry trait_name in class_name, got: {:?}",
+                greet.class_name
+            );
+        }
+
+        #[test]
+        fn test_trait_abstract_method_signatures_not_indexed_as_callables() {
+            // GIVEN: A trait with both an abstract signature (no body) and a
+            //        default method (with body)
+            let source = r#"
+trait Greeter {
+    fn greet(&self) -> &'static str;
+    fn shout(&self) -> &'static str {
+        "HI"
+    }
+}
+"#;
+
+            // WHEN: We extract definitions
+            let (funcs, _classes) = extract_defs(source);
+
+            // THEN: Only `shout` (default method with body) should be emitted.
+            //       `greet` (abstract signature) must NOT be emitted, because
+            //       it has no body and is not a callable definition.
+            assert!(
+                funcs.iter().any(|f| f.name == "shout"),
+                "Default method 'shout' should be emitted, got: {:?}",
+                funcs.iter().map(|f| &f.name).collect::<Vec<_>>()
+            );
+            assert!(
+                !funcs.iter().any(|f| f.name == "greet"),
+                "Abstract signature 'greet' must NOT be emitted as a callable, got: {:?}",
+                funcs.iter().map(|f| &f.name).collect::<Vec<_>>()
+            );
+        }
+
+        #[test]
+        fn test_func_index_no_overwrite_between_trait_method_and_free_fn() {
+            // GIVEN: A free function `greet` AND a trait `Greeter` with a default
+            //        method also called `greet`. Pre-fix, both would be inserted
+            //        into FuncIndex under the bare key (module, "greet") and the
+            //        last writer would clobber the first.
+            let source = r#"
+fn greet() -> &'static str {
+    "free"
+}
+
+trait Greeter {
+    fn greet(&self) -> &'static str {
+        "trait"
+    }
+}
+"#;
+
+            // WHEN: We extract definitions
+            let (funcs, _classes) = extract_defs(source);
+
+            // THEN: Two distinct FuncDef entries with the name "greet" must exist:
+            //   - one is_method=false (the free fn)
+            //   - one is_method=true with class_name=Some("Greeter")
+            //
+            // builder_v2.rs:158 inserts (module, "greet") and lines 169-181 insert
+            // (module, "Greeter.greet") -- so the qualified key disambiguates and
+            // the trait-default form is reachable via Greeter.greet even when the
+            // bare key resolves to whichever is inserted last.
+            //
+            // The patch shape mandate (V-bundle augmentation #1) is that the
+            // trait method MUST be emitted as FuncDef::method so the qualified
+            // key is generated; otherwise (FuncDef::function) the qualified key
+            // never exists and the collision is irrecoverable.
+            let greet_entries: Vec<&FuncDef> =
+                funcs.iter().filter(|f| f.name == "greet").collect();
+            assert_eq!(
+                greet_entries.len(),
+                2,
+                "Expected 2 FuncDefs named 'greet' (free fn + trait default), got {}: {:?}",
+                greet_entries.len(),
+                greet_entries
+            );
+
+            let free_fn_count = greet_entries.iter().filter(|f| !f.is_method).count();
+            let trait_method_count = greet_entries
+                .iter()
+                .filter(|f| f.is_method && f.class_name.as_deref() == Some("Greeter"))
+                .count();
+
+            assert_eq!(
+                free_fn_count, 1,
+                "Expected exactly 1 free fn 'greet' (is_method=false), got {}: {:?}",
+                free_fn_count, greet_entries
+            );
+            assert_eq!(
+                trait_method_count, 1,
+                "Expected exactly 1 trait default method 'greet' (is_method=true, class_name=Some(\"Greeter\")), got {}: {:?}",
+                trait_method_count, greet_entries
+            );
         }
     }
 }
