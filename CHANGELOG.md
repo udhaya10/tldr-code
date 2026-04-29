@@ -1,63 +1,66 @@
 # Changelog
 
-## v0.3.0 — 2026-04-29
+## engine-v1 (internal milestone) — 2026-04-29
 
-**MAJOR engine restructure release.**
+**INTERNAL milestone — NOT a published release.** Engine restructure work
+that will be bundled into the next external publish once the deferred
+regex-fallback work and `tldr vuln` migration also land. Tagged locally
+as `engine-v1`. No `cargo publish`, no `git push`.
 
-### Engine
+### Engine internals (unit-test verified)
 
 - **process_block taint propagation** rewired from substring matching to
   VarRef-based per-line use lookup (M1a). Eliminates the variable-shadowing
-  false-positive class — short variable names like `x`, `i`, `db` no
-  longer match unrelated tokens. Substring predicate at taint.rs:3761 (Definition
-  arm) and :3780 (Update arm) replaced with `rhs_uses_tainted` helper.
+  false-positive class for the `tldr taint` code path — short variable
+  names like `x`, `i`, `db` no longer match unrelated tokens via substring.
+  Substring predicate at taint.rs:3761 (Definition arm) and :3780 (Update arm)
+  replaced with `rhs_uses_tainted` helper. **Binary-verified:** the prior
+  FP on `bar.x()` shadowing `x = input()` no longer fires via `tldr taint`.
 - **SSA-versioned taint key** layered on top (M1b). `compute_taint_with_tree`
   accepts an optional `&SsaFunction`; reassignment-through-sanitizer correctly
   clears taint on the post-sanitizer SSA version. Falls back to VarRef-keyed
   mode for languages where SSA construction is partial — never panics.
 - **AST member-access matching** is now structural across all 16 language
-  families (M2 — closes #24). Replaces `text.contains(member_pattern)`
-  with `extract_member_access_receiver_and_field` via the existing
-  `field_access_info(language)` schema (covers all 18 Language variants).
-  String literals containing pattern fragments (e.g., `"see req.body for details"`)
-  no longer trigger sources. 217 member_patterns strings migrated from
-  `&[&str]` to `&[(&str, &str)]` across 43 of 48 AST pattern banks.
-  **Note:** Ruby, Elixir, and OCaml have partial `field_access_info` coverage
-  (instance_variable / `@attr` / `field_get_expression` respectively);
-  `Module.function` call patterns in those 3 languages retain
-  `call_names` / substring fallback for v0.3.0. Structural hardening
-  queued for v0.4.0.
+  families (M2). Replaces `text.contains(member_pattern)` with
+  `extract_member_access_receiver_and_field` via the existing
+  `field_access_info(language)` schema. 217 member_patterns strings migrated
+  from `&[&str]` to `&[(&str, &str)]` across 43 of 48 AST pattern banks.
+  **Caveat:** Ruby, Elixir, and OCaml have partial `field_access_info`
+  coverage; `Module.function` call patterns retain `call_names` / substring
+  fallback.
 
-### Deferred to v0.4.0
+### Known gaps NOT closed by this milestone (binary-verified open)
 
-- **Sink dispatch flip** to AST-preferring + AST sink-parity bank work
-  (TypeScript NextJS/Fastify/NestJS = 9 sinks; Python `os.spawn*` = 6
-  variants — currently in regex banks only). v0.3.0 keeps additive
-  dispatch (regex+AST merged) to avoid silent regression of v0.2.3 M3's
-  framework patterns. v0.4.0 closes the parity as part of cross-procedural
-  work — see `thoughts/shared/plans/v0.4.0-cross-procedural-design.md` §7.
-- **DtoTypeIndex** (class-validator awareness for NestJS DTOs) and
-  **cross-procedural taint summaries** — see v0.4.0 design doc Sections 1–2.
-- **detect_sanitizer_ast** wired only via regex detect_sanitizer; AST-based
-  sanitizer detection deferred to v0.4.0.
+These are the reasons engine-v1 is internal-only — the next external
+publish ships when all four code paths produce honest results end-to-end:
 
-### Infrastructure
+- **Issue #24 (string-literal substring FP) PERSISTS end-to-end** despite
+  M2's unit-test PASS. Source dispatch is AST-preferring with regex
+  fallback; when the AST returns empty for a line, the regex bank still
+  substring-matches `req.body` against raw line text. Closure requires
+  the deferred sink-dispatch flip + parity work (next internal milestone,
+  was v0.4.0 §7).
+- **`tldr vuln` retains all v0.2.x FPs** including the M1a substring
+  shadow. `vuln.rs` has duplicate `TaintSource`/`TaintSink` types and
+  inline taint propagation independent of `compute_taint_with_tree`.
+  M1a/M1b/M2 do not reach this code path. Closure requires the
+  vuln-migration milestone (was v0.5.0).
+- **AST sanitizer detection** wired only via regex `detect_sanitizer`;
+  AST-based sanitizer dispatch deferred.
+
+### Infrastructure (also internal)
 
 - **Multi-daemon registry** (M3) replaces v0.2.2 single-slot
   `daemon-active.json`. New commands: `tldr daemon list`,
   `tldr daemon stop --all`, `tldr daemon stop --project <abs-path>`.
-  `tldr daemon status` (no flag) now errors when multiple daemons are
-  running (`multiple daemons running; use --project <path> or run 'tldr daemon list'`).
   Concurrency: bounded compare-and-swap retry (3 attempts, no new
   dependency). One-shot migration shim auto-converts v0.2.x
-  `daemon-active.json` on first registry access; `daemon_active` module
-  marked `#[deprecated(since = "0.3.0")]`.
+  `daemon-active.json` on first registry access.
 - **Fastembed cache fix** (M4 — closes v0.2.2 M9 deferred finding).
-  `embedder.rs` honors `TLDR_FASTEMBED_CACHE` env override and defaults to
-  `dirs::cache_dir().join("tldr/fastembed")`. **Default parallelism now
-  works** for the test matrix; the `--test-threads=1` workaround documented
-  in v0.2.2 is retired. 54 race-prone test cells annotated with
-  `#[serial(embedding_cache)]` via new `serial_test = "3"` dev-dep.
+  `embedder.rs` honors `TLDR_FASTEMBED_CACHE` env override and defaults
+  to `dirs::cache_dir().join("tldr/fastembed")`. Default parallelism now
+  works for the test matrix; `--test-threads=1` workaround retired.
+  54 race-prone test cells annotated with `#[serial(embedding_cache)]`.
   Two leaked `.fastembed_cache/` directories (~832 MB total) at workspace
   root and `crates/tldr-cli/` may be deleted:
   `rm -rf .fastembed_cache crates/tldr-cli/.fastembed_cache`
@@ -67,18 +70,19 @@
 - v0.4.0 cross-procedural design queued at
   `thoughts/shared/plans/v0.4.0-cross-procedural-design.md` (M5).
   7 sections covering DtoTypeIndex, TaintSummary, sink dispatch flip
-  + parity work, dependency graph, testing strategy, v0.4.0 milestone
-  proposal M1–M7.
+  + parity work, dependency graph, testing strategy, milestone proposal.
 
 ### Test Matrix
 
 730/730 (`exhaustive_matrix`) + 234/234 (`language_command_matrix`) =
 **964/964 at DEFAULT parallelism.** `--test-threads=1` no longer required.
 
-### Issue close-outs
+### Issues touched (NONE closed by engine-v1)
 
-- **#24** (substring false positives in AST member-access) — closed by M2
-  structural matching.
+- **#24** AST path fixed structurally; regex fallback FP persists
+  end-to-end. **Issue stays OPEN** until the regex-fallback flip lands.
+- **#7, #23, #27, #28** untouched — queued for the next internal
+  milestone (quality bundle).
 
 ## v0.2.4 — 2026-04-28
 
