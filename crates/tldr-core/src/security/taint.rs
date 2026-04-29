@@ -1874,32 +1874,42 @@ pub use detect_sources as find_sources_in_statement;
 // to regex-based detection when the AST yields no results.
 
 use super::ast_utils::{
-    call_node_kinds, extract_call_name, find_parent_assignment_var, is_in_comment, is_in_string,
-    node_text, walk_descendants,
+    call_node_kinds, extract_call_name, extract_member_access_receiver_and_field,
+    find_parent_assignment_var, is_in_comment, is_in_string, node_text, walk_descendants,
 };
 
 /// AST-based source pattern: matches call names and member access patterns.
+///
+/// **FORMAT NOTE (v0.3.0 M2):** `member_patterns` is now `(receiver, field)`
+/// tuples, matched structurally via
+/// [`extract_member_access_receiver_and_field`]. The v0.2.x
+/// `text.contains(member_pattern)` substring path was removed at the 3
+/// `detect_*_ast` predicates because it produced false positives whenever an
+/// arbitrary AST node's text happened to include the pattern as a substring
+/// (e.g., a string literal containing `"req.body"`). Ruby/Elixir/OCaml module
+/// calls stay as `call_names` or substring fallback — see
+/// `m2-ground-truth.md` §field_access_info.
 struct AstSourcePattern {
     /// Simple function names that indicate a source (e.g., "input", "readLine")
     call_names: &'static [&'static str],
-    /// Dotted member access patterns (e.g., "request.args", "os.environ")
-    /// Matched as substrings of the full call name text.
-    member_patterns: &'static [&'static str],
+    /// Member-access patterns as `(receiver, field)` tuples
+    /// (e.g., `("request", "args")` matches `request.args`).
+    member_patterns: &'static [(&'static str, &'static str)],
     /// The source type to assign when matched
     source_type: TaintSourceType,
 }
 
-/// AST-based sink pattern.
+/// AST-based sink pattern. See [`AstSourcePattern`] for the v0.3.0 format note.
 struct AstSinkPattern {
     call_names: &'static [&'static str],
-    member_patterns: &'static [&'static str],
+    member_patterns: &'static [(&'static str, &'static str)],
     sink_type: TaintSinkType,
 }
 
-/// AST-based sanitizer pattern.
+/// AST-based sanitizer pattern. See [`AstSourcePattern`] for the v0.3.0 format note.
 struct AstSanitizerPattern {
     call_names: &'static [&'static str],
-    member_patterns: &'static [&'static str],
+    member_patterns: &'static [(&'static str, &'static str)],
     sanitizer_type: SanitizerType,
 }
 
@@ -1923,37 +1933,38 @@ static PYTHON_AST_SOURCES: &[AstSourcePattern] = &[
     AstSourcePattern {
         call_names: &[],
         member_patterns: &[
-            "request.args",
-            "request.form",
-            "request.values",
-            "request.cookies",
-            "request.headers",
+            ("request", "args"),
+            ("request", "form"),
+            ("request", "values"),
+            ("request", "cookies"),
+            ("request", "headers"),
         ],
         source_type: TaintSourceType::HttpParam,
     },
     AstSourcePattern {
         call_names: &[],
-        member_patterns: &["request.json", "request.data"],
+        member_patterns: &[("request", "json"), ("request", "data")],
         source_type: TaintSourceType::HttpParam,
     },
     AstSourcePattern {
         call_names: &[],
-        member_patterns: &["request.get_json"],
+        member_patterns: &[("request", "get_json")],
         source_type: TaintSourceType::HttpBody,
     },
     AstSourcePattern {
         call_names: &[],
-        member_patterns: &["sys.stdin"],
+        member_patterns: &[("sys", "stdin")],
         source_type: TaintSourceType::Stdin,
     },
     AstSourcePattern {
         call_names: &[],
-        member_patterns: &["os.environ", "os.getenv"],
+        member_patterns: &[("os", "environ"), ("os", "getenv")],
         source_type: TaintSourceType::EnvVar,
     },
     AstSourcePattern {
         call_names: &[],
-        member_patterns: &[".read(", ".readlines(", ".readline("],
+        // Wildcard receiver: any `obj.read()` / `.readlines()` / `.readline()`.
+        member_patterns: &[("*", "read"), ("*", "readlines"), ("*", "readline")],
         source_type: TaintSourceType::FileRead,
     },
 ];
@@ -1961,7 +1972,8 @@ static PYTHON_AST_SOURCES: &[AstSourcePattern] = &[
 static PYTHON_AST_SINKS: &[AstSinkPattern] = &[
     AstSinkPattern {
         call_names: &[],
-        member_patterns: &[".execute(", ".executemany("],
+        // Wildcard receiver: matches `cursor.execute(...)`, `db.executemany(...)`.
+        member_patterns: &[("*", "execute"), ("*", "executemany")],
         sink_type: TaintSinkType::SqlQuery,
     },
     AstSinkPattern {
@@ -1982,21 +1994,21 @@ static PYTHON_AST_SINKS: &[AstSinkPattern] = &[
     AstSinkPattern {
         call_names: &[],
         member_patterns: &[
-            "subprocess.run",
-            "subprocess.call",
-            "subprocess.Popen",
-            "subprocess.check_output",
+            ("subprocess", "run"),
+            ("subprocess", "call"),
+            ("subprocess", "Popen"),
+            ("subprocess", "check_output"),
         ],
         sink_type: TaintSinkType::ShellExec,
     },
     AstSinkPattern {
         call_names: &[],
-        member_patterns: &["os.system", "os.popen"],
+        member_patterns: &[("os", "system"), ("os", "popen")],
         sink_type: TaintSinkType::ShellExec,
     },
     AstSinkPattern {
         call_names: &[],
-        member_patterns: &[".write("],
+        member_patterns: &[("*", "write")],
         sink_type: TaintSinkType::FileWrite,
     },
 ];
@@ -2009,12 +2021,16 @@ static PYTHON_AST_SANITIZERS: &[AstSanitizerPattern] = &[
     },
     AstSanitizerPattern {
         call_names: &[],
-        member_patterns: &["shlex.quote", "pipes.quote"],
+        member_patterns: &[("shlex", "quote"), ("pipes", "quote")],
         sanitizer_type: SanitizerType::Shell,
     },
     AstSanitizerPattern {
         call_names: &[],
-        member_patterns: &["html.escape", "markupsafe.escape", "cgi.escape"],
+        member_patterns: &[
+            ("html", "escape"),
+            ("markupsafe", "escape"),
+            ("cgi", "escape"),
+        ],
         sanitizer_type: SanitizerType::Html,
     },
 ];
@@ -2022,22 +2038,27 @@ static PYTHON_AST_SANITIZERS: &[AstSanitizerPattern] = &[
 static TYPESCRIPT_AST_SOURCES: &[AstSourcePattern] = &[
     AstSourcePattern {
         call_names: &[],
-        member_patterns: &["req.body"],
+        member_patterns: &[("req", "body")],
         source_type: TaintSourceType::HttpBody,
     },
     AstSourcePattern {
         call_names: &[],
-        member_patterns: &["req.params", "req.query", "req.cookies", "req.headers"],
+        member_patterns: &[
+            ("req", "params"),
+            ("req", "query"),
+            ("req", "cookies"),
+            ("req", "headers"),
+        ],
         source_type: TaintSourceType::HttpParam,
     },
     AstSourcePattern {
         call_names: &[],
-        member_patterns: &["process.env"],
+        member_patterns: &[("process", "env")],
         source_type: TaintSourceType::EnvVar,
     },
     AstSourcePattern {
         call_names: &[],
-        member_patterns: &["process.stdin"],
+        member_patterns: &[("process", "stdin")],
         source_type: TaintSourceType::Stdin,
     },
     AstSourcePattern {
@@ -2047,7 +2068,8 @@ static TYPESCRIPT_AST_SOURCES: &[AstSourcePattern] = &[
     },
     AstSourcePattern {
         call_names: &[],
-        member_patterns: &[".read(", ".readFile("],
+        // Wildcard: `fs.read()`, `obj.readFile()` etc.
+        member_patterns: &[("*", "read"), ("*", "readFile")],
         source_type: TaintSourceType::FileRead,
     },
 ];
@@ -2060,16 +2082,17 @@ static TYPESCRIPT_AST_SINKS: &[AstSinkPattern] = &[
     },
     AstSinkPattern {
         call_names: &[],
-        member_patterns: &["new Function"],
+        // `new Function(...)` is a `new_expression`, not member-access — raw fallback.
+        member_patterns: &[("", "new Function")],
         sink_type: TaintSinkType::CodeEval,
     },
     AstSinkPattern {
         call_names: &[],
         member_patterns: &[
-            "child_process.exec",
-            "child_process.spawn",
-            "child_process.execSync",
-            "child_process.execFile",
+            ("child_process", "exec"),
+            ("child_process", "spawn"),
+            ("child_process", "execSync"),
+            ("child_process", "execFile"),
         ],
         sink_type: TaintSinkType::ShellExec,
     },
@@ -2080,17 +2103,17 @@ static TYPESCRIPT_AST_SINKS: &[AstSinkPattern] = &[
     },
     AstSinkPattern {
         call_names: &[],
-        member_patterns: &[".innerHTML"],
+        member_patterns: &[("*", "innerHTML")],
         sink_type: TaintSinkType::FileWrite,
     },
     AstSinkPattern {
         call_names: &[],
-        member_patterns: &["document.write"],
+        member_patterns: &[("document", "write")],
         sink_type: TaintSinkType::FileWrite,
     },
     AstSinkPattern {
         call_names: &[],
-        member_patterns: &[".query(", ".execute("],
+        member_patterns: &[("*", "query"), ("*", "execute")],
         sink_type: TaintSinkType::SqlQuery,
     },
 ];
@@ -2103,7 +2126,7 @@ static TYPESCRIPT_AST_SANITIZERS: &[AstSanitizerPattern] = &[
     },
     AstSanitizerPattern {
         call_names: &["encodeURIComponent"],
-        member_patterns: &["DOMPurify.sanitize"],
+        member_patterns: &[("DOMPurify", "sanitize")],
         sanitizer_type: SanitizerType::Html,
     },
 ];
@@ -2111,32 +2134,45 @@ static TYPESCRIPT_AST_SANITIZERS: &[AstSanitizerPattern] = &[
 static GO_AST_SOURCES: &[AstSourcePattern] = &[
     AstSourcePattern {
         call_names: &[],
-        member_patterns: &["fmt.Scan", "bufio.NewReader", "bufio.NewScanner"],
+        member_patterns: &[
+            ("fmt", "Scan"),
+            ("bufio", "NewReader"),
+            ("bufio", "NewScanner"),
+        ],
         source_type: TaintSourceType::UserInput,
     },
     AstSourcePattern {
         call_names: &[],
-        member_patterns: &["r.FormValue", "r.PostFormValue", "r.URL.Query", ".Query()"],
+        member_patterns: &[
+            ("r", "FormValue"),
+            ("r", "PostFormValue"),
+            // r.URL.Query is a nested selector_expression; outer object_text is "r.URL".
+            ("r.URL", "Query"),
+            // Wildcard `.Query()` for non-`r` receivers (e.g., `req.Query()`).
+            ("*", "Query"),
+        ],
         source_type: TaintSourceType::HttpParam,
     },
     AstSourcePattern {
         call_names: &[],
-        member_patterns: &["r.Body", ".ReadAll(r.Body)"],
+        // r.Body is a member-access; ".ReadAll(r.Body)" is a substring fallback
+        // for the call form (call_expression containing the whole text).
+        member_patterns: &[("r", "Body"), ("", ".ReadAll(r.Body)")],
         source_type: TaintSourceType::HttpBody,
     },
     AstSourcePattern {
         call_names: &[],
-        member_patterns: &["os.Getenv"],
+        member_patterns: &[("os", "Getenv")],
         source_type: TaintSourceType::EnvVar,
     },
     AstSourcePattern {
         call_names: &[],
-        member_patterns: &["os.Stdin"],
+        member_patterns: &[("os", "Stdin")],
         source_type: TaintSourceType::Stdin,
     },
     AstSourcePattern {
         call_names: &[],
-        member_patterns: &["os.Open", "ioutil.ReadFile"],
+        member_patterns: &[("os", "Open"), ("ioutil", "ReadFile")],
         source_type: TaintSourceType::FileRead,
     },
 ];
@@ -2144,17 +2180,17 @@ static GO_AST_SOURCES: &[AstSourcePattern] = &[
 static GO_AST_SINKS: &[AstSinkPattern] = &[
     AstSinkPattern {
         call_names: &[],
-        member_patterns: &["exec.Command"],
+        member_patterns: &[("exec", "Command")],
         sink_type: TaintSinkType::ShellExec,
     },
     AstSinkPattern {
         call_names: &[],
-        member_patterns: &["db.Exec", "db.Query", "db.QueryRow"],
+        member_patterns: &[("db", "Exec"), ("db", "Query"), ("db", "QueryRow")],
         sink_type: TaintSinkType::SqlQuery,
     },
     AstSinkPattern {
         call_names: &[],
-        member_patterns: &["template.HTML", "fmt.Fprintf"],
+        member_patterns: &[("template", "HTML"), ("fmt", "Fprintf")],
         sink_type: TaintSinkType::FileWrite,
     },
 ];
@@ -2162,12 +2198,16 @@ static GO_AST_SINKS: &[AstSinkPattern] = &[
 static GO_AST_SANITIZERS: &[AstSanitizerPattern] = &[
     AstSanitizerPattern {
         call_names: &[],
-        member_patterns: &["strconv.Atoi", "strconv.ParseInt", "strconv.ParseFloat"],
+        member_patterns: &[
+            ("strconv", "Atoi"),
+            ("strconv", "ParseInt"),
+            ("strconv", "ParseFloat"),
+        ],
         sanitizer_type: SanitizerType::Numeric,
     },
     AstSanitizerPattern {
         call_names: &[],
-        member_patterns: &["html.EscapeString", "url.QueryEscape"],
+        member_patterns: &[("html", "EscapeString"), ("url", "QueryEscape")],
         sanitizer_type: SanitizerType::Html,
     },
 ];
@@ -2175,27 +2215,28 @@ static GO_AST_SANITIZERS: &[AstSanitizerPattern] = &[
 static JAVA_AST_SOURCES: &[AstSourcePattern] = &[
     AstSourcePattern {
         call_names: &[],
-        member_patterns: &["new Scanner(System.in)"],
+        // `new Scanner(System.in)` is an object_creation_expression; raw fallback.
+        member_patterns: &[("", "new Scanner(System.in)")],
         source_type: TaintSourceType::Stdin,
     },
     AstSourcePattern {
         call_names: &["readLine"],
-        member_patterns: &["new BufferedReader"],
+        member_patterns: &[("", "new BufferedReader")],
         source_type: TaintSourceType::UserInput,
     },
     AstSourcePattern {
         call_names: &[],
-        member_patterns: &["request.getParameter", "getQueryString"],
+        member_patterns: &[("request", "getParameter"), ("*", "getQueryString")],
         source_type: TaintSourceType::HttpParam,
     },
     AstSourcePattern {
         call_names: &[],
-        member_patterns: &["System.getenv"],
+        member_patterns: &[("System", "getenv")],
         source_type: TaintSourceType::EnvVar,
     },
     AstSourcePattern {
         call_names: &[],
-        member_patterns: &["new FileReader", "Files.readAllLines"],
+        member_patterns: &[("", "new FileReader"), ("Files", "readAllLines")],
         source_type: TaintSourceType::FileRead,
     },
 ];
@@ -2203,17 +2244,26 @@ static JAVA_AST_SOURCES: &[AstSourcePattern] = &[
 static JAVA_AST_SINKS: &[AstSinkPattern] = &[
     AstSinkPattern {
         call_names: &[],
-        member_patterns: &["Runtime.getRuntime().exec", "ProcessBuilder"],
+        // Runtime.getRuntime().exec is a chained call; raw fallback. ProcessBuilder
+        // is an object_creation; raw fallback.
+        member_patterns: &[
+            ("", "Runtime.getRuntime().exec"),
+            ("", "ProcessBuilder"),
+        ],
         sink_type: TaintSinkType::ShellExec,
     },
     AstSinkPattern {
         call_names: &[],
-        member_patterns: &[".execute(", ".executeQuery(", ".executeUpdate("],
+        member_patterns: &[
+            ("*", "execute"),
+            ("*", "executeQuery"),
+            ("*", "executeUpdate"),
+        ],
         sink_type: TaintSinkType::SqlQuery,
     },
     AstSinkPattern {
         call_names: &[],
-        member_patterns: &["Class.forName"],
+        member_patterns: &[("Class", "forName")],
         sink_type: TaintSinkType::CodeEval,
     },
 ];
@@ -2221,12 +2271,19 @@ static JAVA_AST_SINKS: &[AstSinkPattern] = &[
 static JAVA_AST_SANITIZERS: &[AstSanitizerPattern] = &[
     AstSanitizerPattern {
         call_names: &[],
-        member_patterns: &["Integer.parseInt", "Long.parseLong", "Double.parseDouble"],
+        member_patterns: &[
+            ("Integer", "parseInt"),
+            ("Long", "parseLong"),
+            ("Double", "parseDouble"),
+        ],
         sanitizer_type: SanitizerType::Numeric,
     },
     AstSanitizerPattern {
         call_names: &[],
-        member_patterns: &["ESAPI.encoder", "StringEscapeUtils.escapeHtml"],
+        member_patterns: &[
+            ("ESAPI", "encoder"),
+            ("StringEscapeUtils", "escapeHtml"),
+        ],
         sanitizer_type: SanitizerType::Html,
     },
 ];
@@ -2234,25 +2291,27 @@ static JAVA_AST_SANITIZERS: &[AstSanitizerPattern] = &[
 static RUST_AST_SOURCES: &[AstSourcePattern] = &[
     AstSourcePattern {
         call_names: &[],
-        member_patterns: &["io::stdin", "std::io::stdin"],
+        // `io::stdin`, `std::io::stdin` are scoped_identifier nodes (`::`),
+        // not field_expression — raw substring fallback.
+        member_patterns: &[("", "io::stdin"), ("", "std::io::stdin")],
         source_type: TaintSourceType::Stdin,
     },
     AstSourcePattern {
         call_names: &[],
-        member_patterns: &["env::var", "std::env::var"],
+        member_patterns: &[("", "env::var"), ("", "std::env::var")],
         source_type: TaintSourceType::EnvVar,
     },
     AstSourcePattern {
         call_names: &[],
-        member_patterns: &["env::args", "std::env::args"],
+        member_patterns: &[("", "env::args"), ("", "std::env::args")],
         source_type: TaintSourceType::UserInput,
     },
     AstSourcePattern {
         call_names: &[],
         member_patterns: &[
-            "fs::read_to_string",
-            "std::fs::read_to_string",
-            "File::open",
+            ("", "fs::read_to_string"),
+            ("", "std::fs::read_to_string"),
+            ("", "File::open"),
         ],
         source_type: TaintSourceType::FileRead,
     },
@@ -2261,36 +2320,40 @@ static RUST_AST_SOURCES: &[AstSourcePattern] = &[
 static RUST_AST_SINKS: &[AstSinkPattern] = &[
     AstSinkPattern {
         call_names: &[],
-        member_patterns: &["Command::new", "std::process::Command"],
+        member_patterns: &[("", "Command::new"), ("", "std::process::Command")],
         sink_type: TaintSinkType::ShellExec,
     },
     AstSinkPattern {
         call_names: &[],
-        member_patterns: &["unsafe"],
+        // `unsafe` is a keyword inside an unsafe_block; raw fallback.
+        member_patterns: &[("", "unsafe")],
         sink_type: TaintSinkType::CodeEval,
     },
     AstSinkPattern {
         call_names: &[],
-        member_patterns: &["std::ptr::write", "std::ptr::read"],
+        member_patterns: &[("", "std::ptr::write"), ("", "std::ptr::read")],
         sink_type: TaintSinkType::FileWrite,
     },
 ];
 
 static RUST_AST_SANITIZERS: &[AstSanitizerPattern] = &[AstSanitizerPattern {
     call_names: &[],
+    // Turbofish `.parse::<i32>` — generic_function call, not field_expression
+    // in the simple sense. Keep as raw substring fallback.
     member_patterns: &[
-        ".parse::<i32>",
-        ".parse::<i64>",
-        ".parse::<u32>",
-        ".parse::<u64>",
-        ".parse::<f32>",
-        ".parse::<f64>",
-        ".parse::<usize>",
-        ".parse::<isize>",
+        ("", ".parse::<i32>"),
+        ("", ".parse::<i64>"),
+        ("", ".parse::<u32>"),
+        ("", ".parse::<u64>"),
+        ("", ".parse::<f32>"),
+        ("", ".parse::<f64>"),
+        ("", ".parse::<usize>"),
+        ("", ".parse::<isize>"),
     ],
     sanitizer_type: SanitizerType::Numeric,
 }];
 
+// C banks: zero member_patterns (pure call_names) — type-annotation flip only.
 static C_AST_SOURCES: &[AstSourcePattern] = &[
     AstSourcePattern {
         call_names: &["scanf", "fscanf", "sscanf", "fgets", "gets", "getchar"],
@@ -2348,7 +2411,9 @@ static C_AST_SANITIZERS: &[AstSanitizerPattern] = &[
 static CPP_AST_SOURCES: &[AstSourcePattern] = &[
     AstSourcePattern {
         call_names: &["getline"],
-        member_patterns: &["std::cin", "std::getline"],
+        // `std::cin`, `std::getline` are qualified_identifier nodes (`::`),
+        // not field_expression — raw fallback.
+        member_patterns: &[("", "std::cin"), ("", "std::getline")],
         source_type: TaintSourceType::UserInput,
     },
     AstSourcePattern {
@@ -2358,7 +2423,7 @@ static CPP_AST_SOURCES: &[AstSourcePattern] = &[
     },
     AstSourcePattern {
         call_names: &[],
-        member_patterns: &["std::ifstream", "std::fstream"],
+        member_patterns: &[("", "std::ifstream"), ("", "std::fstream")],
         source_type: TaintSourceType::FileRead,
     },
 ];
@@ -2366,7 +2431,7 @@ static CPP_AST_SOURCES: &[AstSourcePattern] = &[
 static CPP_AST_SINKS: &[AstSinkPattern] = &[
     AstSinkPattern {
         call_names: &["system", "popen"],
-        member_patterns: &["std::system"],
+        member_patterns: &[("", "std::system")],
         sink_type: TaintSinkType::ShellExec,
     },
     AstSinkPattern {
@@ -2380,27 +2445,33 @@ static CPP_AST_SANITIZERS: &[AstSanitizerPattern] = &[
     AstSanitizerPattern {
         call_names: &[],
         member_patterns: &[
-            "std::stoi",
-            "std::stol",
-            "std::stoul",
-            "std::stoll",
-            "std::stof",
-            "std::stod",
+            ("", "std::stoi"),
+            ("", "std::stol"),
+            ("", "std::stoul"),
+            ("", "std::stoll"),
+            ("", "std::stof"),
+            ("", "std::stod"),
         ],
         sanitizer_type: SanitizerType::Numeric,
     },
     AstSanitizerPattern {
         call_names: &[],
+        // `static_cast<T>(...)` is template-call shape, not field_expression — raw.
         member_patterns: &[
-            "static_cast<int>",
-            "static_cast<long>",
-            "static_cast<float>",
-            "static_cast<double>",
+            ("", "static_cast<int>"),
+            ("", "static_cast<long>"),
+            ("", "static_cast<float>"),
+            ("", "static_cast<double>"),
         ],
         sanitizer_type: SanitizerType::Numeric,
     },
 ];
 
+// Ruby PARTIAL coverage (per m2-ground-truth): field_access_info covers ONLY
+// `instance_variable` (the `@name` pattern). Module method calls like
+// `STDIN.read`, `IO.popen`, `File.read` are call_expression nodes, not
+// member-access — they use raw substring fallback. Subscripts (`params[`,
+// `ENV[`) are also non-member-access. Documented as a v0.4.0 hardening item.
 static RUBY_AST_SOURCES: &[AstSourcePattern] = &[
     AstSourcePattern {
         call_names: &["gets"],
@@ -2409,22 +2480,26 @@ static RUBY_AST_SOURCES: &[AstSourcePattern] = &[
     },
     AstSourcePattern {
         call_names: &[],
-        member_patterns: &["STDIN.read", "STDIN.gets", "STDIN.readline"],
+        member_patterns: &[
+            ("", "STDIN.read"),
+            ("", "STDIN.gets"),
+            ("", "STDIN.readline"),
+        ],
         source_type: TaintSourceType::Stdin,
     },
     AstSourcePattern {
         call_names: &[],
-        member_patterns: &["params["],
+        member_patterns: &[("", "params[")],
         source_type: TaintSourceType::HttpParam,
     },
     AstSourcePattern {
         call_names: &[],
-        member_patterns: &["ENV["],
+        member_patterns: &[("", "ENV[")],
         source_type: TaintSourceType::EnvVar,
     },
     AstSourcePattern {
         call_names: &[],
-        member_patterns: &["File.read", "File.open"],
+        member_patterns: &[("", "File.read"), ("", "File.open")],
         source_type: TaintSourceType::FileRead,
     },
 ];
@@ -2442,12 +2517,12 @@ static RUBY_AST_SINKS: &[AstSinkPattern] = &[
     },
     AstSinkPattern {
         call_names: &[],
-        member_patterns: &["IO.popen"],
+        member_patterns: &[("", "IO.popen")],
         sink_type: TaintSinkType::ShellExec,
     },
     AstSinkPattern {
         call_names: &[],
-        member_patterns: &[".send("],
+        member_patterns: &[("*", "send")],
         sink_type: TaintSinkType::CodeEval,
     },
 ];
@@ -2455,12 +2530,15 @@ static RUBY_AST_SINKS: &[AstSinkPattern] = &[
 static RUBY_AST_SANITIZERS: &[AstSanitizerPattern] = &[
     AstSanitizerPattern {
         call_names: &[],
-        member_patterns: &[".to_i", ".to_f"],
+        member_patterns: &[("*", "to_i"), ("*", "to_f")],
         sanitizer_type: SanitizerType::Numeric,
     },
     AstSanitizerPattern {
         call_names: &[],
-        member_patterns: &["CGI.escapeHTML", "Rack::Utils.escape_html"],
+        member_patterns: &[
+            ("", "CGI.escapeHTML"),
+            ("", "Rack::Utils.escape_html"),
+        ],
         sanitizer_type: SanitizerType::Html,
     },
 ];
@@ -2473,17 +2551,18 @@ static KOTLIN_AST_SOURCES: &[AstSourcePattern] = &[
     },
     AstSourcePattern {
         call_names: &[],
-        member_patterns: &["System.getenv"],
+        member_patterns: &[("System", "getenv")],
         source_type: TaintSourceType::EnvVar,
     },
     AstSourcePattern {
         call_names: &[],
-        member_patterns: &["BufferedReader"],
+        // Bare identifier — raw fallback.
+        member_patterns: &[("", "BufferedReader")],
         source_type: TaintSourceType::UserInput,
     },
     AstSourcePattern {
         call_names: &[],
-        member_patterns: &["request.getParameter"],
+        member_patterns: &[("request", "getParameter")],
         source_type: TaintSourceType::HttpParam,
     },
 ];
@@ -2491,19 +2570,31 @@ static KOTLIN_AST_SOURCES: &[AstSourcePattern] = &[
 static KOTLIN_AST_SINKS: &[AstSinkPattern] = &[
     AstSinkPattern {
         call_names: &[],
-        member_patterns: &["Runtime.getRuntime().exec", "ProcessBuilder"],
+        member_patterns: &[
+            ("", "Runtime.getRuntime().exec"),
+            ("", "ProcessBuilder"),
+        ],
         sink_type: TaintSinkType::ShellExec,
     },
     AstSinkPattern {
         call_names: &[],
-        member_patterns: &[".execute(", ".executeQuery(", "prepareStatement"],
+        member_patterns: &[
+            ("*", "execute"),
+            ("*", "executeQuery"),
+            ("", "prepareStatement"),
+        ],
         sink_type: TaintSinkType::SqlQuery,
     },
 ];
 
 static KOTLIN_AST_SANITIZERS: &[AstSanitizerPattern] = &[AstSanitizerPattern {
     call_names: &[],
-    member_patterns: &[".toInt()", ".toLong()", ".toDouble()", ".toFloat()"],
+    member_patterns: &[
+        ("*", "toInt"),
+        ("*", "toLong"),
+        ("*", "toDouble"),
+        ("*", "toFloat"),
+    ],
     sanitizer_type: SanitizerType::Numeric,
 }];
 
@@ -2515,12 +2606,17 @@ static SWIFT_AST_SOURCES: &[AstSourcePattern] = &[
     },
     AstSourcePattern {
         call_names: &[],
-        member_patterns: &["ProcessInfo.processInfo.environment"],
+        // Three-segment chain — match outer (object_text="ProcessInfo.processInfo", field="environment").
+        member_patterns: &[("ProcessInfo.processInfo", "environment")],
         source_type: TaintSourceType::EnvVar,
     },
     AstSourcePattern {
         call_names: &[],
-        member_patterns: &["FileManager.default", "URLSession"],
+        // FileManager.default is structural; URLSession is a bare identifier (raw).
+        member_patterns: &[
+            ("FileManager", "default"),
+            ("", "URLSession"),
+        ],
         source_type: TaintSourceType::FileRead,
     },
 ];
@@ -2528,7 +2624,8 @@ static SWIFT_AST_SOURCES: &[AstSourcePattern] = &[
 static SWIFT_AST_SINKS: &[AstSinkPattern] = &[
     AstSinkPattern {
         call_names: &[],
-        member_patterns: &["Process()", "NSTask"],
+        // `Process()` is a constructor call; `NSTask` is a bare identifier — raw.
+        member_patterns: &[("", "Process()"), ("", "NSTask")],
         sink_type: TaintSinkType::ShellExec,
     },
     AstSinkPattern {
@@ -2546,7 +2643,8 @@ static SWIFT_AST_SANITIZERS: &[AstSanitizerPattern] = &[
     },
     AstSanitizerPattern {
         call_names: &[],
-        member_patterns: &["addingPercentEncoding"],
+        // `addingPercentEncoding` is a method-call name.
+        member_patterns: &[("*", "addingPercentEncoding")],
         sanitizer_type: SanitizerType::Html,
     },
 ];
@@ -2554,26 +2652,27 @@ static SWIFT_AST_SANITIZERS: &[AstSanitizerPattern] = &[
 static CSHARP_AST_SOURCES: &[AstSourcePattern] = &[
     AstSourcePattern {
         call_names: &[],
-        member_patterns: &["Console.ReadLine"],
+        member_patterns: &[("Console", "ReadLine")],
         source_type: TaintSourceType::UserInput,
     },
     AstSourcePattern {
         call_names: &[],
-        member_patterns: &["Request.QueryString", "Request.Form"],
+        member_patterns: &[("Request", "QueryString"), ("Request", "Form")],
         source_type: TaintSourceType::HttpParam,
     },
     AstSourcePattern {
         call_names: &[],
-        member_patterns: &["Environment.GetEnvironmentVariable"],
+        member_patterns: &[("Environment", "GetEnvironmentVariable")],
         source_type: TaintSourceType::EnvVar,
     },
     AstSourcePattern {
         call_names: &[],
         member_patterns: &[
-            "File.ReadAllText",
-            "File.ReadAllLines",
-            "File.OpenRead",
-            "StreamReader",
+            ("File", "ReadAllText"),
+            ("File", "ReadAllLines"),
+            ("File", "OpenRead"),
+            // Bare identifier — raw fallback.
+            ("", "StreamReader"),
         ],
         source_type: TaintSourceType::FileRead,
     },
@@ -2582,17 +2681,22 @@ static CSHARP_AST_SOURCES: &[AstSourcePattern] = &[
 static CSHARP_AST_SINKS: &[AstSinkPattern] = &[
     AstSinkPattern {
         call_names: &[],
-        member_patterns: &["Process.Start"],
+        member_patterns: &[("Process", "Start")],
         sink_type: TaintSinkType::ShellExec,
     },
     AstSinkPattern {
         call_names: &[],
-        member_patterns: &["SqlCommand", ".ExecuteNonQuery", ".ExecuteReader"],
+        member_patterns: &[
+            // `SqlCommand` is a bare identifier (constructor call) — raw fallback.
+            ("", "SqlCommand"),
+            ("*", "ExecuteNonQuery"),
+            ("*", "ExecuteReader"),
+        ],
         sink_type: TaintSinkType::SqlQuery,
     },
     AstSinkPattern {
         call_names: &[],
-        member_patterns: &["Activator.CreateInstance"],
+        member_patterns: &[("Activator", "CreateInstance")],
         sink_type: TaintSinkType::CodeEval,
     },
 ];
@@ -2600,12 +2704,16 @@ static CSHARP_AST_SINKS: &[AstSinkPattern] = &[
 static CSHARP_AST_SANITIZERS: &[AstSanitizerPattern] = &[
     AstSanitizerPattern {
         call_names: &[],
-        member_patterns: &["int.Parse", "Convert.ToInt32", "double.Parse"],
+        member_patterns: &[
+            ("int", "Parse"),
+            ("Convert", "ToInt32"),
+            ("double", "Parse"),
+        ],
         sanitizer_type: SanitizerType::Numeric,
     },
     AstSanitizerPattern {
         call_names: &[],
-        member_patterns: &["HttpUtility.HtmlEncode"],
+        member_patterns: &[("HttpUtility", "HtmlEncode")],
         sanitizer_type: SanitizerType::Html,
     },
 ];
@@ -2613,17 +2721,22 @@ static CSHARP_AST_SANITIZERS: &[AstSanitizerPattern] = &[
 static SCALA_AST_SOURCES: &[AstSourcePattern] = &[
     AstSourcePattern {
         call_names: &[],
-        member_patterns: &["StdIn.readLine", "scala.io.StdIn"],
+        // `StdIn.readLine` is structural; `scala.io.StdIn` is a multi-segment qualified
+        // path — raw fallback.
+        member_patterns: &[
+            ("StdIn", "readLine"),
+            ("", "scala.io.StdIn"),
+        ],
         source_type: TaintSourceType::UserInput,
     },
     AstSourcePattern {
         call_names: &[],
-        member_patterns: &["System.getenv"],
+        member_patterns: &[("System", "getenv")],
         source_type: TaintSourceType::EnvVar,
     },
     AstSourcePattern {
         call_names: &[],
-        member_patterns: &["Source.fromFile"],
+        member_patterns: &[("Source", "fromFile")],
         source_type: TaintSourceType::FileRead,
     },
 ];
@@ -2631,12 +2744,18 @@ static SCALA_AST_SOURCES: &[AstSourcePattern] = &[
 static SCALA_AST_SINKS: &[AstSinkPattern] = &[
     AstSinkPattern {
         call_names: &[],
-        member_patterns: &["Runtime.getRuntime.exec", "sys.process", "Process("],
+        // `Runtime.getRuntime.exec` is multi-segment chain (raw); `sys.process` is
+        // structural; `Process(` is a constructor call (raw).
+        member_patterns: &[
+            ("", "Runtime.getRuntime.exec"),
+            ("sys", "process"),
+            ("", "Process("),
+        ],
         sink_type: TaintSinkType::ShellExec,
     },
     AstSinkPattern {
         call_names: &[],
-        member_patterns: &[".execute(", ".executeQuery("],
+        member_patterns: &[("*", "execute"), ("*", "executeQuery")],
         sink_type: TaintSinkType::SqlQuery,
     },
 ];
@@ -2644,25 +2763,33 @@ static SCALA_AST_SINKS: &[AstSinkPattern] = &[
 static SCALA_AST_SANITIZERS: &[AstSanitizerPattern] = &[
     AstSanitizerPattern {
         call_names: &[],
-        member_patterns: &[".toInt", ".toLong", ".toDouble"],
+        member_patterns: &[("*", "toInt"), ("*", "toLong"), ("*", "toDouble")],
         sanitizer_type: SanitizerType::Numeric,
     },
     AstSanitizerPattern {
         call_names: &[],
-        member_patterns: &["StringEscapeUtils.escapeHtml"],
+        member_patterns: &[("StringEscapeUtils", "escapeHtml")],
         sanitizer_type: SanitizerType::Html,
     },
 ];
 
+// PHP: superglobal subscripts (`$_GET[`, `$_POST[`, etc.) are subscript_expression
+// nodes, not member-access — raw fallback. `->query(` is PHP's member-access
+// arrow operator, distinct from `.` field access; raw fallback preserves shape.
 static PHP_AST_SOURCES: &[AstSourcePattern] = &[
     AstSourcePattern {
         call_names: &[],
-        member_patterns: &["$_GET[", "$_REQUEST[", "$_COOKIE[", "$_SERVER["],
+        member_patterns: &[
+            ("", "$_GET["),
+            ("", "$_REQUEST["),
+            ("", "$_COOKIE["),
+            ("", "$_SERVER["),
+        ],
         source_type: TaintSourceType::HttpParam,
     },
     AstSourcePattern {
         call_names: &[],
-        member_patterns: &["$_POST["],
+        member_patterns: &[("", "$_POST[")],
         source_type: TaintSourceType::HttpBody,
     },
     AstSourcePattern {
@@ -2677,7 +2804,7 @@ static PHP_AST_SOURCES: &[AstSourcePattern] = &[
     },
     AstSourcePattern {
         call_names: &["getenv"],
-        member_patterns: &["$_ENV["],
+        member_patterns: &[("", "$_ENV[")],
         source_type: TaintSourceType::EnvVar,
     },
 ];
@@ -2702,7 +2829,7 @@ static PHP_AST_SINKS: &[AstSinkPattern] = &[
     },
     AstSinkPattern {
         call_names: &["mysqli_query"],
-        member_patterns: &["->query("],
+        member_patterns: &[("", "->query(")],
         sink_type: TaintSinkType::SqlQuery,
     },
 ];
@@ -2710,7 +2837,8 @@ static PHP_AST_SINKS: &[AstSinkPattern] = &[
 static PHP_AST_SANITIZERS: &[AstSanitizerPattern] = &[
     AstSanitizerPattern {
         call_names: &["intval", "floatval"],
-        member_patterns: &["(int)", "(float)"],
+        // `(int)`, `(float)` are cast expressions — raw fallback.
+        member_patterns: &[("", "(int)"), ("", "(float)")],
         sanitizer_type: SanitizerType::Numeric,
     },
     AstSanitizerPattern {
@@ -2728,17 +2856,17 @@ static PHP_AST_SANITIZERS: &[AstSanitizerPattern] = &[
 static LUA_AST_SOURCES: &[AstSourcePattern] = &[
     AstSourcePattern {
         call_names: &[],
-        member_patterns: &["io.read"],
+        member_patterns: &[("io", "read")],
         source_type: TaintSourceType::UserInput,
     },
     AstSourcePattern {
         call_names: &[],
-        member_patterns: &["os.getenv"],
+        member_patterns: &[("os", "getenv")],
         source_type: TaintSourceType::EnvVar,
     },
     AstSourcePattern {
         call_names: &[],
-        member_patterns: &["io.open"],
+        member_patterns: &[("io", "open")],
         source_type: TaintSourceType::FileRead,
     },
 ];
@@ -2746,12 +2874,12 @@ static LUA_AST_SOURCES: &[AstSourcePattern] = &[
 static LUA_AST_SINKS: &[AstSinkPattern] = &[
     AstSinkPattern {
         call_names: &[],
-        member_patterns: &["os.execute"],
+        member_patterns: &[("os", "execute")],
         sink_type: TaintSinkType::ShellExec,
     },
     AstSinkPattern {
         call_names: &[],
-        member_patterns: &["io.popen"],
+        member_patterns: &[("io", "popen")],
         sink_type: TaintSinkType::ShellExec,
     },
     AstSinkPattern {
@@ -2761,26 +2889,31 @@ static LUA_AST_SINKS: &[AstSinkPattern] = &[
     },
 ];
 
+// Lua sanitizers: zero member_patterns — type-annotation flip only.
 static LUA_AST_SANITIZERS: &[AstSanitizerPattern] = &[AstSanitizerPattern {
     call_names: &["tonumber"],
     member_patterns: &[],
     sanitizer_type: SanitizerType::Numeric,
 }];
 
+// Elixir PARTIAL coverage (per m2-ground-truth): field_access_info covers ONLY
+// `unary_operator` (the `@module_attribute` pattern). `Module.function` calls
+// like `IO.gets`, `System.cmd`, `Ecto.Adapters.SQL.query` are call_expression
+// nodes, not member-access — raw substring fallback. Documented as v0.4.0 hardening.
 static ELIXIR_AST_SOURCES: &[AstSourcePattern] = &[
     AstSourcePattern {
         call_names: &[],
-        member_patterns: &["IO.gets"],
+        member_patterns: &[("", "IO.gets")],
         source_type: TaintSourceType::UserInput,
     },
     AstSourcePattern {
         call_names: &[],
-        member_patterns: &["System.get_env"],
+        member_patterns: &[("", "System.get_env")],
         source_type: TaintSourceType::EnvVar,
     },
     AstSourcePattern {
         call_names: &[],
-        member_patterns: &["File.read", "File.read!"],
+        member_patterns: &[("", "File.read"), ("", "File.read!")],
         source_type: TaintSourceType::FileRead,
     },
 ];
@@ -2788,17 +2921,17 @@ static ELIXIR_AST_SOURCES: &[AstSourcePattern] = &[
 static ELIXIR_AST_SINKS: &[AstSinkPattern] = &[
     AstSinkPattern {
         call_names: &[],
-        member_patterns: &["System.cmd"],
+        member_patterns: &[("", "System.cmd")],
         sink_type: TaintSinkType::ShellExec,
     },
     AstSinkPattern {
         call_names: &[],
-        member_patterns: &["Code.eval_string"],
+        member_patterns: &[("", "Code.eval_string")],
         sink_type: TaintSinkType::CodeEval,
     },
     AstSinkPattern {
         call_names: &[],
-        member_patterns: &["Ecto.Adapters.SQL.query"],
+        member_patterns: &[("", "Ecto.Adapters.SQL.query")],
         sink_type: TaintSinkType::SqlQuery,
     },
 ];
@@ -2806,16 +2939,20 @@ static ELIXIR_AST_SINKS: &[AstSinkPattern] = &[
 static ELIXIR_AST_SANITIZERS: &[AstSanitizerPattern] = &[
     AstSanitizerPattern {
         call_names: &[],
-        member_patterns: &["String.to_integer", "String.to_float"],
+        member_patterns: &[("", "String.to_integer"), ("", "String.to_float")],
         sanitizer_type: SanitizerType::Numeric,
     },
     AstSanitizerPattern {
         call_names: &[],
-        member_patterns: &["Phoenix.HTML.html_escape"],
+        member_patterns: &[("", "Phoenix.HTML.html_escape")],
         sanitizer_type: SanitizerType::Html,
     },
 ];
 
+// OCaml PARTIAL coverage (per m2-ground-truth): field_access_info covers ONLY
+// `field_get_expression` (the `record.field` pattern). `Module.function` calls
+// like `Sys.command`, `Unix.execvp`, `Sqlite3.exec` are application_expression
+// nodes, not field-access — raw substring fallback. Documented as v0.4.0 hardening.
 static OCAML_AST_SOURCES: &[AstSourcePattern] = &[
     AstSourcePattern {
         call_names: &["read_line"],
@@ -2829,12 +2966,12 @@ static OCAML_AST_SOURCES: &[AstSourcePattern] = &[
     },
     AstSourcePattern {
         call_names: &[],
-        member_patterns: &["Sys.getenv"],
+        member_patterns: &[("", "Sys.getenv")],
         source_type: TaintSourceType::EnvVar,
     },
     AstSourcePattern {
         call_names: &[],
-        member_patterns: &["In_channel.read_all", "In_channel.input_all"],
+        member_patterns: &[("", "In_channel.read_all"), ("", "In_channel.input_all")],
         source_type: TaintSourceType::FileRead,
     },
 ];
@@ -2842,21 +2979,22 @@ static OCAML_AST_SOURCES: &[AstSourcePattern] = &[
 static OCAML_AST_SINKS: &[AstSinkPattern] = &[
     AstSinkPattern {
         call_names: &[],
-        member_patterns: &["Sys.command"],
+        member_patterns: &[("", "Sys.command")],
         sink_type: TaintSinkType::ShellExec,
     },
     AstSinkPattern {
         call_names: &[],
-        member_patterns: &["Unix.execvp"],
+        member_patterns: &[("", "Unix.execvp")],
         sink_type: TaintSinkType::ShellExec,
     },
     AstSinkPattern {
         call_names: &[],
-        member_patterns: &["Sqlite3.exec"],
+        member_patterns: &[("", "Sqlite3.exec")],
         sink_type: TaintSinkType::SqlQuery,
     },
 ];
 
+// OCaml sanitizers: zero member_patterns — type-annotation flip only.
 static OCAML_AST_SANITIZERS: &[AstSanitizerPattern] = &[AstSanitizerPattern {
     call_names: &["int_of_string", "float_of_string"],
     member_patterns: &[],
@@ -2953,6 +3091,78 @@ fn get_ast_patterns(language: Language) -> AstLanguagePatterns {
 // AST-Based Detection Functions
 // ---------------------------------------------------------------------------
 
+/// Match a list of `(receiver, field)` tuple patterns against an AST descendant.
+///
+/// **v0.3.0 M2 — structural rewrite of v0.2.x `text.contains(member_pattern)`.**
+///
+/// The legacy substring path produced false positives whenever an arbitrary AST
+/// node's text happened to include the pattern as a substring (e.g., a string
+/// literal containing `"req.body"`). After this rewrite, three matching modes
+/// are supported via the tuple convention:
+///
+/// 1. **Structural exact** — `(receiver, field)` with both non-empty and
+///    `receiver != "*"`: matches a member-access node whose `object_text == receiver`
+///    AND `member_text == field`. Uses [`extract_member_access_receiver_and_field`]
+///    to dispatch via [`field_access_info`].
+/// 2. **Structural wildcard** — `("*", field)`: matches a member-access node
+///    whose `member_text == field`, with any receiver. Used for `".read(`,
+///    `".write(`, `".execute(` shapes that previously matched by substring.
+/// 3. **Raw substring fallback** — `("", raw_text)`: matches against
+///    `node_text(descendant)` only when the descendant is in a code-bearing
+///    context (already filtered by `is_in_string` / `is_in_comment` upstream).
+///    Used for shapes that aren't member-access in the tree-sitter sense:
+///    subscript access (`$_GET[`, `params[`, `ENV[`), `new` expressions
+///    (`new Function`, `new BufferedReader`), C++ template-call (`static_cast<int>`),
+///    bare identifiers (`unsafe`, `BufferedReader`, `NSTask`), and Ruby/Elixir/OCaml
+///    qualified module calls (`IO.popen`, `System.cmd`, `Sys.command`) where
+///    `field_access_info` only covers `@ivar` / `@attr` / `record.field` (per
+///    `m2-ground-truth.md` partial-coverage note).
+///
+/// The string/comment context filter is applied by callers BEFORE entering
+/// this function — see `is_in_string` and `is_in_comment` checks in each
+/// `detect_*_ast` predicate. The fallback substring mode therefore can never
+/// fire inside a string literal.
+fn member_patterns_match(
+    descendant: &tree_sitter::Node,
+    source: &[u8],
+    language: Language,
+    member_patterns: &[(&str, &str)],
+    descendant_text: &str,
+) -> bool {
+    // First check structural matches against member-access nodes.
+    if let Some((rcv, field)) =
+        extract_member_access_receiver_and_field(descendant, source, language)
+    {
+        for (pat_rcv, pat_field) in member_patterns {
+            if pat_rcv.is_empty() {
+                continue; // raw-substring entries are handled in the fallback below
+            }
+            if *pat_rcv == "*" {
+                if field == *pat_field {
+                    return true;
+                }
+            } else if rcv == *pat_rcv && field == *pat_field {
+                return true;
+            }
+        }
+        // Structural match attempted; no entries matched.
+        // Fall through to the substring-fallback path for legacy shapes.
+    }
+
+    // Raw-substring fallback for non-member-access shapes (subscripts, new
+    // expressions, qualified module calls in Ruby/Elixir/OCaml, etc.). The
+    // caller has already filtered out string-literal and comment contexts via
+    // `is_in_string` / `is_in_comment`, so this fallback is safe with respect
+    // to the github#24 substring-in-string-literal regression.
+    for (pat_rcv, pat_field) in member_patterns {
+        if pat_rcv.is_empty() && descendant_text.contains(pat_field) {
+            return true;
+        }
+    }
+
+    false
+}
+
 /// Detect taint sources using AST nodes from a parsed tree.
 ///
 /// Walks the tree looking for call nodes that match known source patterns.
@@ -3002,7 +3212,7 @@ pub fn detect_sources_ast(
                     }
                 }
                 false
-            }) || pattern.member_patterns.iter().any(|mp| text.contains(mp));
+            }) || member_patterns_match(descendant, source, language, pattern.member_patterns, text);
 
             if matched {
                 // Try to get variable from parent assignment
@@ -3075,7 +3285,7 @@ pub fn detect_sinks_ast(
                     }
                 }
                 false
-            }) || pattern.member_patterns.iter().any(|mp| text.contains(mp));
+            }) || member_patterns_match(descendant, source, language, pattern.member_patterns, text);
 
             if matched {
                 let stmt_text = std::str::from_utf8(source)
@@ -3150,7 +3360,7 @@ pub fn detect_sanitizer_ast(
                     }
                 }
                 false
-            }) || pattern.member_patterns.iter().any(|mp| text.contains(mp));
+            }) || member_patterns_match(descendant, source, language, pattern.member_patterns, text);
 
             if matched {
                 return Some(pattern.sanitizer_type);

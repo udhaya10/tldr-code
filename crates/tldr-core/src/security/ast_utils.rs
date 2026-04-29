@@ -506,6 +506,62 @@ pub struct FieldAccessPattern {
     pub self_keywords: &'static [&'static str],
 }
 
+/// Extract `(receiver_name, field_name)` from a member-access AST node.
+///
+/// Uses [`field_access_info`] to dispatch to the per-language node-kind grammar
+/// schema. Returns `None` if the node is not a member-access node, or if either
+/// child cannot be extracted as text.
+///
+/// Replaces the v0.2.x `text.contains(member_pattern)` substring matching that
+/// produced false positives whenever an arbitrary AST node's text happened to
+/// include the pattern as a substring (e.g., a string literal containing the
+/// pattern text).
+///
+/// **Partial coverage** (per `m2-ground-truth.md`):
+/// - **Ruby**: `field_access_info` covers only `instance_variable` (the `@name`
+///   pattern). Module method calls like `IO.popen` or `File.read` are CALL
+///   nodes, not field-access — they return `None` here and must be matched via
+///   `call_names` entries instead.
+/// - **Elixir**: covers only `unary_operator` for `@module_attribute`.
+/// - **OCaml**: covers only `field_get_expression` for record.field access.
+///
+/// For those three languages, qualified module calls such as `System.cmd`,
+/// `Code.eval_string`, or `Sys.command` are not member-access nodes; the
+/// detection predicates fall back gracefully (the helper returns `None` and the
+/// predicate's `unwrap_or(false)` short-circuits to no match — the regex bank
+/// compensates for those cases).
+pub fn extract_member_access_receiver_and_field(
+    node: &Node,
+    source: &[u8],
+    language: Language,
+) -> Option<(String, String)> {
+    let patterns = field_access_info(language);
+    for pat in patterns {
+        if node.kind() != pat.node_kind {
+            continue;
+        }
+        let object = pat
+            .object_field
+            .and_then(|f| node.child_by_field_name(f))
+            .or_else(|| node.child(0))?;
+        let member = pat
+            .member_field
+            .and_then(|f| node.child_by_field_name(f))
+            .or_else(|| {
+                let count = node.child_count();
+                if count == 0 {
+                    None
+                } else {
+                    node.child(count - 1)
+                }
+            })?;
+        let receiver_text = node_text(&object, source).to_string();
+        let field_text = node_text(&member, source).to_string();
+        return Some((receiver_text, field_text));
+    }
+    None
+}
+
 // =============================================================================
 // Node Text Helpers
 // =============================================================================
