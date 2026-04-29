@@ -371,8 +371,11 @@ impl TLDRDaemon {
                 let mut errors = Vec::new();
 
                 // 1. Warm call graph
-                let calls_key =
-                    QueryKey::new("calls", hash_str_args(&[&self.project.to_string_lossy()]));
+                let calls_key = QueryKey::new(
+                    "calls",
+                    hash_str_args(&[&self.project.to_string_lossy()]),
+                    lang,
+                );
                 if self.cache.get::<serde_json::Value>(&calls_key).is_some() {
                     warmed.push("call_graph (cached)");
                 } else {
@@ -390,6 +393,7 @@ impl TLDRDaemon {
                 let struct_key = QueryKey::new(
                     "structure",
                     hash_str_args(&[&self.project.to_string_lossy(), ""]),
+                    lang,
                 );
                 if self.cache.get::<serde_json::Value>(&struct_key).is_some() {
                     warmed.push("structure (cached)");
@@ -405,8 +409,11 @@ impl TLDRDaemon {
                 }
 
                 // 3. Warm file tree
-                let tree_key =
-                    QueryKey::new("tree", hash_str_args(&[&self.project.to_string_lossy()]));
+                let tree_key = QueryKey::new(
+                    "tree",
+                    hash_str_args(&[&self.project.to_string_lossy()]),
+                    lang,
+                );
                 if self.cache.get::<serde_json::Value>(&tree_key).is_some() {
                     warmed.push("file_tree (cached)");
                 } else {
@@ -527,7 +534,14 @@ impl TLDRDaemon {
                 max_results,
             } => {
                 let max = max_results.unwrap_or(100);
-                let key = QueryKey::new("search", hash_str_args(&[&pattern, &max.to_string()]));
+                // Search is regex-based and language-agnostic; tag with the
+                // resolve_language default so QueryKey is well-formed without
+                // discriminating across languages.
+                let key = QueryKey::new(
+                    "search",
+                    hash_str_args(&[&pattern, &max.to_string()]),
+                    resolve_language(None),
+                );
                 if let Some(cached) = self.cache.get::<serde_json::Value>(&key) {
                     return DaemonResponse::Result(cached);
                 }
@@ -546,7 +560,16 @@ impl TLDRDaemon {
 
             DaemonCommand::Extract { file, session: _ } => {
                 let file_str = file.to_string_lossy().to_string();
-                let key = QueryKey::new("extract", hash_str_args(&[&file_str]));
+                // Extract auto-detects language from the file path. Tag the
+                // cache key with the detected language so two files with the
+                // same name in different language sub-projects do not collide.
+                let detected_lang = detect_or_parse_language(None, &file)
+                    .unwrap_or(Language::Python);
+                let key = QueryKey::new(
+                    "extract",
+                    hash_str_args(&[&file_str]),
+                    detected_lang,
+                );
                 if let Some(cached) = self.cache.get::<serde_json::Value>(&key) {
                     return DaemonResponse::Result(cached);
                 }
@@ -567,7 +590,12 @@ impl TLDRDaemon {
             DaemonCommand::Tree { path } => {
                 let root = path.unwrap_or_else(|| self.project.clone());
                 let root_str = root.to_string_lossy().to_string();
-                let key = QueryKey::new("tree", hash_str_args(&[&root_str]));
+                // File tree is language-agnostic; tag with default language.
+                let key = QueryKey::new(
+                    "tree",
+                    hash_str_args(&[&root_str]),
+                    resolve_language(None),
+                );
                 if let Some(cached) = self.cache.get::<serde_json::Value>(&key) {
                     return DaemonResponse::Result(cached);
                 }
@@ -587,10 +615,6 @@ impl TLDRDaemon {
             DaemonCommand::Structure { path, lang } => {
                 let path_str = path.to_string_lossy().to_string();
                 let lang_str = lang.as_deref().unwrap_or("");
-                let key = QueryKey::new("structure", hash_str_args(&[&path_str, lang_str]));
-                if let Some(cached) = self.cache.get::<serde_json::Value>(&key) {
-                    return DaemonResponse::Result(cached);
-                }
                 let language = match detect_or_parse_language(lang.as_deref(), &path) {
                     Ok(l) => l,
                     Err(e) => {
@@ -600,6 +624,14 @@ impl TLDRDaemon {
                         }
                     }
                 };
+                let key = QueryKey::new(
+                    "structure",
+                    hash_str_args(&[&path_str, lang_str]),
+                    language,
+                );
+                if let Some(cached) = self.cache.get::<serde_json::Value>(&key) {
+                    return DaemonResponse::Result(cached);
+                }
                 match get_code_structure(&path, language, 0, None) {
                     Ok(result) => {
                         let val = serde_json::to_value(&result).unwrap_or_default();
@@ -620,7 +652,11 @@ impl TLDRDaemon {
             } => {
                 let d = depth.unwrap_or(2);
                 let lang = resolve_language(language);
-                let key = QueryKey::new("context", hash_str_args(&[&entry, &d.to_string()]));
+                let key = QueryKey::new(
+                    "context",
+                    hash_str_args(&[&entry, &d.to_string()]),
+                    lang,
+                );
                 if let Some(cached) = self.cache.get::<serde_json::Value>(&key) {
                     return DaemonResponse::Result(cached);
                 }
@@ -639,10 +675,6 @@ impl TLDRDaemon {
 
             DaemonCommand::Cfg { file, function } => {
                 let file_str = file.to_string_lossy().to_string();
-                let key = QueryKey::new("cfg", hash_str_args(&[&file_str, &function]));
-                if let Some(cached) = self.cache.get::<serde_json::Value>(&key) {
-                    return DaemonResponse::Result(cached);
-                }
                 let language = match detect_or_parse_language(None, &file) {
                     Ok(l) => l,
                     Err(e) => {
@@ -652,6 +684,14 @@ impl TLDRDaemon {
                         }
                     }
                 };
+                let key = QueryKey::new(
+                    "cfg",
+                    hash_str_args(&[&file_str, &function]),
+                    language,
+                );
+                if let Some(cached) = self.cache.get::<serde_json::Value>(&key) {
+                    return DaemonResponse::Result(cached);
+                }
                 let file_hash = super::salsa::hash_path(&file);
                 match get_cfg_context(&file_str, &function, language) {
                     Ok(result) => {
@@ -668,10 +708,6 @@ impl TLDRDaemon {
 
             DaemonCommand::Dfg { file, function } => {
                 let file_str = file.to_string_lossy().to_string();
-                let key = QueryKey::new("dfg", hash_str_args(&[&file_str, &function]));
-                if let Some(cached) = self.cache.get::<serde_json::Value>(&key) {
-                    return DaemonResponse::Result(cached);
-                }
                 let language = match detect_or_parse_language(None, &file) {
                     Ok(l) => l,
                     Err(e) => {
@@ -681,6 +717,14 @@ impl TLDRDaemon {
                         }
                     }
                 };
+                let key = QueryKey::new(
+                    "dfg",
+                    hash_str_args(&[&file_str, &function]),
+                    language,
+                );
+                if let Some(cached) = self.cache.get::<serde_json::Value>(&key) {
+                    return DaemonResponse::Result(cached);
+                }
                 let file_hash = super::salsa::hash_path(&file);
                 match get_dfg_context(&file_str, &function, language) {
                     Ok(result) => {
@@ -701,13 +745,6 @@ impl TLDRDaemon {
                 line,
             } => {
                 let file_str = file.to_string_lossy().to_string();
-                let key = QueryKey::new(
-                    "slice",
-                    hash_str_args(&[&file_str, &function, &line.to_string()]),
-                );
-                if let Some(cached) = self.cache.get::<serde_json::Value>(&key) {
-                    return DaemonResponse::Result(cached);
-                }
                 let language = match detect_or_parse_language(None, &file) {
                     Ok(l) => l,
                     Err(e) => {
@@ -717,6 +754,14 @@ impl TLDRDaemon {
                         }
                     }
                 };
+                let key = QueryKey::new(
+                    "slice",
+                    hash_str_args(&[&file_str, &function, &line.to_string()]),
+                    language,
+                );
+                if let Some(cached) = self.cache.get::<serde_json::Value>(&key) {
+                    return DaemonResponse::Result(cached);
+                }
                 let file_hash = super::salsa::hash_path(&file);
                 match get_slice(
                     &file_str,
@@ -742,7 +787,7 @@ impl TLDRDaemon {
                 let root = path.unwrap_or_else(|| self.project.clone());
                 let lang = resolve_language(language);
                 let root_str = root.to_string_lossy().to_string();
-                let key = QueryKey::new("calls", hash_str_args(&[&root_str]));
+                let key = QueryKey::new("calls", hash_str_args(&[&root_str]), lang);
                 if let Some(cached) = self.cache.get::<serde_json::Value>(&key) {
                     return DaemonResponse::Result(cached);
                 }
@@ -766,7 +811,11 @@ impl TLDRDaemon {
             } => {
                 let d = depth.unwrap_or(3);
                 let lang = resolve_language(language);
-                let key = QueryKey::new("impact", hash_str_args(&[&func, &d.to_string()]));
+                let key = QueryKey::new(
+                    "impact",
+                    hash_str_args(&[&func, &d.to_string()]),
+                    lang,
+                );
                 if let Some(cached) = self.cache.get::<serde_json::Value>(&key) {
                     return DaemonResponse::Result(cached);
                 }
@@ -801,7 +850,11 @@ impl TLDRDaemon {
                 let lang = resolve_language(language);
                 let root_str = root.to_string_lossy().to_string();
                 let entry_str = entry.as_ref().map(|v| v.join(",")).unwrap_or_default();
-                let key = QueryKey::new("dead", hash_str_args(&[&root_str, &entry_str]));
+                let key = QueryKey::new(
+                    "dead",
+                    hash_str_args(&[&root_str, &entry_str]),
+                    lang,
+                );
                 if let Some(cached) = self.cache.get::<serde_json::Value>(&key) {
                     return DaemonResponse::Result(cached);
                 }
@@ -856,7 +909,7 @@ impl TLDRDaemon {
                 let root = path.unwrap_or_else(|| self.project.clone());
                 let lang = resolve_language(language);
                 let root_str = root.to_string_lossy().to_string();
-                let key = QueryKey::new("arch", hash_str_args(&[&root_str]));
+                let key = QueryKey::new("arch", hash_str_args(&[&root_str]), lang);
                 if let Some(cached) = self.cache.get::<serde_json::Value>(&key) {
                     return DaemonResponse::Result(cached);
                 }
@@ -884,10 +937,6 @@ impl TLDRDaemon {
 
             DaemonCommand::Imports { file } => {
                 let file_str = file.to_string_lossy().to_string();
-                let key = QueryKey::new("imports", hash_str_args(&[&file_str]));
-                if let Some(cached) = self.cache.get::<serde_json::Value>(&key) {
-                    return DaemonResponse::Result(cached);
-                }
                 let language = match detect_or_parse_language(None, &file) {
                     Ok(l) => l,
                     Err(e) => {
@@ -897,6 +946,14 @@ impl TLDRDaemon {
                         }
                     }
                 };
+                let key = QueryKey::new(
+                    "imports",
+                    hash_str_args(&[&file_str]),
+                    language,
+                );
+                if let Some(cached) = self.cache.get::<serde_json::Value>(&key) {
+                    return DaemonResponse::Result(cached);
+                }
                 let file_hash = super::salsa::hash_path(&file);
                 match get_imports(&file, language) {
                     Ok(result) => {
@@ -919,7 +976,11 @@ impl TLDRDaemon {
                 let root = path.unwrap_or_else(|| self.project.clone());
                 let lang = resolve_language(language);
                 let root_str = root.to_string_lossy().to_string();
-                let key = QueryKey::new("importers", hash_str_args(&[&module, &root_str]));
+                let key = QueryKey::new(
+                    "importers",
+                    hash_str_args(&[&module, &root_str]),
+                    lang,
+                );
                 if let Some(cached) = self.cache.get::<serde_json::Value>(&key) {
                     return DaemonResponse::Result(cached);
                 }
@@ -961,7 +1022,11 @@ impl TLDRDaemon {
                             .join(",")
                     })
                     .unwrap_or_default();
-                let key = QueryKey::new("change_impact", hash_str_args(&[&files_str]));
+                let key = QueryKey::new(
+                    "change_impact",
+                    hash_str_args(&[&files_str]),
+                    lang,
+                );
                 if let Some(cached) = self.cache.get::<serde_json::Value>(&key) {
                     return DaemonResponse::Result(cached);
                 }

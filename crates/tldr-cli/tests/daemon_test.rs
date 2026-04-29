@@ -2241,3 +2241,139 @@ export function caller(): number {
     }
 }
 
+// =============================================================================
+// v031-cluster-M3a: cache isolation between languages (regression for #27)
+// =============================================================================
+//
+// The `Calls` handler caches its result keyed on the project root path. Pre
+// v031-cluster-M3a, `QueryKey` was `(query_name, args_hash)` only, so a Python
+// query against `/tmp/proj` produced a cache entry that was served back when
+// a TypeScript query for the SAME `/tmp/proj` arrived. The daemon then
+// returned an empty graph (the Python pipeline saw zero `.ts` files) for
+// TypeScript even though the second query supplied `language: TypeScript`.
+//
+// Post-fix the QueryKey carries `language: Language`, so the two queries
+// occupy disjoint cache slots and each computes correctly.
+// =============================================================================
+
+mod cluster_m3a_cache_isolation {
+    use std::fs;
+    use tempfile::TempDir;
+    use tldr_cli::commands::daemon::types::{DaemonCommand, DaemonConfig, DaemonResponse};
+    use tldr_cli::commands::daemon::TLDRDaemon;
+    use tldr_core::Language;
+
+    /// Regression test (M3a): the daemon caches Python and TypeScript
+    /// results independently when they target the same project path.
+    ///
+    /// Pre-fix this fails because the second (TypeScript) query gets a
+    /// cache hit on the Python entry — which has zero edges (Python
+    /// pipeline can't see .ts files). Post-fix the cache distinguishes by
+    /// language, so the TypeScript query computes its own result.
+    #[tokio::test]
+    async fn test_daemon_caches_python_and_typescript_results_independently() {
+        let temp = TempDir::new().expect("temp dir");
+
+        // Mixed-language project: one .py file with no callers (so a
+        // Python call-graph build legally produces zero edges) plus one
+        // .ts file with one intra-file edge.
+        fs::write(
+            temp.path().join("solo.py"),
+            "def lonely():\n    return 1\n",
+        )
+        .expect("write solo.py");
+        fs::write(
+            temp.path().join("main.ts"),
+            r#"export function callee(): number { return 42; }
+export function caller(): number { return callee(); }
+"#,
+        )
+        .expect("write main.ts");
+
+        let config = DaemonConfig::default();
+        let daemon = TLDRDaemon::new(temp.path().to_path_buf(), config);
+
+        // First request: Python language. Should produce zero (or near-zero)
+        // edges given the trivial .py file. Result is cached under the
+        // Python language slot.
+        let py_response = daemon
+            .handle_command(DaemonCommand::Calls {
+                path: Some(temp.path().to_path_buf()),
+                language: Some(Language::Python),
+            })
+            .await;
+        let py_value = match py_response {
+            DaemonResponse::Result(v) => v,
+            other => panic!("Python Calls returned non-Result: {:?}", other),
+        };
+        let py_edges = py_value
+            .get("edges")
+            .and_then(|e| e.as_array())
+            .map(|a| a.len())
+            .or_else(|| py_value.as_array().map(|a| a.len()))
+            .unwrap_or(0);
+
+        // Second request: TypeScript on the SAME path. Pre-fix the cache
+        // key is identical to the Python query (only `(query_name,
+        // hash(root))` is hashed) so this returns the cached Python
+        // result — zero TS edges. Post-fix the cache key carries the
+        // language, so this is a miss and the daemon computes the TS
+        // graph fresh.
+        let ts_response = daemon
+            .handle_command(DaemonCommand::Calls {
+                path: Some(temp.path().to_path_buf()),
+                language: Some(Language::TypeScript),
+            })
+            .await;
+        let ts_value = match ts_response {
+            DaemonResponse::Result(v) => v,
+            other => panic!("TypeScript Calls returned non-Result: {:?}", other),
+        };
+        let ts_edges = ts_value
+            .get("edges")
+            .and_then(|e| e.as_array())
+            .or_else(|| ts_value.as_array());
+        let ts_edges_count = ts_edges.map(|a| a.len()).unwrap_or(0);
+
+        assert!(
+            ts_edges_count > 0,
+            "TypeScript request after Python request must compute fresh \
+             (not return cached Python result). TS edges = {}, Python edges \
+             = {}. Pre-fix this assertion fails because the Python entry \
+             leaks into the TS query.",
+            ts_edges_count,
+            py_edges,
+        );
+
+        // Stronger guard: at least one TS edge must reference a `.ts` file
+        // — proves the TS pipeline ran rather than reusing Python output.
+        let has_ts_edge = ts_edges
+            .map(|edges| edges.iter().any(|e| e.to_string().contains(".ts")))
+            .unwrap_or(false);
+        assert!(
+            has_ts_edge,
+            "Expected at least one .ts edge in the TypeScript response; \
+             cache cross-contamination would yield only Python edges. \
+             Response: {}",
+            ts_value,
+        );
+
+        // Re-query Python to confirm Python's cached value is still
+        // intact (TS query did not overwrite it). This locks the disjoint-
+        // slots invariant from the cache-side as well as the lookup-side.
+        let py2_response = daemon
+            .handle_command(DaemonCommand::Calls {
+                path: Some(temp.path().to_path_buf()),
+                language: Some(Language::Python),
+            })
+            .await;
+        let py2_value = match py2_response {
+            DaemonResponse::Result(v) => v,
+            other => panic!("Python re-query returned non-Result: {:?}", other),
+        };
+        assert_eq!(
+            py_value, py2_value,
+            "Python cache entry must survive TypeScript query unchanged"
+        );
+    }
+}

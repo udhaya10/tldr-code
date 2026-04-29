@@ -27,6 +27,7 @@ use std::time::SystemTime;
 
 use dashmap::DashMap;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use tldr_core::Language;
 
 use super::error::{DaemonError, DaemonResult};
 use super::types::SalsaCacheStats;
@@ -52,20 +53,39 @@ const CACHE_VERSION: u8 = 1;
 // =============================================================================
 
 /// Key for looking up cached query results
+///
+/// v031-cluster-M3a: extended with `language` to close the cross-language
+/// cache contamination half of issue #27. Pre-fix, a Python query result
+/// for function `foo` was served back when a TypeScript query for `foo`
+/// arrived because keys collided on `(query_name, args_hash)` only. The
+/// `language` field plus the `Hash`/`Eq` derive (which automatically picks
+/// it up) place each language's results in disjoint cache slots.
+///
+/// **On-disk note:** `QueryKey` is serialized into the cache file via
+/// `CacheFileData`. Adding `language` changes the JSON shape, so pre-v0.3.1
+/// cache files cannot deserialize cleanly. Graceful-discard on schema
+/// mismatch is owned by the sibling milestone v031-cluster-M3b
+/// (`schema_version` header field). This struct change must ship in the
+/// same release commit as M3b.
 #[derive(Debug, Clone, Hash, Eq, PartialEq, Serialize, Deserialize)]
 pub struct QueryKey {
     /// Name of the query (e.g., "extract", "structure", "calls")
     pub query_name: String,
     /// Hash of the query arguments
     pub args_hash: u64,
+    /// Language discriminator: prevents Python/TypeScript/etc. cache
+    /// contamination when the same `(query_name, args_hash)` tuple is
+    /// queried under different languages.
+    pub language: Language,
 }
 
 impl QueryKey {
     /// Create a new query key
-    pub fn new(query_name: impl Into<String>, args_hash: u64) -> Self {
+    pub fn new(query_name: impl Into<String>, args_hash: u64, language: Language) -> Self {
         Self {
             query_name: query_name.into(),
             args_hash,
+            language,
         }
     }
 }
@@ -558,7 +578,7 @@ mod tests {
     #[test]
     fn test_query_cache_insert_and_get() {
         let cache = QueryCache::new(100);
-        let key = QueryKey::new("test", 12345);
+        let key = QueryKey::new("test", 12345, Language::Python);
         let value = vec!["hello", "world"];
 
         cache.insert(key.clone(), &value, vec![]);
@@ -571,7 +591,7 @@ mod tests {
     #[test]
     fn test_query_cache_miss() {
         let cache = QueryCache::new(100);
-        let key = QueryKey::new("nonexistent", 99999);
+        let key = QueryKey::new("nonexistent", 99999, Language::Python);
 
         let result: Option<String> = cache.get(&key);
         assert!(result.is_none());
@@ -584,7 +604,7 @@ mod tests {
     #[test]
     fn test_query_cache_hit_tracking() {
         let cache = QueryCache::new(100);
-        let key = QueryKey::new("test", 12345);
+        let key = QueryKey::new("test", 12345, Language::Python);
         cache.insert(key.clone(), &"value", vec![]);
 
         // First get - hit
@@ -602,9 +622,9 @@ mod tests {
         let input_hash = hash_path(Path::new("/test/file.rs"));
 
         // Insert entries that depend on the input
-        let key1 = QueryKey::new("query1", 1);
-        let key2 = QueryKey::new("query2", 2);
-        let key3 = QueryKey::new("query3", 3); // No dependency
+        let key1 = QueryKey::new("query1", 1, Language::Python);
+        let key2 = QueryKey::new("query2", 2, Language::Python);
+        let key3 = QueryKey::new("query3", 3, Language::Python); // No dependency
 
         cache.insert(key1.clone(), &"value1", vec![input_hash]);
         cache.insert(key2.clone(), &"value2", vec![input_hash]);
@@ -629,7 +649,7 @@ mod tests {
     #[test]
     fn test_query_cache_invalidation_stats() {
         let cache = QueryCache::new(100);
-        let key = QueryKey::new("test", 1);
+        let key = QueryKey::new("test", 1, Language::Python);
         cache.insert(key.clone(), &"value", vec![12345]);
 
         cache.invalidate_by_input(12345);
@@ -643,8 +663,8 @@ mod tests {
         let cache = QueryCache::new(100);
 
         // Insert some entries
-        cache.insert(QueryKey::new("q1", 1), &"v1", vec![]);
-        cache.insert(QueryKey::new("q2", 2), &"v2", vec![]);
+        cache.insert(QueryKey::new("q1", 1, Language::Python), &"v1", vec![]);
+        cache.insert(QueryKey::new("q2", 2, Language::Python), &"v2", vec![]);
 
         assert_eq!(cache.len(), 2);
 
@@ -659,24 +679,24 @@ mod tests {
         let cache = QueryCache::new(3); // Max 3 entries
 
         // Insert 4 entries
-        cache.insert(QueryKey::new("q1", 1), &"v1", vec![]);
+        cache.insert(QueryKey::new("q1", 1, Language::Python), &"v1", vec![]);
         std::thread::sleep(std::time::Duration::from_millis(10));
-        cache.insert(QueryKey::new("q2", 2), &"v2", vec![]);
+        cache.insert(QueryKey::new("q2", 2, Language::Python), &"v2", vec![]);
         std::thread::sleep(std::time::Duration::from_millis(10));
-        cache.insert(QueryKey::new("q3", 3), &"v3", vec![]);
+        cache.insert(QueryKey::new("q3", 3, Language::Python), &"v3", vec![]);
         std::thread::sleep(std::time::Duration::from_millis(10));
 
         // Access q1 to make it recently used
-        let _: Option<String> = cache.get(&QueryKey::new("q1", 1));
+        let _: Option<String> = cache.get(&QueryKey::new("q1", 1, Language::Python));
         std::thread::sleep(std::time::Duration::from_millis(10));
 
         // Insert q4 - should evict q2 (oldest accessed)
-        cache.insert(QueryKey::new("q4", 4), &"v4", vec![]);
+        cache.insert(QueryKey::new("q4", 4, Language::Python), &"v4", vec![]);
 
         assert!(cache.len() <= 3);
 
         // q1 should still exist (was accessed recently)
-        let result: Option<String> = cache.get(&QueryKey::new("q1", 1));
+        let result: Option<String> = cache.get(&QueryKey::new("q1", 1, Language::Python));
         assert!(result.is_some());
     }
 
@@ -687,8 +707,8 @@ mod tests {
 
         // Create and populate cache
         let cache = QueryCache::new(100);
-        cache.insert(QueryKey::new("test", 12345), &"hello world", vec![1, 2, 3]);
-        cache.insert(QueryKey::new("test2", 67890), &vec![1, 2, 3], vec![]);
+        cache.insert(QueryKey::new("test", 12345, Language::Python), &"hello world", vec![1, 2, 3]);
+        cache.insert(QueryKey::new("test2", 67890, Language::Python), &vec![1, 2, 3], vec![]);
 
         // Save to file
         cache.save_to_file(&cache_path).unwrap();
@@ -699,10 +719,10 @@ mod tests {
         // Verify contents
         assert_eq!(loaded.len(), 2);
 
-        let result: Option<String> = loaded.get(&QueryKey::new("test", 12345));
+        let result: Option<String> = loaded.get(&QueryKey::new("test", 12345, Language::Python));
         assert_eq!(result, Some("hello world".to_string()));
 
-        let result: Option<Vec<i32>> = loaded.get(&QueryKey::new("test2", 67890));
+        let result: Option<Vec<i32>> = loaded.get(&QueryKey::new("test2", 67890, Language::Python));
         assert_eq!(result, Some(vec![1, 2, 3]));
     }
 
@@ -713,7 +733,7 @@ mod tests {
 
         // Create and save cache
         let cache = QueryCache::new(100);
-        cache.insert(QueryKey::new("test", 1), &"value", vec![]);
+        cache.insert(QueryKey::new("test", 1, Language::Python), &"value", vec![]);
         cache.save_to_file(&cache_path).unwrap();
 
         // Corrupt the file
@@ -750,10 +770,10 @@ mod tests {
 
     #[test]
     fn test_query_key_equality() {
-        let key1 = QueryKey::new("test", 12345);
-        let key2 = QueryKey::new("test", 12345);
-        let key3 = QueryKey::new("test", 99999);
-        let key4 = QueryKey::new("other", 12345);
+        let key1 = QueryKey::new("test", 12345, Language::Python);
+        let key2 = QueryKey::new("test", 12345, Language::Python);
+        let key3 = QueryKey::new("test", 99999, Language::Python);
+        let key4 = QueryKey::new("other", 12345, Language::Python);
 
         assert_eq!(key1, key2);
         assert_ne!(key1, key3);
@@ -780,10 +800,10 @@ mod tests {
         assert_eq!(stats.hit_rate(), 0.0);
 
         // Insert and query
-        cache.insert(QueryKey::new("test", 1), &"value", vec![]);
-        let _: Option<String> = cache.get(&QueryKey::new("test", 1)); // hit
-        let _: Option<String> = cache.get(&QueryKey::new("test", 2)); // miss
-        let _: Option<String> = cache.get(&QueryKey::new("test", 1)); // hit
+        cache.insert(QueryKey::new("test", 1, Language::Python), &"value", vec![]);
+        let _: Option<String> = cache.get(&QueryKey::new("test", 1, Language::Python)); // hit
+        let _: Option<String> = cache.get(&QueryKey::new("test", 2, Language::Python)); // miss
+        let _: Option<String> = cache.get(&QueryKey::new("test", 1, Language::Python)); // hit
 
         let stats = cache.stats();
         assert_eq!(stats.hits, 2);
@@ -810,9 +830,9 @@ mod tests {
         let shared_input = 12345u64;
 
         // Multiple queries depend on the same input
-        cache.insert(QueryKey::new("q1", 1), &"v1", vec![shared_input]);
-        cache.insert(QueryKey::new("q2", 2), &"v2", vec![shared_input]);
-        cache.insert(QueryKey::new("q3", 3), &"v3", vec![shared_input]);
+        cache.insert(QueryKey::new("q1", 1, Language::Python), &"v1", vec![shared_input]);
+        cache.insert(QueryKey::new("q2", 2, Language::Python), &"v2", vec![shared_input]);
+        cache.insert(QueryKey::new("q3", 3, Language::Python), &"v3", vec![shared_input]);
 
         assert_eq!(cache.len(), 3);
 
@@ -829,7 +849,7 @@ mod tests {
         let input2 = 222u64;
 
         // Entry depends on multiple inputs
-        cache.insert(QueryKey::new("q1", 1), &"v1", vec![input1, input2]);
+        cache.insert(QueryKey::new("q1", 1, Language::Python), &"v1", vec![input1, input2]);
 
         // Invalidating either input should remove the entry
         assert_eq!(cache.len(), 1);
@@ -847,7 +867,7 @@ mod tests {
         assert_eq!(cache.total_bytes(), 0);
 
         // Insert a value and check bytes increased
-        cache.insert(QueryKey::new("q1", 1), &"hello", vec![]);
+        cache.insert(QueryKey::new("q1", 1, Language::Python), &"hello", vec![]);
         let bytes_after_one = cache.total_bytes();
         assert!(
             bytes_after_one > 0,
@@ -855,7 +875,7 @@ mod tests {
         );
 
         // Insert another and check it increased further
-        cache.insert(QueryKey::new("q2", 2), &"world", vec![]);
+        cache.insert(QueryKey::new("q2", 2, Language::Python), &"world", vec![]);
         let bytes_after_two = cache.total_bytes();
         assert!(
             bytes_after_two > bytes_after_one,
@@ -870,11 +890,11 @@ mod tests {
     #[test]
     fn test_bytes_decrease_on_invalidate() {
         let cache = QueryCache::new(100);
-        cache.insert(QueryKey::new("q1", 1), &"value1", vec![]);
-        cache.insert(QueryKey::new("q2", 2), &"value2", vec![]);
+        cache.insert(QueryKey::new("q1", 1, Language::Python), &"value1", vec![]);
+        cache.insert(QueryKey::new("q2", 2, Language::Python), &"value2", vec![]);
         let bytes_before = cache.total_bytes();
 
-        cache.invalidate(&QueryKey::new("q1", 1));
+        cache.invalidate(&QueryKey::new("q1", 1, Language::Python));
         let bytes_after = cache.total_bytes();
         assert!(
             bytes_after < bytes_before,
@@ -887,8 +907,8 @@ mod tests {
         let cache = QueryCache::new(100);
         let input_hash = 42u64;
 
-        cache.insert(QueryKey::new("q1", 1), &"value1", vec![input_hash]);
-        cache.insert(QueryKey::new("q2", 2), &"value2", vec![input_hash]);
+        cache.insert(QueryKey::new("q1", 1, Language::Python), &"value1", vec![input_hash]);
+        cache.insert(QueryKey::new("q2", 2, Language::Python), &"value2", vec![input_hash]);
         let bytes_before = cache.total_bytes();
         assert!(bytes_before > 0);
 
@@ -909,7 +929,7 @@ mod tests {
         // Each entry with a 200-byte payload
         let payload = "x".repeat(200);
         for i in 0..20 {
-            cache.insert(QueryKey::new("q", i), &payload, vec![]);
+            cache.insert(QueryKey::new("q", i, Language::Python), &payload, vec![]);
         }
 
         // Cache should have evicted to stay under 1 KB
@@ -932,14 +952,14 @@ mod tests {
 
         // Insert 10 small entries (~50 bytes each)
         for i in 0..10 {
-            cache.insert(QueryKey::new("small", i), &"tiny", vec![]);
+            cache.insert(QueryKey::new("small", i, Language::Python), &"tiny", vec![]);
         }
         let count_before = cache.len();
         assert_eq!(count_before, 10);
 
         // Insert one large entry (~1500 bytes)
         let big_payload = "x".repeat(1500);
-        cache.insert(QueryKey::new("big", 0), &big_payload, vec![]);
+        cache.insert(QueryKey::new("big", 0, Language::Python), &big_payload, vec![]);
 
         // Should have evicted some small entries to make room
         assert!(
@@ -948,7 +968,7 @@ mod tests {
             cache.total_bytes()
         );
         // The big entry should still be present (most recently inserted)
-        let result: Option<String> = cache.get(&QueryKey::new("big", 0));
+        let result: Option<String> = cache.get(&QueryKey::new("big", 0, Language::Python));
         assert!(result.is_some(), "large entry should survive eviction");
     }
 
@@ -957,12 +977,12 @@ mod tests {
         let cache = QueryCache::new(100);
 
         // Insert a small value
-        cache.insert(QueryKey::new("q1", 1), &"small", vec![]);
+        cache.insert(QueryKey::new("q1", 1, Language::Python), &"small", vec![]);
         let bytes_small = cache.total_bytes();
 
         // Replace with a large value
         let big = "x".repeat(10_000);
-        cache.insert(QueryKey::new("q1", 1), &big, vec![]);
+        cache.insert(QueryKey::new("q1", 1, Language::Python), &big, vec![]);
         let bytes_big = cache.total_bytes();
 
         assert!(
@@ -981,7 +1001,7 @@ mod tests {
         for i in 0..1000u64 {
             let size = ((i % 10) + 1) as usize * 100; // 100 to 1000 bytes
             let payload = "x".repeat(size);
-            cache.insert(QueryKey::new("stress", i), &payload, vec![]);
+            cache.insert(QueryKey::new("stress", i, Language::Python), &payload, vec![]);
         }
 
         // Cache must respect byte limit
@@ -992,7 +1012,7 @@ mod tests {
         );
 
         // Most recent entries should be accessible
-        let result: Option<String> = cache.get(&QueryKey::new("stress", 999));
+        let result: Option<String> = cache.get(&QueryKey::new("stress", 999, Language::Python));
         assert!(result.is_some(), "most recent entry should be cached");
     }
 
@@ -1071,7 +1091,7 @@ mod tests {
                 for op in ops {
                     match op {
                         CacheOp::Insert { key_id, payload_len, input_hash } => {
-                            let key = QueryKey::new("prop", key_id as u64);
+                            let key = QueryKey::new("prop", key_id as u64, Language::Python);
                             let payload = vec![0u8; payload_len];
                             cache.insert(key, &payload, vec![input_hash]);
                         }
@@ -1079,7 +1099,7 @@ mod tests {
                             cache.invalidate_by_input(hash);
                         }
                         CacheOp::InvalidateByKey(key_id) => {
-                            let key = QueryKey::new("prop", key_id as u64);
+                            let key = QueryKey::new("prop", key_id as u64, Language::Python);
                             cache.invalidate(&key);
                         }
                         CacheOp::Clear => {
@@ -1103,7 +1123,7 @@ mod tests {
                 for op in ops {
                     match op {
                         CacheOp::Insert { key_id, payload_len, input_hash } => {
-                            let key = QueryKey::new("prop", key_id as u64);
+                            let key = QueryKey::new("prop", key_id as u64, Language::Python);
                             let payload = vec![0u8; payload_len];
                             cache.insert(key, &payload, vec![input_hash]);
                         }
@@ -1111,7 +1131,7 @@ mod tests {
                             cache.invalidate_by_input(hash);
                         }
                         CacheOp::InvalidateByKey(key_id) => {
-                            let key = QueryKey::new("prop", key_id as u64);
+                            let key = QueryKey::new("prop", key_id as u64, Language::Python);
                             cache.invalidate(&key);
                         }
                         CacheOp::Clear => {
@@ -1133,7 +1153,7 @@ mod tests {
                 for op in ops {
                     match op {
                         CacheOp::Insert { key_id, payload_len, input_hash } => {
-                            let key = QueryKey::new("prop", key_id as u64);
+                            let key = QueryKey::new("prop", key_id as u64, Language::Python);
                             let payload = vec![0u8; payload_len];
                             cache.insert(key, &payload, vec![input_hash]);
                         }
@@ -1141,7 +1161,7 @@ mod tests {
                             cache.invalidate_by_input(hash);
                         }
                         CacheOp::InvalidateByKey(key_id) => {
-                            let key = QueryKey::new("prop", key_id as u64);
+                            let key = QueryKey::new("prop", key_id as u64, Language::Python);
                             cache.invalidate(&key);
                         }
                         CacheOp::Clear => {
@@ -1162,7 +1182,7 @@ mod tests {
                 let cache = QueryCache::with_limits(500, 10_000_000);
 
                 for (key_id, payload_len) in inserts {
-                    let key = QueryKey::new("prop", key_id as u64);
+                    let key = QueryKey::new("prop", key_id as u64, Language::Python);
                     cache.insert(key, &vec![0u8; payload_len], vec![]);
                 }
 
@@ -1180,7 +1200,7 @@ mod tests {
                 sizes in prop::collection::vec(0..5000usize, 2..20)
             ) {
                 let cache = QueryCache::with_limits(500, 10_000_000);
-                let key = QueryKey::new("same", 42);
+                let key = QueryKey::new("same", 42, Language::Python);
 
                 for size in &sizes {
                     cache.insert(key.clone(), &vec![0u8; *size], vec![]);

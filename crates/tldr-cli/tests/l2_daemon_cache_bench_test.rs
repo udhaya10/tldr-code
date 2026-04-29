@@ -24,6 +24,7 @@ use std::time::Instant;
 use tempfile::tempdir;
 
 use tldr_cli::commands::daemon::salsa::{hash_args, hash_path, QueryCache, QueryKey};
+use tldr_core::Language;
 
 // =============================================================================
 // Simulated L2 Data Structures
@@ -257,7 +258,7 @@ fn bench_cold_query_latency_cache_miss() {
 
     // Measure 1000 cache misses
     for i in 0..1000 {
-        let key = QueryKey::new("calls", hash_args(&("project", i)));
+        let key = QueryKey::new("calls", hash_args(&("project", i)), Language::Python);
         let start = Instant::now();
         let result: Option<ProjectCallGraph> = cache.get(&key);
         let elapsed = start.elapsed();
@@ -292,7 +293,7 @@ fn bench_warm_query_latency_small_payload() {
 
     // Pre-populate with small data (single function CFG)
     let cfg = generate_function_cfg("src/lib.rs", "main", 8);
-    let key = QueryKey::new("cfg", hash_args(&("src/lib.rs", "main")));
+    let key = QueryKey::new("cfg", hash_args(&("src/lib.rs", "main")), Language::Python);
     let input_hash = hash_path(Path::new("src/lib.rs"));
     cache.insert(key.clone(), &cfg, vec![input_hash]);
 
@@ -337,7 +338,7 @@ fn bench_call_graph_cache_large_payload() {
 
     // Generate a realistic project call graph (~245 files, ~10 edges each = 2450 edges)
     let call_graph = generate_project_call_graph(245, 10);
-    let key = QueryKey::new("calls", hash_args(&("project_root",)));
+    let key = QueryKey::new("calls", hash_args(&("project_root",)), Language::Python);
     let input_hashes: Vec<u64> = call_graph
         .files
         .iter()
@@ -412,7 +413,7 @@ fn bench_per_function_ir_cache_50_functions() {
         // CFG with 8-15 blocks
         let num_blocks = 8 + (i % 8);
         let cfg = generate_function_cfg(&file, &func, num_blocks);
-        let cfg_key = QueryKey::new("cfg", hash_args(&(&file, &func)));
+        let cfg_key = QueryKey::new("cfg", hash_args(&(&file, &func)), Language::Python);
         total_cfg_bytes += serde_json::to_vec(&cfg).unwrap().len();
         cache.insert(cfg_key.clone(), &cfg, vec![input_hash]);
         cfg_keys.push(cfg_key);
@@ -420,7 +421,7 @@ fn bench_per_function_ir_cache_50_functions() {
         // DFG with 10-20 facts
         let num_facts = 10 + (i % 11);
         let dfg = generate_function_dfg(&file, &func, num_facts);
-        let dfg_key = QueryKey::new("dfg", hash_args(&(&file, &func)));
+        let dfg_key = QueryKey::new("dfg", hash_args(&(&file, &func)), Language::Python);
         total_dfg_bytes += serde_json::to_vec(&dfg).unwrap().len();
         cache.insert(dfg_key.clone(), &dfg, vec![input_hash]);
         dfg_keys.push(dfg_key);
@@ -508,14 +509,14 @@ fn bench_memory_footprint_50_functions() {
         let cfg = generate_function_cfg(&file, &func, 12);
         let cfg_bytes = serde_json::to_vec(&cfg).unwrap();
         total_serialized_bytes += cfg_bytes.len();
-        let cfg_key = QueryKey::new("cfg", hash_args(&(&file, &func)));
+        let cfg_key = QueryKey::new("cfg", hash_args(&(&file, &func)), Language::Python);
         cache.insert(cfg_key, &cfg, vec![input_hash]);
 
         // DFG
         let dfg = generate_function_dfg(&file, &func, 15);
         let dfg_bytes = serde_json::to_vec(&dfg).unwrap();
         total_serialized_bytes += dfg_bytes.len();
-        let dfg_key = QueryKey::new("dfg", hash_args(&(&file, &func)));
+        let dfg_key = QueryKey::new("dfg", hash_args(&(&file, &func)), Language::Python);
         cache.insert(dfg_key, &dfg, vec![input_hash]);
     }
 
@@ -574,7 +575,7 @@ fn bench_dirty_file_invalidation_speed() {
         file_hashes.push(file_hash);
 
         for query_type in &["cfg", "dfg", "structure"] {
-            let key = QueryKey::new(*query_type, hash_args(&(&file, query_type)));
+            let key = QueryKey::new(*query_type, hash_args(&(&file, query_type)), Language::Python);
             cache.insert(key, &format!("data_{}_{}", i, query_type), vec![file_hash]);
         }
     }
@@ -590,7 +591,7 @@ fn bench_dirty_file_invalidation_speed() {
         // Re-populate entries for this file
         let file = format!("src/file_{}.rs", i);
         for query_type in &["cfg", "dfg", "structure"] {
-            let key = QueryKey::new(*query_type, hash_args(&(&file, query_type)));
+            let key = QueryKey::new(*query_type, hash_args(&(&file, query_type)), Language::Python);
             cache.insert(key, &format!("data_{}_{}", i, query_type), vec![file_hash]);
         }
 
@@ -613,7 +614,7 @@ fn bench_dirty_file_invalidation_speed() {
     for (i, &file_hash) in file_hashes.iter().enumerate().take(100) {
         let file = format!("src/file_{}.rs", i);
         for query_type in &["cfg", "dfg", "structure"] {
-            let key = QueryKey::new(*query_type, hash_args(&(&file, query_type)));
+            let key = QueryKey::new(*query_type, hash_args(&(&file, query_type)), Language::Python);
             cache.insert(key, &format!("data_{}_{}", i, query_type), vec![file_hash]);
         }
     }
@@ -658,17 +659,17 @@ fn bench_persistence_round_trip() {
         let input_hash = hash_path(Path::new(&file));
 
         let cfg = generate_function_cfg(&file, &func, 12);
-        let cfg_key = QueryKey::new("cfg", hash_args(&(&file, &func)));
+        let cfg_key = QueryKey::new("cfg", hash_args(&(&file, &func)), Language::Python);
         cache.insert(cfg_key, &cfg, vec![input_hash]);
 
         let dfg = generate_function_dfg(&file, &func, 15);
-        let dfg_key = QueryKey::new("dfg", hash_args(&(&file, &func)));
+        let dfg_key = QueryKey::new("dfg", hash_args(&(&file, &func)), Language::Python);
         cache.insert(dfg_key, &dfg, vec![input_hash]);
     }
 
     // Also add a call graph
     let call_graph = generate_project_call_graph(50, 5);
-    let cg_key = QueryKey::new("calls", hash_args(&("project",)));
+    let cg_key = QueryKey::new("calls", hash_args(&("project",)), Language::Python);
     cache.insert(cg_key.clone(), &call_graph, vec![]);
 
     let total_entries = cache.len();
@@ -737,7 +738,7 @@ fn bench_concurrent_access_latency() {
 
     // Pre-populate with 100 entries
     for i in 0..100 {
-        let key = QueryKey::new("cfg", hash_args(&(i,)));
+        let key = QueryKey::new("cfg", hash_args(&(i,)), Language::Python);
         let cfg = generate_function_cfg(&format!("file_{}.rs", i), &format!("func_{}", i), 10);
         cache.insert(key, &cfg, vec![]);
     }
@@ -756,7 +757,7 @@ fn bench_concurrent_access_latency() {
             let mut stats = TimingStats::new();
             for i in 0..reads_per_thread {
                 let key_idx = (thread_id * reads_per_thread + i) % 100;
-                let key = QueryKey::new("cfg", hash_args(&(key_idx,)));
+                let key = QueryKey::new("cfg", hash_args(&(key_idx,)), Language::Python);
                 let start = Instant::now();
                 let _result: Option<FunctionCfg> = cache_clone.get(&key);
                 let elapsed = start.elapsed();
@@ -773,7 +774,7 @@ fn bench_concurrent_access_latency() {
         let handle = std::thread::spawn(move || {
             let mut stats = TimingStats::new();
             for i in 0..writes_per_thread {
-                let key = QueryKey::new("cfg", hash_args(&(100 + i,)));
+                let key = QueryKey::new("cfg", hash_args(&(100 + i,)), Language::Python);
                 let cfg = generate_function_cfg(
                     &format!("new_file_{}.rs", i),
                     &format!("new_func_{}", i),
@@ -824,7 +825,7 @@ fn bench_l2_query_type_coverage() {
 
     // 1. Call graph (project-level)
     let cg = generate_project_call_graph(10, 5);
-    let cg_key = QueryKey::new("calls", hash_args(&("project",)));
+    let cg_key = QueryKey::new("calls", hash_args(&("project",)), Language::Python);
     cache.insert(cg_key.clone(), &cg, vec![]);
     let result: Option<ProjectCallGraph> = cache.get(&cg_key);
     assert!(result.is_some(), "calls query type: SUPPORTED");
@@ -832,7 +833,7 @@ fn bench_l2_query_type_coverage() {
 
     // 2. CFG per function
     let cfg = generate_function_cfg("test.rs", "main", 10);
-    let cfg_key = QueryKey::new("cfg", hash_args(&("test.rs", "main")));
+    let cfg_key = QueryKey::new("cfg", hash_args(&("test.rs", "main")), Language::Python);
     cache.insert(cfg_key.clone(), &cfg, vec![]);
     let result: Option<FunctionCfg> = cache.get(&cfg_key);
     assert!(result.is_some(), "cfg query type: SUPPORTED");
@@ -840,7 +841,7 @@ fn bench_l2_query_type_coverage() {
 
     // 3. DFG per function
     let dfg = generate_function_dfg("test.rs", "main", 15);
-    let dfg_key = QueryKey::new("dfg", hash_args(&("test.rs", "main")));
+    let dfg_key = QueryKey::new("dfg", hash_args(&("test.rs", "main")), Language::Python);
     cache.insert(dfg_key.clone(), &dfg, vec![]);
     let result: Option<FunctionDfg> = cache.get(&dfg_key);
     assert!(result.is_some(), "dfg query type: SUPPORTED");
@@ -855,7 +856,7 @@ fn bench_l2_query_type_coverage() {
         );
         m
     };
-    let impact_key = QueryKey::new("impact", hash_args(&("target_func", 2)));
+    let impact_key = QueryKey::new("impact", hash_args(&("target_func", 2)), Language::Python);
     cache.insert(impact_key.clone(), &impact_data, vec![]);
     let result: Option<HashMap<String, Vec<String>>> = cache.get(&impact_key);
     assert!(result.is_some(), "impact query type: SUPPORTED");
@@ -863,7 +864,7 @@ fn bench_l2_query_type_coverage() {
 
     // 5. Dead code analysis
     let dead_funcs: Vec<String> = vec!["unused_func_1".to_string(), "unused_func_2".to_string()];
-    let dead_key = QueryKey::new("dead", hash_args(&("project",)));
+    let dead_key = QueryKey::new("dead", hash_args(&("project",)), Language::Python);
     cache.insert(dead_key.clone(), &dead_funcs, vec![]);
     let result: Option<Vec<String>> = cache.get(&dead_key);
     assert!(result.is_some(), "dead query type: SUPPORTED");
@@ -871,7 +872,7 @@ fn bench_l2_query_type_coverage() {
 
     // 6. Program slice
     let slice_data: Vec<usize> = vec![1, 5, 12, 18, 25]; // affected line numbers
-    let slice_key = QueryKey::new("slice", hash_args(&("test.rs", "main", 25)));
+    let slice_key = QueryKey::new("slice", hash_args(&("test.rs", "main", 25)), Language::Python);
     cache.insert(slice_key.clone(), &slice_data, vec![]);
     let result: Option<Vec<usize>> = cache.get(&slice_key);
     assert!(result.is_some(), "slice query type: SUPPORTED");
@@ -883,7 +884,7 @@ fn bench_l2_query_type_coverage() {
         "classes": [],
         "imports": ["std::io"]
     });
-    let struct_key = QueryKey::new("structure", hash_args(&("test.rs",)));
+    let struct_key = QueryKey::new("structure", hash_args(&("test.rs",)), Language::Python);
     cache.insert(struct_key.clone(), &structure_data, vec![]);
     let result: Option<serde_json::Value> = cache.get(&struct_key);
     assert!(result.is_some(), "structure query type: SUPPORTED");
@@ -916,11 +917,11 @@ fn bench_invalidation_cascade_correctness() {
     for i in 0..3 {
         let func = format!("func_a_{}", i);
         let cfg = generate_function_cfg(file_a, &func, 8);
-        let cfg_key = QueryKey::new("cfg", hash_args(&(file_a, &func)));
+        let cfg_key = QueryKey::new("cfg", hash_args(&(file_a, &func)), Language::Python);
         cache.insert(cfg_key, &cfg, vec![hash_a]);
 
         let dfg = generate_function_dfg(file_a, &func, 10);
-        let dfg_key = QueryKey::new("dfg", hash_args(&(file_a, &func)));
+        let dfg_key = QueryKey::new("dfg", hash_args(&(file_a, &func)), Language::Python);
         cache.insert(dfg_key, &dfg, vec![hash_a]);
     }
 
@@ -928,17 +929,17 @@ fn bench_invalidation_cascade_correctness() {
     for i in 0..3 {
         let func = format!("func_b_{}", i);
         let cfg = generate_function_cfg(file_b, &func, 8);
-        let cfg_key = QueryKey::new("cfg", hash_args(&(file_b, &func)));
+        let cfg_key = QueryKey::new("cfg", hash_args(&(file_b, &func)), Language::Python);
         cache.insert(cfg_key, &cfg, vec![hash_b]);
 
         let dfg = generate_function_dfg(file_b, &func, 10);
-        let dfg_key = QueryKey::new("dfg", hash_args(&(file_b, &func)));
+        let dfg_key = QueryKey::new("dfg", hash_args(&(file_b, &func)), Language::Python);
         cache.insert(dfg_key, &dfg, vec![hash_b]);
     }
 
     // Call graph depends on both files
     let cg = generate_project_call_graph(10, 3);
-    let cg_key = QueryKey::new("calls", hash_args(&("project",)));
+    let cg_key = QueryKey::new("calls", hash_args(&("project",)), Language::Python);
     cache.insert(cg_key.clone(), &cg, vec![hash_a, hash_b]);
 
     assert_eq!(cache.len(), 13); // 6 (A) + 6 (B) + 1 (CG)
@@ -968,7 +969,7 @@ fn bench_invalidation_cascade_correctness() {
     // File B entries should still be accessible
     for i in 0..3 {
         let func = format!("func_b_{}", i);
-        let cfg_key = QueryKey::new("cfg", hash_args(&(file_b, &func)));
+        let cfg_key = QueryKey::new("cfg", hash_args(&(file_b, &func)), Language::Python);
         let result: Option<FunctionCfg> = cache.get(&cfg_key);
         assert!(
             result.is_some(),
@@ -1006,14 +1007,14 @@ fn bench_full_project_scale_245_files() {
             let cfg = generate_function_cfg(&file, &func, 10);
             let cfg_bytes = serde_json::to_vec(&cfg).unwrap();
             total_bytes += cfg_bytes.len();
-            let cfg_key = QueryKey::new("cfg", hash_args(&(&file, &func)));
+            let cfg_key = QueryKey::new("cfg", hash_args(&(&file, &func)), Language::Python);
             cache.insert(cfg_key, &cfg, vec![file_hash]);
 
             // DFG
             let dfg = generate_function_dfg(&file, &func, 12);
             let dfg_bytes = serde_json::to_vec(&dfg).unwrap();
             total_bytes += dfg_bytes.len();
-            let dfg_key = QueryKey::new("dfg", hash_args(&(&file, &func)));
+            let dfg_key = QueryKey::new("dfg", hash_args(&(&file, &func)), Language::Python);
             cache.insert(dfg_key, &dfg, vec![file_hash]);
         }
     }
@@ -1022,7 +1023,7 @@ fn bench_full_project_scale_245_files() {
     let cg = generate_project_call_graph(num_files, 8);
     let cg_bytes = serde_json::to_vec(&cg).unwrap();
     total_bytes += cg_bytes.len();
-    let cg_key = QueryKey::new("calls", hash_args(&("project",)));
+    let cg_key = QueryKey::new("calls", hash_args(&("project",)), Language::Python);
     cache.insert(cg_key.clone(), &cg, vec![]);
 
     let populate_elapsed = populate_start.elapsed();
@@ -1056,7 +1057,7 @@ fn bench_full_project_scale_245_files() {
         let func_idx = i % funcs_per_file;
         let file = format!("src/crate/module_{}/file_{}.rs", file_idx / 20, file_idx);
         let func = format!("func_{}_{}", file_idx, func_idx);
-        let cfg_key = QueryKey::new("cfg", hash_args(&(&file, &func)));
+        let cfg_key = QueryKey::new("cfg", hash_args(&(&file, &func)), Language::Python);
 
         let start = Instant::now();
         let result: Option<FunctionCfg> = cache.get(&cfg_key);
@@ -1111,8 +1112,8 @@ fn bench_cache_key_collision_safety() {
     let dfg = generate_function_dfg(file, func, 15);
 
     // Keys use different query_name, so they should not collide
-    let cfg_key = QueryKey::new("cfg", hash_args(&(file, func)));
-    let dfg_key = QueryKey::new("dfg", hash_args(&(file, func)));
+    let cfg_key = QueryKey::new("cfg", hash_args(&(file, func)), Language::Python);
+    let dfg_key = QueryKey::new("dfg", hash_args(&(file, func)), Language::Python);
 
     cache.insert(cfg_key.clone(), &cfg, vec![]);
     cache.insert(dfg_key.clone(), &dfg, vec![]);
