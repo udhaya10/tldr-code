@@ -2116,6 +2116,33 @@ static TYPESCRIPT_AST_SINKS: &[AstSinkPattern] = &[
         member_patterns: &[("*", "query"), ("*", "execute")],
         sink_type: TaintSinkType::SqlQuery,
     },
+    // W1-M1: NextJS framework sinks (parity-add for Wave 2 regex deletion).
+    // NextResponse.redirect / .json — App Router response helpers.
+    AstSinkPattern {
+        call_names: &[],
+        member_patterns: &[
+            ("NextResponse", "redirect"),
+            ("NextResponse", "json"),
+            ("Response", "redirect"),
+        ],
+        sink_type: TaintSinkType::FileWrite,
+    },
+    // Bare `redirect(...)` server-action helper from `next/navigation` —
+    // call_expression with no receiver. Raw-fallback (empty receiver) entry
+    // matches via the substring path on the call_expression's text.
+    AstSinkPattern {
+        call_names: &[],
+        member_patterns: &[("", "redirect")],
+        sink_type: TaintSinkType::FileWrite,
+    },
+    // JSX `dangerouslySetInnerHTML={{ __html: tainted }}` — attribute
+    // identifier is a jsx_attribute, not a member-access. Raw-fallback entry
+    // catches the attribute name on the line via substring path.
+    AstSinkPattern {
+        call_names: &[],
+        member_patterns: &[("", "dangerouslySetInnerHTML")],
+        sink_type: TaintSinkType::FileWrite,
+    },
 ];
 
 static TYPESCRIPT_AST_SANITIZERS: &[AstSanitizerPattern] = &[
