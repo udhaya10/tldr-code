@@ -8,8 +8,10 @@
 //!
 //! Helper shape mirrored from
 //! `val002_member_access_structural_test.rs::analyze` /
-//! `analyze_with_ssa`. Future W1 milestones (M2, M3, M5) append their tests
-//! here.
+//! `analyze_with_ssa`. As of W1.5-M6 the `analyze` / `analyze_with_ssa` /
+//! `assert_source_to_eval_flow` helpers live in
+//! `tests/common/integ_helpers.rs` and are shared by every Wave-1.5+
+//! integration test file (framework / stdlib / per-language baseline).
 //!
 //! Milestone scope:
 //! * W1-M1 — NextJS sink AST entries (this file's first 4 tests).
@@ -21,49 +23,15 @@
 //!   raw-fallbacks for nextUrl/headers()/cookies() + 9 NestJS decorator
 //!   raw-fallbacks). Source-side parity-add — exercises the full
 //!   source→sink flow path through `compute_taint_with_tree`.
+//! * W1.5-M6 — refactor only: helpers moved to `common/integ_helpers.rs`;
+//!   the 18 tests below are unchanged.
 
-use std::collections::HashMap;
-
-use tldr_core::ast::parser::parse;
-use tldr_core::cfg::get_cfg_context;
-use tldr_core::dfg::get_dfg_context;
-use tldr_core::security::taint::compute_taint_with_tree;
-use tldr_core::ssa::construct::construct_minimal_ssa;
 use tldr_core::{Language, TaintInfo, TaintSinkType, TaintSourceType};
 
-fn statements_from(src: &str) -> HashMap<u32, String> {
-    src.lines()
-        .enumerate()
-        .map(|(i, text)| ((i + 1) as u32, text.to_string()))
-        .collect()
-}
+#[path = "common/integ_helpers.rs"]
+mod common;
 
-#[allow(dead_code)]
-fn analyze(src: &str, lang: Language, fn_name: &str) -> TaintInfo {
-    analyze_with_ssa(src, lang, fn_name, /* use_ssa */ true)
-}
-
-fn analyze_with_ssa(src: &str, lang: Language, fn_name: &str, use_ssa: bool) -> TaintInfo {
-    let cfg = get_cfg_context(src, fn_name, lang).expect("CFG must succeed");
-    let dfg = get_dfg_context(src, fn_name, lang).expect("DFG must succeed");
-    let ssa = if use_ssa {
-        construct_minimal_ssa(&cfg, &dfg).ok()
-    } else {
-        None
-    };
-    let tree = parse(src, lang).expect("parse must succeed");
-
-    compute_taint_with_tree(
-        &cfg,
-        &dfg.refs,
-        &statements_from(src),
-        Some(&tree),
-        Some(src.as_bytes()),
-        lang,
-        ssa.as_ref(),
-    )
-    .expect("taint analysis must succeed")
-}
+use common::{analyze_with_ssa, assert_source_to_eval_flow as common_assert_source_to_eval_flow};
 
 // ---------- W1-M1: NextJS sinks ----------
 
@@ -389,33 +357,12 @@ async function handler(req, Response) {
 // active), pre-add capture is expected to be GREEN — the milestone closes
 // the parity gap so Wave 2's atomic deletion does not regress these flows.
 
-/// Helper: assert at least one source of the given type, at least one
-/// `CodeEval` sink, and at least one source→sink flow.
+/// Wave 1 source→eval flow assertion. Delegates to `common::
+/// assert_source_to_eval_flow` so all integration tests share one
+/// implementation; W1-M5's commit message documented this helper, and
+/// W1.5-M6 promotes it to the shared module.
 fn assert_source_to_eval_flow(result: &TaintInfo, expected_source: TaintSourceType) {
-    let source_match = result
-        .sources
-        .iter()
-        .any(|s| s.source_type == expected_source);
-    assert!(
-        source_match,
-        "expected at least one {:?} source; got sources={:?}",
-        expected_source, result.sources
-    );
-    let eval_sinks: Vec<_> = result
-        .sinks
-        .iter()
-        .filter(|s| matches!(s.sink_type, TaintSinkType::CodeEval))
-        .collect();
-    assert!(
-        !eval_sinks.is_empty(),
-        "expected at least one CodeEval sink; got sinks={:?}",
-        result.sinks
-    );
-    assert!(
-        !result.flows.is_empty(),
-        "expected at least one source->sink flow; got flows={:?}",
-        result.flows
-    );
+    common_assert_source_to_eval_flow(result, expected_source);
 }
 
 /// W1-M5 #1 — App Router `request.json()` (HttpBody) flowing into `eval`.

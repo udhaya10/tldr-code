@@ -8,55 +8,25 @@
 //!
 //! Helper shape mirrored from
 //! `val002_member_access_structural_test.rs::analyze` /
-//! `analyze_with_ssa` (same shape as `rr_framework_integ_test.rs`).
+//! `analyze_with_ssa`. As of W1.5-M6 the helpers live in
+//! `tests/common/integ_helpers.rs` and are shared by all Wave-1.5+
+//! integration tests.
 //!
 //! Milestone scope:
 //! * W1-M4 — Python `os.spawn*` family AST sinks (this file's first 6 tests).
-//! * W1.5-M6 — Ruby `IO.popen` + Elixir `System.cmd` module-call coverage
-//!   (will append 2 more tests below).
+//! * W1.5-M6 — Ruby `IO.popen` + Elixir `System.cmd` module-call partial-
+//!   coverage probes (the 2 tests appended below). Both are documented as
+//!   PARTIAL per worker-2-integ-tests.json: they currently pass via the
+//!   regex bank (Ruby/Elixir are HOLD languages whose substring fallback
+//!   stays through Wave 2). Wave 2 deletion does NOT remove the Ruby/
+//!   Elixir regex banks, so these tests continue to pass post-deletion.
 
-use std::collections::HashMap;
+use tldr_core::{Language, TaintSinkType};
 
-use tldr_core::ast::parser::parse;
-use tldr_core::cfg::get_cfg_context;
-use tldr_core::dfg::get_dfg_context;
-use tldr_core::security::taint::compute_taint_with_tree;
-use tldr_core::ssa::construct::construct_minimal_ssa;
-use tldr_core::{Language, TaintInfo, TaintSinkType};
+#[path = "common/integ_helpers.rs"]
+mod common;
 
-fn statements_from(src: &str) -> HashMap<u32, String> {
-    src.lines()
-        .enumerate()
-        .map(|(i, text)| ((i + 1) as u32, text.to_string()))
-        .collect()
-}
-
-#[allow(dead_code)]
-fn analyze(src: &str, lang: Language, fn_name: &str) -> TaintInfo {
-    analyze_with_ssa(src, lang, fn_name, /* use_ssa */ true)
-}
-
-fn analyze_with_ssa(src: &str, lang: Language, fn_name: &str, use_ssa: bool) -> TaintInfo {
-    let cfg = get_cfg_context(src, fn_name, lang).expect("CFG must succeed");
-    let dfg = get_dfg_context(src, fn_name, lang).expect("DFG must succeed");
-    let ssa = if use_ssa {
-        construct_minimal_ssa(&cfg, &dfg).ok()
-    } else {
-        None
-    };
-    let tree = parse(src, lang).expect("parse must succeed");
-
-    compute_taint_with_tree(
-        &cfg,
-        &dfg.refs,
-        &statements_from(src),
-        Some(&tree),
-        Some(src.as_bytes()),
-        lang,
-        ssa.as_ref(),
-    )
-    .expect("taint analysis must succeed")
-}
+use common::analyze_with_ssa;
 
 // ---------- W1-M4: Python os.spawn* family sinks ----------
 
@@ -199,6 +169,74 @@ def handler():
     assert!(
         !sink_lines.is_empty(),
         "expected at least one ShellExec sink for os.spawnvpe; got sinks={:?}",
+        result.sinks
+    );
+}
+
+// ---------- W1.5-M6: Ruby + Elixir module-call partial-coverage probes ----------
+
+/// W1.5-M6 #1 — Ruby `IO.popen(cmd)` where `cmd` came from `gets`. Module-
+/// method-call form (qualified receiver = constant module name).
+///
+/// Per worker-2-integ-tests.json (B-#7): Ruby `field_access_info` covers
+/// only `@ivar` (instance_variable nodes), NOT module calls. The flow can
+/// land via either (a) `extract_call_name_ruby` returning the qualified
+/// `'IO.popen'` form so that `RUBY_AST_SINKS` call_names matches, or
+/// (b) the substring fallback in the retained Ruby regex bank (Ruby is a
+/// HOLD language; its regex bank STAYS through Wave 2).
+///
+/// In additive dispatch (Wave 1.5) at least one of those paths fires —
+/// the test is GREEN. Post-Wave-2 the Ruby regex bank is preserved
+/// verbatim, so this test stays GREEN even after the TS/Python regex
+/// banks are deleted.
+#[test]
+fn ruby_io_popen_module_call_via_compute_taint() {
+    let src = "\
+def handler
+    cmd = gets
+    IO.popen(cmd)
+end
+";
+    let result = analyze_with_ssa(src, Language::Ruby, "handler", /* use_ssa */ false);
+    let sink_lines: Vec<_> = result
+        .sinks
+        .iter()
+        .filter(|s| matches!(s.sink_type, TaintSinkType::ShellExec))
+        .map(|s| s.line)
+        .collect();
+    assert!(
+        !sink_lines.is_empty(),
+        "expected at least one ShellExec sink for IO.popen; got sinks={:?}",
+        result.sinks
+    );
+}
+
+/// W1.5-M6 #2 — Elixir `System.cmd(cmd, [])` where `cmd` came from
+/// `IO.gets`. Module-method-call form mirroring the Ruby probe.
+///
+/// Per worker-2-integ-tests.json (B-#8): Elixir `field_access_info`
+/// covers only `@attr` unary_operator nodes; module calls go through the
+/// call_names path or the substring fallback in the retained Elixir
+/// regex bank (also a HOLD language). Wave 2 preserves the Elixir regex
+/// bank, so this probe stays GREEN through deletion.
+#[test]
+fn elixir_system_cmd_module_call_via_compute_taint() {
+    let src = "\
+def handler do
+  cmd = IO.gets(\"$ \")
+  System.cmd(cmd, [])
+end
+";
+    let result = analyze_with_ssa(src, Language::Elixir, "handler", /* use_ssa */ false);
+    let sink_lines: Vec<_> = result
+        .sinks
+        .iter()
+        .filter(|s| matches!(s.sink_type, TaintSinkType::ShellExec))
+        .map(|s| s.line)
+        .collect();
+    assert!(
+        !sink_lines.is_empty(),
+        "expected at least one ShellExec sink for System.cmd; got sinks={:?}",
         result.sinks
     );
 }
