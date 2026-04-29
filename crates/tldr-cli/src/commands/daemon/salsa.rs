@@ -29,7 +29,7 @@ use dashmap::DashMap;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use tldr_core::Language;
 
-use super::error::{DaemonError, DaemonResult};
+use super::error::DaemonResult;
 use super::types::SalsaCacheStats;
 
 // =============================================================================
@@ -45,8 +45,23 @@ pub const DEFAULT_MAX_BYTES: usize = 512 * 1024 * 1024;
 /// Magic bytes for cache file validation
 const CACHE_MAGIC: &[u8; 4] = b"TLDR";
 
-/// Cache file version
+/// Cache file version (header byte — distinct from `CACHE_SCHEMA_VERSION`,
+/// which versions the JSON payload). Bumping this byte is reserved for
+/// changes to the binary framing (magic / checksum layout / header order).
 const CACHE_VERSION: u8 = 1;
+
+/// Schema version for the JSON payload (`CacheFileData`).
+///
+/// v031-cluster-M3b: introduced alongside M3a's `language` field on
+/// `QueryKey`. Bumped from the implicit v1 to v2 because pre-v0.3.1
+/// caches lack the `language` field and cannot deserialize cleanly.
+///
+/// **Bumping policy:** increment whenever the JSON wire shape of
+/// `CacheFileData`, `QueryKey`, or `CacheEntry` changes in a way that
+/// would make older payloads fail to deserialize cleanly. Loading a
+/// payload with a mismatched `schema_version` triggers graceful-discard
+/// in `QueryCache::load_from_file`.
+pub const CACHE_SCHEMA_VERSION: u32 = 2;
 
 // =============================================================================
 // Core Types
@@ -394,6 +409,9 @@ impl QueryCache {
         let revision = self.revision();
 
         let cache_data = CacheFileData {
+            // v031-cluster-M3b: stamp the current schema version so future
+            // loaders can graceful-discard mismatched payloads.
+            schema_version: CACHE_SCHEMA_VERSION,
             entries,
             dependents,
             stats,
@@ -426,49 +444,92 @@ impl QueryCache {
         Ok(())
     }
 
-    /// Load cache from a file with checksum validation
+    /// Load cache from a file with checksum and schema-version validation.
+    ///
+    /// **v031-cluster-M3b graceful-discard contract:** any failure mode
+    /// — file-system error after open succeeds, bad magic, unsupported
+    /// header version, checksum mismatch, JSON parse failure, or stale
+    /// `schema_version` — is treated as a corrupt/legacy cache. The
+    /// offending file is removed and a fresh empty `QueryCache` is
+    /// returned. This is the load-bearing fix for users upgrading from
+    /// v0.3.0 to v0.3.1: pre-v0.3.1 caches lack the `language` field on
+    /// `QueryKey` (M3a) and would otherwise crash the daemon on every
+    /// startup. Only a missing file (the path doesn't exist or can't be
+    /// opened) is propagated as a real error to the caller.
     pub fn load_from_file(path: &Path) -> DaemonResult<Self> {
         let file = File::open(path)?;
+        match Self::try_load_payload(&file) {
+            Ok(cache_data) if cache_data.schema_version == CACHE_SCHEMA_VERSION => {
+                Ok(Self::from_cache_data(cache_data))
+            }
+            Ok(stale) => {
+                eprintln!(
+                    "tldr-cli: cache schema mismatch on {} (found schema_version={}, expected {}); discarding and starting fresh",
+                    path.display(),
+                    stale.schema_version,
+                    CACHE_SCHEMA_VERSION,
+                );
+                let _ = fs::remove_file(path);
+                Ok(Self::with_defaults())
+            }
+            Err(reason) => {
+                eprintln!(
+                    "tldr-cli: cache file at {} could not be loaded ({}); discarding and starting fresh",
+                    path.display(),
+                    reason,
+                );
+                let _ = fs::remove_file(path);
+                Ok(Self::with_defaults())
+            }
+        }
+    }
+
+    /// Internal: parse the on-disk format into a `CacheFileData`. Returns
+    /// `Err(reason)` on any validation/parse failure so the caller can
+    /// route to graceful-discard. Reasons are humane strings (no
+    /// `DaemonError`) — they only feed the warning log.
+    fn try_load_payload(file: &File) -> Result<CacheFileData, String> {
         let mut reader = BufReader::new(file);
 
-        // Read and validate header
         let mut magic = [0u8; 4];
-        reader.read_exact(&mut magic)?;
+        reader
+            .read_exact(&mut magic)
+            .map_err(|e| format!("read magic: {}", e))?;
         if &magic != CACHE_MAGIC {
-            return Err(DaemonError::InvalidMessage(
-                "invalid cache file magic".to_string(),
-            ));
+            return Err("invalid cache file magic".to_string());
         }
 
         let mut version = [0u8; 1];
-        reader.read_exact(&mut version)?;
+        reader
+            .read_exact(&mut version)
+            .map_err(|e| format!("read version: {}", e))?;
         if version[0] != CACHE_VERSION {
-            return Err(DaemonError::InvalidMessage(format!(
-                "unsupported cache version: {}",
-                version[0]
-            )));
+            return Err(format!("unsupported cache header version: {}", version[0]));
         }
 
         let mut checksum_bytes = [0u8; 8];
-        reader.read_exact(&mut checksum_bytes)?;
+        reader
+            .read_exact(&mut checksum_bytes)
+            .map_err(|e| format!("read checksum: {}", e))?;
         let stored_checksum = u64::from_le_bytes(checksum_bytes);
 
-        // Read remaining data
         let mut data = Vec::new();
-        reader.read_to_end(&mut data)?;
+        reader
+            .read_to_end(&mut data)
+            .map_err(|e| format!("read payload: {}", e))?;
 
-        // Validate checksum
         let actual_checksum = calculate_checksum(&data);
         if stored_checksum != actual_checksum {
-            return Err(DaemonError::InvalidMessage(
-                "cache file checksum mismatch".to_string(),
-            ));
+            return Err("cache file checksum mismatch".to_string());
         }
 
-        // Deserialize
-        let cache_data: CacheFileData = serde_json::from_slice(&data)?;
+        serde_json::from_slice::<CacheFileData>(&data)
+            .map_err(|e| format!("deserialize payload: {}", e))
+    }
 
-        // Reconstruct cache
+    /// Internal: rebuild a populated `QueryCache` from a validated
+    /// `CacheFileData` payload.
+    fn from_cache_data(cache_data: CacheFileData) -> Self {
         let cache = Self::with_defaults();
 
         let mut total_bytes: u64 = 0;
@@ -488,7 +549,7 @@ impl QueryCache {
             *stats = cache_data.stats;
         }
 
-        Ok(cache)
+        cache
     }
 }
 
@@ -502,13 +563,31 @@ impl Default for QueryCache {
 // Helper Types
 // =============================================================================
 
-/// Serializable cache file data
-#[derive(Serialize, Deserialize)]
-struct CacheFileData {
-    entries: Vec<(QueryKey, CacheEntry)>,
-    dependents: Vec<(u64, Vec<QueryKey>)>,
-    stats: SalsaCacheStats,
-    revision: u64,
+/// Serializable cache file data.
+///
+/// **JSON wire format.** This struct is the on-disk JSON payload of the
+/// Salsa cache. The `schema_version` header field (v031-cluster-M3b) is
+/// checked on load: a mismatch triggers graceful-discard rather than a
+/// daemon-crashing deserialize error. See `CACHE_SCHEMA_VERSION` for the
+/// bumping policy.
+///
+/// Pre-v0.3.1 cache files lack both `schema_version` and `language` (on
+/// `QueryKey`) and therefore fail the version check (or fail to
+/// deserialize entirely) — both paths converge on graceful-discard.
+#[derive(Serialize, Deserialize, Default)]
+pub struct CacheFileData {
+    /// Schema version of this payload. Set to `CACHE_SCHEMA_VERSION` on save;
+    /// any other value on load triggers graceful-discard.
+    #[serde(default)]
+    pub schema_version: u32,
+    /// Cached query results.
+    pub entries: Vec<(QueryKey, CacheEntry)>,
+    /// Reverse-index of input-hash → dependent query keys.
+    pub dependents: Vec<(u64, Vec<QueryKey>)>,
+    /// Cache statistics at the time of save.
+    pub stats: SalsaCacheStats,
+    /// Global revision counter at the time of save.
+    pub revision: u64,
 }
 
 /// Calculate a checksum for data validation
@@ -743,9 +822,19 @@ mod tests {
         }
         fs::write(&cache_path, data).unwrap();
 
-        // Loading should fail due to checksum mismatch
-        let result = QueryCache::load_from_file(&cache_path);
-        assert!(result.is_err());
+        // v031-cluster-M3b: a corrupted cache no longer surfaces a hard
+        // error; the load path detects the checksum mismatch, removes the
+        // offending file, logs a warning, and returns a fresh empty
+        // cache. This is intentional — a daemon that panics every
+        // startup because a single byte flipped on disk is worse for
+        // users than a one-time cold-start cost.
+        let loaded = QueryCache::load_from_file(&cache_path)
+            .expect("checksum mismatch must be discarded gracefully");
+        assert_eq!(loaded.len(), 0, "discarded cache must be empty");
+        assert!(
+            !cache_path.exists(),
+            "corrupted cache file must be removed by graceful-discard path"
+        );
     }
 
     #[test]
