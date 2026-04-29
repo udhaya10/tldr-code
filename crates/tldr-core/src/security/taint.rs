@@ -2011,6 +2011,28 @@ static PYTHON_AST_SINKS: &[AstSinkPattern] = &[
         member_patterns: &[("os", "system"), ("os", "popen")],
         sink_type: TaintSinkType::ShellExec,
     },
+    // W1-M4: Python `os.spawn*` family sinks (parity-add for Wave 2 regex
+    // deletion). The legacy regex bank entry `os\.(system|popen|spawn\w*)\(`
+    // wildcards across 8 spawn variants; we wire them as explicit
+    // member_patterns so the AST path (call.member shape) recognizes them
+    // independently. Contract names 8 entries (covering every spawn variant
+    // listed in CPython `os` docs), but only 6 have direct named tests in
+    // `rr_stdlib_integ_test.rs`; the remaining two (`spawnle`, `spawnlpe`)
+    // are added for completeness/parity with the `\w*` regex glob.
+    AstSinkPattern {
+        call_names: &[],
+        member_patterns: &[
+            ("os", "spawnl"),
+            ("os", "spawnle"),
+            ("os", "spawnlp"),
+            ("os", "spawnlpe"),
+            ("os", "spawnv"),
+            ("os", "spawnve"),
+            ("os", "spawnvp"),
+            ("os", "spawnvpe"),
+        ],
+        sink_type: TaintSinkType::ShellExec,
+    },
     AstSinkPattern {
         call_names: &[],
         member_patterns: &[("*", "write")],
