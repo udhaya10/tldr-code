@@ -5,7 +5,7 @@
   "co_ship_group": "lang-threading-rewrite",
   "must_ship_with": ["v031-cluster-M2", "v031-cluster-M3b"],
   "head_before": "eef5b31",
-  "head_after_pending_commit": "<filled-after-commit>",
+  "head_after_pending_commit": "6a0efa4",
   "bloks_used": [],
 
   "scope_summary": {
@@ -53,8 +53,8 @@
     "salsa_lib_unit_tests": "PASS (32 passed, including 5 proptest invariants)",
     "workspace_build_all_features": "PASS",
     "clippy_workspace_all_features_tests_deny_warnings": "PASS",
-    "exhaustive_matrix_release_semantic": "<filled-after-bg-task>",
-    "language_command_matrix_release_semantic": "<filled-after-bg-task>",
+    "exhaustive_matrix_release_semantic": "PASS (730 passed, 0 failed, 51.46s)",
+    "language_command_matrix_release_semantic": "PASS (234 passed, 0 failed, 0.32s)",
     "l2_daemon_cache_bench_test_release": "PASS (12 tests, including bench_concurrent_access_latency under release-mode contention; debug-mode flake on perf threshold pre-existing and unrelated)"
   },
 
@@ -92,7 +92,7 @@
     ]
   },
 
-  "staging_audit": "<filled-after-commit>",
+  "staging_audit": "STAGING-OK — only continuum/autonomous/v031-quality-bundle/* directory touched among continuum tree; no Cargo.lock; 8 files staged exactly as declared; commit SHA 6a0efa4",
 
   "notes": [
     "Hard cap of <= 2 source files respected: only salsa.rs + daemon.rs in src/.",
