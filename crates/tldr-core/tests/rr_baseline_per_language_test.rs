@@ -497,3 +497,98 @@ let handler () =
         result.sinks
     );
 }
+
+// ---------- field_access_info-extension-v1 M1: per-language Module.function baselines ----------
+//
+// Three additive baseline tests covering the canonical Ruby/Elixir/OCaml
+// Module.function shape end-to-end via the regular `analyze_with_ssa` path
+// (regex banks active at HEAD; AST-only assertion lives in
+// `rr_module_function_integ_test.rs`). These are the "additive coverage"
+// proof — they MUST be GREEN at HEAD (regex bank covers them) and stay
+// GREEN through M5 (post-deletion the structured AST shape covers them).
+
+/// Ruby Module.function baseline: `gets` -> `IO.popen(cmd)`. ShellExec sink
+/// reached via `IO.popen` Module call. Mirrors the existing Ruby baseline
+/// at L280 but uses the `IO.popen` sink form instead of bare `system`, so
+/// the field_access_info-extension-v1 Module.function path participates in
+/// the per-language baseline matrix.
+#[test]
+fn ruby_module_function_io_popen_baseline() {
+    let src = "\
+def handler
+    cmd = gets
+    IO.popen(cmd)
+end
+";
+    let result = analyze_with_ssa(src, Language::Ruby, "handler", /* use_ssa */ false);
+    let sink_lines: Vec<_> = result
+        .sinks
+        .iter()
+        .filter(|s| matches!(s.sink_type, TaintSinkType::ShellExec))
+        .map(|s| s.line)
+        .collect();
+    assert!(
+        !sink_lines.is_empty(),
+        "expected at least one ShellExec sink for IO.popen; got sinks={:?}",
+        result.sinks
+    );
+}
+
+/// Elixir Module.function baseline: `IO.gets("> ")` -> `System.cmd(cmd, [])`.
+/// Module.function shape on BOTH source and sink — additive baseline.
+#[test]
+fn elixir_module_function_system_cmd_baseline() {
+    let src = "\
+def handler do
+  cmd = IO.gets(\"> \")
+  System.cmd(cmd, [])
+end
+";
+    let result = analyze_with_ssa(src, Language::Elixir, "handler", /* use_ssa */ false);
+    let sink_lines: Vec<_> = result
+        .sinks
+        .iter()
+        .filter(|s| matches!(s.sink_type, TaintSinkType::ShellExec))
+        .map(|s| s.line)
+        .collect();
+    assert!(
+        !sink_lines.is_empty(),
+        "expected at least one ShellExec sink for System.cmd; got sinks={:?}",
+        result.sinks
+    );
+}
+
+/// OCaml Module.function baseline: `Sys.getenv "CMD"` -> `Sys.command cmd`.
+/// EnvVar source via `Sys.getenv` Module call paired with ShellExec via
+/// `Sys.command` Module call.
+#[test]
+fn ocaml_module_function_sys_command_baseline() {
+    let src = "\
+let handler () =
+  let cmd = Sys.getenv \"CMD\" in
+  ignore (Sys.command cmd)
+";
+    let result = analyze_with_ssa(src, Language::Ocaml, "handler", /* use_ssa */ false);
+    let source_lines: Vec<_> = result
+        .sources
+        .iter()
+        .filter(|s| matches!(s.source_type, TaintSourceType::EnvVar))
+        .map(|s| s.line)
+        .collect();
+    let sink_lines: Vec<_> = result
+        .sinks
+        .iter()
+        .filter(|s| matches!(s.sink_type, TaintSinkType::ShellExec))
+        .map(|s| s.line)
+        .collect();
+    assert!(
+        !source_lines.is_empty(),
+        "expected at least one EnvVar source for Sys.getenv; got sources={:?}",
+        result.sources
+    );
+    assert!(
+        !sink_lines.is_empty(),
+        "expected at least one ShellExec sink for Sys.command; got sinks={:?}",
+        result.sinks
+    );
+}

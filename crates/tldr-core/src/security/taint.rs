@@ -21,12 +21,68 @@
 use lazy_static::lazy_static;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::ssa::types::{SsaFunction, SsaNameId};
 use crate::types::{CfgInfo, RefType, VarRef};
 use crate::Language;
 use crate::TldrError;
+
+thread_local! {
+    /// Test-only thread-local switch that, when set to `true`, makes
+    /// `detect_sources` and `detect_sinks` return empty vectors regardless of
+    /// the regex bank's `.sources` / `.sinks` contents. Sanitizer banks are
+    /// untouched (they are consulted via `detect_sanitizer` /
+    /// `detect_sanitizer_ast`, not the source/sink code paths gated here).
+    ///
+    /// Used by `field_access_info-extension-v1` M1 to provide a transient
+    /// bank-empty harness for the `analyze_ast_only` integration-test helper
+    /// — mirrors the W2-pre "AST-only mode simulation" pattern proven in
+    /// `regex-removal-v1` (W2-pre-report.json:45). The flag is process-local
+    /// to a single thread; a guard struct (`AstOnlyTestModeGuard`) restores
+    /// the previous value on Drop so concurrent tests on different threads
+    /// do not see each other's overrides, and mid-test panics still restore
+    /// the flag.
+    ///
+    /// This is **not a production switch** — production code never sets it,
+    /// so the only runtime cost is one `Cell::get()` on each `detect_sources`
+    /// / `detect_sinks` entry, which is negligible.
+    static AST_ONLY_TEST_MODE: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Test-only RAII guard that sets `AST_ONLY_TEST_MODE` to `true` on
+/// construction and restores the previous value on Drop. Used by
+/// `analyze_ast_only` in M1 integration tests to gate `detect_sources` /
+/// `detect_sinks` to AST-only behavior for the duration of one
+/// `compute_taint_with_tree` call.
+///
+/// Public so integration-test crates (which see `tldr-core` as a regular
+/// dependency, not under `cfg(test)`) can construct it. Not part of the
+/// stable public API; documented as test-only.
+pub struct AstOnlyTestModeGuard {
+    previous: bool,
+}
+
+impl AstOnlyTestModeGuard {
+    /// Set `AST_ONLY_TEST_MODE` to `true` for the current thread; the
+    /// previous value is captured for restoration on Drop.
+    pub fn enter() -> Self {
+        let previous = AST_ONLY_TEST_MODE.with(|m| {
+            let prev = m.get();
+            m.set(true);
+            prev
+        });
+        Self { previous }
+    }
+}
+
+impl Drop for AstOnlyTestModeGuard {
+    fn drop(&mut self) {
+        let prev = self.previous;
+        AST_ONLY_TEST_MODE.with(|m| m.set(prev));
+    }
+}
 
 /// Internal taint-set key for the SSA-aware propagation path (M1b VAL-001b).
 ///
@@ -784,6 +840,14 @@ pub fn get_patterns(language: Language) -> &'static LanguagePatterns {
 /// A vector of detected `TaintSource`s. Usually 0 or 1, but could be more if
 /// multiple sources appear in the same statement.
 pub fn detect_sources(statement: &str, line: u32, language: Language) -> Vec<TaintSource> {
+    // Test-only AST-only-mode override: when set by an integration-test
+    // `AstOnlyTestModeGuard`, skip the entire regex source bank so the
+    // returned vector reflects pure-AST detection. See `AST_ONLY_TEST_MODE`
+    // doc comment.
+    if AST_ONLY_TEST_MODE.with(|m| m.get()) {
+        return Vec::new();
+    }
+
     let mut sources = Vec::new();
     let patterns = get_patterns(language);
 
@@ -893,6 +957,14 @@ fn extract_source_var_from_statement(statement: &str) -> Option<String> {
 /// A vector of detected `TaintSink`s. The `tainted` field is set to `false`
 /// initially; it will be updated by the taint propagation analysis.
 pub fn detect_sinks(statement: &str, line: u32, language: Language) -> Vec<TaintSink> {
+    // Test-only AST-only-mode override: when set by an integration-test
+    // `AstOnlyTestModeGuard`, skip the entire regex sink bank so the
+    // returned vector reflects pure-AST detection. See `AST_ONLY_TEST_MODE`
+    // doc comment.
+    if AST_ONLY_TEST_MODE.with(|m| m.get()) {
+        return Vec::new();
+    }
+
     let mut sinks = Vec::new();
     let patterns = get_patterns(language);
     for (pattern, sink_type) in patterns.sinks.iter() {

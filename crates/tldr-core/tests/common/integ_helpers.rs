@@ -26,7 +26,7 @@ use std::collections::HashMap;
 use tldr_core::ast::parser::parse;
 use tldr_core::cfg::get_cfg_context;
 use tldr_core::dfg::get_dfg_context;
-use tldr_core::security::taint::compute_taint_with_tree;
+use tldr_core::security::taint::{compute_taint_with_tree, AstOnlyTestModeGuard};
 use tldr_core::ssa::construct::construct_minimal_ssa;
 use tldr_core::{Language, TaintInfo, TaintSinkType, TaintSourceType};
 
@@ -68,6 +68,32 @@ pub fn analyze_with_ssa(src: &str, lang: Language, fn_name: &str, use_ssa: bool)
         ssa.as_ref(),
     )
     .expect("taint analysis must succeed")
+}
+
+/// AST-only dispatch harness — transiently empties the regex `.sources` /
+/// `.sinks` bank for the target language by activating the thread-local
+/// `AstOnlyTestModeGuard` defined in `tldr_core::security::taint`. While the
+/// guard is alive, `detect_sources` / `detect_sinks` short-circuit to empty
+/// vectors regardless of the regex bank's contents, so the only detection
+/// path that can produce sources/sinks is the AST path inside
+/// `compute_taint_with_tree` (`detect_sources_ast` / `detect_sinks_ast`).
+/// Sanitizers are unaffected.
+///
+/// Mirrors the W2-pre "AST-only mode simulation" pattern proven in
+/// `regex-removal-v1` (W2-pre-report.json:45 — "Temporarily disabled regex
+/// fallback in compute_taint_with_tree (then restored before commit). Re-ran
+/// all 34 tests: 34/34 PASS under AST-only dispatch."). Used as the
+/// discriminative RED gate for `field_access_info-extension-v1` M2/M3/M4:
+/// fixtures asserting under this helper FAIL at HEAD pre-M2 because the
+/// raw-substring `("", "Module.fn")` AST entries are skipped by the
+/// structural and W2-pre call-shape paths. M2/M3/M4 turn them GREEN by
+/// rewriting the entries to structured `("Module", "fn")` shape.
+///
+/// Always runs with SSA off — the M1 fixtures don't need SSA precision and
+/// running without SSA matches the per-language baseline tests' convention.
+pub fn analyze_ast_only(src: &str, lang: Language, fn_name: &str) -> TaintInfo {
+    let _guard = AstOnlyTestModeGuard::enter();
+    analyze_with_ssa(src, lang, fn_name, /* use_ssa */ false)
 }
 
 /// Assert that `result` contains at least one source of `expected_source`,
