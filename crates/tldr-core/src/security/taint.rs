@@ -2143,6 +2143,18 @@ static TYPESCRIPT_AST_SINKS: &[AstSinkPattern] = &[
         member_patterns: &[("", "dangerouslySetInnerHTML")],
         sink_type: TaintSinkType::FileWrite,
     },
+    // W1-M2: Fastify framework sinks (parity-add for Wave 2 regex deletion).
+    // `reply.send(...)` / `.redirect(...)` / `.header(...)` are the three
+    // Fastify reply APIs currently caught by FASTIFY_PATTERNS regex sinks.
+    AstSinkPattern {
+        call_names: &[],
+        member_patterns: &[
+            ("reply", "send"),
+            ("reply", "redirect"),
+            ("reply", "header"),
+        ],
+        sink_type: TaintSinkType::FileWrite,
+    },
 ];
 
 static TYPESCRIPT_AST_SANITIZERS: &[AstSanitizerPattern] = &[

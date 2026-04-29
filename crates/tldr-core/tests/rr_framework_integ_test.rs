@@ -13,6 +13,7 @@
 //!
 //! Milestone scope:
 //! * W1-M1 — NextJS sink AST entries (this file's first 4 tests).
+//! * W1-M2 — Fastify sink AST entries (`reply.send` / `.redirect` / `.header`).
 
 use std::collections::HashMap;
 
@@ -165,6 +166,86 @@ export default function Page({ params }) {
     assert!(
         !sink_lines.is_empty(),
         "expected at least one FileWrite sink for dangerouslySetInnerHTML; \
+         got sinks={:?}",
+        result.sinks
+    );
+}
+
+// ---------- W1-M2: Fastify sinks ----------
+
+/// W1-M2 #1 — `reply.send(data)` reflects `request.body` — reflected
+/// response from a Fastify handler. Pre-W1-M2: AST bank lacks
+/// `('reply','send')`; the regex bank's FASTIFY_PATTERNS sink
+/// `\breply\.send\s*\(` is what currently catches it. Post-W1-M2: matches
+/// via TYPESCRIPT_AST_SINKS member_pattern.
+#[test]
+fn fastify_reply_send_reflected_via_compute_taint() {
+    let src = "\
+async function echo(request, reply) {
+    const data = request.body;
+    reply.send(data);
+}
+";
+    let result = analyze_with_ssa(src, Language::TypeScript, "echo", /* use_ssa */ false);
+    let sink_lines: Vec<_> = result
+        .sinks
+        .iter()
+        .filter(|s| matches!(s.sink_type, TaintSinkType::FileWrite))
+        .map(|s| s.line)
+        .collect();
+    assert!(
+        !sink_lines.is_empty(),
+        "expected at least one FileWrite sink for reply.send; \
+         got sinks={:?}",
+        result.sinks
+    );
+}
+
+/// W1-M2 #2 — `reply.redirect(url)` where `url` is reflected from
+/// `request.body.next` — open redirect via Fastify reply API.
+#[test]
+fn fastify_reply_redirect_via_compute_taint() {
+    let src = "\
+async function go(request, reply) {
+    const target = request.body.next;
+    reply.redirect(target);
+}
+";
+    let result = analyze_with_ssa(src, Language::TypeScript, "go", /* use_ssa */ false);
+    let sink_lines: Vec<_> = result
+        .sinks
+        .iter()
+        .filter(|s| matches!(s.sink_type, TaintSinkType::FileWrite))
+        .map(|s| s.line)
+        .collect();
+    assert!(
+        !sink_lines.is_empty(),
+        "expected at least one FileWrite sink for reply.redirect; \
+         got sinks={:?}",
+        result.sinks
+    );
+}
+
+/// W1-M2 #3 — `reply.header('X-Echo', v)` where `v` came from
+/// `request.headers['x-forwarded']` — header injection via Fastify reply.
+#[test]
+fn fastify_reply_header_injection_via_compute_taint() {
+    let src = "\
+async function setHeader(request, reply) {
+    const v = request.headers['x-forwarded'];
+    reply.header('X-Echo', v);
+}
+";
+    let result = analyze_with_ssa(src, Language::TypeScript, "setHeader", /* use_ssa */ false);
+    let sink_lines: Vec<_> = result
+        .sinks
+        .iter()
+        .filter(|s| matches!(s.sink_type, TaintSinkType::FileWrite))
+        .map(|s| s.line)
+        .collect();
+    assert!(
+        !sink_lines.is_empty(),
+        "expected at least one FileWrite sink for reply.header; \
          got sinks={:?}",
         result.sinks
     );
