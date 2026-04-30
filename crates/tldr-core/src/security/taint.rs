@@ -3536,6 +3536,59 @@ pub fn detect_sanitizer_ast(
     None
 }
 
+/// Build a per-line index of AST sanitizer hits by walking the tree ONCE.
+///
+/// Mirrors the source/sink WALK-ONCE pattern at the top of
+/// `compute_taint_with_tree` (see L3573-3590). Avoids the historical
+/// O(L*N) infinite-loop hang that motivated the no-line-filter pass for
+/// sources and sinks.
+///
+/// The public per-line API `detect_sanitizer_ast` (L3498) is preserved for
+/// external callers but is NOT invoked from the worklist — this helper is
+/// the worklist's single AST entry point. Lines are 1-indexed to match
+/// `VarRef.line` and `SsaInstruction.line`.
+///
+/// When multiple sanitizer hits land on the same line, the latest write
+/// wins (matches the source/sink helper's `insert` semantics).
+fn build_sanitizer_ast_index(
+    tree: &tree_sitter::Tree,
+    source: &[u8],
+    language: Language,
+) -> HashMap<u32, SanitizerType> {
+    let mut index: HashMap<u32, SanitizerType> = HashMap::new();
+    let patterns = get_ast_patterns(language);
+    let root = tree.root_node();
+    let descendants = walk_descendants(root);
+
+    for descendant in &descendants {
+        if is_in_comment(descendant, language) || is_in_string(descendant, language) {
+            continue;
+        }
+
+        let line = descendant.start_position().row as u32 + 1;
+        let text = node_text(descendant, source);
+
+        for pattern in patterns.sanitizers {
+            let matched = pattern.call_names.iter().any(|name| {
+                let call_kinds = call_node_kinds(language);
+                if call_kinds.contains(&descendant.kind()) {
+                    if let Some(call_name) = extract_call_name(descendant, source, language) {
+                        return call_name == *name;
+                    }
+                }
+                false
+            }) || member_patterns_match(descendant, source, language, pattern.member_patterns, text);
+
+            if matched {
+                index.insert(line, pattern.sanitizer_type);
+                break;
+            }
+        }
+    }
+
+    index
+}
+
 /// Compute taint analysis with optional AST tree for improved detection.
 ///
 /// When a parsed tree is provided, uses AST-based detection to filter out
@@ -3568,6 +3621,18 @@ pub fn compute_taint_with_tree(
     let successors = build_successors(cfg);
     let line_to_block = build_line_to_block(cfg);
     let refs_by_block = build_refs_by_block(refs, &line_to_block);
+
+    // M2 sanitizer-removal-v1: build per-line AST sanitizer index ONCE.
+    // Mirrors the source/sink WALK-ONCE pattern below. The worklist
+    // (`process_block`, `ssa_propagate`) consults this index AST-FIRST
+    // and falls back to the regex `detect_sanitizer` helper. M4 will
+    // flip dispatch to AST-only by deleting the regex banks.
+    let sanitizer_ast_index: HashMap<u32, SanitizerType> =
+        if let (Some(t), Some(s)) = (tree, source) {
+            build_sanitizer_ast_index(t, s, language)
+        } else {
+            HashMap::new()
+        };
 
     // Detect sources and sinks
     if let (Some(tree), Some(src)) = (tree, source) {
@@ -3706,6 +3771,7 @@ pub fn compute_taint_with_tree(
             statements,
             language,
             max_iterations,
+            sanitizer_ast_index: &sanitizer_ast_index,
         };
         let tainted_ssa = ssa_propagate(&ctx, &mut result.sanitized_vars);
         // Translate SSA-versioned tainted set into the String-keyed `tainted`
@@ -3760,10 +3826,10 @@ pub fn compute_taint_with_tree(
                 taint_in,
                 &refs_by_block,
                 statements,
-                &line_to_block,
                 &sources_by_line,
                 &mut result.sanitized_vars,
                 language,
+                &sanitizer_ast_index,
             );
 
             let old_taint = tainted.get(&block_id).cloned().unwrap_or_default();
@@ -4071,10 +4137,10 @@ fn process_block(
     mut current_taint: HashSet<String>,
     refs_by_block: &HashMap<usize, Vec<&VarRef>>,
     statements: &HashMap<u32, String>,
-    _line_to_block: &HashMap<u32, usize>,
     sources_by_line: &HashMap<u32, HashSet<String>>,
     sanitized_vars: &mut HashSet<String>,
     language: Language,
+    sanitizer_ast_index: &HashMap<u32, SanitizerType>,
 ) -> HashSet<String> {
     let empty_refs = vec![];
     let block_refs = refs_by_block.get(&block_id).unwrap_or(&empty_refs);
@@ -4105,8 +4171,13 @@ fn process_block(
                     .get(&var_ref.line)
                     .is_some_and(|vars| vars.contains(&var_ref.name));
 
-                // Check if sanitized
-                if detect_sanitizer(stmt, language).is_some() {
+                // Check if sanitized.
+                // M2 sanitizer-removal-v1: AST-FIRST-WITH-REGEX-FALLBACK.
+                // The pre-built per-line AST sanitizer index is consulted
+                // first; if no AST hit, fall back to the regex bank. M4
+                // will flip dispatch to AST-only by deleting the banks.
+                let ast_sanitizer_hit = sanitizer_ast_index.contains_key(&var_ref.line);
+                if ast_sanitizer_hit || detect_sanitizer(stmt, language).is_some() {
                     sanitized_vars.insert(var_ref.name.clone());
                     current_taint.remove(&var_ref.name);
                 } else if rhs_tainted || is_source_def {
@@ -4188,6 +4259,11 @@ struct SsaPropagateCtx<'a> {
     statements: &'a HashMap<u32, String>,
     language: Language,
     max_iterations: usize,
+    /// M2 sanitizer-removal-v1: per-line AST sanitizer index built once
+    /// at the top of `compute_taint_with_tree`. Consulted AST-FIRST in
+    /// `ssa_propagate`; the regex `detect_sanitizer` helper is the
+    /// fallback. M4 flips dispatch to AST-only.
+    sanitizer_ast_index: &'a HashMap<u32, SanitizerType>,
 }
 
 fn ssa_propagate(
@@ -4203,6 +4279,7 @@ fn ssa_propagate(
         statements,
         language,
         max_iterations,
+        sanitizer_ast_index,
     } = *ctx;
     // Build per-block instruction list keyed by block id (SsaBlock.id matches
     // CFG block id per ssa::types). Sort instructions by line to guarantee
@@ -4355,7 +4432,11 @@ fn ssa_propagate(
                         .get(target.0 as usize)
                         .map(|n| n.variable.clone());
 
-                    if detect_sanitizer(line_stmt, language).is_some() {
+                    // M2 sanitizer-removal-v1: AST-FIRST-WITH-REGEX-FALLBACK
+                    // (mirrors process_block at L4143 sibling site). M4
+                    // will flip dispatch to AST-only.
+                    let ast_sanitizer_hit = sanitizer_ast_index.contains_key(&inst.line);
+                    if ast_sanitizer_hit || detect_sanitizer(line_stmt, language).is_some() {
                         if let Some(v) = target_var.clone() {
                             sanitized_vars.insert(v);
                         }
