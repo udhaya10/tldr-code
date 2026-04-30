@@ -874,12 +874,16 @@ export const MY_CONST: number = 42;
 
 #[test]
 fn test_surface_unsupported_language_errors() {
+    // Ruby is now SUPPORTED; pick a language that the surface dispatcher
+    // genuinely does not handle. Haskell has no surface backend in
+    // crates/tldr-core/src/surface/mod.rs, so it falls through to the
+    // UnsupportedLanguage Err arm.
     let dir = TempDir::new().unwrap();
-    write_fixture(&dir, "lib.rb", "def hello; end");
+    write_fixture(&dir, "lib.hs", "module Lib where\nhello = \"hi\"");
 
     let result = extract_api_surface(
         dir.path().to_str().unwrap(),
-        Some("ruby"),
+        Some("haskell"),
         false,
         None,
         None,

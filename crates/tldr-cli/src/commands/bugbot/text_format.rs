@@ -2354,7 +2354,7 @@ mod tests {
             output
         );
         assert!(
-            output.contains("3.14"),
+            output.contains("2.5"),
             "generic should show float values, got: {}",
             output
         );

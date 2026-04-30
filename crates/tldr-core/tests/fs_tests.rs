@@ -492,8 +492,11 @@ fn test_realistic_python_project_structure() {
     let tree = get_file_tree(temp_dir.path(), Some(&extensions), true, None).unwrap();
     let files = collect_files(&tree, temp_dir.path());
 
-    // Should only have Python files
-    assert_eq!(files.len(), 5); // All .py files
+    // Should only have Python files. The fixture creates 6 .py files:
+    //   src/__init__.py, src/main.py,
+    //   src/utils/__init__.py, src/utils/helpers.py,
+    //   tests/test_main.py, setup.py
+    assert_eq!(files.len(), 6);
     for file in &files {
         assert!(file.extension().map(|e| e == "py").unwrap_or(false));
     }

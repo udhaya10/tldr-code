@@ -265,14 +265,22 @@ fn is_pid_alive(_pid: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
     use tempfile::TempDir;
 
+    /// Serialize tests that mutate the process-global TLDR_DAEMON_REGISTRY_DIR
+    /// env var. Without this, parallel tests stomp on each other's overrides
+    /// and `add_entry` sees a NotFound when another thread has already
+    /// removed the env var (registry dir resolves to a non-existent default).
+    static REGISTRY_ENV_LOCK: Mutex<()> = Mutex::new(());
+
     /// Helper: scope an env var override for the duration of a closure.
-    /// NOTE: tests in this module must NOT run in parallel with other tests
-    /// that read `TLDR_DAEMON_REGISTRY_DIR`. `cargo test` defaults isolate
-    /// per-thread, but sharing an env var across threads is still racy. We
-    /// use unique tempdirs per test to side-step that.
     fn with_registry_dir<F: FnOnce(&Path)>(prefix: &str, f: F) {
+        // Hold the lock for the entire body so set_var / f / remove_var
+        // run atomically with respect to other tests in this module.
+        let _guard = REGISTRY_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let tmp = TempDir::new().expect("tempdir");
         std::env::set_var("TLDR_DAEMON_REGISTRY_DIR", tmp.path());
         let _prefix = prefix;

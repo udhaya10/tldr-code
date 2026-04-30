@@ -222,8 +222,15 @@ pub fn analyze_dead_code(
                     )
                 })?
             } else {
-                Language::from_directory(path)
-                    .ok_or_else(|| TldrError::NoSupportedFiles(path.to_path_buf()))?
+                // Empty directory or directory with no recognizable source
+                // files: return an empty Report rather than erroring. This
+                // mirrors the convention used by martin/coverage and lets
+                // callers (CLI, daemon) treat "nothing to analyze" as a
+                // success state rather than a hard failure.
+                match Language::from_directory(path) {
+                    Some(l) => l,
+                    None => return Ok(DeadCodeReport::default()),
+                }
             }
         }
     };

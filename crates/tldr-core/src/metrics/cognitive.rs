@@ -558,26 +558,22 @@ impl<'a> CognitiveCalculator<'a> {
     fn count_cognitive_increment(&mut self, node: Node, line: u32) {
         let kind = node.kind();
 
-        // Skip if_statement/if_expression that's a direct child of else_clause
-        // (else_clause already scored +1, this prevents double-counting else-if)
-        if kind == "if_statement" || kind == "if_expression" {
-            if let Some(parent) = node.parent() {
-                if parent.kind() == "else_clause" {
-                    // Don't score this if — the else_clause already covers it
-                    // We still recurse into children (handled by analyze_node)
-                    return;
-                }
-            }
-        }
+        // Per SonarSource Cognitive Complexity v1.4: `else if` adds +1, NOT
+        // +2. We score the inner `if_statement` directly (which is exactly +1
+        // base, no nesting penalty since the parent else_clause is treated as
+        // linear flow), and score `else_clause` as +0. This produces the
+        // correct +1 for `else if` without double-counting.
 
-        // Control structures that add base increment + nesting
+        // Control structures that add base increment + nesting.
+        //
+        // Per SonarSource Cognitive Complexity v1.4 (and the module-level
+        // doc-comment): `else` is linear flow and adds +0. Only `if`, `elif`,
+        // for/while/catch/switch/?: increment.
         let base_increment = match kind {
             // if adds +1 base + nesting
             "if_statement" | "if_expression" => Some((1, "if")),
-            // elif adds +1 base + nesting (NOT elif_clause in Python, which is separate)
+            // elif adds +1 base + nesting (Python's elif_clause)
             "elif_clause" => Some((1, "elif")),
-            // else adds +1 base increment with no nesting penalty - per SonarSource spec
-            "else_clause" => Some((1, "else")),
             // for/while add +1 base + nesting
             "for_statement" | "for_in_statement" => Some((1, "for")),
             "while_statement" => Some((1, "while")),
@@ -591,11 +587,22 @@ impl<'a> CognitiveCalculator<'a> {
         };
 
         if let Some((base, construct)) = base_increment {
-            // Nesting penalty only applies to nested control structures
-            // The current_nesting is already incremented for this node, so we use saturating_sub(1)
-            // Exception: ternary (?:) and else get no nesting penalty per SonarSource spec
+            // Nesting penalty only applies to nested control structures.
+            // The current_nesting is already incremented for this node, so we
+            // use saturating_sub(1).
+            // Exceptions per SonarSource spec (no nesting penalty):
+            //   - ternary (?:)
+            //   - `else if` — an if_statement that is a direct child of an
+            //     else_clause; treated as a flat sibling of the parent if,
+            //     not a nested construct.
+            let is_else_if = construct == "if"
+                && node
+                    .parent()
+                    .map(|p| p.kind() == "else_clause")
+                    .unwrap_or(false);
+
             let nesting_increment =
-                if construct != "?:" && construct != "else" && self.current_nesting > 1 {
+                if construct != "?:" && !is_else_if && self.current_nesting > 1 {
                     self.current_nesting.saturating_sub(1)
                 } else {
                     0
@@ -977,7 +984,8 @@ def complex_function(data, threshold, flag):
         );
     }
 
-    /// Test else adds +1 base increment with no nesting penalty (per SonarSource spec)
+    /// Test that `else` adds +0 (linear flow) per SonarSource Cognitive
+    /// Complexity v1.4. Only `if` and `elif` increment.
     #[test]
     fn test_else_not_counted() {
         let source = r#"
@@ -996,10 +1004,10 @@ def with_else(x):
             .iter()
             .find(|f| f.name == "with_else")
             .unwrap();
-        // if adds +1, else adds +1 (no nesting penalty) = 2 total
+        // if adds +1, else adds +0 (linear flow per SonarSource v1.4)
         assert_eq!(
-            func.cognitive, 2,
-            "else should add +1 base increment with no nesting penalty"
+            func.cognitive, 1,
+            "else should NOT add to cognitive complexity per SonarSource v1.4"
         );
     }
 
@@ -1028,15 +1036,17 @@ def with_logic(a, b, c):
     }
 
     /// Test else-if chains don't double-count in JavaScript
+    /// Per SonarSource Cognitive Complexity v1.4: `else` adds +0,
+    /// `else if` adds +1 (not +2), so `if-else if-else` scores 2.
     #[test]
     fn test_else_if_no_double_count_javascript() {
         let js_code = r#"
 function test(x) {
     if (x > 0) {       // +1
         return 1;
-    } else if (x < 0) { // +1 (NOT +2)
+    } else if (x < 0) { // +1 (else-if: +1, NOT +2; else adds 0)
         return -1;
-    } else {            // +1
+    } else {            // +0 (else is linear flow per SonarSource v1.4)
         return 0;
     }
 }
@@ -1047,8 +1057,8 @@ function test(x) {
 
         let func = report.functions.iter().find(|f| f.name == "test").unwrap();
         assert_eq!(
-            func.cognitive, 3,
-            "if-else if-else should score 3, not double-count the else-if"
+            func.cognitive, 2,
+            "if-else if-else should score 2 per SonarSource (if=+1, else-if=+1, else=+0)"
         );
     }
 
@@ -1061,7 +1071,7 @@ function test(x: number): number {
         return 1;
     } else if (x < 0) { // +1 (NOT +2)
         return -1;
-    } else {            // +1
+    } else {            // +0 (else is linear flow)
         return 0;
     }
 }
@@ -1071,7 +1081,7 @@ function test(x: number): number {
             analyze_cognitive_source(ts_code, Language::TypeScript, "test.ts", &options).unwrap();
 
         let func = report.functions.iter().find(|f| f.name == "test").unwrap();
-        assert_eq!(func.cognitive, 3, "if-else if-else should score 3");
+        assert_eq!(func.cognitive, 2, "if-else if-else should score 2");
     }
 
     /// Test else-if chains in Rust
@@ -1083,7 +1093,7 @@ fn test(x: i32) -> i32 {
         1
     } else if x < 0 {  // +1
         -1
-    } else {            // +1
+    } else {            // +0
         0
     }
 }
@@ -1093,7 +1103,7 @@ fn test(x: i32) -> i32 {
             analyze_cognitive_source(rust_code, Language::Rust, "test.rs", &options).unwrap();
 
         let func = report.functions.iter().find(|f| f.name == "test").unwrap();
-        assert_eq!(func.cognitive, 3, "Rust if-else if-else should score 3");
+        assert_eq!(func.cognitive, 2, "Rust if-else if-else should score 2");
     }
 
     /// Test Python elif still works correctly (already used elif_clause)
@@ -1105,7 +1115,7 @@ def test(x):
         return 1
     elif x < 0:   # +1
         return -1
-    else:          # +1
+    else:          # +0 (else is linear flow per SonarSource v1.4)
         return 0
 "#;
         let options = CognitiveOptions::new();
@@ -1113,7 +1123,7 @@ def test(x):
             analyze_cognitive_source(py_code, Language::Python, "test.py", &options).unwrap();
 
         let func = report.functions.iter().find(|f| f.name == "test").unwrap();
-        assert_eq!(func.cognitive, 3, "Python if-elif-else should score 3");
+        assert_eq!(func.cognitive, 2, "Python if-elif-else should score 2");
     }
 
     /// Test multiple else-if chains
@@ -1127,7 +1137,7 @@ function classify(x) {
         return "medium";
     } else if (x > 0) {  // +1
         return "low";
-    } else {             // +1
+    } else {             // +0
         return "negative";
     }
 }
@@ -1142,8 +1152,8 @@ function classify(x) {
             .find(|f| f.name == "classify")
             .unwrap();
         assert_eq!(
-            func.cognitive, 4,
-            "Multiple else-if should each score +1, not double-count"
+            func.cognitive, 3,
+            "Multiple else-if should each score +1; else=0; total = 3"
         );
     }
 
@@ -1156,7 +1166,7 @@ int test(int x) {
         return 1;
     } else if (x < 0) { // +1 (NOT +2)
         return -1;
-    } else {            // +1
+    } else {            // +0
         return 0;
     }
 }
@@ -1165,7 +1175,7 @@ int test(int x) {
         let report = analyze_cognitive_source(c_code, Language::C, "test.c", &options).unwrap();
 
         let func = report.functions.iter().find(|f| f.name == "test").unwrap();
-        assert_eq!(func.cognitive, 3, "C if-else if-else should score 3");
+        assert_eq!(func.cognitive, 2, "C if-else if-else should score 2");
     }
 
     // -------------------------------------------------------------------------

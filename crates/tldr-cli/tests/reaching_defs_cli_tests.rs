@@ -265,6 +265,9 @@ fn test_reaching_defs_text_output() {
 
 #[test]
 fn test_reaching_defs_text_shows_gen_kill() {
+    // GEN/KILL details are only emitted in `--show-in-out` mode (per-block
+    // details). Without it, the text formatter only shows the header +
+    // chains + stats. Add the flag so we exercise the GEN/KILL path.
     let temp = TempDir::new().unwrap();
     let file = temp.path().join("test.py");
     fs::write(&file, fixtures::PYTHON_KILLED).unwrap();
@@ -276,6 +279,7 @@ fn test_reaching_defs_text_shows_gen_kill() {
         "killed",
         "--format",
         "text",
+        "--show-in-out",
     ])
     .assert()
     .success()

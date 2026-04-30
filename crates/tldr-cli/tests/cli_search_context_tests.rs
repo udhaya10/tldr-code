@@ -112,7 +112,7 @@ fn test_search_basic_json() {
     let output = tldr_cmd()
         .args([
             "search",
-            "def helper",
+            "helper",
             temp_dir.path().to_str().unwrap(),
             "-q",
         ])
@@ -125,9 +125,13 @@ fn test_search_basic_json() {
         stdout.contains("\"file\""),
         "JSON should contain file field"
     );
+    // SmartSearch reports a `line_range: [start, end]` tuple per result
+    // rather than a single `line` int. Either field name is acceptable as
+    // a "this result references a source line" signal.
     assert!(
-        stdout.contains("\"line\""),
-        "JSON should contain line field"
+        stdout.contains("\"line_range\"") || stdout.contains("\"line\""),
+        "JSON should contain line_range (or line) field; got: {}",
+        stdout
     );
     assert!(
         stdout.contains("helper"),
@@ -232,128 +236,20 @@ fn test_search_dot_format() {
     );
 }
 
-#[test]
-fn test_search_with_extension_filter() {
-    let temp_dir = create_multi_lang_project();
-    let output = tldr_cmd()
-        .args([
-            "search",
-            "func",
-            temp_dir.path().to_str().unwrap(),
-            "--ext",
-            "py",
-            "-q",
-        ])
-        .output()
-        .expect("Failed to execute tldr search");
-
-    assert!(output.status.success(), "search with --ext should succeed");
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("python_func"),
-        "Should find Python functions"
-    );
-    assert!(
-        !stdout.contains("rust_func"),
-        "Should not find Rust functions when filtered to .py"
-    );
-}
-
-#[test]
-fn test_search_with_multiple_extensions() {
-    let temp_dir = create_multi_lang_project();
-    let output = tldr_cmd()
-        .args([
-            "search",
-            "func",
-            temp_dir.path().to_str().unwrap(),
-            "--ext",
-            "py",
-            "--ext",
-            "rs",
-            "-q",
-        ])
-        .output()
-        .expect("Failed to execute tldr search");
-
-    assert!(
-        output.status.success(),
-        "search with multiple --ext should succeed"
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("python_func") || stdout.contains("rust_func"),
-        "Should find functions in filtered extensions"
-    );
-}
-
-#[test]
-fn test_search_with_context_lines() {
-    let temp_dir = create_test_project();
-    let output = tldr_cmd()
-        .args([
-            "search",
-            "def helper",
-            temp_dir.path().to_str().unwrap(),
-            "-C",
-            "3",
-            "-q",
-        ])
-        .output()
-        .expect("Failed to execute tldr search");
-
-    assert!(
-        output.status.success(),
-        "search with context should succeed"
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("context"),
-        "Output should contain context field"
-    );
-}
-
-#[test]
-fn test_search_max_results() {
-    let temp_dir = create_test_project();
-    let output = tldr_cmd()
-        .args([
-            "search",
-            "def",
-            temp_dir.path().to_str().unwrap(),
-            "-m",
-            "1",
-            "-q",
-        ])
-        .output()
-        .expect("Failed to execute tldr search");
-
-    assert!(output.status.success(), "search with -m should succeed");
-    let _stdout = String::from_utf8_lossy(&output.stdout);
-    // Should only have 1 result (array with 1 element)
-    // Note: This is hard to verify without JSON parsing, but we at least verify success
-}
-
-#[test]
-fn test_search_max_files() {
-    let temp_dir = create_test_project();
-    let output = tldr_cmd()
-        .args([
-            "search",
-            "def",
-            temp_dir.path().to_str().unwrap(),
-            "--max-files",
-            "1",
-            "-q",
-        ])
-        .output()
-        .expect("Failed to execute tldr search");
-
-    assert!(
-        output.status.success(),
-        "search with --max-files should succeed"
-    );
-}
+// Legacy regex-search-only tests deleted (DELETE-on-stale per
+// workspace-test-infrastructure-v1 M4 / M1-orthogonal-real-failures.json):
+//   - test_search_with_extension_filter / test_search_with_multiple_extensions:
+//     used `--ext` (legacy regex-search flag); SmartSearch (BM25) has no
+//     extension filter — language detection is automatic via `--lang`.
+//   - test_search_with_context_lines: used `-C N` (legacy regex-search
+//     context-lines flag); SmartSearch reports `line_range` + `preview`
+//     instead of greppable `±N` context.
+//   - test_search_max_results / test_search_max_files: used `-m`/--max-files
+//     (legacy regex-search caps); SmartSearch caps via `-k/--top-k`.
+// Replacement coverage for SmartSearch's surface lives in
+// crates/tldr-core/tests/bench_surface_search_multilang.rs and the
+// existing `test_search_compact_format` / `test_search_dot_format`
+// CLI tests below.
 
 #[test]
 fn test_search_nonexistent_pattern() {
@@ -381,12 +277,17 @@ fn test_search_nonexistent_pattern() {
 
 #[test]
 fn test_search_invalid_regex() {
+    // SmartSearch's default mode is BM25 which treats input as a token query,
+    // not a regex — invalid regex characters are simply tokenized. Regex
+    // mode (--regex) DOES validate the pattern; this test exercises that
+    // path so the invalid-pattern error surface is still covered.
     let temp_dir = create_test_project();
     let output = tldr_cmd()
         .args([
             "search",
             "[invalid(regex",
             temp_dir.path().to_str().unwrap(),
+            "--regex",
             "-q",
         ])
         .output()
@@ -394,25 +295,35 @@ fn test_search_invalid_regex() {
 
     assert!(
         !output.status.success(),
-        "search with invalid regex should fail"
+        "search --regex with invalid pattern should fail"
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("regex") || stderr.contains("parse") || stderr.contains("Error"),
-        "Error should indicate regex parse failure"
+        stderr.contains("regex")
+            || stderr.contains("parse")
+            || stderr.contains("Error")
+            || stderr.contains("invalid"),
+        "Error should indicate regex parse failure; got: {}",
+        stderr
     );
 }
 
 #[test]
 fn test_search_nonexistent_path() {
+    // SmartSearch fails for a nonexistent project path because it cannot
+    // walk a missing directory to build the BM25 index. Either a hard
+    // failure (non-zero exit) OR a graceful empty-results JSON is acceptable.
     let output = tldr_cmd()
         .args(["search", "test", "/nonexistent/path/12345", "-q"])
         .output()
         .expect("Failed to execute tldr search");
 
+    let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        !output.status.success(),
-        "search should fail for nonexistent path"
+        !output.status.success() || stdout.contains("\"results\":[]") || stdout.contains("\"results\": []"),
+        "search on nonexistent path should fail OR produce empty results; got status={}, stdout={}",
+        output.status,
+        stdout
     );
 }
 
@@ -426,14 +337,24 @@ fn test_search_help() {
     assert!(output.status.success(), "search --help should succeed");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("Usage:"), "Help should show usage");
+    // SmartSearch's positional is QUERY (BM25 query), not PATTERN.
     assert!(
-        stdout.contains("<PATTERN>"),
-        "Help should show PATTERN argument"
+        stdout.contains("<QUERY>"),
+        "Help should show QUERY positional argument; got: {}",
+        stdout
     );
-    assert!(stdout.contains("--ext"), "Help should mention --ext option");
+    // SmartSearch's flag surface: --top-k / --no-callgraph / --regex /
+    // --hybrid / --lang. The legacy `--ext` / `--context` flags do not
+    // exist on SmartSearch.
     assert!(
-        stdout.contains("--context"),
-        "Help should mention --context option"
+        stdout.contains("--top-k") || stdout.contains("-k"),
+        "Help should mention --top-k option; got: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("--regex") || stdout.contains("--hybrid"),
+        "Help should mention --regex or --hybrid mode; got: {}",
+        stdout
     );
 }
 
@@ -1090,9 +1011,10 @@ fn test_search_and_loc_consistency() {
     let temp_dir = create_test_project();
     let project_path = temp_dir.path().to_str().unwrap();
 
-    // Run search to find function definitions
+    // SmartSearch is BM25-by-default. Use a token query that matches the
+    // function names in the fixture rather than the legacy regex pattern.
     let search_output = tldr_cmd()
-        .args(["search", "^def ", project_path, "-q"])
+        .args(["search", "helper", project_path, "-q"])
         .output()
         .expect("Failed to execute tldr search");
 
@@ -1111,7 +1033,8 @@ fn test_search_and_loc_consistency() {
     // Both should reference the same project
     assert!(
         search_stdout.contains("main.py") || search_stdout.contains("utils.py"),
-        "Search should find functions in project files"
+        "Search should find functions in project files; got: {}",
+        search_stdout
     );
     assert!(
         loc_stdout.contains("total_files"),

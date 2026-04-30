@@ -218,14 +218,63 @@ pub fn parse_coverage(
     format: Option<CoverageFormat>,
     options: &CoverageOptions,
 ) -> TldrResult<CoverageReport> {
-    // Check file exists
+    // Check path exists
     if !path.exists() {
         return Err(TldrError::PathNotFound(path.to_path_buf()));
     }
 
+    // If a directory is given, search for a known coverage file inside it.
+    // Returns an empty Ok(Report) when no recognized coverage file is present
+    // so callers (CLI, tests) treat "no coverage data yet" as a success state
+    // rather than a hard failure.
+    let resolved_path: std::path::PathBuf = if path.is_dir() {
+        let candidates = [
+            "coverage.xml",
+            "cobertura.xml",
+            "coverage.lcov",
+            "lcov.info",
+            "coverage.json",
+            ".coverage",
+        ];
+        let mut found: Option<std::path::PathBuf> = None;
+        for name in candidates {
+            let candidate = path.join(name);
+            if candidate.is_file() {
+                found = Some(candidate);
+                break;
+            }
+        }
+        match found {
+            Some(p) => p,
+            None => {
+                // No coverage report file in directory: return empty report.
+                return Ok(CoverageReport {
+                    format: format.unwrap_or(CoverageFormat::Cobertura),
+                    summary: CoverageSummary {
+                        line_coverage: 0.0,
+                        branch_coverage: None,
+                        function_coverage: None,
+                        total_lines: 0,
+                        covered_lines: 0,
+                        total_branches: None,
+                        covered_branches: None,
+                        total_functions: None,
+                        covered_functions: None,
+                        threshold_met: 0.0 >= options.threshold,
+                    },
+                    files: Vec::new(),
+                    uncovered: None,
+                    warnings: Vec::new(),
+                });
+            }
+        }
+    } else {
+        path.to_path_buf()
+    };
+
     // Read file content
-    let content = std::fs::read_to_string(path).map_err(|e| TldrError::ParseError {
-        file: path.to_path_buf(),
+    let content = std::fs::read_to_string(&resolved_path).map_err(|e| TldrError::ParseError {
+        file: resolved_path.clone(),
         line: None,
         message: format!("Failed to read file: {}", e),
     })?;

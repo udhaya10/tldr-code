@@ -1904,7 +1904,6 @@ public class Circle {
 // =============================================================================
 
 mod p2_language_status_tests {
-    use super::*;
 
     // Note: C and C++ now have full grammar support (Phase 2) and import/function extraction (Phase 6/7)
     // The test_c_returns_unsupported and test_cpp_returns_unsupported tests have been removed
@@ -1918,33 +1917,13 @@ mod p2_language_status_tests {
     // - Lua (Phase 5)
     // - Luau (Phase 5)
     // - Elixir (Phase 5)
+    // - Kotlin (Phase 7, via tree_sitter_kotlin_ng)
+    // - Swift (Phase 7, via tree_sitter_swift)
     //
     // Their corresponding test_*_returns_unsupported tests have been removed.
-    // See parser_tests module for parse tests that verify these grammars work.
-
-    /// Verify Kotlin returns UnsupportedLanguage
-    /// Note: tree-sitter-kotlin 0.3.8 requires tree-sitter <0.23, incompatible with 0.24.7
-    #[test]
-    fn test_kotlin_returns_unsupported() {
-        let pool = ParserPool::new();
-        let result = pool.parse(SAMPLE_KOTLIN_CODE, Language::Kotlin);
-        assert!(
-            matches!(result, Err(TldrError::UnsupportedLanguage(_))),
-            "Kotlin should return UnsupportedLanguage until tree-sitter-kotlin is updated for tree-sitter 0.24"
-        );
-    }
-
-    /// Verify Swift returns UnsupportedLanguage
-    /// Note: tree-sitter-swift 0.7.1 has ABI version 15, incompatible with tree-sitter 0.24.7
-    #[test]
-    fn test_swift_returns_unsupported() {
-        let pool = ParserPool::new();
-        let result = pool.parse(SAMPLE_SWIFT_CODE, Language::Swift);
-        assert!(
-            matches!(result, Err(TldrError::UnsupportedLanguage(_))),
-            "Swift should return UnsupportedLanguage until tree-sitter-swift is updated for tree-sitter 0.24"
-        );
-    }
+    // See parser_tests module for parse tests (test_kotlin_parse,
+    // test_swift_parse, test_ruby_parse, etc.) that verify these grammars
+    // now work end-to-end.
 }
 
 // =============================================================================

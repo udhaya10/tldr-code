@@ -1485,29 +1485,24 @@ mod tests {
     // ========================================================================
 
     /// Helper: create a temp dir with a single TypeScript file and extract surface.
+    ///
+    /// Uses `tempfile::TempDir` (UUID-backed) instead of an epoch-nanos-named
+    /// directory so concurrently-running tests cannot collide / step on each
+    /// other's `index.ts`. The TempDir is held until after extraction so the
+    /// file is guaranteed to exist when the parser reads it.
     fn extract_surface_from_source(source: &str) -> ApiSurface {
-        let tmp = std::env::temp_dir().join(format!(
-            "tldr_ts_surface_test_{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let _ = std::fs::create_dir_all(&tmp);
-        std::fs::write(tmp.join("index.ts"), source).unwrap();
+        let tmp = tempfile::TempDir::new().expect("create temp dir");
+        std::fs::write(tmp.path().join("index.ts"), source).unwrap();
 
         let resolved = ResolvedPackage {
-            root_dir: tmp.clone(),
+            root_dir: tmp.path().to_path_buf(),
             package_name: "testpkg".to_string(),
             is_pure_source: true,
             public_names: None,
         };
 
-        let result = extract_typescript_api_surface(&resolved, false, None)
-            .expect("extraction should succeed");
-
-        let _ = std::fs::remove_dir_all(&tmp);
-        result
+        extract_typescript_api_surface(&resolved, false, None)
+            .expect("extraction should succeed")
     }
 
     #[test]

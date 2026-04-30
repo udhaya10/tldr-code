@@ -268,12 +268,22 @@ fn test_temporal_basic_json() {
         .output()
         .expect("Failed to execute tldr temporal");
 
-    assert!(output.status.success(), "temporal command should succeed");
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    // May or may not find temporal patterns
+    // Temporal exits 2 when no constraint/trigram patterns are mined from
+    // the corpus (the small fixture project rarely has enough sequences).
+    // Both exit 0 (patterns found) and exit 2 (none found) are valid
+    // success states; failures (signals, panics, parse errors) are not.
+    let code = output.status.code();
     assert!(
-        !stdout.is_empty() || stdout.is_empty(),
-        "Command should run"
+        matches!(code, Some(0) | Some(2)),
+        "temporal command should exit 0 or 2; got {:?}, stderr={}",
+        code,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("constraints") || stdout.contains("trigrams") || stdout.contains("metadata"),
+        "Output should contain temporal report fields; got: {}",
+        stdout
     );
 }
 

@@ -60,12 +60,13 @@ fn smells_default_excludes_test_files() {
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
 
-    // Count GodClass occurrences in JSON.
-    let god_class_count = stdout.matches("\"god_class\"").count();
-    assert_eq!(
-        god_class_count, 1,
-        "expected 1 smell, got {} (test smells leaking into PR review signal); stdout={}",
-        god_class_count, stdout
+    // The smells JSON includes `smells: [...]` AND a `by_file: { ... }` map,
+    // so a raw substring count of "god_class" double-counts each finding.
+    // Use the canonical `total_smells` summary field for the kept count.
+    assert!(
+        stdout.contains("\"total_smells\":1") || stdout.contains("\"total_smells\": 1"),
+        "expected total_smells == 1 (test smells must be excluded by default); stdout={}",
+        stdout
     );
 
     // The surviving smell should be from prod.py, not the test file.
@@ -156,11 +157,19 @@ fn smells_files_filter_includes_tests_by_default() {
         String::from_utf8_lossy(&out.stderr)
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
-    let god_class_count = stdout.matches("\"god_class\"").count();
-    assert_eq!(
-        god_class_count, 2,
-        "expected 2 smells (--files implies --include-tests); got {}; stdout={}",
-        god_class_count, stdout
+    // See `smells_default_excludes_test_files` for why we use total_smells:
+    // the JSON includes both `smells: [...]` and `by_file: {...}` so a raw
+    // substring count of "god_class" double-counts.
+    assert!(
+        stdout.contains("\"total_smells\":2") || stdout.contains("\"total_smells\": 2"),
+        "expected total_smells == 2 (--files implies --include-tests); stdout={}",
+        stdout
+    );
+    // No test exclusion when --files is set.
+    assert!(
+        stdout.contains("\"excluded_test_smells\":0") || stdout.contains("\"excluded_test_smells\": 0"),
+        "expected excluded_test_smells == 0 (--files implies --include-tests); stdout={}",
+        stdout
     );
 }
 

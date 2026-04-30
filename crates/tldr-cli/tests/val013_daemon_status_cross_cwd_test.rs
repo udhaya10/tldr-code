@@ -78,6 +78,16 @@ fn wait_for_daemon_running(project: &Path, timeout: Duration) -> bool {
 /// and reports `"running"` with the fixture project path.
 #[test]
 fn daemon_status_from_other_cwd_reports_running() {
+    // Pre-test cleanup: stop any daemons left over from previous test runs
+    // so the cross-cwd discovery has a single canonical active daemon to
+    // resolve. Without this, leftover daemons yield "multiple daemons
+    // running" and `daemon status` errors to stderr instead of emitting
+    // a JSON envelope.
+    let stop_all = Command::new(env!("CARGO_BIN_EXE_tldr"))
+        .args(["daemon", "stop", "--all"])
+        .output();
+    let _ = stop_all; // best-effort
+
     let fixture = tempfile::Builder::new()
         .prefix("val013-fixture-")
         .tempdir()

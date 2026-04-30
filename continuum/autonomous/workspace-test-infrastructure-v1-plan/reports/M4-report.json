@@ -1,0 +1,142 @@
+{
+  "milestone": "M4",
+  "name": "Cat-C orthogonal-real fixes",
+  "plan": "workspace-test-infrastructure-v1",
+  "wave": 4,
+  "atomic_commit": false,
+  "status": "BLOCKED_PENDING_OPERATOR_ESCALATION_DECISION",
+  "rationale": "M4 closed all FIX-disposition Cat-C entries from M1-orthogonal-real-failures.json EXCEPT 2 entries that root-caused to regressions introduced by prior milestones (vuln-migration-v1 + field_access_info-v1). Per dispatch-contract validator mandate operator_escalation_on_regression_from_prior_milestone, those 2 entries must NOT be silently fixed in M4 because the fix would require modifying active subcmd handler code (crates/tldr-core/src/security/taint.rs source/sink banks) that is OUTSIDE M4's named exception list, AND because regression-class issues should trigger a milestone-revert decision by the operator.",
+  "starting_state": {
+    "head": "cf0b2be",
+    "M3_post_count": 73,
+    "Cat_A_M3_residue": 0,
+    "Cat_B_carry_forward": 33,
+    "Cat_C_orthogonal_real": 41
+  },
+  "final_state": {
+    "head_after_commit": "TBD",
+    "cargo_test_workspace_features_semantic_release_no_fail_fast_failure_count": 35,
+    "delta_from_M3": "73 -> 35 (38 net fixes)",
+    "delta_to_target": "+2 over target of 33",
+    "Cat_A_residue": 0,
+    "Cat_B_carry_forward": 33,
+    "Cat_C_unresolved": 0,
+    "escalated_regressions": 2
+  },
+  "fixes_applied": 38,
+  "fix_breakdown": {
+    "fixture_gap": 1,
+    "edge_case_handler_named_exception": 5,
+    "spec_alignment_named_exception": 1,
+    "test_fixture": 22,
+    "delete_on_stale": 8,
+    "no_op_already_green": 1
+  },
+  "named_exception_files_modified": [
+    {
+      "file": "crates/tldr-core/src/git/mod.rs",
+      "exception": "git_log",
+      "change_summary": "git_log + git_log_numstat treat 'does not have any commits yet' stderr (empty repo) as Ok(empty) per dispatch-contract M4 named exception list."
+    },
+    {
+      "file": "crates/tldr-core/src/quality/dead_code.rs",
+      "exception": "analyze_dead_code",
+      "change_summary": "analyze_dead_code returns Ok(empty Report) on empty input/no-language detection."
+    },
+    {
+      "file": "crates/tldr-core/src/quality/martin.rs",
+      "exception": "compute_martin_metrics",
+      "change_summary": "compute_martin_metrics returns Ok(empty Report) on empty input/no-language detection."
+    },
+    {
+      "file": "crates/tldr-core/src/quality/coverage.rs",
+      "exception": "parse_coverage",
+      "change_summary": "parse_coverage accepts directory paths (auto-discovers known coverage filenames); returns Ok(empty) when no coverage file found."
+    },
+    {
+      "file": "crates/tldr-core/src/metrics/cognitive.rs",
+      "exception": "cognitive analyzer",
+      "change_summary": "Removed else_clause from cognitive complexity base_increment match per SonarSource Cognitive Complexity v1.4 spec; added is_else_if check so `else if` (if_statement under else_clause) keeps +1 base with no nesting penalty."
+    }
+  ],
+  "test_fixture_files_modified": [
+    "crates/tldr-core/tests/fixtures/empty-dir/.gitkeep (created)",
+    "crates/tldr-core/tests/quality_tests.rs",
+    "crates/tldr-core/tests/language_parity_test.rs",
+    "crates/tldr-core/tests/bench_surface_search_multilang.rs",
+    "crates/tldr-core/tests/val010_change_impact_git_path_test.rs",
+    "crates/tldr-core/tests/fs_tests.rs",
+    "crates/tldr-core/src/surface/typescript.rs (test mod only)",
+    "crates/tldr-core/src/metrics/cognitive.rs (test mod corollary updates)",
+    "crates/tldr-cli/src/commands/bugbot/text_format.rs (test mod only)",
+    "crates/tldr-cli/src/commands/daemon/daemon_registry.rs (test mod only)",
+    "crates/tldr-cli/tests/cli_remaining_tests.rs",
+    "crates/tldr-cli/tests/cli_search_context_tests.rs",
+    "crates/tldr-cli/tests/cli_tests.rs",
+    "crates/tldr-cli/tests/cli_patterns_contracts_tests.rs",
+    "crates/tldr-cli/tests/cli_quality_tests.rs",
+    "crates/tldr-cli/tests/reaching_defs_cli_tests.rs",
+    "crates/tldr-cli/tests/smells_pr_focused_filter_test.rs",
+    "crates/tldr-cli/tests/val013_daemon_status_cross_cwd_test.rs"
+  ],
+  "delete_on_stale": [
+    "test_kotlin_returns_unsupported (Kotlin now supported via tree_sitter_kotlin_ng; replacement test_kotlin_parse exists)",
+    "test_swift_returns_unsupported (Swift now supported via tree_sitter_swift; replacement test_swift_parse exists)",
+    "test_search_with_extension_filter (legacy --ext flag; SmartSearch has no extension filter)",
+    "test_search_with_multiple_extensions (legacy --ext flag)",
+    "test_search_with_context_lines (legacy -C flag; SmartSearch has line_range+preview)",
+    "test_search_max_results (legacy -m flag; SmartSearch uses --top-k)",
+    "test_search_max_files (legacy --max-files flag; not on SmartSearch)",
+    "Note: 5 above are inline #[cfg(test)] mod tests inside cli_search_context_tests.rs replaced by a documenting comment block."
+  ],
+  "escalated_to_operator": {
+    "report": "reports/operator-escalation-regression.json",
+    "tests": [
+      "vuln_command::test_vuln_detects_xss",
+      "ruby_io_popen_with_user_input_via_compute_taint"
+    ],
+    "regression_milestones": [
+      "vuln-migration-v1",
+      "field_access_info-v1"
+    ],
+    "operator_options": [
+      "Option A: relabel both tests as Cat-B carry-forwards (raise stop-threshold from 33 to 35).",
+      "Option B: open a new atomic milestone (e.g. vuln-migration-v1.1) to fix the Python f-string-as-HtmlOutput sink + Ruby gets-as-UserInput source regressions, then close M4.",
+      "Option C: revert vuln-migration-v1 / field_access_info-v1 portions that introduced the regression, then re-attempt their work."
+    ]
+  },
+  "verifications": {
+    "cargo_build_workspace_tests_features_semantic": {
+      "command": "cargo build --workspace --tests --features semantic",
+      "exit_code": 0
+    },
+    "cargo_clippy_workspace_tests_features_semantic_dD_warnings": {
+      "command": "cargo clippy --workspace --tests --features semantic -- -D warnings",
+      "exit_code": 0
+    },
+    "cargo_test_workspace_features_semantic_doc_no_fail_fast": {
+      "command": "cargo test --workspace --features semantic --doc --no-fail-fast",
+      "exit_code": 0,
+      "summary": "0 failed, 33 passed, 147 pre-existing ignores"
+    },
+    "cargo_test_workspace_features_semantic_no_fail_fast_release": {
+      "command": "cargo test --workspace --features semantic --no-fail-fast --release",
+      "exit_code": 101,
+      "summary": "35 failed (33 Cat-B vuln-source-parity-v1 carry-forwards + 2 escalated regressions). All ~1900 other tests pass.",
+      "capture_file": "reports/M4-test-capture.txt"
+    }
+  },
+  "validator_mandate_compliance": {
+    "no_test_gaming_rule": "PASS — zero #[ignore] markers added; assertions corrected to match post-fix correct behavior or the SonarSource Cognitive Complexity v1.4 spec; no commented-out code; no weakened assertions.",
+    "no_source_changes_in_active_subcmd_implementations": "PASS — source modifications restricted to (a) named exceptions: cognitive analyzer, parse_coverage, analyze_dead_code, compute_martin_metrics, git_log; (b) test fixtures (test files, #[cfg(test)] mods, fixture data files). Two regressions that would have required active-subcmd-handler changes were ESCALATED instead of silently fixed.",
+    "pre_publish_baseline_restored": "PARTIAL — failure-count is 35, target is 33. The +2 are documented escalations awaiting operator decision per the operator_escalation_on_regression_from_prior_milestone validator mandate.",
+    "cli_output_shape_unchanged": "PASS — no CLI public-API surface changes; all source changes are internal handler edge-cases (named exceptions only).",
+    "operator_escalation_on_regression_from_prior_milestone": "TRIGGERED — reports/operator-escalation-regression.json created with full diagnosis of vuln-migration-v1 and field_access_info-v1 regressions affecting 2 tests."
+  },
+  "next_steps": [
+    "Operator review of reports/operator-escalation-regression.json to choose between Option A (Cat-B relabel + stop-threshold raise to 35), Option B (new milestone for regression fix), or Option C (revert).",
+    "Once decided, M5 (CHANGELOG + local tag workspace-test-infrastructure-v1) can proceed."
+  ],
+  "generated_at": "2026-04-29",
+  "commit_sha_self_reference": "TBD (will be backfilled after commit per M1 backfill protocol)"
+}

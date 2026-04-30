@@ -56,6 +56,12 @@ pub fn git_log(
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
+        // Empty repo (no commits yet): treat as Ok with empty output rather
+        // than an error. `git log` exits with code 128 in this state and
+        // emits a "does not have any commits yet" message on stderr.
+        if stderr.contains("does not have any commits yet") {
+            return Ok(String::new());
+        }
         return Err(TldrError::GitError(format!("git log failed: {}", stderr)));
     }
 
@@ -77,6 +83,11 @@ pub fn git_log_numstat(path: &Path, since_days: u32) -> TldrResult<String> {
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
+        // Empty repo (no commits yet): treat as Ok with empty output rather
+        // than an error. Same as `git_log` above.
+        if stderr.contains("does not have any commits yet") {
+            return Ok(String::new());
+        }
         return Err(TldrError::GitError(format!(
             "git log --numstat failed: {}",
             stderr

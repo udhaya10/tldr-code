@@ -141,6 +141,12 @@ fn change_impact_succeeds_when_path_is_empty() {
 fn detection_error_hints_at_origin_branch_when_only_remote_exists() {
     use tempfile::TempDir;
 
+    // Acquire the ENV_LOCK so we don't race with `change_impact_succeeds_when
+    // _path_is_empty` which transiently clears PATH process-wide. Without
+    // this, our `git update-ref` invocation can fail with ENOENT when run
+    // in parallel.
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
     let tmp = TempDir::new().unwrap();
     let project = tmp.path();
     init_git_repo_with_one_commit(project);

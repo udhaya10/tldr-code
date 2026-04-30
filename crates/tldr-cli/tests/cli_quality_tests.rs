@@ -859,6 +859,10 @@ mod churn_tests {
     use super::*;
 
     /// Test churn command help output
+    ///
+    /// `--hotspots` is now deprecated and hidden from help (use the
+    /// dedicated `tldr hotspots` subcommand). The visible churn flags
+    /// are --days/--top/--exclude/--authors.
     #[test]
     fn test_churn_help() {
         let mut cmd = tldr_cmd();
@@ -869,8 +873,7 @@ mod churn_tests {
             .stdout(predicate::str::contains("--days"))
             .stdout(predicate::str::contains("--top"))
             .stdout(predicate::str::contains("--exclude"))
-            .stdout(predicate::str::contains("--authors"))
-            .stdout(predicate::str::contains("--hotspots"));
+            .stdout(predicate::str::contains("--authors"));
     }
 
     /// Test churn command with git repository

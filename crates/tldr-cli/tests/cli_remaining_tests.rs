@@ -38,7 +38,7 @@ fn create_test_project() -> TempDir {
 
 def main():
     helper()
-    
+
 class MyClass:
     def method(self):
         helper()
@@ -48,6 +48,31 @@ def unused_func():
 "#,
     )
     .unwrap();
+
+    temp_dir
+}
+
+/// Create a test project with an initialized git repository (single seed
+/// commit). Required by `tldr change-impact` which needs a baseline to diff
+/// against; without it the command returns NoBaseline and exits non-zero.
+fn create_git_test_project() -> TempDir {
+    let temp_dir = create_test_project();
+    let project_path = temp_dir.path();
+
+    let run_git = |args: &[&str]| {
+        let _ = Command::new("git")
+            .args(args)
+            .current_dir(project_path)
+            .output()
+            .expect("git should be available in the test environment");
+    };
+
+    run_git(&["init", "-q"]);
+    run_git(&["config", "user.email", "test@test.com"]);
+    run_git(&["config", "user.name", "Test"]);
+    run_git(&["config", "commit.gpgsign", "false"]);
+    run_git(&["add", "."]);
+    run_git(&["commit", "-q", "-m", "seed"]);
 
     temp_dir
 }
@@ -720,7 +745,8 @@ fn test_slice_help() {
 
 #[test]
 fn test_change_impact_basic() {
-    let temp_dir = create_test_project();
+    // change-impact requires a git baseline (NoBaseline -> exit 3).
+    let temp_dir = create_git_test_project();
     let output = Command::new(assert_cmd::cargo::cargo_bin!("tldr"))
         .args(["change-impact", temp_dir.path().to_str().unwrap(), "-q"])
         .output()
@@ -728,7 +754,8 @@ fn test_change_impact_basic() {
 
     assert!(
         output.status.success(),
-        "change-impact command should succeed"
+        "change-impact command should succeed; stderr={}",
+        String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
@@ -739,7 +766,7 @@ fn test_change_impact_basic() {
 
 #[test]
 fn test_change_impact_text_format() {
-    let temp_dir = create_test_project();
+    let temp_dir = create_git_test_project();
     let output = Command::new(assert_cmd::cargo::cargo_bin!("tldr"))
         .args([
             "change-impact",
@@ -753,7 +780,8 @@ fn test_change_impact_text_format() {
 
     assert!(
         output.status.success(),
-        "change-impact text format should succeed"
+        "change-impact text format should succeed; stderr={}",
+        String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
@@ -792,7 +820,7 @@ fn test_change_impact_with_files() {
 
 #[test]
 fn test_change_impact_runner_pytest() {
-    let temp_dir = create_test_project();
+    let temp_dir = create_git_test_project();
     let output = Command::new(assert_cmd::cargo::cargo_bin!("tldr"))
         .args([
             "change-impact",
@@ -2037,8 +2065,11 @@ fn test_invalid_format_option() {
 
 #[test]
 fn test_nonexistent_path() {
-    // Commands that properly fail with non-zero exit code for nonexistent paths
-    let strict_commands = vec!["hubs", "deps"];
+    // Commands that properly fail with non-zero exit code for nonexistent paths.
+    // `change-impact` is strict because the path must resolve to a git
+    // repository (or contain detectable changes) to establish a baseline;
+    // a missing path is a NoBaseline error and exits non-zero.
+    let strict_commands = vec!["hubs", "deps", "change-impact"];
 
     for cmd in &strict_commands {
         let output = Command::new(assert_cmd::cargo::cargo_bin!("tldr"))
@@ -2054,14 +2085,19 @@ fn test_nonexistent_path() {
 
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
-            stderr.contains("not found") || stderr.contains("Error") || stderr.contains("path"),
-            "{} error should indicate path not found",
-            cmd
+            stderr.contains("not found")
+                || stderr.contains("Error")
+                || stderr.contains("path")
+                || stderr.contains("baseline")
+                || stderr.contains("ERROR"),
+            "{} error should indicate path/baseline issue, got stderr: {}",
+            cmd,
+            stderr
         );
     }
 
     // Commands that return success with empty results for nonexistent paths
-    let lenient_commands = vec!["clones", "change-impact"];
+    let lenient_commands = vec!["clones"];
 
     for cmd in &lenient_commands {
         let output = Command::new(assert_cmd::cargo::cargo_bin!("tldr"))

@@ -134,13 +134,22 @@ def another():
 
 #[test]
 fn test_search_invalid_regex() {
+    // SmartSearch's default mode is BM25 which treats input as a token
+    // query, not a regex. To exercise the invalid-pattern error path we
+    // must opt into --regex mode explicitly.
     let temp = TempDir::new().unwrap();
     fs::write(temp.path().join("test.py"), "content").unwrap();
 
     let mut cmd = tldr_cmd();
-    cmd.args(["search", "[invalid", temp.path().to_str().unwrap(), "-q"])
-        .assert()
-        .failure();
+    cmd.args([
+        "search",
+        "[invalid",
+        temp.path().to_str().unwrap(),
+        "--regex",
+        "-q",
+    ])
+    .assert()
+    .failure();
 }
 
 // =============================================================================

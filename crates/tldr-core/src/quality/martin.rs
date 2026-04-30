@@ -263,8 +263,13 @@ pub fn compute_martin_metrics(path: &Path, language: Option<Language>) -> TldrRe
                     )
                 })?
             } else {
-                Language::from_directory(path)
-                    .ok_or_else(|| TldrError::NoSupportedFiles(path.to_path_buf()))?
+                // Empty directory or directory with no recognizable source
+                // files: return an empty Report rather than erroring. Aligns
+                // with the convention used by analyze_dead_code/parse_coverage.
+                match Language::from_directory(path) {
+                    Some(l) => l,
+                    None => return Ok(MartinReport::default()),
+                }
             }
         }
     };

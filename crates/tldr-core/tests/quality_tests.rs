@@ -571,12 +571,21 @@ fn test_find_similar_empty() {
 fn test_find_similar_no_clones() {
     let dir = create_test_dir();
 
+    // Two functions with structurally different bodies — different
+    // statement kinds, different operations — so they must score below
+    // the 0.8 similarity threshold. Single-statement function bodies
+    // (e.g. `return "x"` vs `return "y"`) tokenize identically and
+    // trip the clone detector even when string literals differ, so we
+    // give each fixture a distinct multi-statement shape.
     write_file(
         &dir,
         "a.py",
         r#"
-def unique_a():
-    return "completely different implementation"
+def unique_a(items):
+    total = 0
+    for item in items:
+        total += item * 2
+    return total
 "#,
     );
 
@@ -584,8 +593,11 @@ def unique_a():
         &dir,
         "b.py",
         r#"
-def unique_b():
-    return "another totally different function"
+def unique_b(name):
+    greeting = "hello"
+    if name:
+        greeting = greeting + ", " + name
+    print(greeting)
 "#,
     );
 
@@ -627,7 +639,12 @@ fn test_parse_coverage_cobertura() {
 
     write_file(&dir, "coverage.xml", cobertura_xml);
 
-    let options = CoverageOptions::default();
+    // by_file=true so per-file detail is retained; otherwise the parser
+    // clears `report.files` for compactness (the parse itself succeeds).
+    let options = CoverageOptions {
+        by_file: true,
+        ..CoverageOptions::default()
+    };
     let result = parse_coverage(dir.path(), Some(CoverageFormat::Cobertura), &options);
     assert!(result.is_ok());
     let report = result.unwrap();
