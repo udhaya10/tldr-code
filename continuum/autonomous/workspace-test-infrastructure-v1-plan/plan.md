@@ -30,6 +30,8 @@ The `pre_existing_orthogonal_failures` list in `regex-removal-v1-plan/reports/W2
 
 `ls crates/tldr-cli/src/commands/archived/` confirms 17 subcommands have been moved to the archive directory (`cfg`, `dfg`, `ssa`, `alias`, `dominators`, `live_vars`, `abstract_interp`, `arch`, `behavioral`, `bounds`, `diff_impact`, `equivalence`, `maintainability`, `mutability`, `purity`, `search`, `secrets`). The `Subcommand` enum in `crates/tldr-cli/src/main.rs` has NO variants for these — confirmed via grep. But the test files (`cli_graph_tests.rs`, `cli_remaining_tests.rs`, `cli_quality_tests.rs`, `ssa_cli_tests.rs`, `gvn_cli_tests.rs`, `p2_multilang_tests.rs`, `exhaustive_matrix.rs`, etc.) still invoke `tldr cfg ...`, `tldr dfg ...`, `tldr ssa ...` etc. Every such invocation returns clap-unknown-subcommand and the test panics on `assert!(output.status.success())`.
 
+**Disambiguation note (per premortem ELEPHANT-1)**: of the 17 archived modules, **only 16 are Cat-A deletion targets**. The `search` module is presence-only — at `crates/tldr-cli/src/main.rs:141-142`, the active `SmartSearch(SmartSearchArgs)` enum variant is renamed via `#[command(name = "search")]` so that `tldr search ...` invocations route to **active** SmartSearch, NOT to anything in `archived/search.rs`. Tests invoking `args(["search", ...])` are therefore ACTIVE and PRESERVED. M1 enumeration MUST exclude `search` from the archived candidate set; the dispatch contract carries a `m1_classification_by_clap_name` validator mandate to enforce this. The 16 actual Cat-A deletion targets are: `cfg`, `dfg`, `ssa`, `alias`, `dominators`, `live_vars`, `abstract_interp`, `arch`, `behavioral`, `bounds`, `diff_impact`, `equivalence`, `maintainability`, `mutability`, `purity`, `secrets`.
+
 This is a clean DELETE bucket: tests targeting functionality that no longer exists in the binary. Per the no-gaming rule (CLAUDE.md global): deletion of tests is justified ONLY when the target functionality has been intentionally removed AND modern equivalents are covered by other active tests. Both conditions hold here (archived deliberately in prior milestones; modern equivalents like `taint`, `slice`, `whatbreaks`, `references` have their own active test coverage).
 
 ### Failure breakdown at HEAD `671a984`
@@ -81,13 +83,15 @@ This milestone has **5 sub-milestones**. All are non-atomic except **M3** (atomi
 **Additional artifacts** (GATING for M2-M4):
 - `reports/M1-red-capture.txt` — full cargo test output at HEAD.
 - `reports/M1-doctest-red-capture.txt` — `cargo test --workspace --features semantic --doc --no-fail-fast` output.
-- `reports/M1-archived-cmd-test-enumeration.json` — authoritative list of every archived-cmd test function by file + line. Schema: `{file: <path>, line: <usize>, fn_name: <str>, archived_subcommand: <str>}`. Constructed by walking each `cli_*_tests.rs` and `*_cli_tests.rs` file, identifying every `Command::new(assert_cmd::cargo::cargo_bin!("tldr")).args([\"<archived>\"...])` invocation. Estimated ~200 entries.
+- `reports/M1-archived-cmd-test-enumeration.json` — authoritative list of every archived-cmd test function by file + line. Schema: `{file: <path>, line: <usize>, fn_name: <str>, archived_subcommand: <str>}`. Constructed by walking each `cli_*_tests.rs` and `*_cli_tests.rs` file, identifying every `Command::new(assert_cmd::cargo::cargo_bin!("tldr")).args([\"<archived>\"...])` invocation, where `<archived>` is in the **16-element** Cat-A set: `{cfg, dfg, ssa, gvn, alias, dominators, live_vars, abstract_interp, arch, behavioral, bounds, diff_impact, equivalence, maintainability, mutability, purity, secrets}` (note: `search` is EXCLUDED — it is the ACTIVE SmartSearch CLI alias per `crates/tldr-cli/src/main.rs:141-142`). Estimated 218-225 entries (premortem ELEPHANT-2 — supersedes the legacy ~200 narrative). The M1 enumeration JSON is the binding count; do NOT panic if the count exceeds 200.
 - `reports/M1-orthogonal-real-failures.json` — authoritative list of Category-C failures. Each entry: `{test: <name>, file: <path>, line: <usize>, root_cause: <str>, disposition: FIX|DELETE, fix_sketch: <str>}`. Estimated 16-25 entries.
 - `reports/M1-out-of-scope-confirmation.json` — list of all 33 `vuln_migration_v1_red` Category-B failures, EXPLICITLY excluded from this milestone's scope; cross-reference to vuln-source-parity-v1.
 
 **Stop thresholds**:
 - All four artifacts committed.
-- Sum of Cat-A + Cat-C + 4 (doctests) + Cat-B = 276 (live capture total). Numerical reconciliation must match.
+- Sum of Cat-A + Cat-C + 4 (doctests) + Cat-B = 276 (live capture total). Numerical reconciliation must match within +/- 5.
+- M1's authoritative count from `M1-archived-cmd-test-enumeration.json` SUPERSEDES any narrative estimate (per validator mandate `m1_enumeration_authoritative_over_plan_estimate`). The +/- 5 tolerance applies only between M1 final enumeration and M3's actual delete count, **not** between the plan's narrative ~200 and the M1 enumeration. Workers must not flag a M1 count of 218-225 as "drift".
+- Spot-check (per validator mandate `m1_classification_by_clap_name`): grep `M1-archived-cmd-test-enumeration.json` for `"archived_subcommand": "search"` — any match is a M1 BLOCKER (re-enumerate; `search` is the active SmartSearch alias).
 - `cargo build --workspace --tests --features semantic` exit 0 (re-confirm clean build).
 
 ### M2 — Doctest fixes
@@ -121,16 +125,16 @@ This milestone has **5 sub-milestones**. All are non-atomic except **M3** (atomi
 
 **Red tests** (compile-gate only): `cargo build --workspace --tests --features semantic` after deletion (must remain exit 0; no orphaned helper imports).
 
-**Green files** (per M1-archived-cmd-test-enumeration.json — list authoritative):
+**Green files** (per M1-archived-cmd-test-enumeration.json — list authoritative; per validator mandate `m1_enumeration_authoritative_over_plan_estimate`, M3 actual delete count MUST match the M1 enumeration line-for-line):
 - `crates/tldr-cli/tests/cli_graph_tests.rs` — DELETE all `test_cfg_*`, `test_dfg_*`, `test_ssa_*` test functions (~16-25 functions).
 - `crates/tldr-cli/tests/cli_remaining_tests.rs` — DELETE archived subset (alias, dominators, live_vars, arch tests). PRESERVE active subset (taint, slice, whatbreaks, hubs, references, deps, inheritance, clones, dice, daemon-related).
 - `crates/tldr-cli/tests/cli_quality_tests.rs` — DELETE archived (maintainability, mutability, purity, secrets); PRESERVE active.
-- `crates/tldr-cli/tests/cli_search_context_tests.rs` — DELETE archived `search` tests (note: `search` is a borderline case — there's a `search_*` family that may be partly active; M1 enumeration must classify).
-- `crates/tldr-cli/tests/cli_tests.rs` — DELETE archived subset; PRESERVE active.
-- `crates/tldr-cli/tests/ssa_cli_tests.rs` — DELETE entire file (all 26 tests target archived `ssa`).
-- `crates/tldr-cli/tests/gvn_cli_tests.rs` — DELETE entire file (gvn is archived-equivalent — not in main.rs Subcommand enum).
-- `crates/tldr-cli/tests/p2_multilang_tests.rs` — DELETE archived subset (the bulk of `test_<archived_cmd>_<lang>` matrix); PRESERVE active subset.
-- `crates/tldr-cli/tests/exhaustive_matrix.rs` — DELETE archived subset (53 failed entries; mostly archived-cmd × lang matrix).
+- `crates/tldr-cli/tests/cli_search_context_tests.rs` — **PRESERVE entire file** (per validator mandate `m1_classification_by_clap_name`). Every `args(["search", ...])` invocation routes to ACTIVE SmartSearch via `#[command(name = "search")]` at `crates/tldr-cli/src/main.rs:141-142`. The `search` token is NOT in the 16-element Cat-A set.
+- `crates/tldr-cli/tests/cli_tests.rs` — DELETE archived subset; PRESERVE active. Active includes every `args(["search", ...])` SmartSearch invocation (do NOT confuse with archived/search.rs).
+- `crates/tldr-cli/tests/ssa_cli_tests.rs` — DELETE entire file (all 26 tests target archived `ssa`; whole-file `git rm` permitted — this file is purely-archived).
+- `crates/tldr-cli/tests/gvn_cli_tests.rs` — DELETE entire file (gvn is archived-equivalent — not in main.rs Subcommand enum; whole-file `git rm` permitted).
+- `crates/tldr-cli/tests/p2_multilang_tests.rs` — **PER-TEST DELETE ONLY** (per validator mandate `m3_no_whole_file_delete_for_mixed_files`). 45 tests: ~37 archived-cmd (Cat-A delete) vs ~8 active (preserve). Whole-file `git rm` is FORBIDDEN. Use surgical `fast_edit` per test function.
+- `crates/tldr-cli/tests/exhaustive_matrix.rs` — **PER-TEST DELETE ONLY** (per validator mandate `m3_no_whole_file_delete_for_mixed_files`). 729+ tests: 53 archived-cmd (Cat-A delete) vs the rest active (preserve). Whole-file `git rm` is FORBIDDEN. Use surgical `fast_edit` per test function.
 - `crates/tldr-cli/tests/cli_patterns_contracts_tests.rs` — DELETE archived subset; PRESERVE active.
 - `crates/tldr-cli/src/commands/bugbot/text_format.rs` — DELETE 1 unit test `test_text_format_generic_evidence_shows_numbers` if M1 classifies it as Cat-A (numeric drift on archived-cmd evidence) or as Cat-C (real fixable bug).
 
@@ -142,7 +146,7 @@ This milestone has **5 sub-milestones**. All are non-atomic except **M3** (atomi
 - `cargo clippy --workspace --tests --features semantic -- -D warnings` exit 0.
 - `cargo test --workspace --features semantic --no-fail-fast --release` failure count drops by ~200 (Cat-A failures eliminated; remaining failures = Cat-B + Cat-C + 4 doctests + 0 = ~33 + 16-25 + 4 = ~53-62 expected).
 
-**Rollback rule**: If post-commit verification surfaces compile errors or clippy warnings, REVERT entire M3 commit, re-run M1 enumeration to identify the missed dependency, then re-stage.
+**Rollback rule**: If post-commit verification surfaces compile errors or clippy warnings, REVERT entire M3 commit, re-run M1 enumeration to identify the missed dependency, then re-stage. **Enumeration authority** (per validator mandate `m1_enumeration_authoritative_over_plan_estimate`): M3's actual delete set MUST match `M1-archived-cmd-test-enumeration.json` line-for-line. Any mismatch (under-delete or over-delete) is a M3 stop-threshold violation, regardless of whether the M1 enumeration count diverges from the plan-narrative ~200 estimate. The +/- 5 tolerance applies only between M1 final enumeration and M3 actual delete count, NOT against the legacy narrative estimate.
 
 ### M4 — Targeted Category-C orthogonal-real fixes
 
@@ -204,6 +208,8 @@ This milestone has **5 sub-milestones**. All are non-atomic except **M3** (atomi
 | Category | Risk | Mitigation |
 |----------|------|------------|
 | Cat-A (archived-cmd test deletion) | Bulk delete may inadvertently remove a test for an ACTIVE subcommand if M1 enumeration mis-classifies | M1 enumeration cross-checks every test function against the active Subcommand variants in main.rs. Active variants are SOURCE-OF-TRUTH; deletions only happen for invocations of cmds NOT in that enum. |
+| Cat-A `search`-vs-SmartSearch disambiguation | The 17 archived modules in `crates/tldr-cli/src/commands/archived/` include `search.rs`, but `tldr search ...` is the ACTIVE CLI alias for SmartSearch via `#[command(name = "search")]` at `crates/tldr-cli/src/main.rs:141-142`. A literal-reading worker would mis-classify `args(["search", ...])` invocations as Cat-A and delete active SmartSearch coverage. | Validator mandate `m1_classification_by_clap_name`: classification by CLI-name-after-clap-rename, NOT module presence in archived/. The 16-element Cat-A set EXCLUDES `search`. M1 spot-check: any `archived_subcommand: "search"` entry is a BLOCKER. Plan §M3 explicitly marks `cli_search_context_tests.rs` as PRESERVE entire file. |
+| Cat-A intra-file mixed deletions (`p2_multilang_tests.rs`, `exhaustive_matrix.rs`) | These two files contain a mix of archived-cmd tests (Cat-A delete) and active-cmd tests (preserve). `p2_multilang_tests.rs` has 45 tests / 37 fail; `exhaustive_matrix.rs` has 729+ tests / 53 fail. A worker doing a whole-file `git rm` would delete the active subset and silently lose coverage. | Validator mandate `m3_no_whole_file_delete_for_mixed_files`: PER-TEST DELETE ONLY for mixed files. Whole-file `git rm` is FORBIDDEN. Surgical `fast_edit` per test function. Whole-file delete remains permitted only for purely-archived files (`ssa_cli_tests.rs`, `gvn_cli_tests.rs`). |
 | Cat-A (helper-import orphans post-deletion) | A test-only helper used by both archived and active tests may end up unused if we don't track helpers | Post-M3, `cargo build --workspace --tests` exit 0 + `cargo clippy -D warnings` catches every orphan. M3 stop-threshold gates on this. |
 | Cat-A (atomic deletion failure) | Partial deletion across multiple files leaves intermediate state in compile-fail | M3 marked atomic_commit:true. All archived-cmd test deletions go in ONE commit. Mirror vuln-migration-v1 M5. |
 | Cat-C (FIX cascades) | Fixing one test may break another (e.g., changing `git_log` empty-repo behavior may break a positive-case test elsewhere) | Each Cat-C fix verified individually — `cargo test --workspace --features semantic --no-fail-fast --release` after each Cat-C fix; expected delta = -1 per fix. |
