@@ -19,7 +19,9 @@
     "no_public_api_change": "compute_taint_with_tree, scan_vulnerabilities, detect_sources_ast, detect_sinks_ast — all signatures unchanged. No new exports. Bank arrays are crate-internal `static` items; modifying them is not a public API change.",
     "no_enum_variant_extension": "TaintSourceType, TaintSinkType, VulnType — no new variants. If M1 surfaces a need for a new variant (e.g., a hypothetical TaintSourceType::WebSocketMessage), that is OUT OF SCOPE for this milestone and routes to a separate enum-extension milestone.",
     "no_perf_regression": "The structural perf carry-forward M3-CF-02 (avg 17.18× M1, p99 5.24× M1) is documented but not addressed here. M5 verification reports same-order perf as HEAD (no NEW regression introduced by adding bank entries; bank lookup is O(N_patterns) per descendant, and the additions are <100 entries total across 16 banks).",
-    "carry_forward_max_5": "Ruby backtick (1) + worst-case Rust (4 if all categorized as type-b in M1) = 5. If M1 surfaces additional carry-forward beyond Rust (e.g., a Java FQN issue that turns out to be a tree-sitter parse-shape bug), M5 stop-threshold MUST surface it explicitly with a non-additive-resolution rationale; the executor does NOT extend scope to fix engine-level issues."
+    "carry_forward_max_5": "Ruby backtick (1) + worst-case Rust (4 if all categorized as type-b in M1) = 5. If M1 surfaces additional carry-forward beyond Rust (e.g., a Java FQN issue that turns out to be a tree-sitter parse-shape bug), M5 stop-threshold MUST surface it explicitly with a non-additive-resolution rationale; the executor does NOT extend scope to fix engine-level issues.",
+    "m3_test_reclassification_atomic": "M3 bank flip (res.send/reply.send FileWrite→HtmlOutput in TYPESCRIPT_AST_SINKS) MUST atomically include the 2 test assertion updates at rr_framework_integ_test.rs:157-177 (fastify_reply_send_reflected_via_compute_taint, assertion at line 168 `TaintSinkType::FileWrite` → `TaintSinkType::HtmlOutput`) and :237-257 (nestjs_res_send_reflected_via_compute_taint, assertion at line 248 analogous). Both tests assert the sink_type variant DIRECTLY via matches!, NOT the projected vuln_type — the plan's previous pre-flight grep convention (`res\\.send.*path_traversal`) was filter-bugged and would have falsely confirmed safety. Non-atomic ship breaks the regression guard. Per premortem E1 (BLOCKER).",
+    "m2_m3_m4_serial": "M2, M3, M4 ALL edit crates/tldr-core/src/security/taint.rs at non-overlapping ranges (per-language AST source/sink banks). M3 and M4 both edit TYPESCRIPT_AST_SINKS specifically. Naive parallelisation would race on the same file. Executor MUST serialize: M2 → M3 → M4 under a single executor session. Mirrors the FAI-v1 + sanitizer-v1 + vuln-migration-v1 precedent. Per premortem E2 (MEDIUM)."
   },
   "skip_blokers": true,
   "release_constraints": {
@@ -30,7 +32,8 @@
   },
   "staging_method": {
     "command": "git add <listed-files-explicitly>",
-    "verification": "git show HEAD --stat | grep -E 'continuum/autonomous/(?!vuln-source-parity-v1-plan/)' && echo LEAK || echo STAGING-OK",
+    "verification": "git show HEAD --stat | awk '/continuum\\/autonomous\\// { print }' | grep -v 'vuln-source-parity-v1-plan/' && echo LEAK || echo STAGING-OK",
+    "verification_note": "Per premortem RM-4: the prior `grep -E 'continuum/autonomous/(?!vuln-source-parity-v1-plan/)'` regex used PCRE negative lookahead which is unsupported by macOS BSD grep -E and would have been a no-op. Replaced with portable awk + grep -v pipeline. Manual `git show HEAD --stat` audit remains canonical regardless.",
     "rationale": "Prevents accidental staging of unrelated continuum/autonomous artifacts (especially the existing unstaged M5/M6 SHA-backref edits in vuln-migration-v1-plan/, FAI-v1-plan/, sanitizer-removal-v1-plan/, etc.). Cargo.lock NEVER staged — `git checkout HEAD -- Cargo.lock` before each commit if dirty."
   },
   "milestones": [
@@ -59,13 +62,14 @@
       "wave": "2",
       "title": "Per-language sink/source bank additions (Wave 2 bulk)",
       "depends": ["M1"],
+      "serialization_note": "M2/M3/M4 ALL edit crates/tldr-core/src/security/taint.rs. M3 and M4 both edit TYPESCRIPT_AST_SINKS specifically. The plan's prior 'parallel after M1' framing was incorrect for taint.rs file-overlap. Executor MUST serialize: M2 → M3 → M4 under a single executor session. Per validator_mandate m2_m3_m4_serial.",
       "atomic_commit": false,
       "must_ship_in_same_release_commit": false,
       "scope": "Apply the additions enumerated in plan.md §3 across taint.rs source/sink banks: C/Cpp SqlQuery banks; Cpp std::getenv source qualifier + std::fopen sink qualifier; CSharp Response.Write HtmlOutput + Process.Start FQN + System.IO.File.Open FQN + JavaScriptSerializer/XmlSerializer/SoapFormatter Deserialize; Elixir bang-convention SqlQuery/FileOpen + :os.cmd/System.shell/Port.open ShellExec; Java new java.io.File / new java.io.ObjectInputStream FQN; Lua/Luau :query( colon-method SqlQuery; OCaml Mariadb.Stmt.execute / Postgresql.exec / Mysql.exec / Sqlite3.prepare SqlQuery; Python response.write / Response.set_data HtmlOutput; Ruby SqlQuery NEW BANK (ActiveRecord::Base.connection.execute, raw_sql); Scala scala.io.Source.fromFile / new java.io.ObjectInputStream FQN; Swift Vapor request.query[ HttpParam source + executeQuery/prepareStatement SqlQuery + Process.launchedProcess/Process.run ShellExec + FileHandle(forReadingAtPath: FileOpen.",
       "files_modified": [
         "crates/tldr-core/src/security/taint.rs"
       ],
-      "loc_delta_estimate": "+60 to +90 LOC (~14 new AstSinkPattern entries + ~2 new AstSourcePattern entries + 4 in-place call_names extensions)",
+      "loc_delta_estimate": "+80 to +110 LOC (~22 distinct new AstSinkPattern entries premortem-corrected from prior '~14' undercount + ~2 new AstSourcePattern entries + 4 in-place call_names extensions; LOC count is informational, not a stop-threshold gate)",
       "stop_thresholds": [
         "26-30 of 33 RED tests transition GREEN (variance depends on M1 Rust disposition; Rust 4 tests addressed here only if M1 categorized them as type-S/K/B; type-R or type-X stay RED).",
         "0 currently-GREEN positive tests transition RED.",
@@ -80,20 +84,24 @@
     {
       "id": "M3",
       "wave": "2",
-      "title": "Reclassify res.send family — FileWrite → HtmlOutput",
-      "depends": ["M1"],
-      "atomic_commit": false,
-      "must_ship_in_same_release_commit": false,
-      "scope": "In TYPESCRIPT_AST_SINKS at taint.rs:2003 (W1-M3 NestJS block), MOVE the four entries (res, send), (response, send), (response, redirect — KEEP as FileWrite), (response, json — KEEP as FileWrite), (Response, send) from sink_type: FileWrite to a NEW HtmlOutput AstSinkPattern entry. Also move (reply, send) from the W1-M2 Fastify block at taint.rs:1981 to HtmlOutput. The redirect/json variants stay FileWrite (semantically navigation/JSON-emit, not Xss). Update the inline comment at taint.rs:2020-2028 to retire the M2 deferred-reclassification carry-forward note.",
+      "title": "Reclassify res.send family — FileWrite → HtmlOutput (ATOMIC with test edits)",
+      "depends": ["M2"],
+      "serialization_note": "Depends on M2 (not just M1) because M2/M3/M4 ALL edit taint.rs and M3+M4 both edit TYPESCRIPT_AST_SINKS — must serialize to avoid merge conflicts under any parallel-agent harness. Per validator_mandate m2_m3_m4_serial.",
+      "atomic_commit": true,
+      "must_ship_in_same_release_commit": true,
+      "scope": "In TYPESCRIPT_AST_SINKS at taint.rs:2003 (W1-M3 NestJS block), MOVE the four entries (res, send), (response, send), (response, redirect — KEEP as FileWrite), (response, json — KEEP as FileWrite), (Response, send) from sink_type: FileWrite to a NEW HtmlOutput AstSinkPattern entry. Also move (reply, send) from the W1-M2 Fastify block at taint.rs:1981 to HtmlOutput. The redirect/json variants stay FileWrite (semantically navigation/JSON-emit, not Xss). Update the inline comment at taint.rs:2020-2028 to retire the M2 deferred-reclassification carry-forward note. ATOMIC: this commit MUST also include the 2 test assertion updates at crates/tldr-core/tests/rr_framework_integ_test.rs:157-177 (fastify_reply_send_reflected_via_compute_taint — line 168 changes `TaintSinkType::FileWrite` → `TaintSinkType::HtmlOutput`) and :237-257 (nestjs_res_send_reflected_via_compute_taint — line 248 analogous). Both currently-GREEN tests assert the sink_type variant DIRECTLY via matches!, NOT the projected vuln_type. Non-atomic ship would flip them RED and break the regression guard. The plan's previous pre-flight grep convention (res\\.send.*path_traversal) is filter-bugged and would have missed these — premortem E1 surfaced them via a corrected grep on `TaintSinkType::FileWrite` near `send`.",
       "files_modified": [
-        "crates/tldr-core/src/security/taint.rs (TYPESCRIPT_AST_SINKS only)"
+        "crates/tldr-core/src/security/taint.rs (TYPESCRIPT_AST_SINKS only)",
+        "crates/tldr-core/tests/rr_framework_integ_test.rs (UPDATE 2 test assertions atomic with M3 bank flip — line 157-177 fastify_reply_send_reflected_via_compute_taint at line 168 changes `TaintSinkType::FileWrite` → `TaintSinkType::HtmlOutput`; line 237-257 nestjs_res_send_reflected_via_compute_taint at line 248 analogous. Both edits ship in the SAME commit as the M3 bank flip — non-atomic would break the regression guard.)"
       ],
-      "loc_delta_estimate": "+8 / -4 (split one merged entry into two by sink_type; update comment)",
+      "loc_delta_estimate": "+8 / -4 source code (split one merged entry into two by sink_type; update comment) + 2 LOC test assertion edits (1 per test)",
       "stop_thresholds": [
         "javascript_xss_positive transitions GREEN.",
         "typescript_xss_positive transitions GREEN.",
-        "0 currently-GREEN tests transition RED — pre-flight grep for res.send/reply.send/response.send/Response.send asserting vuln_type=path_traversal must return zero hits in either tldr-cli/tests/ or tldr-core/tests/.",
-        "M3 report includes the pre-flight grep output verbatim.",
+        "After the bank flip + 2 test edits, ALL rr_framework_integ_test.rs tests still GREEN (including fastify_reply_send_reflected_via_compute_taint and nestjs_res_send_reflected_via_compute_taint with their updated assertions on TaintSinkType::HtmlOutput).",
+        "0 currently-GREEN tests transition RED — corrected pre-flight grep MUST scan both vuln_type projections AND direct sink_type variant assertions: `grep -rEn '(reply|res|response|Response)\\.(send)\\b' crates/tldr-core/tests/ crates/tldr-cli/tests/` AND `grep -rE 'TaintSinkType::FileWrite' crates/tldr-core/tests/ crates/tldr-cli/tests/ | grep -B5 -A5 send`. Any hits beyond the 2 known rr_framework_integ_test.rs cases must trigger triage.",
+        "M3 report includes the corrected pre-flight grep output verbatim AND a diff snippet showing the 2 test assertion updates.",
+        "ATOMIC: single commit. The bank flip + 2 test assertion updates ship together with NO intermediate commit.",
         "cargo check workspace PASS; cargo clippy -D warnings PASS."
       ]
     },
@@ -101,7 +109,8 @@
       "id": "M4",
       "wave": "2",
       "title": "Fixture fix for js/ts deserialization (atomic with bank addition)",
-      "depends": ["M1"],
+      "depends": ["M3"],
+      "serialization_note": "Depends on M3 (not just M1) because M3 and M4 BOTH edit TYPESCRIPT_AST_SINKS in taint.rs (M3 reclassifies res.send/reply.send entries; M4 adds the Deserialize bank entry). Naive parallelization would race on the same file region. Executor MUST serialize: M2 → M3 → M4 under a single executor session. Per validator_mandate m2_m3_m4_serial.",
       "atomic_commit": true,
       "must_ship_in_same_release_commit": true,
       "scope": "Rewrite fixtures javascript/deserialization_positive.js + typescript/deserialization_positive.ts to exercise a real Deserialize sink (e.g., `const serialize = require('node-serialize'); serialize.unserialize(d);` for JS / TS-equivalent). Concurrently add the corresponding TYPESCRIPT_AST_SINKS Deserialize bank entry: { call_names: &[\"unserialize\"], member_patterns: &[(\"\", \"node-serialize\")], sink_type: TaintSinkType::Deserialize }. ATOMIC because splitting these into two commits leaves the suite inconsistent: rewrite-then-bank-add intermediate commit has the fixture asserting vuln_type=deserialization but the engine has no matching sink, so the test stays RED until the second commit; bank-add-then-rewrite intermediate commit adds an unused bank entry (clippy/dead_code clean) but is harmless. The atomic-commit gate prevents accidental scope-leak (e.g., the rewriter forgetting to update the FP fixture).",

@@ -73,7 +73,7 @@ The orchestrator brief framed this as "source-bank parity" across 6 languages. E
 | Swift    | 3         | request.query[, request.headers.first, request.body.string | SqlQuery (executeQuery, prepareStatement wildcards), ShellExec (Process.launchedProcess, Process.run static-method), FileOpen (FileHandle(forReadingAtPath:, forWritingAtPath:) | - | - | - |
 | TypeScript | 2       | (inherits JS) | (inherits JS) | (inherits JS) | (inherits JS) | - |
 
-Total: ~14 sink additions, 4 source-qualifier additions, 4 source-shape additions (Swift), 2 reclassifications (FileWrite→HtmlOutput for res.send family), 2 fixture fixes (eval→unserialize), 4 source-extraction investigations (Rust .unwrap chain), 1 carry-forward.
+Total: ~22 distinct AstSinkPattern entries (premortem-corrected from prior plan-narrative undercount of "~14"; counting per-language: C(1) + Cpp(2) + CSharp(4) + Elixir(3) + Java(2) + Lua(1) + OCaml(1) + Python(1) + Ruby(1) + Scala(2) + Swift(3) + JS/TS(1 in M4 + 1 reclass via M3) ≈ 22), 4 source-qualifier additions, 4 source-shape additions (Swift), 2 reclassifications (FileWrite→HtmlOutput for res.send family), 2 fixture fixes (eval→unserialize), 4 source-extraction investigations (Rust .unwrap chain), 1 carry-forward. LOC delta estimate adjusts to +80 to +110 LOC (was +60 to +90).
 
 ### Out of scope
 
@@ -98,21 +98,19 @@ The carry-forward debt from vuln-migration-v1 M3 IS this milestone. Closing it u
 graph TD
     M1["M1: RED enumeration + Rust source-extraction investigation"]
     M2["M2: Per-language sink/source bank additions (Wave 2)"]
-    M3["M3: Reclassification — res.send family → HtmlOutput"]
-    M4["M4: Fixture fixes for js/ts deserialization"]
+    M3["M3: Reclassification — res.send family → HtmlOutput (atomic w/ test edits)"]
+    M4["M4: Fixture fixes for js/ts deserialization (atomic w/ bank addition)"]
     M5["M5: Verification + binary smoke + carry-forward documentation"]
     M6["M6: CHANGELOG entry + local tag"]
 
     M1 --> M2
-    M1 --> M3
-    M1 --> M4
-    M2 --> M5
-    M3 --> M5
+    M2 --> M3
+    M3 --> M4
     M4 --> M5
     M5 --> M6
 ```
 
-M2/M3/M4 are independently parallelizable after M1 lands. They land sequentially under one orchestrator but could be executed in parallel under a parallel-agent harness.
+M2 → M3 → M4 land **serially under one orchestrator**, NOT in parallel. All three edit `crates/tldr-core/src/security/taint.rs`; M3 and M4 BOTH edit `TYPESCRIPT_AST_SINKS`. A parallel-agent harness with separate worktree branches would race on the same file (and same struct array for M3/M4). This mirrors the FAI-v1 / sanitizer-removal-v1 / vuln-migration-v1 precedent — premortem E2 explicitly flagged the prior "parallelizable after M1" framing as misleading. Per dispatch-contract validator_mandate `m2_m3_m4_serial`.
 
 ### M1: Investigate Rust source-extraction + lock RED-list audit + author verification harness
 
@@ -144,7 +142,7 @@ M2/M3/M4 are independently parallelizable after M1 lands. They land sequentially
   - rust_command_injection_positive, rust_path_traversal_positive, rust_ssrf_positive, rust_deserialization_positive (if M1 categorizes Rust as additive-resolvable; otherwise deferred)
 - **GREEN tests staying GREEN**: ALL 134 currently-passing positive tests + 83 string-literal regression-guard tests + 36 test_e2e_*
 - **Files modified**: `crates/tldr-core/src/security/taint.rs` (source/sink bank extensions)
-- **LOC delta estimate**: +60 to +90 LOC additions (~14 sink additions × 3-5 entries each, plus ~8 source-shape additions)
+- **LOC delta estimate**: +80 to +110 LOC additions (~22 distinct AstSinkPattern entries — premortem-corrected from prior "~14" undercount — × 3-5 entries each, plus ~8 source-shape additions). LOC count is informational, not gating.
 - **Stop thresholds**:
   - 28-32 of 33 RED tests transition GREEN (the variance depends on M1's Rust diagnosis).
   - 0 currently-GREEN tests transition RED.
@@ -152,23 +150,27 @@ M2/M3/M4 are independently parallelizable after M1 lands. They land sequentially
   - cargo clippy -D warnings PASS.
   - tldr vuln binary smoke test on string_literal_fp fixtures returns 0 findings for ALL 14 fall-through languages.
 
-### M3: Reclassification — res.send family wired as HtmlOutput
+### M3: Reclassification — res.send family wired as HtmlOutput (ATOMIC with 2 test assertion updates)
 
-- **Depends**: M1 (for Rust diagnosis lock-in to avoid a 3-way collision risk)
-- **Atomic commit**: false
+- **Depends**: M2 (per validator_mandate `m2_m3_m4_serial` — M2/M3/M4 all edit `taint.rs`; M3 and M4 both edit `TYPESCRIPT_AST_SINKS`. Serialize.)
+- **Atomic commit**: **true** — the bank flip MUST ship atomically with the 2 test assertion updates at `rr_framework_integ_test.rs:157-177` and `:237-257` (see "Files modified" below). Premortem E1 (BLOCKER) verified that those 2 currently-GREEN tests assert `matches!(s.sink_type, TaintSinkType::FileWrite)` directly — non-atomic ship would flip them RED.
 - **RED tests transitioning GREEN**: javascript_xss_positive, typescript_xss_positive
-- **Risk**: any currently-GREEN test that asserts vuln_type=path_traversal on a `res.send` / `reply.send` / `response.send` finding would flip RED. M1 must verify NO such test exists at HEAD. Pre-flight: grep the test corpus.
-- **Files modified**: `crates/tldr-core/src/security/taint.rs` (TYPESCRIPT_AST_SINKS — move 4 entries from FileWrite to HtmlOutput sink_type)
-- **LOC delta estimate**: -4 / +4 (just sink_type field changes; possibly inline-comment update)
+- **Risk**: 2 currently-GREEN tests in `crates/tldr-core/tests/rr_framework_integ_test.rs` assert directly on `TaintSinkType::FileWrite` for `reply.send` (line 168) and `res.send` (line 248). Without atomic test-edit ship, M3 will flip them RED. Premortem corrected the false claim that "the only res.send test is javascript_xss_positive itself" — this milestone retracts that claim.
+- **Files modified**:
+  - `crates/tldr-core/src/security/taint.rs` (TYPESCRIPT_AST_SINKS — move res.send / reply.send / response.send / Response.send entries from FileWrite to HtmlOutput sink_type)
+  - `crates/tldr-core/tests/rr_framework_integ_test.rs` — line 157-177 `fastify_reply_send_reflected_via_compute_taint`: change assertion at line 168 from `TaintSinkType::FileWrite` → `TaintSinkType::HtmlOutput`. Line 237-257 `nestjs_res_send_reflected_via_compute_taint`: change assertion at line 248 analogously. **Both edits ship in the SAME commit as the bank flip** — non-atomic would break the regression guard.
+- **LOC delta estimate**: -4 / +4 source code (sink_type field changes + comment update) + 2 LOC test assertion edits (1 per test).
 - **Stop thresholds**:
-  - 2 RED tests transition GREEN.
+  - 2 RED tests transition GREEN (javascript_xss_positive, typescript_xss_positive).
+  - After the bank flip + 2 test edits, ALL `rr_framework_integ_test.rs` tests still GREEN (including `fastify_reply_send_reflected_via_compute_taint` and `nestjs_res_send_reflected_via_compute_taint` with their updated assertions on `TaintSinkType::HtmlOutput`).
   - 0 currently-GREEN tests transition RED.
+  - Corrected pre-flight grep: `grep -rEn '(reply|res|response|Response)\.(send)\b' crates/tldr-core/tests/ crates/tldr-cli/tests/` AND `grep -rE 'TaintSinkType::FileWrite' crates/tldr-core/tests/ crates/tldr-cli/tests/ | grep -B5 -A5 send` — the M3 commit message must include the diff snippet showing the 2 test assertion updates plus this corrected grep output.
   - vuln-migration-v1 M2 carry-forward note (`taint.rs:2020-2028` "M3 vuln_type_from_sink projects FileWrite -> Xss/PathTraversal/etc. ... M2's deferred reclassification") explicitly retired in updated comment.
 
 ### M4: Fixture fixes for JS/TS deserialization tests
 
-- **Depends**: M1
-- **Atomic commit**: false
+- **Depends**: M3 (per validator_mandate `m2_m3_m4_serial` — M3 and M4 both edit `TYPESCRIPT_AST_SINKS`; serialize)
+- **Atomic commit**: true (single commit — fixture rewrites + sink-bank addition; this property already mandated by `fixture_fix_atomic` in dispatch-contract)
 - **RED tests transitioning GREEN**: javascript_deserialization_positive, typescript_deserialization_positive
 - **Diagnosis**: the fixture authored at vuln-migration-v1 M1 used `eval(d)` as a "deserialization" sink, but `eval` is wired (correctly) as CodeEval / CommandInjection in the canonical taxonomy. The fixture is shape-incorrect — the test asserts vuln_type='deserialization' but the engine emits vuln_type='command_injection'. Fix the fixture to exercise a real deserialization sink (e.g., `node-serialize` library's `unserialize`).
 - **Files modified**:
@@ -660,23 +662,36 @@ positive cases (mod the documented Ruby backtick carry-forward).
 
 ## §7 Atomic-commit checklist
 
-Per the orchestrator brief: "likely no atomic commit needed (these are pure additive changes; the deletion happened in vuln-v1 M3)". Confirmed:
+Per the orchestrator brief: "likely no atomic commit needed (these are pure additive changes; the deletion happened in vuln-v1 M3)". Premortem-corrected:
 
 - M2 is purely additive (new sink/source bank entries) — no atomic gate.
-- M3 is in-place modification of 4 sink_type field values — single-commit-safe but no atomic gate (pre-flight grep verifies no GREEN test asserts on the pre-M3 sink_type for these entries).
+- M3 is in-place modification of 4 sink_type field values **PLUS 2 test assertion updates** at `rr_framework_integ_test.rs:168` and `:248` — **MUST ship as ATOMIC commit**. Premortem E1 (BLOCKER) discovered that 2 currently-GREEN tests assert `matches!(s.sink_type, TaintSinkType::FileWrite)` directly, NOT the projected vuln_type. The original "single-commit-safe but no atomic gate" framing was based on a filter-bugged pre-flight grep (`res\.send.*path_traversal`) that would have missed these. Atomic gate prevents non-atomic ship from breaking the regression guard.
 - M4 is a fixture rewrite + bank addition that ship together (the new fixture exercises the new sink) — must ship in one commit to keep the test suite consistent.
 
-**Atomic-commit gate: M4 only** (single commit: 2 fixture edits + 1 bank addition). M2 and M3 can land independently.
+**Atomic-commit gates: M3 AND M4** (M3: bank flip + 2 test assertion updates; M4: 2 fixture edits + 1 bank addition). M2 lands independently.
 
 ## §8 Premortem / risk register
 
-### Risk 1: M3 reclassification (res.send → HtmlOutput) breaks a currently-GREEN test
+### Risk 1: M3 reclassification (res.send → HtmlOutput) breaks 2 currently-GREEN tests — **VERIFIED, MITIGATED VIA ATOMIC GATE**
 
-**Tiger or elephant**: ELEPHANT (small, easy to detect, easy to fix).
+**Tiger or elephant**: ELEPHANT (BLOCKER-class — premortem E1 surfaced the empirical failure mode and the prior mitigation was filter-bugged).
 
-**Hypothesis**: A currently-GREEN test in the ts-cli or tldr-core test corpus asserts vuln_type=path_traversal for a `res.send(tainted)` finding. M3's reclassification would flip it RED.
+**Hypothesis (EMPIRICALLY VERIFIED at HEAD `e987189`)**: Two currently-GREEN tests in `crates/tldr-core/tests/rr_framework_integ_test.rs` assert directly on the sink-type variant via `matches!(s.sink_type, TaintSinkType::FileWrite)`:
+- Line 157-177: `fastify_reply_send_reflected_via_compute_taint` — asserts FileWrite on `reply.send` (assertion at line 168). M3 moves this to HtmlOutput.
+- Line 237-257: `nestjs_res_send_reflected_via_compute_taint` — asserts FileWrite on `res.send` (assertion at line 248). M3 moves this to HtmlOutput.
 
-**Mitigation**: M1 deliverable includes a pre-flight grep across `crates/tldr-cli/tests/` and `crates/tldr-core/tests/` for any string matching `res\.send.*path_traversal` (and the reply.send / response.send / Response.send variants). If the grep returns hits, M3's stop-threshold MUST also include "no GREEN tests transition RED" — the executor pauses and triages.
+**Retraction**: The previous version of this risk's mitigation claimed "the only res.send test is the failing javascript_xss_positive itself" — that claim is **EMPIRICALLY FALSE** and is hereby retracted. The two `rr_framework_integ_test.rs` tests above were not surfaced by the original pre-flight grep (`res\.send.*path_traversal`) because they assert on the **sink_type variant DIRECTLY**, not on the projected `vuln_type` string `path_traversal`. The original grep was filter-bugged and would have falsely confirmed safety.
+
+**Mitigation (corrected)**: M3 ships as an **ATOMIC COMMIT** including (a) the bank flip in `TYPESCRIPT_AST_SINKS`, AND (b) the 2 test assertion updates at `rr_framework_integ_test.rs:168` (fastify) and `:248` (nestjs) — both changing `TaintSinkType::FileWrite` → `TaintSinkType::HtmlOutput`. M1's pre-flight grep convention is **expanded** to:
+- `grep -rEn '(reply|res|response|Response)\.(send)\b' crates/tldr-core/tests/ crates/tldr-cli/tests/`
+- `grep -rE 'TaintSinkType::FileWrite' crates/tldr-core/tests/ crates/tldr-cli/tests/ | grep -B5 -A5 send`
+
+The expanded grep catches both the projected-vuln_type AND the direct-sink_type assertion shapes. If any hits beyond the 2 known `rr_framework_integ_test.rs` tests appear, the executor pauses and triages.
+
+**Tests that stay GREEN (verified at HEAD)** — DO NOT change these (assertions on `reply.redirect`, `reply.header`, `res.redirect` remain semantically `FileWrite`-mapped per M3's scope of "redirect/json variants stay FileWrite"):
+- `fastify_reply_redirect_via_compute_taint` — asserts FileWrite on `reply.redirect`.
+- `fastify_reply_header_injection_via_compute_taint` — asserts FileWrite on `reply.header`.
+- `nestjs_res_redirect_open_redirect_via_compute_taint` — asserts FileWrite on `res.redirect`.
 
 ### Risk 2: M2 sink additions over-broaden and FP-fire on string literals
 
@@ -719,7 +734,9 @@ The plan asserts the following mandates that the executor MUST verify before dec
 - `string_literal_regression_zero_new_fps` — 83/83 string-literal FP-class GREEN MUST hold across all milestones. M2/M3/M4 verification reports include the binary-smoke output on /tmp/vuln-mig-repro/* to evidence this.
 - `e2e_test_preservation_mandatory` — 36/36 test_e2e_* GREEN MUST hold (primary regression guard from vuln-migration-v1).
 - `rust_disposition_explicit` — M1 MUST categorize each of the 4 Rust RED tests with explicit category-(a/b/c) and document the rationale. Aggregate carry-forward count cannot exceed 5 (1 Ruby backtick + 4 Rust max).
-- `m3_reclassification_pre_flight_grep_required` — before M3 lands, the executor performs a corpus grep for `res\.send.*path_traversal` (and variants) and includes the result in the M3 report.
+- `m3_reclassification_pre_flight_grep_required` — before M3 lands, the executor performs the **corrected** corpus grep — `grep -rEn '(reply|res|response|Response)\.(send)\b' crates/tldr-core/tests/ crates/tldr-cli/tests/` PLUS `grep -rE 'TaintSinkType::FileWrite' crates/tldr-core/tests/ crates/tldr-cli/tests/ | grep -B5 -A5 send` — and includes the result in the M3 report. Premortem E1 (BLOCKER) demonstrated the prior `res\.send.*path_traversal` regex was filter-bugged because it scanned only the projected vuln_type string.
+- `m3_test_reclassification_atomic` — M3 commit MUST atomically include the bank flip AND the 2 test assertion updates at `rr_framework_integ_test.rs:168` (fastify_reply_send) + `:248` (nestjs_res_send) changing `TaintSinkType::FileWrite` → `TaintSinkType::HtmlOutput`. Non-atomic ship would flip those tests RED and break the regression guard. Per premortem E1 (BLOCKER).
+- `m2_m3_m4_serial` — M2, M3, M4 ALL edit `crates/tldr-core/src/security/taint.rs`. M3 and M4 both edit `TYPESCRIPT_AST_SINKS`. The executor MUST serialize: M2 → M3 → M4 under a single executor session — NOT a parallel-agent harness. Mirrors the FAI-v1 + sanitizer-removal-v1 + vuln-migration-v1 precedent. Per premortem E2 (MEDIUM).
 - `carry_forward_exceptions_documented` — any test that does NOT transition GREEN MUST appear in `reports/M5-carry-forward.json` with explicit rationale and predecessor-precedent reference (FAI-v1 `\bgets\b` for the Ruby case).
 
 ## §10 /autonomous-readiness assessment
