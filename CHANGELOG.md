@@ -1,5 +1,179 @@
 # Changelog
 
+## vuln-source-parity-v1 — internal milestone
+
+NOT a published release. Closes vuln-migration-v1 M3-CF-01 + M4-CF-01
+carry-forward (32 of 33 RED positive tests across 15 languages).
+Companion to workspace-test-infrastructure-v1 (parallel pre-publish
+hygiene milestone). Both must land before single coherent external
+cargo publish ships.
+
+### Added
+
+- 42 additive `AstSinkPattern` + `AstSourcePattern` entries across 16
+  `LanguagePatterns` AST banks (M2, commit `f838387`):
+  - C/Cpp: `SqlQuery` banks + Cpp `std::getenv` source qualifier +
+    `std::fopen` sink qualifier
+  - CSharp: `Response.Write` `HtmlOutput` + `Process.Start` FQN +
+    `System.IO.File.Open` FQN + `JavaScriptSerializer` /
+    `XmlSerializer` / `SoapFormatter` `Deserialize`
+  - Elixir: bang-convention `SqlQuery` / `FileOpen` + `:os.cmd` /
+    `System.shell` / `Port.open` `ShellExec`
+  - Java: `new java.io.File` / `new java.io.ObjectInputStream` FQN
+  - Lua/Luau: `:query(` colon-method `SqlQuery`
+  - OCaml: `Mariadb.Stmt.execute` / `Postgresql.exec` / `Mysql.exec` /
+    `Sqlite3.prepare` `SqlQuery`
+  - Python: `response.write` / `Response.set_data` `HtmlOutput`
+  - Ruby: `SqlQuery` NEW BANK
+    (`ActiveRecord::Base.connection.execute`, `raw_sql`)
+  - Scala: `scala.io.Source.fromFile` /
+    `new java.io.ObjectInputStream` FQN
+  - Swift: Vapor `request.query[` `HttpParam` + `executeQuery` /
+    `prepareStatement` `SqlQuery` + `Process.launchedProcess` /
+    `Process.run` `ShellExec` + `FileHandle(forReadingAtPath:`
+    `FileOpen`
+- 1 new `Deserialize` bank entry in `TYPESCRIPT_AST_SINKS` for
+  `node-serialize.unserialize` (M4, commit `c9d75ab`)
+- 0 new `TaintSourceType` / `TaintSinkType` / `VulnType` enum variants
+  (purely bank-additive)
+
+### Changed
+
+- 4 entries in `TYPESCRIPT_AST_SINKS` reclassified from
+  `TaintSinkType::FileWrite` to `TaintSinkType::HtmlOutput` (M3, commit
+  `669b0f5`):
+  - `(reply, send)` (Fastify)
+  - `(res, send)` (NestJS Express-style)
+  - `(response, send)` (NestJS Response-builder lowercase)
+  - `(Response, send)` (NestJS Response-builder capitalized)
+- 3 atomic test assertion updates at
+  `crates/tldr-core/tests/rr_framework_integ_test.rs` shipped in same
+  commit (premortem E1 BLOCKER + M1 pre-flight grep finding):
+  - L168 `fastify_reply_send_reflected_via_compute_taint`:
+    `TaintSinkType::FileWrite` → `TaintSinkType::HtmlOutput`
+  - L248 `nestjs_res_send_reflected_via_compute_taint`: same
+  - L301 `nestjs_response_builder_send_via_compute_taint`: same
+    (lowercase `response.send` builder; M1 pre-flight grep surfaced
+    this 3rd case the premortem missed)
+- 2 fixture rewrites at
+  `crates/tldr-cli/tests/fixtures/vuln_migration_v1/{javascript,typescript}/deserialization_positive.{js,ts}`:
+  replaced `eval(d)` (CodeEval, not Deserialize) with
+  `serialize.unserialize(d)` from `node-serialize` package (M4, commit
+  `c9d75ab`)
+- `(response, redirect)`, `(response, json)`, `(Response, redirect)`,
+  `(Response, json)`, `(NextResponse, redirect)`, `(NextResponse, json)`
+  PRESERVED as `FileWrite` (semantically navigation/JSON-emit, not Xss)
+
+### Fixed
+
+- `vuln_migration_v1_red` pass rate: 133/166 (80.1%) → **158/166
+  (95.2%)** — +25 RED tests transitioned to GREEN
+- Closes M3-CF-01 (32 source-bank-gap tests across 6 langs from
+  vuln-migration-v1) AND M4-CF-01 (Python `res.send` XSS)
+- Reclassification fixes `javascript_xss_positive` +
+  `typescript_xss_positive` transitions to GREEN
+
+### Carry-forwards documented (8 across 3 technical buckets)
+
+- **Bucket A — M1-classified (5)**: 1 Ruby backtick + 4 Rust dispatch
+  bypass
+  - `ruby_command_injection_positive`: tree-sitter-ruby parses
+    `` `#{cmd}` `` as `subshell` node, not `call_expression`. AST shape
+    inexpressible without FP risk. Future
+    `ruby-backtick-extraction-v1` follow-on adds `subshell` to
+    `call_node_kinds(Ruby)`. Mirrors FAI-v1 `\bgets\b` carry-forward
+    precedent.
+  - `rust_{command_injection,deserialization,path_traversal,ssrf}_positive`:
+    M1 empirical investigation falsified the planning hypothesis
+    (`.unwrap()` chain extraction). Real root cause:
+    `crates/tldr-cli/src/commands/remaining/vuln.rs:368-370`
+    (`analyze_file`) routes `.rs` extension exclusively to
+    `analyze_rust_file` (UnsafeCode/MemorySafety/Panic line scanner),
+    bypassing `tldr_core::security::vuln::scan_vulnerabilities`.
+    Reframe C from vuln-migration-v1 plan §0 confirmed. Future
+    `rust-vuln-taint-pipeline-v1` follow-on designs how line-scanner
+    findings interact with canonical taint findings.
+- **Bucket B — M2-surfaced (3, NEW technical class)**:
+  nested-constructor var-extraction
+  - `cpp_deserialization_positive`: tree-sitter-cpp parsing variance on
+    `boost::archive::text_iarchive` constructor declaration shape; bank
+    entry exists but doesn't fire empirically.
+  - `java_deserialization_positive`:
+    `extract_first_identifier_arg_ast` returns `var=None` because first
+    arg is `new java.io.ByteArrayInputStream(d.getBytes())` (nested
+    constructor, not identifier). Var-extraction logic doesn't descend
+    through `object_creation` / `new_expression` nodes.
+  - `scala_deserialization_positive`: same root cause.
+  - Future `var-extract-nested-constructor-v1` follow-on extends
+    `extract_first_identifier_arg_ast` to descend through constructor
+    argument nodes.
+- **Aggregate count 8 exceeds plan's cap of 5** — documented per
+  `validator_mandate.carry_forward_max_5` non-additive-resolution
+  clause. Bucket B is technically distinct from Bucket A:
+  var-extraction limitation, not bank parity or dispatch bypass.
+
+### Retained
+
+- All 83 string-literal regression-guard tests GREEN (closes-#24 root
+  pattern preserved)
+- All 36 `test_e2e_*` in `tldr-core/security/vuln.rs` GREEN (primary
+  regression guard)
+- All CLI integration tests (`vuln_autodetect` 6/6, `vuln_ssrf_test`
+  3/3, `vuln_sarif_deserialization_test` 2/2, `composite_red` 1/1)
+- Public API surface UNCHANGED: no new
+  `TaintSourceType` / `TaintSinkType` / `VulnType` variants, no
+  signature changes, JSON / SARIF output schema unchanged
+- All M2 additive bank entries are PURELY ADDITIVE (no removal of
+  existing entries — audit-verified at `M2-report.json`)
+
+### Architectural notes
+
+- This is a HYGIENE-class follow-on milestone (companion to
+  workspace-test-infrastructure-v1) closing the source/sink-bank
+  coverage gap that vuln-migration-v1 deferred to M3-CF-01 / M4-CF-01.
+- Premortem caught E1 BLOCKER (`res.send` sink_type assertion mismatch
+  — premortem found 2; M1 pre-flight grep added the 3rd at L301), E2
+  (M2/M3/M4 must serialize on `taint.rs`), E3 (sink-addition undercount
+  ~14→~22), RM-4 (BSD grep PCRE incompatibility). All 4 amended pre-/
+  autonomous.
+- M2 worker disclosed honest protocol slip: used `git stash` / pop once
+  for diagnostic comparison (violated standing rule). No work lost.
+  Same kind of slip the sanitizer-v1 M2 worker made earlier in the
+  session. Documented for future reinforcement; cleaner approach is
+  `git show HEAD:path > /tmp/x.rs` + diff.
+- M2 surfaced 3 NEW carry-forwards (Bucket B) raising aggregate from 5
+  to 8 — empirical reality outranking plan estimate. Documented
+  honestly with non-additive-resolution rationale rather than gamed
+  away.
+
+### Standing rules upheld
+
+- Internal-versioning posture honored: NO push, NO `cargo publish`, NO
+  version bumps.
+- The 8 internal tags + this one + workspace-test-infrastructure-v1
+  sibling are local-only.
+- Single coherent external `cargo publish` ships AFTER
+  publish-operator's explicit authorization (USER STANDING RULE:
+  `cargo publish` requires explicit authorization every time,
+  regardless of any milestone PASS verdict or
+  `pre-publish-binary-verification.json` artifact recommending
+  publish).
+
+### Future follow-on milestones queued
+
+- `var-extract-nested-constructor-v1` — extend
+  `extract_first_identifier_arg_ast` to descend through
+  `object_creation` / `new_expression` nodes. Closes 3 carry-forwards
+  (Bucket B). LOC estimate: +30-60.
+- `rust-vuln-taint-pipeline-v1` — design how `analyze_rust_file`
+  line-scanner interacts with `scan_vulnerabilities` taint pipeline
+  for Rust. Closes 4 carry-forwards (Bucket A Rust subset). LOC
+  estimate: TBD; design milestone first.
+- `ruby-backtick-extraction-v1` — add Ruby tree-sitter `subshell` node
+  kind to `call_node_kinds(Ruby)` OR add a new dispatch path that
+  handles backtick `subshell` nodes as `ShellExec` sinks. Closes 1
+  carry-forward (Bucket A Ruby subset). LOC estimate: +10-20.
+
 ## workspace-test-infrastructure-v1 — internal milestone
 
 NOT a published release. Hygiene milestone — restores
