@@ -59,7 +59,7 @@
     "tolerance": 5,
     "pass": true
   },
-  "commit_sha": "<TBD-after-commit>",
+  "commit_sha": "fde7c5fa2b1905f6e6d31054544e696ba83e3978",
   "loc_delta_actual": 0,
   "loc_delta_target": 30,
   "loc_delta_note": "Target was 30 (small JSON artifacts). Actual is 0 LoC of source-code edits — all artifacts are in continuum/autonomous/, no source-code touched per M1 spec.",
