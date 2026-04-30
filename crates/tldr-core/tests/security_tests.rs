@@ -12,9 +12,8 @@ use tempfile::TempDir;
 // Security module imports
 use tldr_core::security::ast_utils::{assignment_node_kinds, call_node_kinds, string_node_kinds};
 use tldr_core::security::taint::{
-    build_line_to_block, build_predecessors, build_successors, compute_taint, detect_sanitizer,
-    detect_sources, validate_cfg, SanitizerType, TaintInfo, TaintSink, TaintSinkType,
-    TaintSourceType,
+    build_line_to_block, build_predecessors, build_successors, compute_taint, detect_sources,
+    validate_cfg, SanitizerType, TaintInfo, TaintSink, TaintSinkType, TaintSourceType,
 };
 use tldr_core::security::{
     scan_secrets, scan_vulnerabilities, Severity as SecretSeverity, VulnType,
@@ -379,26 +378,12 @@ fn test_taint_info_get_vulnerabilities() {
     assert_eq!(vulns.len(), 1);
     assert_eq!(vulns[0].var, "query");
 }
-#[test]
-fn test_detect_sanitizer_python_int() {
-    let sanitizer = detect_sanitizer("safe_id = int(user_id)", Language::Python);
-
-    assert_eq!(sanitizer, Some(SanitizerType::Numeric));
-}
-
-#[test]
-fn test_detect_sanitizer_python_shlex() {
-    let sanitizer = detect_sanitizer("safe_cmd = shlex.quote(user_input)", Language::Python);
-
-    assert_eq!(sanitizer, Some(SanitizerType::Shell));
-}
-
-#[test]
-fn test_detect_sanitizer_python_html_escape() {
-    let sanitizer = detect_sanitizer("safe_html = html.escape(user_content)", Language::Python);
-
-    assert_eq!(sanitizer, Some(SanitizerType::Html));
-}
+// sanitizer-removal-v1 M4 (ATOMIC): three Python `test_detect_sanitizer_*`
+// tests deleted (`_python_int`, `_python_shlex`, `_python_html_escape`).
+// They asserted directly on the regex bank via `detect_sanitizer`. The
+// regex bank is now empty; AST-based dispatch via `compute_taint_with_tree`
+// covers the same fixtures and is exercised by
+// `test_compute_taint_sanitizer_removes_taint` (~L509).
 
 // =============================================================================
 // CFG Helper Tests
@@ -666,12 +651,13 @@ fn test_assignment_node_kinds() {
 
 // =============================================================================
 // Language-Specific Pattern Tests
+//
+// sanitizer-removal-v1 M4 (ATOMIC): `test_detect_sanitizer_typescript`
+// deleted. It asserted on the TypeScript regex sanitizer bank, which is now
+// empty. AST-based dispatch via `compute_taint_with_tree` covers the same
+// `parseInt(val)` fixture; integration coverage lives in
+// `tests/sanitize_breaks_flow_per_language.rs`.
 // =============================================================================
-#[test]
-fn test_detect_sanitizer_typescript() {
-    let sanitizer = detect_sanitizer("parseInt(val)", Language::TypeScript);
-    assert_eq!(sanitizer, Some(SanitizerType::Numeric));
-}
 
 // =============================================================================
 // Serialization Tests

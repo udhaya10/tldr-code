@@ -497,17 +497,16 @@ lazy_static! {
     static ref PYTHON_PATTERNS: LanguagePatterns = LanguagePatterns {
         // Wave-2-atomic (regex-removal-v1 M8): sources + sinks regex banks
         // deleted; AST-based detection in detect_sources_ast/detect_sinks_ast
-        // is canonical. Sanitizer Vec is RETAINED.
+        // is canonical.
+        // sanitizer-removal-v1 M4 (ATOMIC): sanitizer Vec emptied; AST-based
+        // detection via PYTHON_AST_SANITIZERS is canonical, dispatched via
+        // `build_sanitizer_ast_index` in `compute_taint_with_tree`. The
+        // regex bank's `int|float|bool`, `(shlex|pipes).quote`, and
+        // `(html|markupsafe|cgi).escape` patterns are all covered by the
+        // AST bank's structured (call_names, member_patterns) tuples.
         sources: vec![],
         sinks: vec![],
-        sanitizers: vec![
-            // Numeric: int(), float(), bool()
-            (Regex::new(r"\b(int|float|bool)\s*\(").unwrap(), SanitizerType::Numeric),
-            // Shell: shlex.quote, pipes.quote
-            (Regex::new(r"(shlex|pipes)\.quote\s*\(").unwrap(), SanitizerType::Shell),
-            // Html: html.escape, markupsafe.escape, cgi.escape
-            (Regex::new(r"(html|markupsafe|cgi)\.escape\s*\(").unwrap(), SanitizerType::Html),
-        ],
+        sanitizers: vec![],
     };
 }
 
@@ -523,16 +522,12 @@ lazy_static! {
     /// `compute_taint_with_tree`. The sanitizer Vec is RETAINED across all
     /// 4 sub-banks (sanitizer-removal is a future milestone).
     static ref TYPESCRIPT_PATTERNS: LanguagePatterns = LanguagePatterns {
+        // sanitizer-removal-v1 M4 (ATOMIC): sanitizer Vec emptied.
+        // AST bank TYPESCRIPT_AST_SANITIZERS covers parseInt/Number/parseFloat,
+        // encodeURIComponent/DOMPurify.sanitize, and Zod .parse/.safeParse.
         sources: vec![],
         sinks: vec![],
-        sanitizers: vec![
-            // Numeric: parseInt, Number, parseFloat (Express + universal JS)
-            (Regex::new(r"\b(parseInt|Number|parseFloat)\s*\(").unwrap(), SanitizerType::Numeric),
-            // Html: encodeURIComponent, DOMPurify.sanitize (Express + universal JS)
-            (Regex::new(r"(encodeURIComponent|DOMPurify\.sanitize)\s*\(").unwrap(), SanitizerType::Html),
-            // Numeric: Zod .parse() / .safeParse() (Next.js)
-            (Regex::new(r"\.(parse|safeParse)\s*\(").unwrap(), SanitizerType::Numeric),
-        ],
+        sanitizers: vec![],
     };
 }
 
@@ -540,15 +535,13 @@ lazy_static! {
     /// Go taint patterns.
     static ref GO_PATTERNS: LanguagePatterns = LanguagePatterns {
         // Wave-2-atomic (regex-removal-v1 M9): sources + sinks regex banks
-        // deleted; AST detection canonical. Sanitizers RETAINED.
+        // deleted.
+        // sanitizer-removal-v1 M4 (ATOMIC): sanitizer Vec emptied; AST bank
+        // GO_AST_SANITIZERS covers strconv.{Atoi,ParseInt,ParseFloat} and
+        // html.EscapeString / url.QueryEscape.
         sources: vec![],
         sinks: vec![],
-        sanitizers: vec![
-            // Numeric: strconv.Atoi, strconv.ParseInt, strconv.ParseFloat
-            (Regex::new(r"strconv\.(Atoi|ParseInt|ParseFloat)\s*\(").unwrap(), SanitizerType::Numeric),
-            // Html: html.EscapeString, url.QueryEscape
-            (Regex::new(r"(html\.EscapeString|url\.QueryEscape)\s*\(").unwrap(), SanitizerType::Html),
-        ],
+        sanitizers: vec![],
     };
 }
 
@@ -556,15 +549,13 @@ lazy_static! {
     /// Java taint patterns.
     static ref JAVA_PATTERNS: LanguagePatterns = LanguagePatterns {
         // Wave-2-atomic (regex-removal-v1 M9): sources + sinks regex banks
-        // deleted; AST detection canonical. Sanitizers RETAINED.
+        // deleted.
+        // sanitizer-removal-v1 M4 (ATOMIC): sanitizer Vec emptied; AST bank
+        // JAVA_AST_SANITIZERS covers Integer.parseInt / Long.parseLong /
+        // Double.parseDouble and ESAPI.encoder / StringEscapeUtils.escapeHtml.
         sources: vec![],
         sinks: vec![],
-        sanitizers: vec![
-            // Numeric: Integer.parseInt, Long.parseLong, Double.parseDouble
-            (Regex::new(r"(Integer\.parseInt|Long\.parseLong|Double\.parseDouble)\s*\(").unwrap(), SanitizerType::Numeric),
-            // Html: ESAPI.encoder, StringEscapeUtils.escapeHtml
-            (Regex::new(r"(ESAPI\.encoder\s*\(|StringEscapeUtils\.escapeHtml)").unwrap(), SanitizerType::Html),
-        ],
+        sanitizers: vec![],
     };
 }
 
@@ -572,13 +563,13 @@ lazy_static! {
     /// Rust taint patterns.
     static ref RUST_PATTERNS: LanguagePatterns = LanguagePatterns {
         // Wave-2-atomic (regex-removal-v1 M9): sources + sinks regex banks
-        // deleted; AST detection canonical. Sanitizers RETAINED.
+        // deleted.
+        // sanitizer-removal-v1 M4 (ATOMIC): sanitizer Vec emptied; AST bank
+        // RUST_AST_SANITIZERS covers `.parse::<NUM>()` via raw-substring
+        // entries on the numeric type names.
         sources: vec![],
         sinks: vec![],
-        sanitizers: vec![
-            // Numeric: .parse::<i32>(), etc.
-            (Regex::new(r"\.parse::<(i32|i64|u32|u64|f32|f64|usize|isize)>\s*\(").unwrap(), SanitizerType::Numeric),
-        ],
+        sanitizers: vec![],
     };
 }
 
@@ -586,15 +577,13 @@ lazy_static! {
     /// C taint patterns.
     static ref C_PATTERNS: LanguagePatterns = LanguagePatterns {
         // Wave-2-atomic (regex-removal-v1 M9): sources + sinks regex banks
-        // deleted; AST detection canonical. Sanitizers RETAINED.
+        // deleted.
+        // sanitizer-removal-v1 M4 (ATOMIC): sanitizer Vec emptied; AST bank
+        // C_AST_SANITIZERS covers atoi/atol/atof/strtol/strtoul/strtod plus
+        // snprintf.
         sources: vec![],
         sinks: vec![],
-        sanitizers: vec![
-            // Numeric: atoi, atol, atof, strtol, strtoul, strtod
-            (Regex::new(r"\b(atoi|atol|atof|strtol|strtoul|strtod)\s*\(").unwrap(), SanitizerType::Numeric),
-            // Shell: snprintf (bounded write)
-            (Regex::new(r"\bsnprintf\s*\(").unwrap(), SanitizerType::Shell),
-        ],
+        sanitizers: vec![],
     };
 }
 
@@ -602,15 +591,13 @@ lazy_static! {
     /// C++ taint patterns.
     static ref CPP_PATTERNS: LanguagePatterns = LanguagePatterns {
         // Wave-2-atomic (regex-removal-v1 M9): sources + sinks regex banks
-        // deleted; AST detection canonical. Sanitizers RETAINED.
+        // deleted.
+        // sanitizer-removal-v1 M4 (ATOMIC): sanitizer Vec emptied; AST bank
+        // CPP_AST_SANITIZERS covers std::stoi/stol/stoul/stoll/stof/stod
+        // plus static_cast<numeric>.
         sources: vec![],
         sinks: vec![],
-        sanitizers: vec![
-            // Numeric: std::stoi, std::stol, std::stoul, std::stoll, std::stof, std::stod
-            (Regex::new(r"std::sto(i|l|ul|ll|f|d)\s*\(").unwrap(), SanitizerType::Numeric),
-            // Numeric: static_cast<int/long/float/double>
-            (Regex::new(r"static_cast<(int|long|float|double)>\s*\(").unwrap(), SanitizerType::Numeric),
-        ],
+        sanitizers: vec![],
     };
 }
 
@@ -631,12 +618,10 @@ lazy_static! {
             (Regex::new(r"\bgets\b").unwrap(), TaintSourceType::UserInput),
         ],
         sinks: vec![],
-        sanitizers: vec![
-            // Numeric: .to_i, .to_f
-            (Regex::new(r"\.(to_i|to_f)\b").unwrap(), SanitizerType::Numeric),
-            // Html: CGI.escapeHTML, Rack::Utils.escape_html
-            (Regex::new(r"(CGI\.escapeHTML|Rack::Utils\.escape_html)\s*\(").unwrap(), SanitizerType::Html),
-        ],
+        // sanitizer-removal-v1 M4 (ATOMIC): sanitizer Vec emptied; AST bank
+        // RUBY_AST_SANITIZERS covers .to_i / .to_f via member_patterns and
+        // CGI.escapeHTML / Rack::Utils.escape_html via raw-substring entries.
+        sanitizers: vec![],
     };
 }
 
@@ -644,13 +629,12 @@ lazy_static! {
     /// Kotlin taint patterns.
     static ref KOTLIN_PATTERNS: LanguagePatterns = LanguagePatterns {
         // Wave-2-atomic (regex-removal-v1 M9): sources + sinks regex banks
-        // deleted; AST detection canonical. Sanitizers RETAINED.
+        // deleted.
+        // sanitizer-removal-v1 M4 (ATOMIC): sanitizer Vec emptied; AST bank
+        // KOTLIN_AST_SANITIZERS covers .toInt/.toLong/.toDouble/.toFloat.
         sources: vec![],
         sinks: vec![],
-        sanitizers: vec![
-            // Numeric: .toInt(), .toLong(), .toDouble(), .toFloat()
-            (Regex::new(r"\.(toInt|toLong|toDouble|toFloat)\s*\(\)").unwrap(), SanitizerType::Numeric),
-        ],
+        sanitizers: vec![],
     };
 }
 
@@ -658,15 +642,13 @@ lazy_static! {
     /// Swift taint patterns.
     static ref SWIFT_PATTERNS: LanguagePatterns = LanguagePatterns {
         // Wave-2-atomic (regex-removal-v1 M9): sources + sinks regex banks
-        // deleted; AST detection canonical. Sanitizers RETAINED.
+        // deleted.
+        // sanitizer-removal-v1 M4 (ATOMIC): sanitizer Vec emptied; AST bank
+        // SWIFT_AST_SANITIZERS covers Int/Double/Float and
+        // addingPercentEncoding.
         sources: vec![],
         sinks: vec![],
-        sanitizers: vec![
-            // Numeric: Int(), Double(), Float()
-            (Regex::new(r"\b(Int|Double|Float)\s*\(").unwrap(), SanitizerType::Numeric),
-            // Html: addingPercentEncoding
-            (Regex::new(r"addingPercentEncoding\s*\(").unwrap(), SanitizerType::Html),
-        ],
+        sanitizers: vec![],
     };
 }
 
@@ -674,15 +656,13 @@ lazy_static! {
     /// C# taint patterns.
     static ref CSHARP_PATTERNS: LanguagePatterns = LanguagePatterns {
         // Wave-2-atomic (regex-removal-v1 M9): sources + sinks regex banks
-        // deleted; AST detection canonical. Sanitizers RETAINED.
+        // deleted.
+        // sanitizer-removal-v1 M4 (ATOMIC): sanitizer Vec emptied; AST bank
+        // CSHARP_AST_SANITIZERS covers int.Parse / Convert.ToInt32 /
+        // double.Parse and HttpUtility.HtmlEncode.
         sources: vec![],
         sinks: vec![],
-        sanitizers: vec![
-            // Numeric: int.Parse, Convert.ToInt32, double.Parse
-            (Regex::new(r"(int\.Parse|Convert\.ToInt32|double\.Parse)\s*\(").unwrap(), SanitizerType::Numeric),
-            // Html: HttpUtility.HtmlEncode
-            (Regex::new(r"HttpUtility\.HtmlEncode\s*\(").unwrap(), SanitizerType::Html),
-        ],
+        sanitizers: vec![],
     };
 }
 
@@ -690,15 +670,13 @@ lazy_static! {
     /// Scala taint patterns.
     static ref SCALA_PATTERNS: LanguagePatterns = LanguagePatterns {
         // Wave-2-atomic (regex-removal-v1 M9): sources + sinks regex banks
-        // deleted; AST detection canonical. Sanitizers RETAINED.
+        // deleted.
+        // sanitizer-removal-v1 M4 (ATOMIC): sanitizer Vec emptied; AST bank
+        // SCALA_AST_SANITIZERS covers .toInt/.toLong/.toDouble and
+        // StringEscapeUtils.escapeHtml.
         sources: vec![],
         sinks: vec![],
-        sanitizers: vec![
-            // Numeric: .toInt, .toLong, .toDouble
-            (Regex::new(r"\.(toInt|toLong|toDouble)\b").unwrap(), SanitizerType::Numeric),
-            // Html: StringEscapeUtils.escapeHtml
-            (Regex::new(r"StringEscapeUtils\.escapeHtml").unwrap(), SanitizerType::Html),
-        ],
+        sanitizers: vec![],
     };
 }
 
@@ -706,17 +684,13 @@ lazy_static! {
     /// PHP taint patterns.
     static ref PHP_PATTERNS: LanguagePatterns = LanguagePatterns {
         // Wave-2-atomic (regex-removal-v1 M9): sources + sinks regex banks
-        // deleted; AST detection canonical. Sanitizers RETAINED.
+        // deleted.
+        // sanitizer-removal-v1 M4 (ATOMIC): sanitizer Vec emptied; AST bank
+        // PHP_AST_SANITIZERS covers intval/floatval and (int)/(float) casts,
+        // htmlspecialchars/htmlentities, and mysqli_real_escape_string.
         sources: vec![],
         sinks: vec![],
-        sanitizers: vec![
-            // Numeric: intval, floatval, (int), (float)
-            (Regex::new(r"(\b(intval|floatval)\s*\(|\(int\)|\(float\))").unwrap(), SanitizerType::Numeric),
-            // Html: htmlspecialchars, htmlentities
-            (Regex::new(r"(htmlspecialchars|htmlentities)\s*\(").unwrap(), SanitizerType::Html),
-            // Shell: mysqli_real_escape_string
-            (Regex::new(r"mysqli_real_escape_string\s*\(").unwrap(), SanitizerType::Shell),
-        ],
+        sanitizers: vec![],
     };
 }
 
@@ -724,13 +698,12 @@ lazy_static! {
     /// Lua/Luau taint patterns.
     static ref LUA_PATTERNS: LanguagePatterns = LanguagePatterns {
         // Wave-2-atomic (regex-removal-v1 M9): sources + sinks regex banks
-        // deleted; AST detection canonical. Sanitizers RETAINED.
+        // deleted.
+        // sanitizer-removal-v1 M4 (ATOMIC): sanitizer Vec emptied; AST bank
+        // LUA_AST_SANITIZERS (shared by Lua/Luau) covers tonumber.
         sources: vec![],
         sinks: vec![],
-        sanitizers: vec![
-            // Numeric: tonumber
-            (Regex::new(r"\btonumber\s*\(").unwrap(), SanitizerType::Numeric),
-        ],
+        sanitizers: vec![],
     };
 }
 
@@ -738,16 +711,13 @@ lazy_static! {
     /// Elixir taint patterns.
     static ref ELIXIR_PATTERNS: LanguagePatterns = LanguagePatterns {
         // field_access_info-extension-v1 M5 (ATOMIC): sources + sinks regex banks
-        // deleted; AST detection canonical via structured (receiver, field) tuples
-        // in ELIXIR_AST_SOURCES / ELIXIR_AST_SINKS. Sanitizers RETAINED.
+        // deleted.
+        // sanitizer-removal-v1 M4 (ATOMIC): sanitizer Vec emptied; AST bank
+        // ELIXIR_AST_SANITIZERS covers String.to_integer / String.to_float
+        // and Phoenix.HTML.html_escape.
         sources: vec![],
         sinks: vec![],
-        sanitizers: vec![
-            // Numeric: String.to_integer, String.to_float
-            (Regex::new(r"String\.(to_integer|to_float)\s*\(").unwrap(), SanitizerType::Numeric),
-            // Html: Phoenix.HTML.html_escape
-            (Regex::new(r"Phoenix\.HTML\.html_escape\s*\(").unwrap(), SanitizerType::Html),
-        ],
+        sanitizers: vec![],
     };
 }
 
@@ -755,15 +725,12 @@ lazy_static! {
     /// OCaml taint patterns.
     static ref OCAML_PATTERNS: LanguagePatterns = LanguagePatterns {
         // field_access_info-extension-v1 M5 (ATOMIC): sources + sinks regex banks
-        // deleted; AST detection canonical via structured (receiver, field) tuples
-        // in OCAML_AST_SOURCES / OCAML_AST_SINKS plus call_names entries for bare
-        // `read_line` / `input_line`. Sanitizers RETAINED.
+        // deleted.
+        // sanitizer-removal-v1 M4 (ATOMIC): sanitizer Vec emptied; AST bank
+        // OCAML_AST_SANITIZERS covers int_of_string / float_of_string.
         sources: vec![],
         sinks: vec![],
-        sanitizers: vec![
-            // Numeric: int_of_string, float_of_string
-            (Regex::new(r"\b(int_of_string|float_of_string)\s").unwrap(), SanitizerType::Numeric),
-        ],
+        sanitizers: vec![],
     };
 }
 
@@ -3603,7 +3570,25 @@ fn build_sanitizer_ast_index(
         }
 
         let line = descendant.start_position().row as u32 + 1;
-        let text = node_text(descendant, source);
+
+        // M3-FIND-01 (sanitizer-removal-v1 M4): string-literal range-overlap
+        // filter for the raw-substring fallback in `member_patterns_match`.
+        // The fallback (`pat_rcv.is_empty() && descendant_text.contains(pat_field)`)
+        // matches against the descendant's full text, which can include the
+        // text of any string-literal child. For a statement like
+        // `msg = "use int(x) to convert"`, the descendant is the assignment
+        // node (NOT inside a string itself, so the outer `is_in_string` skip
+        // does not fire), but its text contains the substring `int(`. Pre-M4
+        // the regex bank exhibited the same false positive; post-M4 (regex
+        // deleted) the AST raw-fallback would inherit it without this filter.
+        //
+        // We mask string-literal descendant byte ranges with ASCII spaces in
+        // a copy of the descendant's text, then pass the masked text to
+        // `member_patterns_match`. The structural paths inside that helper
+        // (member-access via `extract_member_access_receiver_and_field` and
+        // call-shape via `extract_call_name`) re-extract from real AST
+        // nodes, so masking only affects the raw-substring fallback path.
+        let masked_text = mask_string_literal_descendants(descendant, source, language);
 
         for pattern in patterns.sanitizers {
             let matched = pattern.call_names.iter().any(|name| {
@@ -3614,7 +3599,13 @@ fn build_sanitizer_ast_index(
                     }
                 }
                 false
-            }) || member_patterns_match(descendant, source, language, pattern.member_patterns, text);
+            }) || member_patterns_match(
+                descendant,
+                source,
+                language,
+                pattern.member_patterns,
+                &masked_text,
+            );
 
             if matched {
                 index.insert(line, pattern.sanitizer_type);
@@ -3624,6 +3615,54 @@ fn build_sanitizer_ast_index(
     }
 
     index
+}
+
+/// M3-FIND-01 mitigation: build a copy of `descendant`'s text with all
+/// string-literal descendant byte ranges replaced by ASCII spaces.
+///
+/// Used by `build_sanitizer_ast_index` to neutralize the raw-substring
+/// fallback in `member_patterns_match` against text that lives inside
+/// string-literal children. ASCII spaces are chosen because:
+/// - they preserve the byte length and offsets of the source text
+///   (important for any caller that later inspects byte positions),
+/// - they cannot accidentally satisfy any sanitizer pattern's `pat_field`
+///   (no real sanitizer is a single space character).
+///
+/// The caller has already filtered the descendant itself via `is_in_string`,
+/// so any string-literal nodes encountered here are STRICT descendants of
+/// `descendant`. The string-literal node kinds are language-specific and
+/// come from `string_node_kinds(language)`.
+fn mask_string_literal_descendants(
+    descendant: &tree_sitter::Node,
+    source: &[u8],
+    language: Language,
+) -> String {
+    let start = descendant.start_byte();
+    let end = descendant.end_byte();
+    if end <= start || end > source.len() {
+        return node_text(descendant, source).to_string();
+    }
+    let mut buf: Vec<u8> = source[start..end].to_vec();
+    let string_kinds = string_node_kinds(language);
+
+    for d in walk_descendants(*descendant) {
+        if !string_kinds.contains(&d.kind()) {
+            continue;
+        }
+        let s = d.start_byte();
+        let e = d.end_byte();
+        if e <= start || s >= end {
+            continue;
+        }
+        // Clip to [start, end) and translate to local offsets.
+        let local_s = s.saturating_sub(start);
+        let local_e = e.saturating_sub(start).min(buf.len());
+        for byte in &mut buf[local_s..local_e] {
+            *byte = b' ';
+        }
+    }
+
+    String::from_utf8(buf).unwrap_or_else(|_| node_text(descendant, source).to_string())
 }
 
 /// Compute taint analysis with optional AST tree for improved detection.
@@ -3659,11 +3698,15 @@ pub fn compute_taint_with_tree(
     let line_to_block = build_line_to_block(cfg);
     let refs_by_block = build_refs_by_block(refs, &line_to_block);
 
-    // M2 sanitizer-removal-v1: build per-line AST sanitizer index ONCE.
-    // Mirrors the source/sink WALK-ONCE pattern below. The worklist
-    // (`process_block`, `ssa_propagate`) consults this index AST-FIRST
-    // and falls back to the regex `detect_sanitizer` helper. M4 will
-    // flip dispatch to AST-only by deleting the regex banks.
+    // sanitizer-removal-v1 M4 (ATOMIC): build per-line AST sanitizer
+    // index ONCE; mirrors the source/sink WALK-ONCE pattern below. The
+    // worklist (`process_block`, `ssa_propagate`) consults this index
+    // AST-only (regex bank deleted; M2 fallback removed).
+    //
+    // M3-FIND-01: `build_sanitizer_ast_index` masks string-literal
+    // descendant byte ranges before invoking the raw-substring fallback
+    // in `member_patterns_match`, so a sanitizer-name substring inside
+    // a string literal cannot trigger sanitization.
     let sanitizer_ast_index: HashMap<u32, SanitizerType> =
         if let (Some(t), Some(s)) = (tree, source) {
             build_sanitizer_ast_index(t, s, language)
@@ -3805,8 +3848,6 @@ pub fn compute_taint_with_tree(
             predecessors: &predecessors,
             successors: &successors,
             line_to_block: &line_to_block,
-            statements,
-            language,
             max_iterations,
             sanitizer_ast_index: &sanitizer_ast_index,
         };
@@ -3862,10 +3903,8 @@ pub fn compute_taint_with_tree(
                 block_id,
                 taint_in,
                 &refs_by_block,
-                statements,
                 &sources_by_line,
                 &mut result.sanitized_vars,
-                language,
                 &sanitizer_ast_index,
             );
 
@@ -4173,21 +4212,20 @@ fn process_block(
     block_id: usize,
     mut current_taint: HashSet<String>,
     refs_by_block: &HashMap<usize, Vec<&VarRef>>,
-    statements: &HashMap<u32, String>,
     sources_by_line: &HashMap<u32, HashSet<String>>,
     sanitized_vars: &mut HashSet<String>,
-    language: Language,
     sanitizer_ast_index: &HashMap<u32, SanitizerType>,
 ) -> HashSet<String> {
+    // sanitizer-removal-v1 M4 (ATOMIC): post-dispatch-flip the per-line
+    // `stmt` text and `language` are no longer needed in this function —
+    // the regex `detect_sanitizer(stmt, language)` fallback was the only
+    // consumer. Sanitizer dispatch now reads exclusively from
+    // `sanitizer_ast_index`. The `statements` and `language` parameters
+    // were removed to satisfy `-D warnings`.
     let empty_refs = vec![];
     let block_refs = refs_by_block.get(&block_id).unwrap_or(&empty_refs);
 
     for var_ref in block_refs {
-        let stmt = statements
-            .get(&var_ref.line)
-            .map(|s| s.as_str())
-            .unwrap_or("");
-
         match var_ref.ref_type {
             RefType::Definition => {
                 // Check if RHS uses a tainted variable.
@@ -4209,12 +4247,11 @@ fn process_block(
                     .is_some_and(|vars| vars.contains(&var_ref.name));
 
                 // Check if sanitized.
-                // M2 sanitizer-removal-v1: AST-FIRST-WITH-REGEX-FALLBACK.
-                // The pre-built per-line AST sanitizer index is consulted
-                // first; if no AST hit, fall back to the regex bank. M4
-                // will flip dispatch to AST-only by deleting the banks.
+                // sanitizer-removal-v1 M4 (ATOMIC): AST-only (regex bank
+                // deleted; M2 fallback removed). The per-line AST sanitizer
+                // index is the sole dispatch source.
                 let ast_sanitizer_hit = sanitizer_ast_index.contains_key(&var_ref.line);
-                if ast_sanitizer_hit || detect_sanitizer(stmt, language).is_some() {
+                if ast_sanitizer_hit {
                     sanitized_vars.insert(var_ref.name.clone());
                     current_taint.remove(&var_ref.name);
                 } else if rhs_tainted || is_source_def {
@@ -4293,13 +4330,14 @@ struct SsaPropagateCtx<'a> {
     predecessors: &'a HashMap<usize, Vec<usize>>,
     successors: &'a HashMap<usize, Vec<usize>>,
     line_to_block: &'a HashMap<u32, usize>,
-    statements: &'a HashMap<u32, String>,
-    language: Language,
     max_iterations: usize,
-    /// M2 sanitizer-removal-v1: per-line AST sanitizer index built once
-    /// at the top of `compute_taint_with_tree`. Consulted AST-FIRST in
-    /// `ssa_propagate`; the regex `detect_sanitizer` helper is the
-    /// fallback. M4 flips dispatch to AST-only.
+    /// sanitizer-removal-v1 M4 (ATOMIC): per-line AST sanitizer index built
+    /// once at the top of `compute_taint_with_tree`. Sole sanitizer dispatch
+    /// source — the regex `detect_sanitizer` fallback was removed.
+    ///
+    /// Pre-M4 this struct also held `statements: &HashMap<u32, String>` and
+    /// `language: Language`; they fed `detect_sanitizer(stmt, language)`
+    /// and are not needed under AST-only dispatch.
     sanitizer_ast_index: &'a HashMap<u32, SanitizerType>,
 }
 
@@ -4313,8 +4351,6 @@ fn ssa_propagate(
         predecessors,
         successors,
         line_to_block,
-        statements,
-        language,
         max_iterations,
         sanitizer_ast_index,
     } = *ctx;
@@ -4446,11 +4482,10 @@ fn ssa_propagate(
         let mut current_taint = taint_in.clone();
         if let Some(insts) = block_insts.get(&block_id) {
             for inst in insts {
-                let line_stmt = statements
-                    .get(&inst.line)
-                    .map(|s| s.as_str())
-                    .unwrap_or("");
-
+                // sanitizer-removal-v1 M4 (ATOMIC): the per-line `line_stmt`
+                // text is no longer needed; pre-M4 it fed
+                // `detect_sanitizer(line_stmt, language)`. AST-only dispatch
+                // reads from `sanitizer_ast_index` directly.
                 let uses_tainted = inst.uses.iter().any(|use_id| {
                     if current_taint.contains(&TaintKey::Versioned(*use_id)) {
                         return true;
@@ -4469,11 +4504,11 @@ fn ssa_propagate(
                         .get(target.0 as usize)
                         .map(|n| n.variable.clone());
 
-                    // M2 sanitizer-removal-v1: AST-FIRST-WITH-REGEX-FALLBACK
-                    // (mirrors process_block at L4143 sibling site). M4
-                    // will flip dispatch to AST-only.
+                    // sanitizer-removal-v1 M4 (ATOMIC): AST-only (regex
+                    // bank deleted; M2 fallback removed). Mirrors
+                    // process_block sibling site.
                     let ast_sanitizer_hit = sanitizer_ast_index.contains_key(&inst.line);
-                    if ast_sanitizer_hit || detect_sanitizer(line_stmt, language).is_some() {
+                    if ast_sanitizer_hit {
                         if let Some(v) = target_var.clone() {
                             sanitized_vars.insert(v);
                         }

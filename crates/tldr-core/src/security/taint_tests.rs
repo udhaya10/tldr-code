@@ -15,7 +15,7 @@
 use std::collections::{HashMap, HashSet};
 
 // Phase 1: Type imports (enabled)
-use super::taint::{SanitizerType, TaintInfo, TaintSink, TaintSinkType, TaintSourceType};
+use super::taint::{TaintInfo, TaintSink, TaintSinkType, TaintSourceType};
 
 // Phase 3: Pattern matching function imports (implemented)
 //
@@ -26,8 +26,13 @@ use super::taint::{SanitizerType, TaintInfo, TaintSink, TaintSinkType, TaintSour
 // field_access_info-extension-v1 M5 (ATOMIC): the Ruby / Elixir / OCaml
 // `test_<lang>_detect_sources/sinks` tests were deleted along with the
 // regex source+sink banks they exercised, so `detect_sources` and
-// `detect_sinks` are no longer imported here. Sanitizer tests remain.
-use super::taint::{detect_sanitizer, find_sanitizers_in_statement, is_sanitizer};
+// `detect_sinks` are no longer imported here.
+//
+// sanitizer-removal-v1 M4 (ATOMIC): `detect_sanitizer`, `is_sanitizer`,
+// and `find_sanitizers_in_statement` imports removed too — the per-language
+// regex sanitizer-bank tests that exercised them have been deleted. The
+// public APIs are preserved as no-ops (iterate empty Vec) for external
+// callers; AST-based dispatch via `compute_taint_with_tree` is canonical.
 
 // Phase 4: Worklist algorithm (implemented)
 use super::taint::compute_taint;
@@ -315,44 +320,17 @@ fn test_taint_info_default_values() {
 
 // =============================================================================
 // Section 4: Pattern Matching Tests - Sanitizer Detection
+//
+// sanitizer-removal-v1 M4 (ATOMIC): the three Python regex-bank-shaped
+// tests previously here (`test_int_sanitizes_sql_injection`,
+// `test_shlex_quote_sanitizes_command_injection`,
+// `test_html_escape_sanitizes_xss`) are deleted. They asserted directly on
+// the regex bank's behaviour via `is_sanitizer` / `find_sanitizers_in_statement`,
+// which now iterate the (empty) Vec and return false / empty.
+// Coverage of the same behaviour at the worklist level lives in
+// `test_sanitizer_removes_taint` (Section 5) and the
+// `sanitize_breaks_flow_per_language` integration suite.
 // =============================================================================
-
-/// Tests detection of int() as numeric sanitizer
-#[test]
-fn test_int_sanitizes_sql_injection() {
-    let stmt = "safe_id = int(user_id)";
-    assert!(is_sanitizer(stmt, Language::Python));
-
-    // Alternatively check that it marks variable as sanitized
-    let sanitizers = find_sanitizers_in_statement(stmt, 5, Language::Python);
-    assert_eq!(sanitizers.len(), 1);
-    assert_eq!(sanitizers[0].0, "safe_id");
-    assert!(matches!(sanitizers[0].1, SanitizerType::Numeric));
-}
-
-/// Tests detection of shlex.quote() as shell sanitizer
-#[test]
-fn test_shlex_quote_sanitizes_command_injection() {
-    let stmt = "safe_cmd = shlex.quote(user_input)";
-    assert!(is_sanitizer(stmt, Language::Python));
-
-    let sanitizers = find_sanitizers_in_statement(stmt, 5, Language::Python);
-    assert_eq!(sanitizers.len(), 1);
-    assert_eq!(sanitizers[0].0, "safe_cmd");
-    assert!(matches!(sanitizers[0].1, SanitizerType::Shell));
-}
-
-/// Tests detection of html.escape() as HTML sanitizer
-#[test]
-fn test_html_escape_sanitizes_xss() {
-    let stmt = "safe_html = html.escape(user_content)";
-    assert!(is_sanitizer(stmt, Language::Python));
-
-    let sanitizers = find_sanitizers_in_statement(stmt, 5, Language::Python);
-    assert_eq!(sanitizers.len(), 1);
-    assert_eq!(sanitizers[0].0, "safe_html");
-    assert!(matches!(sanitizers[0].1, SanitizerType::Html));
-}
 
 // =============================================================================
 // Section 5: Worklist Algorithm Tests - Taint Propagation
@@ -967,369 +945,20 @@ fn test_taint_sink_type_serialization() {
 // =============================================================================
 
 // =========================================================================
-// TypeScript Taint Patterns
+// Per-language `test_<lang>_detect_sanitizers` tests
+//
+// sanitizer-removal-v1 M4 (ATOMIC): the 17 per-language regex-bank
+// detect_sanitizer assertions previously here (typescript, javascript, go,
+// java, rust, c, cpp, ruby, kotlin, swift, csharp, scala, php, lua, luau,
+// elixir, ocaml) are deleted. Each one called `detect_sanitizer(<text>,
+// <Language>)` and asserted `Some(SanitizerType::*)`. Post-M4 the regex
+// banks are empty Vecs and `detect_sanitizer` always returns None.
+//
+// AST-equivalent coverage lives at the worklist level via the
+// `sanitize_breaks_flow_per_language` integration suite (3 sections:
+// regular sanitizes-flow, in-string-literal-does-not-sanitize, and
+// AST-only mirrors).
 // =========================================================================
-#[test]
-fn test_typescript_detect_sanitizers() {
-    assert_eq!(
-        detect_sanitizer("parseInt(val)", Language::TypeScript),
-        Some(SanitizerType::Numeric),
-        "parseInt should be Numeric sanitizer"
-    );
-    assert_eq!(
-        detect_sanitizer("Number(val)", Language::TypeScript),
-        Some(SanitizerType::Numeric),
-        "Number() should be Numeric sanitizer"
-    );
-    assert_eq!(
-        detect_sanitizer("encodeURIComponent(val)", Language::TypeScript),
-        Some(SanitizerType::Html),
-        "encodeURIComponent should be Html sanitizer"
-    );
-    assert_eq!(
-        detect_sanitizer("DOMPurify.sanitize(html)", Language::TypeScript),
-        Some(SanitizerType::Html),
-        "DOMPurify.sanitize should be Html sanitizer"
-    );
-}
-
-// =========================================================================
-// JavaScript Taint Patterns (shares patterns with TypeScript)
-// =========================================================================
-#[test]
-fn test_javascript_detect_sanitizers() {
-    assert_eq!(
-        detect_sanitizer("parseInt(val, 10)", Language::JavaScript),
-        Some(SanitizerType::Numeric),
-        "parseInt should be Numeric sanitizer"
-    );
-    assert_eq!(
-        detect_sanitizer("encodeURIComponent(val)", Language::JavaScript),
-        Some(SanitizerType::Html),
-        "encodeURIComponent should be Html sanitizer"
-    );
-}
-
-// =========================================================================
-// Go Taint Patterns
-// =========================================================================
-#[test]
-fn test_go_detect_sanitizers() {
-    assert_eq!(
-        detect_sanitizer("n, err := strconv.Atoi(val)", Language::Go),
-        Some(SanitizerType::Numeric),
-        "strconv.Atoi should be Numeric sanitizer"
-    );
-    assert_eq!(
-        detect_sanitizer("n, err := strconv.ParseInt(val, 10, 64)", Language::Go),
-        Some(SanitizerType::Numeric),
-        "strconv.ParseInt should be Numeric sanitizer"
-    );
-    assert_eq!(
-        detect_sanitizer("safe := html.EscapeString(val)", Language::Go),
-        Some(SanitizerType::Html),
-        "html.EscapeString should be Html sanitizer"
-    );
-    assert_eq!(
-        detect_sanitizer("safe := url.QueryEscape(val)", Language::Go),
-        Some(SanitizerType::Html),
-        "url.QueryEscape should be Html sanitizer"
-    );
-}
-
-// =========================================================================
-// Java Taint Patterns
-// =========================================================================
-#[test]
-fn test_java_detect_sanitizers() {
-    assert_eq!(
-        detect_sanitizer("int id = Integer.parseInt(val)", Language::Java),
-        Some(SanitizerType::Numeric),
-        "Integer.parseInt should be Numeric sanitizer"
-    );
-    assert_eq!(
-        detect_sanitizer("long id = Long.parseLong(val)", Language::Java),
-        Some(SanitizerType::Numeric),
-        "Long.parseLong should be Numeric sanitizer"
-    );
-}
-
-// =========================================================================
-// Rust Taint Patterns
-// =========================================================================
-#[test]
-fn test_rust_detect_sanitizers() {
-    assert_eq!(
-        detect_sanitizer("let n: i32 = val.parse::<i32>().unwrap()", Language::Rust),
-        Some(SanitizerType::Numeric),
-        ".parse::<i32>() should be Numeric sanitizer"
-    );
-    assert_eq!(
-        detect_sanitizer("let f: f64 = val.parse::<f64>().unwrap()", Language::Rust),
-        Some(SanitizerType::Numeric),
-        ".parse::<f64>() should be Numeric sanitizer"
-    );
-}
-
-// =========================================================================
-// C Taint Patterns
-// =========================================================================
-#[test]
-fn test_c_detect_sanitizers() {
-    assert_eq!(
-        detect_sanitizer("int n = atoi(val)", Language::C),
-        Some(SanitizerType::Numeric),
-        "atoi should be Numeric sanitizer"
-    );
-    assert_eq!(
-        detect_sanitizer("long n = strtol(val, NULL, 10)", Language::C),
-        Some(SanitizerType::Numeric),
-        "strtol should be Numeric sanitizer"
-    );
-    // snprintf is a bounded sanitizer (prevents buffer overflow)
-    assert_eq!(
-        detect_sanitizer("snprintf(buf, sizeof(buf), \"%s\", val)", Language::C),
-        Some(SanitizerType::Shell),
-        "snprintf should be Shell sanitizer (bounded write)"
-    );
-}
-
-// =========================================================================
-// C++ Taint Patterns
-// =========================================================================
-#[test]
-fn test_cpp_detect_sanitizers() {
-    assert_eq!(
-        detect_sanitizer("int n = std::stoi(val)", Language::Cpp),
-        Some(SanitizerType::Numeric),
-        "std::stoi should be Numeric sanitizer"
-    );
-    assert_eq!(
-        detect_sanitizer("long n = std::stol(val)", Language::Cpp),
-        Some(SanitizerType::Numeric),
-        "std::stol should be Numeric sanitizer"
-    );
-    assert_eq!(
-        detect_sanitizer("int n = static_cast<int>(val)", Language::Cpp),
-        Some(SanitizerType::Numeric),
-        "static_cast<int> should be Numeric sanitizer"
-    );
-}
-
-// =========================================================================
-// Ruby Taint Patterns
-// =========================================================================
-
-#[test]
-fn test_ruby_detect_sanitizers() {
-    assert_eq!(
-        detect_sanitizer("n = val.to_i", Language::Ruby),
-        Some(SanitizerType::Numeric),
-        ".to_i should be Numeric sanitizer"
-    );
-    assert_eq!(
-        detect_sanitizer("n = val.to_f", Language::Ruby),
-        Some(SanitizerType::Numeric),
-        ".to_f should be Numeric sanitizer"
-    );
-    assert_eq!(
-        detect_sanitizer("safe = CGI.escapeHTML(val)", Language::Ruby),
-        Some(SanitizerType::Html),
-        "CGI.escapeHTML should be Html sanitizer"
-    );
-    assert_eq!(
-        detect_sanitizer("safe = Rack::Utils.escape_html(val)", Language::Ruby),
-        Some(SanitizerType::Html),
-        "Rack::Utils.escape_html should be Html sanitizer"
-    );
-}
-
-// =========================================================================
-// Kotlin Taint Patterns
-// =========================================================================
-#[test]
-fn test_kotlin_detect_sanitizers() {
-    assert_eq!(
-        detect_sanitizer("val n = val.toInt()", Language::Kotlin),
-        Some(SanitizerType::Numeric),
-        ".toInt() should be Numeric sanitizer"
-    );
-    assert_eq!(
-        detect_sanitizer("val n = val.toLong()", Language::Kotlin),
-        Some(SanitizerType::Numeric),
-        ".toLong() should be Numeric sanitizer"
-    );
-    assert_eq!(
-        detect_sanitizer("val n = val.toDouble()", Language::Kotlin),
-        Some(SanitizerType::Numeric),
-        ".toDouble() should be Numeric sanitizer"
-    );
-}
-
-// =========================================================================
-// Swift Taint Patterns
-// =========================================================================
-#[test]
-fn test_swift_detect_sanitizers() {
-    assert_eq!(
-        detect_sanitizer("let n = Int(val)", Language::Swift),
-        Some(SanitizerType::Numeric),
-        "Int() should be Numeric sanitizer"
-    );
-    assert_eq!(
-        detect_sanitizer("let n = Double(val)", Language::Swift),
-        Some(SanitizerType::Numeric),
-        "Double() should be Numeric sanitizer"
-    );
-    assert_eq!(
-        detect_sanitizer(
-            "let safe = val.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed)",
-            Language::Swift
-        ),
-        Some(SanitizerType::Html),
-        "addingPercentEncoding should be Html sanitizer"
-    );
-}
-
-// =========================================================================
-// C# Taint Patterns
-// =========================================================================
-#[test]
-fn test_csharp_detect_sanitizers() {
-    assert_eq!(
-        detect_sanitizer("int n = int.Parse(val)", Language::CSharp),
-        Some(SanitizerType::Numeric),
-        "int.Parse should be Numeric sanitizer"
-    );
-    assert_eq!(
-        detect_sanitizer("int n = Convert.ToInt32(val)", Language::CSharp),
-        Some(SanitizerType::Numeric),
-        "Convert.ToInt32 should be Numeric sanitizer"
-    );
-    assert_eq!(
-        detect_sanitizer(
-            "string safe = HttpUtility.HtmlEncode(val)",
-            Language::CSharp
-        ),
-        Some(SanitizerType::Html),
-        "HttpUtility.HtmlEncode should be Html sanitizer"
-    );
-}
-
-// =========================================================================
-// Scala Taint Patterns
-// =========================================================================
-#[test]
-fn test_scala_detect_sanitizers() {
-    assert_eq!(
-        detect_sanitizer("val n = val.toInt", Language::Scala),
-        Some(SanitizerType::Numeric),
-        ".toInt should be Numeric sanitizer"
-    );
-    assert_eq!(
-        detect_sanitizer("val n = val.toLong", Language::Scala),
-        Some(SanitizerType::Numeric),
-        ".toLong should be Numeric sanitizer"
-    );
-    assert_eq!(
-        detect_sanitizer(
-            "val safe = StringEscapeUtils.escapeHtml4(val)",
-            Language::Scala
-        ),
-        Some(SanitizerType::Html),
-        "StringEscapeUtils.escapeHtml4 should be Html sanitizer"
-    );
-}
-
-// =========================================================================
-// PHP Taint Patterns
-// =========================================================================
-#[test]
-fn test_php_detect_sanitizers() {
-    assert_eq!(
-        detect_sanitizer("$n = intval($val)", Language::Php),
-        Some(SanitizerType::Numeric),
-        "intval should be Numeric sanitizer"
-    );
-    assert_eq!(
-        detect_sanitizer("$n = (int)$val", Language::Php),
-        Some(SanitizerType::Numeric),
-        "(int) cast should be Numeric sanitizer"
-    );
-    assert_eq!(
-        detect_sanitizer("$safe = htmlspecialchars($val)", Language::Php),
-        Some(SanitizerType::Html),
-        "htmlspecialchars should be Html sanitizer"
-    );
-    assert_eq!(
-        detect_sanitizer(
-            "$safe = mysqli_real_escape_string($conn, $val)",
-            Language::Php
-        ),
-        Some(SanitizerType::Shell),
-        "mysqli_real_escape_string should be Shell sanitizer"
-    );
-}
-
-// =========================================================================
-// Lua Taint Patterns
-// =========================================================================
-#[test]
-fn test_lua_detect_sanitizers() {
-    assert_eq!(
-        detect_sanitizer("local n = tonumber(val)", Language::Lua),
-        Some(SanitizerType::Numeric),
-        "tonumber should be Numeric sanitizer"
-    );
-}
-
-// =========================================================================
-// Luau Taint Patterns (shares patterns with Lua)
-// =========================================================================
-#[test]
-fn test_luau_detect_sanitizers() {
-    assert_eq!(
-        detect_sanitizer("local n = tonumber(val)", Language::Luau),
-        Some(SanitizerType::Numeric),
-        "tonumber should be Numeric sanitizer"
-    );
-}
-
-// =========================================================================
-// Elixir Taint Patterns
-// =========================================================================
-
-#[test]
-fn test_elixir_detect_sanitizers() {
-    assert_eq!(
-        detect_sanitizer("n = String.to_integer(val)", Language::Elixir),
-        Some(SanitizerType::Numeric),
-        "String.to_integer should be Numeric sanitizer"
-    );
-    assert_eq!(
-        detect_sanitizer("safe = Phoenix.HTML.html_escape(val)", Language::Elixir),
-        Some(SanitizerType::Html),
-        "Phoenix.HTML.html_escape should be Html sanitizer"
-    );
-}
-
-// =========================================================================
-// OCaml Taint Patterns
-// =========================================================================
-
-#[test]
-fn test_ocaml_detect_sanitizers() {
-    assert_eq!(
-        detect_sanitizer("let n = int_of_string val", Language::Ocaml),
-        Some(SanitizerType::Numeric),
-        "int_of_string should be Numeric sanitizer"
-    );
-    assert_eq!(
-        detect_sanitizer("let f = float_of_string val", Language::Ocaml),
-        Some(SanitizerType::Numeric),
-        "float_of_string should be Numeric sanitizer"
-    );
-}
 
 // =============================================================================
 // Section 11: AST-Based Detection Tests (Phase 9)
