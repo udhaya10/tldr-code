@@ -1094,6 +1094,14 @@ fn extract_sink_var_from_statement(statement: &str, pattern: &Regex) -> Option<S
 ///
 /// `Some(SanitizerType)` if a sanitizer is detected, `None` otherwise.
 pub fn detect_sanitizer(statement: &str, language: Language) -> Option<SanitizerType> {
+    // Test-only AST-only-mode override: when set by an integration-test
+    // `AstOnlyTestModeGuard`, skip the entire regex sanitizer bank so the
+    // returned value reflects pure-AST detection. See `AST_ONLY_TEST_MODE`
+    // doc comment.
+    if AST_ONLY_TEST_MODE.with(|m| m.get()) {
+        return None;
+    }
+
     let patterns = get_patterns(language);
     for (pattern, sanitizer_type) in patterns.sanitizers.iter() {
         if pattern.is_match(statement) {

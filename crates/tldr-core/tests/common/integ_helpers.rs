@@ -71,13 +71,20 @@ pub fn analyze_with_ssa(src: &str, lang: Language, fn_name: &str, use_ssa: bool)
 }
 
 /// AST-only dispatch harness — transiently empties the regex `.sources` /
-/// `.sinks` bank for the target language by activating the thread-local
-/// `AstOnlyTestModeGuard` defined in `tldr_core::security::taint`. While the
-/// guard is alive, `detect_sources` / `detect_sinks` short-circuit to empty
-/// vectors regardless of the regex bank's contents, so the only detection
-/// path that can produce sources/sinks is the AST path inside
-/// `compute_taint_with_tree` (`detect_sources_ast` / `detect_sinks_ast`).
-/// Sanitizers are unaffected.
+/// `.sinks` / `.sanitizers` banks for the target language by activating the
+/// thread-local `AstOnlyTestModeGuard` defined in
+/// `tldr_core::security::taint`. While the guard is alive, `detect_sources`
+/// / `detect_sinks` / `detect_sanitizer` short-circuit to empty
+/// vectors / `None` regardless of the regex banks' contents, so the only
+/// detection paths that can produce sources/sinks/sanitizers are the AST
+/// paths inside `compute_taint_with_tree` (`detect_sources_ast` /
+/// `detect_sinks_ast` / `detect_sanitizer_ast`).
+///
+/// Note: extension to sanitizers added in `sanitizer-removal-v1` M1 — the
+/// 3-LOC `AST_ONLY_TEST_MODE` short-circuit at `taint.rs:1096`
+/// (`detect_sanitizer`) mirrors the existing `detect_sources` (L816-818)
+/// and `detect_sinks` (L933-935) checks. Used as the RED gate for
+/// `sanitizer-removal-v1` M2/M3/M4.
 ///
 /// Mirrors the W2-pre "AST-only mode simulation" pattern proven in
 /// `regex-removal-v1` (W2-pre-report.json:45 — "Temporarily disabled regex
