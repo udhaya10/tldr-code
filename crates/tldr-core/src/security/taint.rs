@@ -1988,12 +1988,14 @@ static TYPESCRIPT_AST_SINKS: &[AstSinkPattern] = &[
         sink_type: TaintSinkType::FileWrite,
     },
     // W1-M2: Fastify framework sinks (parity-add for Wave 2 regex deletion).
-    // `reply.send(...)` / `.redirect(...)` / `.header(...)` are the three
-    // Fastify reply APIs currently caught by FASTIFY_PATTERNS regex sinks.
+    // `reply.redirect(...)` / `.header(...)` are caught here as FileWrite
+    // (semantically navigation/header-emit). `reply.send(...)` was previously
+    // wired here as FileWrite but VULN-MIGRATION-V1 M3 reclassified it to
+    // HtmlOutput (Xss) — see the HtmlOutput AstSinkPattern below for the
+    // M3-reclassified `*.send` entries.
     AstSinkPattern {
         call_names: &[],
         member_patterns: &[
-            ("reply", "send"),
             ("reply", "redirect"),
             ("reply", "header"),
         ],
@@ -2001,7 +2003,7 @@ static TYPESCRIPT_AST_SINKS: &[AstSinkPattern] = &[
     },
     // W1-M3: NestJS framework sinks (parity-add for Wave 2 regex deletion).
     // NestJS controllers expose two response shapes:
-    //   * Express-style `res.send|redirect|json(...)` — historically caught
+    //   * Express-style `res.redirect|json(...)` — historically caught
     //     ONLY by the NESTJS_PATTERNS regex; not present in the AST bank
     //     until this milestone.
     //   * `Response`-builder form (the NestJS docs `@Res() response: Response`
@@ -2010,20 +2012,42 @@ static TYPESCRIPT_AST_SINKS: &[AstSinkPattern] = &[
     //     receiver casings since member_patterns matches structurally on the
     //     identifier text. `('Response','redirect')` was already added in
     //     W1-M1's NextJS block (it doubles as the bare-`Response` App Router
-    //     alias); the remaining methods are added here for completeness.
+    //     alias); the remaining redirect/json methods are added here for
+    //     completeness as FileWrite (navigation/JSON-emit, not Xss).
+    //
+    // VULN-MIGRATION-V1 M3 RECLASSIFIED the `*.send` entries
+    // (`('res','send')`, `('Response','send')`, `('response','send')`) from
+    // FileWrite to HtmlOutput — those entries now live in the dedicated
+    // HtmlOutput AstSinkPattern below. Reflected `.send(tainted)` is
+    // semantically Xss (the response body is interpreted as HTML by the
+    // browser), not PathTraversal/FileWrite.
     AstSinkPattern {
         call_names: &[],
         member_patterns: &[
-            ("res", "send"),
             ("res", "redirect"),
             ("res", "json"),
-            ("Response", "send"),
             ("Response", "json"),
-            ("response", "send"),
             ("response", "redirect"),
             ("response", "json"),
         ],
         sink_type: TaintSinkType::FileWrite,
+    },
+    // VULN-MIGRATION-V1 M3 — `*.send(tainted)` reclassification.
+    // Express/Fastify/NestJS reply.send / res.send / response.send /
+    // Response.send all emit the argument as the response body (typically
+    // text/html), making reflected unsanitized input an XSS vector. Pre-M3
+    // these were wired as FileWrite (the closest pre-HtmlOutput variant);
+    // M3 promotes them to HtmlOutput now that the variant exists, fixing
+    // the (javascript|typescript)_xss_positive vuln_type-projection mismatch.
+    AstSinkPattern {
+        call_names: &[],
+        member_patterns: &[
+            ("reply", "send"),
+            ("res", "send"),
+            ("Response", "send"),
+            ("response", "send"),
+        ],
+        sink_type: TaintSinkType::HtmlOutput,
     },
     // VULN-MIGRATION-V1 M2: HtmlOutput (Xss) sinks per vuln.rs L387-L394.
     // `outerHTML` is a property name (member shape with wildcard receiver).
@@ -2034,10 +2058,12 @@ static TYPESCRIPT_AST_SINKS: &[AstSinkPattern] = &[
     // `("", "dangerouslySetInnerHTML")` already fire as FileWrite (pre-M2,
     // regex-removal-v1 W1-M1 wired them as the closest available enum variant
     // before HtmlOutput existed). Per dispatch-contract M2 line 156 (no
-    // double-coverage), they are NOT re-added here. M3 vuln_type_from_sink
-    // projects FileWrite -> Xss/PathTraversal/etc. via context-aware mapping
-    // OR a future reclassification milestone may flip these entries to
-    // HtmlOutput; that is out of scope for M2.
+    // double-coverage), they are NOT re-added here. vuln_type_from_sink
+    // projects FileWrite -> Xss/PathTraversal/etc. via context-aware mapping.
+    // (M3 has separately reclassified the `*.send(...)` entries above from
+    // FileWrite to HtmlOutput; the innerHTML/document.write/dangerouslySet-
+    // InnerHTML entries remain FileWrite-projected via context-aware mapping
+    // pending a future reclassification.)
     AstSinkPattern {
         call_names: &[],
         member_patterns: &[

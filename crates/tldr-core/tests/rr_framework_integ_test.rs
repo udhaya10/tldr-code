@@ -165,12 +165,12 @@ async function echo(request, reply) {
     let sink_lines: Vec<_> = result
         .sinks
         .iter()
-        .filter(|s| matches!(s.sink_type, TaintSinkType::FileWrite))
+        .filter(|s| matches!(s.sink_type, TaintSinkType::HtmlOutput))
         .map(|s| s.line)
         .collect();
     assert!(
         !sink_lines.is_empty(),
-        "expected at least one FileWrite sink for reply.send; \
+        "expected at least one HtmlOutput sink for reply.send; \
          got sinks={:?}",
         result.sinks
     );
@@ -245,12 +245,12 @@ async function handler(req, res) {
     let sink_lines: Vec<_> = result
         .sinks
         .iter()
-        .filter(|s| matches!(s.sink_type, TaintSinkType::FileWrite))
+        .filter(|s| matches!(s.sink_type, TaintSinkType::HtmlOutput))
         .map(|s| s.line)
         .collect();
     assert!(
         !sink_lines.is_empty(),
-        "expected at least one FileWrite sink for res.send; \
+        "expected at least one HtmlOutput sink for res.send; \
          got sinks={:?}",
         result.sinks
     );
@@ -298,12 +298,12 @@ async function handler(req, response) {
     let sink_lines: Vec<_> = result
         .sinks
         .iter()
-        .filter(|s| matches!(s.sink_type, TaintSinkType::FileWrite))
+        .filter(|s| matches!(s.sink_type, TaintSinkType::HtmlOutput))
         .map(|s| s.line)
         .collect();
     assert!(
         !sink_lines.is_empty(),
-        "expected at least one FileWrite sink for Response.send (builder); \
+        "expected at least one HtmlOutput sink for Response.send (builder); \
          got sinks={:?}",
         result.sinks
     );
