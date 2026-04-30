@@ -1,5 +1,14 @@
 {
   "milestone": "M4",
+  "status_at_close": "RESOLVED — Option A applied; both tests relabeled as Cat-B carry-forwards. Threshold raised 33->35.",
+  "operator_decision": "Option A — relabel + raise threshold + defer to follow-on",
+  "operator_decision_date": "2026-04-29",
+  "follow_ups": [
+    "vuln-source-parity-v1 absorbs test_vuln_detects_xss (Python scope expansion — operator review at M5 to confirm milestone scope vs. tiny dedicated patch milestone)",
+    "ruby-bare-call-extraction-v1 (TBD follow-on) addresses bare-`gets` AST limitation in tree-sitter-ruby (parses bareword `gets` as identifier, not call) — closes the documented FAI-v1 M5 carry-forward"
+  ],
+  "operator_rationale_test_1_test_vuln_detects_xss": "Genuine vuln-migration-v1 M2/M3 coverage gap. AST sink bank doesn't cover f-string return from `@app.route` decorated function as HtmlOutput. This is exactly the class vuln-source-parity-v1 was designed to absorb (1 lang scope expansion — Python wasn't in the original 6, but the milestone scope is 'extend canonical AST source/sink banks to close the M3-CF-01 carry-forward class').",
+  "operator_rationale_test_2_ruby_io_popen": "NOT a fresh regression. This is the documented FAI-v1 M5 carry-forward (commit 7849b3f). FAI-v1 M5 explicitly retained `\\bgets\\b` regex in RUBY_PATTERNS.sources as 'Option A' because tree-sitter-ruby parses bare `gets` as identifier (not call), so AST `call_names: ['gets']` can't cover it. Under analyze_ast_only (the test harness FAI-v1 M1 added), the regex bank is short-circuited — so the test fails BY DESIGN. Has been failing since FAI-v1 M5 shipped. M1 enumeration missed cataloging it as Cat-B; that's the gap.",
   "escalation_type": "regression_from_prior_milestone",
   "tests_affected": [
     "vuln_command::test_vuln_detects_xss",

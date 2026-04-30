@@ -4,8 +4,9 @@
   "plan": "workspace-test-infrastructure-v1",
   "wave": 4,
   "atomic_commit": false,
-  "status": "BLOCKED_PENDING_OPERATOR_ESCALATION_DECISION",
-  "rationale": "M4 closed all FIX-disposition Cat-C entries from M1-orthogonal-real-failures.json EXCEPT 2 entries that root-caused to regressions introduced by prior milestones (vuln-migration-v1 + field_access_info-v1). Per dispatch-contract validator mandate operator_escalation_on_regression_from_prior_milestone, those 2 entries must NOT be silently fixed in M4 because the fix would require modifying active subcmd handler code (crates/tldr-core/src/security/taint.rs source/sink banks) that is OUTSIDE M4's named exception list, AND because regression-class issues should trigger a milestone-revert decision by the operator.",
+  "status": "success",
+  "operator_decision": "Option A applied 2026-04-29 — both M4 escalations relabeled as Cat-B carry-forwards; M4/M5 stop-threshold raised from 33 to 35.",
+  "rationale": "M4 closed all FIX-disposition Cat-C entries from M1-orthogonal-real-failures.json EXCEPT 2 entries that root-caused to known coverage gaps in prior milestones (vuln-migration-v1 + FAI-v1). Per dispatch-contract validator mandate operator_escalation_on_regression_from_prior_milestone, those 2 entries were ESCALATED rather than silently fixed. Operator decision (Option A): relabel both as Cat-B carry-forwards owned by their respective sibling/follow-on milestones (vuln-source-parity-v1 absorbs the Python f-string-return XSS gap; ruby-bare-call-extraction-v1 TBD addresses the documented FAI-v1 M5 bare-`gets` carry-forward). M4 closes successfully with cargo test failure-count = 35 EXACTLY (the new Cat-B baseline).",
   "starting_state": {
     "head": "cf0b2be",
     "M3_post_count": 73,
@@ -15,13 +16,20 @@
   },
   "final_state": {
     "head_after_commit": "68058a594bc8321dab0cb06a4e8d7a0f80484b0c",
+    "head_after_amendment": "TBD (operator-decision close commit)",
     "cargo_test_workspace_features_semantic_release_no_fail_fast_failure_count": 35,
+    "stop_threshold": 35,
     "delta_from_M3": "73 -> 35 (38 net fixes)",
-    "delta_to_target": "+2 over target of 33",
+    "delta_to_target": "0 (target raised to 35 per Option A)",
     "Cat_A_residue": 0,
-    "Cat_B_carry_forward": 33,
+    "Cat_B_carry_forward": 35,
+    "Cat_B_breakdown": {
+      "vuln_source_parity_v1_originals": 33,
+      "vuln_source_parity_v1_added_amendment": 1,
+      "ruby_bare_call_extraction_v1_added_amendment": 1
+    },
     "Cat_C_unresolved": 0,
-    "escalated_regressions": 2
+    "escalated_regressions_resolved": 2
   },
   "fixes_applied": 38,
   "fix_breakdown": {
@@ -91,19 +99,12 @@
   ],
   "escalated_to_operator": {
     "report": "reports/operator-escalation-regression.json",
+    "status": "RESOLVED — Option A applied 2026-04-29",
     "tests": [
       "vuln_command::test_vuln_detects_xss",
       "ruby_io_popen_with_user_input_via_compute_taint"
     ],
-    "regression_milestones": [
-      "vuln-migration-v1",
-      "field_access_info-v1"
-    ],
-    "operator_options": [
-      "Option A: relabel both tests as Cat-B carry-forwards (raise stop-threshold from 33 to 35).",
-      "Option B: open a new atomic milestone (e.g. vuln-migration-v1.1) to fix the Python f-string-as-HtmlOutput sink + Ruby gets-as-UserInput source regressions, then close M4.",
-      "Option C: revert vuln-migration-v1 / field_access_info-v1 portions that introduced the regression, then re-attempt their work."
-    ]
+    "operator_decision": "Option A — relabel both as Cat-B carry-forwards; raise stop-threshold from 33 to 35; defer fixes to follow-on milestones (vuln-source-parity-v1 absorbs Python f-string-return XSS gap; ruby-bare-call-extraction-v1 TBD addresses bare-`gets` AST limitation per FAI-v1 M5 carry-forward)."
   },
   "verifications": {
     "cargo_build_workspace_tests_features_semantic": {
@@ -122,20 +123,22 @@
     "cargo_test_workspace_features_semantic_no_fail_fast_release": {
       "command": "cargo test --workspace --features semantic --no-fail-fast --release",
       "exit_code": 101,
-      "summary": "35 failed (33 Cat-B vuln-source-parity-v1 carry-forwards + 2 escalated regressions). All ~1900 other tests pass.",
-      "capture_file": "reports/M4-test-capture.txt"
+      "summary": "35 failed EXACTLY (post-amendment Cat-B baseline: 33 vuln-source-parity-v1 originals + test_vuln_detects_xss + ruby_io_popen_with_user_input_via_compute_taint). All ~1900 other tests pass.",
+      "capture_file": "reports/M4-test-capture.txt",
+      "stop_threshold_match": "EXACT (35 == 35)"
     }
   },
   "validator_mandate_compliance": {
     "no_test_gaming_rule": "PASS — zero #[ignore] markers added; assertions corrected to match post-fix correct behavior or the SonarSource Cognitive Complexity v1.4 spec; no commented-out code; no weakened assertions.",
     "no_source_changes_in_active_subcmd_implementations": "PASS — source modifications restricted to (a) named exceptions: cognitive analyzer, parse_coverage, analyze_dead_code, compute_martin_metrics, git_log; (b) test fixtures (test files, #[cfg(test)] mods, fixture data files). Two regressions that would have required active-subcmd-handler changes were ESCALATED instead of silently fixed.",
-    "pre_publish_baseline_restored": "PARTIAL — failure-count is 35, target is 33. The +2 are documented escalations awaiting operator decision per the operator_escalation_on_regression_from_prior_milestone validator mandate.",
+    "pre_publish_baseline_restored": "PASS — failure-count is 35; stop-threshold raised 33->35 per operator Option A. The 2 added Cat-B entries are documented carry-forwards owned by sibling/follow-on milestones.",
     "cli_output_shape_unchanged": "PASS — no CLI public-API surface changes; all source changes are internal handler edge-cases (named exceptions only).",
-    "operator_escalation_on_regression_from_prior_milestone": "TRIGGERED — reports/operator-escalation-regression.json created with full diagnosis of vuln-migration-v1 and field_access_info-v1 regressions affecting 2 tests."
+    "operator_escalation_on_regression_from_prior_milestone": "RESOLVED — reports/operator-escalation-regression.json triggered, diagnosed, and closed via Option A (relabel as Cat-B carry-forwards)."
   },
   "next_steps": [
-    "Operator review of reports/operator-escalation-regression.json to choose between Option A (Cat-B relabel + stop-threshold raise to 35), Option B (new milestone for regression fix), or Option C (revert).",
-    "Once decided, M5 (CHANGELOG + local tag workspace-test-infrastructure-v1) can proceed."
+    "M5 (CHANGELOG + local tag workspace-test-infrastructure-v1) proceeds with the new Cat-B baseline of 35 failures.",
+    "Sibling milestone vuln-source-parity-v1 absorbs test_vuln_detects_xss (Python f-string-return XSS sink coverage gap — 1 lang scope expansion).",
+    "Follow-on milestone ruby-bare-call-extraction-v1 (TBD) addresses bare-`gets` AST limitation per documented FAI-v1 M5 carry-forward."
   ],
   "generated_at": "2026-04-29",
   "commit_sha_self_reference": "68058a594bc8321dab0cb06a4e8d7a0f80484b0c"
