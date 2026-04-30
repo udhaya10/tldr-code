@@ -14,7 +14,7 @@
     "Cat_C_orthogonal_real": 41
   },
   "final_state": {
-    "head_after_commit": "TBD",
+    "head_after_commit": "68058a594bc8321dab0cb06a4e8d7a0f80484b0c",
     "cargo_test_workspace_features_semantic_release_no_fail_fast_failure_count": 35,
     "delta_from_M3": "73 -> 35 (38 net fixes)",
     "delta_to_target": "+2 over target of 33",
@@ -138,5 +138,5 @@
     "Once decided, M5 (CHANGELOG + local tag workspace-test-infrastructure-v1) can proceed."
   ],
   "generated_at": "2026-04-29",
-  "commit_sha_self_reference": "TBD (will be backfilled after commit per M1 backfill protocol)"
+  "commit_sha_self_reference": "68058a594bc8321dab0cb06a4e8d7a0f80484b0c"
 }
