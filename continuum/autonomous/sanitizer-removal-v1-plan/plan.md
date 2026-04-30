@@ -6,7 +6,7 @@
 - HEAD: `e69eed3` (field_access_info-extension-v1 M6 CHANGELOG entry)
 - Working tree: CLEAN with respect to source code; this plan touches only `continuum/autonomous/sanitizer-removal-v1-plan/`
 - Closes-issues: none (internal milestone — addresses the "tainted forever" tiger from regex-removal-v1 W3 T1 carry-forward; no GH issue)
-- Total estimated diff: see §1 LOC summary; net ~ **-250 LOC** (dominated by 16 regex sanitizer Vec deletions + ~13-16 obsolete unit tests, offset by ~80-100 LOC of new integration tests)
+- Total estimated diff: see §1 LOC summary; net ~ **-87 LOC** (dominated by 16 regex sanitizer Vec deletions + ~24 obsolete unit tests across taint_tests.rs + tests/security_tests.rs, offset by ~80-100 LOC of new integration tests + 3-LOC AST_ONLY_TEST_MODE extension at taint.rs:1096)
 
 ---
 
@@ -45,20 +45,24 @@ The handoff said "5 zero-content banks: C×3, LUA_AST_SANITIZERS, OCAML_AST_SANI
 
 ### Implication for scope
 
-**The original M3 ("parity-fill 5 zero-content banks") is replaced by M3 ("parity-AUDIT 16 banks")**, which verifies each regex sanitizer entry has a corresponding AST entry. Investigation pre-flagged TWO genuine gap candidates (each tied to a specific tree-sitter shape that the AST path currently does not recognize):
+**The original M3 ("parity-fill 5 zero-content banks") is replaced by M3 ("parity-AUDIT 16 banks")**, which verifies each regex sanitizer entry has a corresponding AST entry. Investigation initially pre-flagged TWO genuine gap candidates (each tied to a specific tree-sitter shape that the AST path currently does not recognize):
 
-- **Ruby `Rack::Utils.escape_html`** — `::` is a `scope_resolution` node in tree-sitter-ruby, NOT a `call` node. `extract_call_name_ruby` does not currently dotify scope_resolution. The AST fix is to add a raw-substring fallback `("", "Rack::Utils.escape_html")` (matching the regex literal).
-- **PHP `(int)`/`(float)` casts** — these are `cast_expression` nodes in tree-sitter-php, NOT `call_expression`. The current `PHP_AST_SANITIZERS` likely covers `intval()` / `floatval()` via call_names but not the cast form. AST fix: raw-substring fallback `("", "(int)")` and `("", "(float)")`.
+- **Ruby `Rack::Utils.escape_html`** — `::` is a `scope_resolution` node in tree-sitter-ruby, NOT a `call` node. The AST fix is a raw-substring fallback `("", "Rack::Utils.escape_html")` matching the regex literal.
+- **PHP `(int)`/`(float)` casts** — these are `cast_expression` nodes in tree-sitter-php, NOT `call_expression`. AST fix: raw-substring fallback `("", "(int)")` and `("", "(float)")`.
 
-Other banks (TypeScript, Go, Java, Swift, CSharp, Scala, Elixir) need a quick verify-during-M1 step but are expected to be at parity already because their regex entries map cleanly to call/member_patterns. Final per-language verdict in §3.
+**AMENDMENT (premortem commit `c8c54be`, BLOCKER-1):** The discriminative premortem VERIFIED that BOTH pre-flagged "gaps" are **already filled at HEAD**:
+- `RUBY_AST_SANITIZERS` at **taint.rs:2416** already contains `member_patterns: [("", "CGI.escapeHTML"), ("", "Rack::Utils.escape_html")]` Html.
+- `PHP_AST_SANITIZERS` at **taint.rs:2717** already contains `member_patterns: [("", "(int)"), ("", "(float)")]` Numeric (with comment "`(int)`, `(float)` are cast expressions — raw fallback.").
+
+Consequently **M3 collapses to AUDIT-ONLY** with **zero additions expected** in additive mode. The 2 ast_only RED tests for Ruby Rack::Utils + PHP cast transition RED→GREEN at **M2** (with wiring alone), NOT at M3. M3's purpose is now strictly: per-bank diff between AST and regex sanitizer Vec, document any unforeseen gap from the 7 verify-during-M1 langs. Other banks (TypeScript, Go, Java, Swift, CSharp, Scala, Elixir) need a quick verify-during-M1 step but are expected to be at parity already. Final per-language verdict in §3.
 
 ### Implication for scope-vs-handoff
 
 | Original framing | Refined scope |
 |------------------|---------------|
 | Wire `detect_sanitizer_ast` | UNCHANGED (M2) |
-| Parity-fill 5 zero-content banks | RENAMED + RESCOPED → "Parity-AUDIT 16 banks + add ~2 flagged raw-fallback entries" (M3) |
-| Delete 16 regex sanitizer banks | UNCHANGED (M4 ATOMIC) — but now also flips dispatch from AST-with-fallback to AST-only |
+| Parity-fill 5 zero-content banks | RENAMED + RESCOPED → "Parity-AUDIT 16 banks (audit-only, ZERO additions expected per premortem A1)" (M3) |
+| Delete 16 regex sanitizer banks | UNCHANGED (M4 ATOMIC) — but now also flips dispatch from AST-with-fallback to AST-only AND deletes ~24 obsolete tests (per premortem A2; was 13-16) across BOTH taint_tests.rs and tests/security_tests.rs |
 
 The milestone codename **`sanitizer-removal-v1`** is retained for continuity with the work-DAG and predecessor dispatch contracts.
 
@@ -92,12 +96,12 @@ ALL must be GREEN against the post-milestone `taint.rs` (regex sanitizer banks d
 | Rust | 1 (8 turbofish forms) | full via raw-substring (8 entries) | M4 delete-only |
 | C | 2 | full (call_names) | M4 delete-only |
 | Cpp | 2 | full via raw-substring | M4 delete-only |
-| Ruby | 2 | **GAP** — Rack::Utils.escape_html `::` shape | M3 add `("", "Rack::Utils.escape_html")` raw-fallback then M4 delete |
+| Ruby | 2 | full (raw-fallback `("", "Rack::Utils.escape_html")` ALREADY at taint.rs:2416 — premortem A1) | M4 delete-only |
 | Kotlin | 1 | full via wildcard | M4 delete-only |
 | Swift | 2 | likely full — verify in M1 | M4 delete-only |
 | CSharp | 2 | likely full — verify in M1 | M4 delete-only |
 | Scala | 2 | likely full — verify in M1 | M4 delete-only |
-| PHP | 3 | **GAP** — `(int)` / `(float)` cast_expression | M3 add `("", "(int)")` and `("", "(float)")` raw-fallback then M4 delete |
+| PHP | 3 | full (raw-fallback `("", "(int)")` and `("", "(float)")` ALREADY at taint.rs:2717 — premortem A1) | M4 delete-only |
 | Lua/Luau | 1 | full (call_names) | M4 delete-only |
 | Elixir | 2 | likely full — verify in M1 | M4 delete-only |
 | OCaml | 1 | full (call_names) | M4 delete-only |
@@ -105,7 +109,8 @@ ALL must be GREEN against the post-milestone `taint.rs` (regex sanitizer banks d
 **Counts:**
 - Total regex sanitizer Vec entries to delete in M4 ATOMIC: **30** (the regex tuples summed across the 16 banks; tree-sitter-Lua and Luau share `LUA_PATTERNS` so the 16th bank is folded into Lua).
 - Lazy_static blocks affected by sanitizer-Vec emptying: **16** (one per language; Lua/Luau share one).
-- AST sanitizer entries to ADD in M3 parity-fill: **3** (Ruby Rack::Utils + 2 PHP casts) — pending M1 verification of the 7 "verify_during_M1" languages, which may surface 0-2 more.
+- AST sanitizer entries to ADD in M3 parity-audit: **0 expected** (premortem A1 confirmed both pre-flagged candidates — Ruby Rack::Utils.escape_html at taint.rs:2416, PHP (int)/(float) at taint.rs:2717 — are already present at HEAD). M3 may add 0-2 entries IF the 7 "verify_during_M1" languages surface unforeseen gaps; no carry-forward expected.
+- Obsolete tests to DELETE in M4 ATOMIC: **~24** (per premortem A2): 17 `test_<lang>_detect_sanitizers` in `taint_tests.rs` (L973-L1321) + 3 Python-named-shape sanitizer tests in `taint_tests.rs` at L322/L335/L347 + 4 detect_sanitizer-direct tests in `tests/security_tests.rs` at L383/L390/L397/L671. NOT 13-16. Cleanup is GATING for the M4 atomic commit.
 
 ### Out of scope
 
@@ -140,53 +145,76 @@ graph TD
 
 **SERIALIZED.** M2/M3/M4 all edit `crates/tldr-core/src/security/taint.rs`. M2 alone modifies `process_block` + `SsaPropagateCtx` + `compute_taint_with_tree` call paths. M3 adds at most 3 raw-substring entries to AST sanitizer banks. M4 atomically empties 16 regex Vecs and flips dispatch. Naive parallelization races on the same file.
 
-### M1: Author RED integration tests + AST-only harness + parity-audit
+### M1: Author RED integration tests + AST-only harness extension + parity-audit + obsolete-test enumeration
 
-- **GREEN files**: NEW test files
-  - `crates/tldr-core/tests/sanitize_breaks_flow_per_language.rs` — 16 paired tests (one per language; Lua and Luau covered by one Lua test)
-  - `crates/tldr-core/tests/sanitize_breaks_flow_ast_only_harness.rs` — 16 mirror tests under the AST-only harness
+- **GREEN files**:
+  - NEW: `crates/tldr-core/tests/sanitize_breaks_flow_per_language.rs` — 16 paired tests (one per language; Lua and Luau covered by one Lua test)
+  - NEW: `crates/tldr-core/tests/sanitize_breaks_flow_ast_only_harness.rs` — 16 mirror tests under the AST-only harness
+  - **EDIT (per BLOCKER-3 amendment)**: `crates/tldr-core/src/security/taint.rs` at L1096 — add ~3 LOC AST_ONLY_TEST_MODE short-circuit to `detect_sanitizer` body (mirrors L816-818 in detect_sources). Body uses the existing thread-local from FAI-v1 M1 (commit `49ed30c`); not a public API extension.
 - **Pre-investigation**: Already done in this plan (see §3, §4) plus `reports/investigation.json`. Sub-tasks remaining for the executor:
-  - Author 32 test functions (16 paired × 2 dispatch paths) per §4 fixtures
-  - Add an `analyze_sanitizer_ast_only(...)` helper that clears regex sanitizer Vecs for a single language before invoking `compute_taint_with_tree` (mirrors regex-removal-v1 W2-pre and field_access_info-extension-v1 M1)
-  - Verify each language's regex-to-AST parity by running `analyze_sanitizer_ast_only` against the canonical sanitizer call form per language. Surface any FAIL as a parity gap to be addressed in M3.
-- **Risk**: At HEAD pre-M2, `detect_sanitizer_ast` is dead code, so `analyze_sanitizer_ast_only` requires a synthetic harness — see "M1 RED-first harness" below.
-- **Atomic**: standalone commit OK (test-only, no source change in this milestone)
-- **LOC**: ~140 (32 tests × ~3-4 lines per test body × 16 languages × 2 paths + harness helpers + parity-audit table + per-language baseline)
+  - Author 32 test functions (16 paired × 2 dispatch paths) per §4 fixtures.
+  - Apply the 3-LOC AST_ONLY_TEST_MODE extension to `detect_sanitizer` at `taint.rs:1096`.
+  - Implement `analyze_sanitize_ast_only(...)` as the one-liner wrapping `AstOnlyTestModeGuard::new()` + `common::integ_helpers::analyze(...)` (see "M1 RED-first harness" below).
+  - Verify each language's regex-to-AST parity by running `analyze_sanitize_ast_only` against the canonical sanitizer call form per language. Surface any FAIL as a parity-audit verdict for M3.
+  - **Enumerate ALL obsolete tests across BOTH files into `reports/M1-test-enumeration.json` (gating for M4)** — per premortem A2 the baseline is ~24 tests across `taint_tests.rs` (~20) and `tests/security_tests.rs` (4). See M4 below for the verified enumeration.
+- **Atomic**: standalone commit OK (test-only adds + 3-LOC source change to `detect_sanitizer` mirroring an already-existing pattern)
+- **LOC**: ~203 (200 test code + 3 LOC AST_ONLY_TEST_MODE extension)
 - **STOP threshold**:
-  - All 32 tests compile
-  - 16 `sanitize_breaks_flow_<lang>` tests PASS at HEAD under regular dispatch (regex sanitizer bank still active)
-  - 16 `sanitize_breaks_flow_ast_only_<lang>` tests run; **the 14 expected-parity langs FAIL** (RED gate — proves wiring is needed); the 2 "definitely full parity via call_names" cases (Lua, OCaml) may PASS if `detect_sanitizer_ast` happens to be invoked (it isn't — see investigation), so they should also FAIL at HEAD pre-M2
-  - Existing val001a/val001b/val002/val003/rr_module_function_integ_test/taint_tests.rs all GREEN
+  - All 32 tests compile.
+  - 3-LOC AST_ONLY_TEST_MODE extension at `taint.rs:1096` lands.
+  - 16 `sanitize_breaks_flow_<lang>` tests under regular `analyze_sanitize` PASS at HEAD (regex sanitizer bank still active — additive coverage).
+  - 16 `sanitize_breaks_flow_ast_only_<lang>` tests under `analyze_sanitize_ast_only` FAIL at HEAD (regex bank short-circuited by guard; AST sanitizer not yet wired into dispatch — RED gate for M2).
+  - Existing val001a/val001b/val002/val003/rr_module_function_integ_test/taint_tests.rs all GREEN.
+  - `reports/M1-test-enumeration.json` committed with the full ~24-test list across BOTH `taint_tests.rs` and `tests/security_tests.rs`.
 - **Depends**: none
 
-#### M1 RED-first harness (Option A — transient bank-empty + AST-direct invocation)
+#### M1 RED-first harness (AST_ONLY_TEST_MODE thread-local — extended for sanitizers)
 
-Because `detect_sanitizer_ast` is currently NEVER called, the M1 RED harness must invoke it directly to verify parity AND must mirror the `analyze` / `analyze_ast_only` split from field_access_info-extension-v1.
+**AMENDMENT (premortem commit `c8c54be`, BLOCKER-3):** The original harness referenced a fictional `compute_taint_with_tree_with_patterns(...)` function. The actual harness shape — already added by **field_access_info-extension-v1 M1** (commit `49ed30c`) — is a thread-local `AST_ONLY_TEST_MODE: Cell<bool>` at `taint.rs:51` plus an RAII `AstOnlyTestModeGuard` at `taint.rs:63-83` that sets the flag on construction and clears on Drop. The flag is checked at the top of `detect_sources` (`taint.rs:816-818`) and `detect_sinks` (`taint.rs:933`); when set, those functions return an empty Vec, so the regex source/sink banks are short-circuited and only the AST path is exercised.
+
+For sanitizer-removal-v1 M1 the harness must be **EXTENDED** by ~3 LOC at `taint.rs:1096` (the `detect_sanitizer` body) to mirror exactly the `detect_sources` short-circuit. This is the BLOCKER-3 amendment.
+
+**M1 source change (~3 LOC at `taint.rs:1096`, before the `let patterns = get_patterns(language);` line):**
 
 ```rust
-/// Regular dispatch — uses regex sanitizer bank as today (HEAD e69eed3).
-fn analyze_sanitize(src: &str, lang: Language, fn_name: &str) -> TaintInfo {
-    compute_taint_with_tree(src, lang, fn_name, /* default patterns */)
-}
-
-/// AST-only sanitizer harness — clones the LanguagePatterns for `lang`,
-/// forces `.sanitizers = vec![]`, runs compute_taint_with_tree against the
-/// modified bank. Sources + sinks remain regex/AST-mixed as today; ONLY
-/// the sanitizer Vec is cleared. This is the discriminative RED gate for
-/// detect_sanitizer_ast wiring: a fixture only PASSES if the AST sanitizer
-/// path correctly truncates the flow.
-fn analyze_sanitize_ast_only(src: &str, lang: Language, fn_name: &str) -> TaintInfo {
-    let mut patterns = get_patterns(lang).clone();
-    patterns.sanitizers.clear();
-    compute_taint_with_tree_with_patterns(src, lang, fn_name, patterns)
-    //                                       ^^^^^^^^^^^^^^^^^^^^^^
-    // pub(crate) test-only seam; same shape as field_access_info M1 added
+pub fn detect_sanitizer(statement: &str, language: Language) -> Option<SanitizerType> {
+    // Test-only AST-only-mode override: when set by an integration-test
+    // `AstOnlyTestModeGuard`, skip the entire regex sanitizer bank so the
+    // returned Option reflects pure-AST detection. See `AST_ONLY_TEST_MODE`
+    // doc comment.
+    if AST_ONLY_TEST_MODE.with(|m| m.get()) {
+        return None;
+    }
+    let patterns = get_patterns(language);
+    // ... existing body unchanged ...
 }
 ```
 
-**At HEAD pre-M2:** `analyze_sanitize_ast_only` will fail to truncate any flow because `detect_sanitizer_ast` is never invoked. Result: 16 tests FAIL → RED gate confirmed.
+This is **NOT** a public API extension — it is internal flag-checking on the existing `AST_ONLY_TEST_MODE` `Cell`. Production code never sets the flag (default `false`). After this 3-LOC edit, `AstOnlyTestModeGuard` short-circuits sources, sinks, AND sanitizers uniformly.
 
-**Post-M2:** wiring is in place; the 14 expected-parity langs should PASS under `analyze_sanitize_ast_only`; the 2 flagged langs (Ruby `Rack::Utils`, PHP `(int)`/`(float)`) should still FAIL. M3 adds the raw-fallback AST entries → all 16 PASS.
+**Test harness helpers:**
+
+```rust
+/// Regular dispatch — uses regex sanitizer bank as today (HEAD e69eed3 + premortem amendment).
+fn analyze_sanitize(src: &str, lang: Language, fn_name: &str) -> TaintInfo {
+    common::integ_helpers::analyze(src, lang, fn_name)
+}
+
+/// AST-only sanitizer harness — sets AST_ONLY_TEST_MODE for the duration of
+/// the call via the existing AstOnlyTestModeGuard. With the M1 3-LOC extension
+/// at taint.rs:1096 in place, the regex sanitizer bank is short-circuited
+/// alongside sources/sinks. The discriminative RED gate for detect_sanitizer_ast
+/// wiring: a fixture only PASSES if the AST sanitizer path (built into compute_taint_with_tree
+/// in M2) correctly truncates the flow.
+fn analyze_sanitize_ast_only(src: &str, lang: Language, fn_name: &str) -> TaintInfo {
+    let _g = AstOnlyTestModeGuard::new();
+    common::integ_helpers::analyze(src, lang, fn_name)
+}
+```
+
+**At HEAD pre-M2** (with the M1 3-LOC AST_ONLY_TEST_MODE extension to detect_sanitizer in place): `analyze_sanitize` PASSES for all 16 sanitize_breaks_flow_<lang> fixtures (regex sanitizer bank still active — additive coverage). `analyze_sanitize_ast_only` FAILS for all 16 sanitize_breaks_flow_ast_only_<lang> tests because regex sanitizer bank is short-circuited by the guard AND the AST sanitizer dispatch is not yet wired into compute_taint_with_tree (M2 work). This is the gating RED for M2.
+
+**Post-M2:** wiring is in place. Per premortem A1 (BLOCKER-1 amendment), ALL 16 ast_only tests are expected to transition RED→GREEN at M2 (Ruby Rack::Utils + PHP cast raw-fallbacks already present at taint.rs:2416 and :2717 — they are NOT M3-gated as the original plan claimed).
 
 **Post-M4:** regex Vecs are empty + dispatch flipped to AST-only; both `analyze_sanitize` and `analyze_sanitize_ast_only` produce the same result (both PASS).
 
@@ -219,24 +247,23 @@ fn analyze_sanitize_ast_only(src: &str, lang: Language, fn_name: &str) -> TaintI
   - All existing tests still GREEN (val001a, val001b, val002, val003, rr_module_function, taint_tests.rs) — sanity check that AST-FIRST does not regress current behavior
 - **Depends**: M1
 
-### M3: Parity-audit 16 AST sanitizer banks + add flagged raw-fallback entries
+### M3: Parity-AUDIT 16 AST sanitizer banks (audit-only; ZERO additions expected per premortem A1)
 
-- **GREEN files**: `crates/tldr-core/src/security/taint.rs`
-- **Anchors**:
-  - `RUBY_AST_SANITIZERS` at L2406
-  - `PHP_AST_SANITIZERS` at L2713
-  - All other banks (PYTHON L1730, TYPESCRIPT L1985, GO L2062, JAVA L2135, RUST L2203, C L2262, CPP L2308, KOTLIN L2466, SWIFT L2514, CSHARP L2580, SCALA L2639, LUA L2769, ELIXIR L2821, OCAML L2891) — VERIFY via M1 fixtures, no source change expected
-- **Additions (planned):**
-  - **Ruby:** ADD `AstSanitizerPattern { call_names: &[], member_patterns: &[("", "Rack::Utils.escape_html")], sanitizer_type: SanitizerType::Html }` to `RUBY_AST_SANITIZERS`. Rationale: `Rack::Utils` uses `::` scope_resolution which `extract_call_name_ruby` does NOT dotify; raw-substring fallback is the correct shape (matches the regex literal `Rack::Utils\.escape_html`).
-  - **PHP:** ADD `AstSanitizerPattern { call_names: &[], member_patterns: &[("", "(int)"), ("", "(float)")], sanitizer_type: SanitizerType::Numeric }` to `PHP_AST_SANITIZERS`. Rationale: `(int)`/`(float)` are `cast_expression` nodes, NOT `call_expression` — raw-substring fallback is the correct shape (matches the regex literal `\(int\)|\(float\)`).
-- **Audit-only verification (no additions expected):** TypeScript/JavaScript, Go, Java, Swift, CSharp, Scala, Elixir. M1 fixtures should make `analyze_sanitize_ast_only` PASS for these 7 languages with M2's wiring alone. If any FAIL, M3 adds the corresponding raw-fallback or call_names entry — list of likely candidates per language is in §3 risk matrix.
-- **Atomic**: standalone commit OK (additive — does not break any existing behavior)
-- **LOC**: ~+12 (3 new entries × ~4 lines each, plus possibly 1-2 unforeseen entries from the 7 verify-during-M1 langs)
+**AMENDMENT (premortem commit `c8c54be`, BLOCKER-1):** The two pre-flagged "parity gaps" are ALREADY FILLED at HEAD: Ruby `Rack::Utils.escape_html` is at `taint.rs:2416`; PHP `(int)`/`(float)` is at `taint.rs:2717`. M3 collapses to AUDIT-ONLY: the executor walks each bank, confirms parity with the regex sanitizer Vec it's about to delete in M4, and **adds entries ONLY IF a true gap is found**. Expected additions in additive mode: **ZERO**. The 2 ast_only tests for Ruby Rack::Utils + PHP cast transition RED→GREEN at M2 (with wiring alone), NOT at M3.
+
+- **GREEN files**: `crates/tldr-core/src/security/taint.rs` (audit-trail comment edits or zero edits if no gap is found)
+- **Anchors**: All 16 banks — PYTHON L1730, TYPESCRIPT L1985, GO L2062, JAVA L2135, RUST L2203, C L2262, CPP L2308, RUBY L2406 (already includes Rack::Utils raw-fallback at L2416), KOTLIN L2466, SWIFT L2514, CSHARP L2580, SCALA L2639, PHP L2713 (already includes (int)/(float) raw-fallback at L2717), LUA L2769, ELIXIR L2821, OCAML L2891.
+- **Audit task (per-bank diff):** For each of the 16 banks, the executor produces a per-bank entry in `reports/M3-audit.json` with: (a) regex Vec entries to be deleted in M4; (b) corresponding AST entry (call_names + member_patterns + sanitizer_type); (c) verdict {`parity` | `gap`}. Expected: 16 × `parity`. Any `gap` requires an addition per the rule below.
+- **Conditional additions (only if a true gap surfaces from the 7 verify-during-M1 langs — TS/JS, Go, Java, Swift, CSharp, Scala, Elixir):** Add the corresponding raw-fallback or call_names entry. Most likely candidates (low likelihood per investigation): TypeScript `("*", "parse")`/`("*", "safeParse")` for Zod wildcard receiver; CSharp `("int", "Parse")`/`("long", "Parse")` for primitive-type receiver. Document each addition in `reports/M3-audit.json.discoveries`.
+- **Atomic**: standalone commit OK (audit-trail or no-op or minimal additions; does not break any existing behavior).
+- **LOC**: **0 expected** (was +12). Up to ~5 LOC if executor adds audit-trail comments. Up to ~12 LOC ONLY IF the 7 verify-during-M1 langs surface unforeseen gaps (rare).
 - **STOP threshold**:
-  - cargo check passes
-  - All 16 `sanitize_breaks_flow_ast_only_<lang>` tests transition RED → GREEN under the M2-wired dispatch
-  - cargo clippy --all-targets --workspace -- -D warnings PASS (no unused entries surfacing)
-  - All existing tests still GREEN
+  - cargo check passes.
+  - All 16 `sanitize_breaks_flow_ast_only_<lang>` tests GREEN. **Per premortem A1, ALL 16 are expected GREEN already at M2-end** (Ruby Rack::Utils + PHP cast already present at HEAD; the 7 verify-during-M1 langs expected to PASS with M2 wiring alone). M3 verifies this and is a no-op in additive mode.
+  - All 16 `sanitize_breaks_flow_<lang>` regular tests still GREEN.
+  - `reports/M3-audit.json` per-bank parity verdict committed; `discoveries: []` is the expected outcome.
+  - Any unforeseen gap surfaced in M1's parity-audit is addressed; if a gap requires a NEW carry-forward exception (no AST or raw-fallback shape works), surface in `reports/M3-carry-forward.json` AND amend the CHANGELOG `### Retained` section in M5.
+  - cargo clippy --all-targets --workspace -- -D warnings PASS.
 - **Depends**: M2
 
 ### M4: ATOMIC — Delete 16 regex sanitizer banks + obsolete unit tests + flip dispatch to AST-only
@@ -270,24 +297,58 @@ fn analyze_sanitize_ast_only(src: &str, lang: Language, fn_name: &str) -> TaintI
     ```
   - L4350 (ssa_propagate) — analogous flip
   - **Important**: After M4, when called from `compute_taint` (no tree), sanitizer detection becomes a no-op. This is a deliberate semantic change — but `compute_taint` itself is internal-parse-and-delegate (M11 refactor), so it always has a tree and always reaches the AST path. The `_ => false` arm is dead in practice but kept for defense in depth.
-- **Deletions in `taint_tests.rs`** (per §4 obsolete-test enumeration):
-  - `test_python_detect_sanitizers` (~L320)
-  - `test_typescript_detect_sanitizers` (~L976) and any `test_javascript_*` analog
-  - `test_go_detect_sanitizers`, `test_java_detect_sanitizers`, `test_rust_detect_sanitizers` (~L1003-L1086)
-  - `test_c_detect_sanitizers`, `test_cpp_detect_sanitizers`
-  - `test_ruby_detect_sanitizers` (L1253), `test_elixir_detect_sanitizers` (L1518), `test_ocaml_detect_sanitizers` (L1638) — these were KEPT in field_access_info-extension-v1 M5 explicitly because sanitizer banks were retained then
-  - `test_kotlin_detect_sanitizers`, `test_swift_detect_sanitizers`, `test_csharp_detect_sanitizers`, `test_scala_detect_sanitizers`, `test_php_detect_sanitizers`, `test_lua_detect_sanitizers`
-  - **Estimated total: 13-16 obsolete test functions** (one per language matching the `test_<lang>_detect_sanitizers` pattern). Exact enumeration deferred to M1 (executor surfaces the precise list in `reports/M1-test-enumeration.json`).
-  - **Rationale for deletion**: All `test_<lang>_detect_sanitizers` tests call `detect_sanitizer(stmt, language)` directly, which iterates `patterns.sanitizers`. Post-M4 those Vecs are empty, so the assertion `assert!(matches!(result, Some(SanitizerType::Numeric)))` fails deterministically. Without these deletions, `cargo test --workspace` fails at the M4 verification gate.
-  - **PRESERVE** any tests that exercise `detect_sanitizer_ast` directly (added in M1) or that test `find_sanitizers_in_statement` for non-empty results (will need updating, not deletion — surface in M1).
+- **Deletions in `taint_tests.rs` (~20 tests; AMENDMENT per premortem A2 expanded enumeration):**
+
+  **Group A — 17 `test_<lang>_detect_sanitizers` tests at exact line numbers:**
+  - L973 `test_typescript_detect_sanitizers`
+  - L1000 `test_javascript_detect_sanitizers`
+  - L1017 `test_go_detect_sanitizers`
+  - L1044 `test_java_detect_sanitizers`
+  - L1061 `test_rust_detect_sanitizers`
+  - L1078 `test_c_detect_sanitizers`
+  - L1101 `test_cpp_detect_sanitizers`
+  - L1124 `test_ruby_detect_sanitizers`
+  - L1151 `test_kotlin_detect_sanitizers`
+  - L1173 `test_swift_detect_sanitizers`
+  - L1198 `test_csharp_detect_sanitizers`
+  - L1223 `test_scala_detect_sanitizers`
+  - L1248 `test_php_detect_sanitizers`
+  - L1278 `test_lua_detect_sanitizers`
+  - L1290 `test_luau_detect_sanitizers`
+  - L1303 `test_elixir_detect_sanitizers`
+  - L1321 `test_ocaml_detect_sanitizers`
+
+  Decision rule: each calls `detect_sanitizer(stmt, language)` directly and asserts `Some(SanitizerType::*)` against the regex bank. Post-M4 the regex Vec is empty, returning `None` deterministically — assertion fails. **DELETE.**
+
+  **Group B — 3 Python-named-shape sanitizer tests (NOT enumerated in original plan; per premortem A2):**
+  - L322 `test_int_sanitizes_sql_injection` — uses `is_sanitizer` + `find_sanitizers_in_statement` on `safe_id = int(user_id)`; asserts `is_sanitizer == true` AND `sanitizers.len() == 1` AND `Numeric` type. Post-M4 all three assertions break (regex bank empty → `is_sanitizer` returns `false`, `find_sanitizers_in_statement` returns empty Vec). **DELETE.**
+  - L335 `test_shlex_quote_sanitizes_command_injection` — same shape; asserts `Shell` type. **DELETE.**
+  - L347 `test_html_escape_sanitizes_xss` — same shape; asserts `Html` type. **DELETE.**
+
+  **PRESERVE in `taint_tests.rs`:**
+  - L498 `test_sanitizer_removes_taint` — operates at compute_taint level; AST sanitizer dispatch covers it post-M4. **KEEP.**
+  - L683 `test_no_vulnerability_when_sanitized` — operates at compute_taint level. **KEEP.**
+  - Any tests added in M1 that exercise `detect_sanitizer_ast` or use `AstOnlyTestModeGuard`.
+
+- **Deletions in `crates/tldr-core/tests/security_tests.rs` (4 tests; NEW DELETION TARGET — was missing entirely from original plan; per premortem A2):**
+  - L383 `test_detect_sanitizer_python_int` — calls `detect_sanitizer("safe_id = int(user_id)", Language::Python)` and asserts `Some(SanitizerType::Numeric)`. Post-M4 returns `None`. **DELETE.**
+  - L390 `test_detect_sanitizer_python_shlex` — asserts `Some(SanitizerType::Shell)`. **DELETE.**
+  - L397 `test_detect_sanitizer_python_html_escape` — asserts `Some(SanitizerType::Html)`. **DELETE.**
+  - L671 `test_detect_sanitizer_typescript` — calls `detect_sanitizer("parseInt(val)", Language::TypeScript)` and asserts `Some(SanitizerType::Numeric)`. Post-M4 returns `None`. **DELETE.**
+
+  **PRESERVE in `tests/security_tests.rs`:**
+  - L509 `test_compute_taint_sanitizer_removes_taint` — uses `compute_taint` which internally parses + delegates to `compute_taint_with_tree`; AST sanitizer dispatch covers `safe_id = int(user_id)` via Python AST `call_names: ["int"]`. **KEEP.**
+  - L695 `test_sanitizer_type_serialization` — serializes `SanitizerType` enum; unaffected by Vec emptying. **KEEP.**
+
+- **Total obsolete-test count: ~24** (was 13-16 in original estimate). Exact list verified in `reports/M1-test-enumeration.json` (gating for M4). Cleanup is GATING for the M4 atomic commit — without ALL ~24, `cargo test --workspace` fails deterministically.
 - **Atomic-commit YES**: deletion of regex Vecs + dispatch flip + obsolete unit-test cleanup MUST ship in one commit. Without atomicity:
   - Deleting Vecs without flipping dispatch leaves the dispatch's AST-first-with-regex-fallback in place — fallback always fails (Vec empty), so AST-only is the de-facto behavior; flip is cosmetic only. Skipping it is safe but inconsistent.
   - Flipping dispatch without deleting Vecs leaves dead `Regex::new(...)` allocations in lazy_static — clippy will flag `dead_code`.
   - Deleting Vecs without removing the `test_<lang>_detect_sanitizers` tests breaks `cargo test --workspace`.
-- **LOC**: ~ -250 (30 regex tuples × ~2 lines + 13-16 unit tests × ~25 LOC avg + dispatch-flip simplification offsetting +~10 LOC for AST-only branch)
+- **LOC**: ~ -370 (30 regex tuples × ~2 lines + ~24 obsolete tests × ~20-25 LOC avg + dispatch-flip simplification offsetting +~10 LOC for AST-only branch). **WAS** ~-250 in original plan; expanded per premortem A2.
 - **STOP threshold**:
   - All M2+M3 changes already merged
-  - All N obsolete unit tests deleted from `taint_tests.rs` (executor must surface exact list in M1; ALL of them must go to satisfy the M4 atomic constraint)
+  - All ~24 obsolete tests deleted across BOTH files (per M1 enumeration): ~20 in `taint_tests.rs` (17 `test_<lang>_detect_sanitizers` + 3 Python-named-shape at L322/335/347) + 4 in `tests/security_tests.rs` (L383/390/397/671). **Obsolete-test cleanup is GATING — without ALL of them, `cargo test --workspace` fails deterministically.** The exact count is ~24 per premortem A2, NOT 13-16 as the original plan estimated.
   - cargo check --workspace PASS
   - cargo clippy --all-targets --workspace -- -D warnings PASS (no `dead_code` from unused Regex allocations, no unused imports, no dead-code from `find_sanitizers_in_statement` if it still iterates an always-empty Vec — escalate if so)
   - cargo test --workspace PASS — all M1 integ tests (under both regular and AST-only harness paths) + val001a + val001b + val002 + val003 + rr_module_function + remaining taint_tests.rs minus the deleted N tests
@@ -358,8 +419,8 @@ For each language, this table captures (a) the current regex sanitizer entries; 
 ### Ruby (`tree-sitter-ruby`)
 - **Regex entries (2):** `\.(to_i|to_f)\b`, `(CGI\.escapeHTML|Rack::Utils\.escape_html)\s*\(`
 - **Parse shape:** `x.to_i` → `call` node with `receiver: x`, `method: identifier("to_i")`. `CGI.escapeHTML(x)` → `call` with `receiver: constant("CGI")`, `method: identifier("escapeHTML")`. `Rack::Utils.escape_html(x)` → `call` with `receiver: scope_resolution(Rack::Utils)`, `method: identifier("escape_html")`. **Critical:** `extract_call_name_ruby` (per regex-removal-v1 W3) does NOT dotify `scope_resolution` shape — it returns the literal source text via `node_text`, which would yield `"Rack::Utils.escape_html"` AS A STRING (containing `::`). The W2-pre call-shape path splits on `rfind('.')` which gives `rcv="Rack::Utils"`, `field="escape_html"` — but the AST entry must literally use `("Rack::Utils", "escape_html")` to match, which is unusual.
-- **AST coverage:** `RUBY_AST_SANITIZERS` has `member_patterns: [("*", "to_i"), ("*", "to_f")]` (or similar — verify in M1). For Html: likely `("CGI", "escapeHTML")` — verify in M1. Rack::Utils MAY be missing.
-- **Verdict:** GAP — **M3 ADD `("", "Rack::Utils.escape_html")` raw-fallback** (most conservative; matches the regex literal). Alternative: add `("Rack::Utils", "escape_html")` as a structured entry if `extract_call_name_ruby` does dotify it correctly. M1 fixture must verify which shape works, and M3 picks the simpler one.
+- **AST coverage:** `RUBY_AST_SANITIZERS` at `taint.rs:2406` has `member_patterns: [("*", "to_i"), ("*", "to_f")]` Numeric. For Html at `taint.rs:2412-2419`: `member_patterns: [("", "CGI.escapeHTML"), ("", "Rack::Utils.escape_html")]` — **BOTH entries already present at HEAD per premortem A1 verification.**
+- **Verdict:** Full parity at HEAD. M4 delete-only. (Original plan claimed M3 add was needed — per premortem amendment commit `c8c54be`, that claim is REFUTED; both entries are present at the line numbers above.)
 - **`.to_i` / `.to_f` on numeric literal vs identifier:** `42.to_i` parses as a `call`, but `\.(to_i|to_f)\b` regex matches only the second token regardless of receiver. AST `("*", "to_i")` covers both.
 
 ### Kotlin (`tree-sitter-kotlin`)
@@ -389,8 +450,8 @@ For each language, this table captures (a) the current regex sanitizer entries; 
 ### PHP (`tree-sitter-php`)
 - **Regex entries (3):** `(\b(intval|floatval)\s*\(|\(int\)|\(float\))`, `(htmlspecialchars|htmlentities)\s*\(`, `mysqli_real_escape_string\s*\(`
 - **Parse shape:** `intval(x)` → `function_call_expression`, function = `name` (qualified or unqualified). `(int)x` → `cast_expression` (NOT a call). `htmlspecialchars(x)` → `function_call_expression`. `mysqli_real_escape_string(...)` → `function_call_expression`.
-- **AST coverage:** `PHP_AST_SANITIZERS` covers `intval`, `floatval`, `htmlspecialchars`, `htmlentities`, `mysqli_real_escape_string` via call_names. **GAP:** `(int)` and `(float)` cast_expression shapes are NOT call expressions — they require raw-substring fallback.
-- **Verdict:** GAP — **M3 ADD `member_patterns: [("", "(int)"), ("", "(float)")]` to PHP_AST_SANITIZERS Numeric entry** (or as a separate entry — M3 picks the simpler shape).
+- **AST coverage:** `PHP_AST_SANITIZERS` at `taint.rs:2713` covers `intval`, `floatval` via `call_names`, AND already includes `member_patterns: [("", "(int)"), ("", "(float)")]` at `taint.rs:2717` (with comment "`(int)`, `(float)` are cast expressions — raw fallback.") — **per premortem A1 verification.** Plus `htmlspecialchars`, `htmlentities`, `mysqli_real_escape_string` via call_names in subsequent entries.
+- **Verdict:** Full parity at HEAD. M4 delete-only. (Original plan claimed M3 add was needed — per premortem amendment commit `c8c54be`, that claim is REFUTED; cast-expression raw-fallback already present at `taint.rs:2717`.)
 
 ### Lua / Luau (`tree-sitter-lua` / `tree-sitter-luau` — share LUA_PATTERNS)
 - **Regex entries (1):** `\btonumber\s*\(`
@@ -540,6 +601,10 @@ This is the closes-#24-shaped FP class extended to sanitizers — pre-M2, regex 
 
 This section captures the precise dispatch wiring change for M2.
 
+### Prerequisite: M1 AST_ONLY_TEST_MODE extension
+
+Per BLOCKER-3 amendment (premortem commit `c8c54be`), the M1 harness extends the existing `AST_ONLY_TEST_MODE` thread-local (added in field_access_info-extension-v1 M1 at `taint.rs:51`) to short-circuit `detect_sanitizer` at `taint.rs:1096`. This 3-LOC addition is a **prerequisite** for the M2 wiring change to be RED-testable: without it, `analyze_sanitize_ast_only` cannot exercise pure-AST sanitizer dispatch (the regex bank would still match). With the extension, M2's wiring is what flips the 16 ast_only tests RED→GREEN. See "M1 RED-first harness" in §2.
+
 ### Where in the per-line dispatch to invoke
 
 **Two call sites** in `compute_taint_with_tree`:
@@ -671,11 +736,15 @@ NONE. All M2 changes are:
   regex-removal-v1 Wave 2).
 
 ### Added
-- `RUBY_AST_SANITIZERS` parity entry: raw-substring `("", "Rack::Utils.escape_html")`
-  for the `::` scope_resolution shape that `extract_call_name_ruby` does not dotify.
-- `PHP_AST_SANITIZERS` parity entries: raw-substring `("", "(int)")` and
-  `("", "(float)")` for the cast_expression shape (NOT a call_expression in
-  tree-sitter-php).
+- (Conditional) Parity entries for any unforeseen gaps surfaced by the M3 audit of
+  the 7 verify-during-M1 langs. Per premortem A1 (commit `c8c54be`), zero additions
+  are expected in additive mode because both pre-flagged candidates are already
+  present at HEAD (`RUBY_AST_SANITIZERS` Rack::Utils.escape_html at
+  `taint.rs:2416`; `PHP_AST_SANITIZERS` `(int)`/`(float)` at `taint.rs:2717`).
+- M1 extends the existing `AST_ONLY_TEST_MODE` thread-local short-circuit (added in
+  field_access_info-extension-v1 M1, commit `49ed30c`) to also cover
+  `detect_sanitizer` at `taint.rs:1096` (~3 LOC mirroring the L816-818
+  pattern in `detect_sources`). Internal flag-checking only; not a public API change.
 
 ### Removed
 - 30 regex sanitizer entries deleted from `*_PATTERNS.sanitizers` Vecs across all 16
@@ -683,11 +752,17 @@ NONE. All M2 changes are:
   Scala, PHP, Lua/Luau, Elixir, OCaml). All 16 `*_PATTERNS.sanitizers` Vecs are now
   empty alongside `*_PATTERNS.sources` and `*_PATTERNS.sinks` (which were emptied in
   regex-removal-v1 Wave 2 and field_access_info-extension-v1 M5).
-- N obsolete `test_<lang>_detect_sanitizers` unit tests in
-  `crates/tldr-core/src/security/taint_tests.rs` — these tests called
-  `detect_sanitizer(stmt, language)` directly and asserted non-empty results, which
-  fails deterministically against empty Vecs. Exact count surfaced by the executor
-  in `reports/M1-test-enumeration.json` (estimated 13-16).
+- ~24 obsolete sanitizer-bank-asserting unit tests across two files (per premortem
+  A2 enumeration; exact list in `reports/M1-test-enumeration.json`):
+  - `crates/tldr-core/src/security/taint_tests.rs`: 17 `test_<lang>_detect_sanitizers`
+    tests at L973/L1000/L1017/L1044/L1061/L1078/L1101/L1124/L1151/L1173/L1198/L1223/L1248/L1278/L1290/L1303/L1321
+    plus 3 Python-named-shape sanitizer tests at L322 (`test_int_sanitizes_sql_injection`),
+    L335 (`test_shlex_quote_sanitizes_command_injection`),
+    L347 (`test_html_escape_sanitizes_xss`) — all use `is_sanitizer` /
+    `find_sanitizers_in_statement` / `detect_sanitizer` and assert non-empty against
+    the regex bank.
+  - `crates/tldr-core/tests/security_tests.rs`: 4 `detect_sanitizer`-direct tests at
+    L383/L390/L397/L671.
 
 ### Retained
 - `detect_sanitizer` regex entry-point at taint.rs:1096 — preserved as a public
@@ -778,15 +853,18 @@ Comparison to predecessor milestones:
 
 ### R6 — Obsolete unit-test count uncertain
 
-**Hypothesis:** §2 M4 estimated 13-16 obsolete tests; if the actual count is higher OR includes tests that test `find_sanitizers_in_statement` or `is_sanitizer` differently, M4's atomic deletion may miss some, breaking the test suite.
+**Hypothesis:** §2 M4 originally estimated 13-16 obsolete tests; actual count is ~24 across TWO files (per premortem amendment A2). If the executor relies on the original estimate or only enumerates `taint_tests.rs`, M4's atomic deletion misses 4 tests in `tests/security_tests.rs` plus 3 Python-named-shape tests in `taint_tests.rs` — breaking `cargo test --workspace`.
 
-**Mitigation:** M1 stop-threshold MUST include enumeration of all `taint_tests.rs` tests that:
-- Call `detect_sanitizer(...)` directly
-- Call `find_sanitizers_in_statement(...)` and assert non-empty
-- Iterate `patterns.sanitizers` directly
-This list goes into `reports/M1-test-enumeration.json` and gates M4.
+**Mitigation (UPDATED per premortem amendment commit `c8c54be`):** M1 stop-threshold MUST enumerate ALL obsolete tests across BOTH files:
+- `crates/tldr-core/src/security/taint_tests.rs`:
+  - All tests calling `detect_sanitizer(...)` directly (17 `test_<lang>_detect_sanitizers` at L973-L1321)
+  - All tests calling `is_sanitizer(...)` AND/OR `find_sanitizers_in_statement(...)` and asserting non-empty (3 at L322/L335/L347)
+- `crates/tldr-core/tests/security_tests.rs`:
+  - All tests calling `detect_sanitizer(...)` directly (4 at L383/L390/L397/L671)
 
-**Severity: MEDIUM. Mitigation is gating.**
+The list goes into `reports/M1-test-enumeration.json` and gates M4. Premortem A2 baseline = ~24 tests; executor verifies + augments.
+
+**Severity: MEDIUM. Mitigation is gating. After amendment, baseline is precise.**
 
 ### R7 — `LanguagePatterns` struct becomes empty shells
 
@@ -812,6 +890,14 @@ This list goes into `reports/M1-test-enumeration.json` and gates M4.
 
 **Severity: HIGH (tiger). Mitigation is gating.**
 
+### R10 — M1 RED harness referenced a non-existent function (premortem amendment A3 — MITIGATED)
+
+**Hypothesis (original plan):** Plan §2 M1 referenced `compute_taint_with_tree_with_patterns(...)` as a "pub(crate) test-only seam; same shape as field_access_info M1 added." The discriminative premortem (commit `c8c54be`) verified that this function does NOT exist at HEAD `e69eed3` and was NOT added by field_access_info-extension-v1 M1. The actual harness shape from FAI-v1 M1 is the `AST_ONLY_TEST_MODE: Cell<bool>` thread-local at `taint.rs:51` plus `AstOnlyTestModeGuard` RAII at `taint.rs:63-83` that short-circuits ONLY `detect_sources` (`taint.rs:816-818`) and `detect_sinks` (`taint.rs:933`), NOT `detect_sanitizer`.
+
+**Mitigation (BLOCKER-3 amendment):** Plan §2 M1 + §5 prerequisite + dispatch contract M1 `green_files` updated to specify the actual harness: M1 EXTENDS the existing `AST_ONLY_TEST_MODE` check to `detect_sanitizer` at `taint.rs:1096` via a ~3-LOC addition mirroring exactly the L816-818 detect_sources pattern. Bumps M1 LOC delta from +200 to +203. Internal flag-checking only — not a public API change. After the extension, `AstOnlyTestModeGuard` short-circuits sources, sinks, AND sanitizers uniformly. The harness helper becomes `fn analyze_sanitize_ast_only(src, lang, fn_name) -> TaintInfo { let _g = AstOnlyTestModeGuard::new(); common::integ_helpers::analyze(src, lang, fn_name) }`.
+
+**Severity: MITIGATED.**
+
 ---
 
 ## 9. Carry-forward exceptions
@@ -834,13 +920,17 @@ The contract bakes in:
 
 2. **`atomic_m4`** — M4 deletes regex Vecs + obsolete unit tests + flips dispatch in ONE commit. No partial follow-ups. M4 carries `atomic_commit: true` and `release_commit_group: "milestone_4_atomic"`.
 
-3. **`ast_sanitizer_parity_required`** — M3 STOP threshold gates on all 16 `sanitize_breaks_flow_ast_only_<lang>` tests being GREEN before M4 can ship.
+3. **`ast_sanitizer_parity_required`** — M3 STOP threshold gates on all 16 `sanitize_breaks_flow_ast_only_<lang>` tests being GREEN before M4 can ship. Per premortem A1, ALL 16 are expected GREEN already at M2-end (Ruby Rack::Utils + PHP cast already present at HEAD).
+
+3a. **`m3_audit_only_zero_additions_expected`** (per premortem A1) — Premortem confirmed both putative parity-fill targets are already present at HEAD (Ruby Rack::Utils.escape_html at `taint.rs:2416`, PHP `(int)`/`(float)` at `taint.rs:2717`). Executor MUST audit per-bank but expect ZERO additions; if additions ARE needed for some other gap surfaced by the 7 verify-during-M1 langs, document each in `reports/M3-audit.json` `discoveries` field with explicit rationale.
 
 4. **`carry_forward_exceptions_documented`** — Any unanticipated parity gap surfaced during M1 must be raised in `reports/M3-carry-forward.json` and added to the CHANGELOG.
 
 5. **`walk_once_index_pattern`** — M2 MUST use the WALK-ONCE-INDEX-BY-LINE pattern (per §5 spec) instead of calling `detect_sanitizer_ast` from inside the worklist. Replicating the per-line walk pattern would reintroduce the historical O(N²) infinite-loop hang.
 
-6. **`m1_test_enumeration_required`** — M1 STOP threshold includes enumerating all `taint_tests.rs` tests touching the sanitizer Vec path. The list goes into `reports/M1-test-enumeration.json` and gates M4's deletion list.
+6. **`m1_test_enumeration_required` (TIGHTENED per premortem A2)** — M1 STOP threshold MUST enumerate ALL currently-passing tests that will become obsolete post-M4 across BOTH files: `crates/tldr-core/src/security/taint_tests.rs` AND `crates/tldr-core/tests/security_tests.rs`. The list MUST be complete to the line level. Premortem A2 baseline = ~24 tests (17 `test_<lang>_detect_sanitizers` + 3 Python-named-shape at L322/335/347 + 4 in `tests/security_tests.rs` at L383/390/397/671); executor verifies + augments. The list goes into `reports/M1-test-enumeration.json` and gates M4's deletion list — without ALL of them, `cargo test --workspace` fails deterministically at M4.
+
+6a. **`red_first_harness_required`** (per premortem A3) — M1 MUST extend the existing `AST_ONLY_TEST_MODE` thread-local check (at `taint.rs:51` with checks at L816-818 and L933) to also short-circuit `detect_sanitizer` at `taint.rs:1096` via a ~3-LOC addition mirroring the L816-818 pattern. This is a prerequisite for the M2 wiring to be RED-testable. NOT a public API extension.
 
 7. **`language_pattern_shell_retained`** — `LanguagePatterns` struct + `get_patterns()` + `lazy_static!` blocks are NOT deleted in this milestone. Preserves rollback margin; follow-on cleanup is OUT OF SCOPE.
 
@@ -854,7 +944,7 @@ The contract bakes in:
 
 ## 11. /autonomous-readiness assessment
 
-**Verdict: READY for /autonomous consumption.**
+**Verdict: READY for /autonomous consumption** (post-premortem amendments commit `c8c54be`; premortem CONDITIONAL-PASS → unconditional after A1+A2+A3 amendments above).
 
 Pre-flight checklist:
 
