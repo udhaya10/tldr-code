@@ -2105,6 +2105,26 @@ static TYPESCRIPT_AST_SINKS: &[AstSinkPattern] = &[
         ],
         sink_type: TaintSinkType::HttpRequest,
     },
+    // VULN-MIGRATION-V1 M4: Deserialize sinks for JS/TS.
+    // `node-serialize`'s `unserialize(...)` is the canonical RCE-prone deserializer
+    // in the JS ecosystem (CVE-2017-5941). Two-pronged structural match:
+    //  * `member_patterns: [("serialize", "unserialize")]` — the idiomatic
+    //    `const serialize = require('node-serialize'); serialize.unserialize(d);`
+    //    shape; matched via the call-shape path in `member_patterns_match`
+    //    (taint.rs:3866-3886) which splits the dotted call name on `rfind('.')`.
+    //  * `("", "node-serialize")` — raw substring fallback catches lines that
+    //    inline the require, e.g. `require('node-serialize').unserialize(d)`.
+    // The string-literal regression-guard FP fixture (`deserialization_string_
+    // literal_fp.{js,ts}`) does not mention either pattern, so adding this entry
+    // does not introduce new FPs (verified via dispatch contract M4 stop_threshold).
+    AstSinkPattern {
+        call_names: &["unserialize"],
+        member_patterns: &[
+            ("serialize", "unserialize"),
+            ("", "node-serialize"),
+        ],
+        sink_type: TaintSinkType::Deserialize,
+    },
 ];
 
 static TYPESCRIPT_AST_SANITIZERS: &[AstSanitizerPattern] = &[
