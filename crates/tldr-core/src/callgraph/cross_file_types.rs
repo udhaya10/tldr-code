@@ -1025,16 +1025,16 @@ fn normalize_path_buf(path: &Path) -> PathBuf {
 /// # Example
 ///
 /// ```rust
-/// use tldr_core::callgraph::cross_file_types::FuncIndexProxy;
-/// use tldr_core::callgraph::interner::StringInterner;
-/// use std::sync::Arc;
+/// use tldr_core::callgraph::cross_file_types::FuncIndexProxyMut;
 ///
-/// let interner = Arc::new(StringInterner::new());
-/// let mut index = FuncIndexProxy::new(interner);
-///
+/// let mut index = FuncIndexProxyMut::new();
 /// index.insert("mymodule", "my_func", "src/mymodule.py");
 /// assert_eq!(index.get("mymodule", "my_func"), Some("src/mymodule.py"));
 /// ```
+///
+/// Note: `FuncIndexProxy::insert` is currently `unimplemented!()` because it
+/// requires mutable access to the interner. Use `FuncIndexProxyMut` (above)
+/// during construction; convert to read-only `FuncIndexProxy` afterward.
 #[derive(Debug)]
 pub struct FuncIndexProxy {
     _interner: Arc<StringInterner>,

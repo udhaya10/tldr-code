@@ -214,7 +214,7 @@ impl LuauHandler {
     /// VAL-011: Extract an aliased require from a variable_declaration.
     ///
     /// In Luau, `local util = require('./util')` desugars to:
-    /// ```
+    /// ```text
     /// variable_declaration
     ///   assignment_statement
     ///     variable_list -> identifier "util"   (the alias)

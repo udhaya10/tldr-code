@@ -13,7 +13,7 @@
 ///
 /// # Examples
 /// ```
-/// use tldr_core::contracts::triggers::extract_name_triggers;
+/// use tldr_core::surface::triggers::extract_name_triggers;
 /// let triggers = extract_name_triggers("get_user_by_id");
 /// assert!(triggers.contains(&"get".to_string()));
 /// assert!(triggers.contains(&"user".to_string()));

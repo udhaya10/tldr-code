@@ -71,7 +71,7 @@ impl KotlinHandler {
     /// Parse an import node.
     ///
     /// Kotlin import structure in tree-sitter-kotlin-ng:
-    /// ```
+    /// ```text
     /// import
     ///   import "import"
     ///   qualified_identifier
