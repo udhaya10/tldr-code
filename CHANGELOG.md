@@ -1,5 +1,164 @@
 # Changelog
 
+## workspace-test-infrastructure-v1 — internal milestone
+
+NOT a published release. Hygiene milestone — restores
+`cargo test --workspace --features semantic` baseline (modulo 35
+documented Cat-B carry-forwards owned by vuln-source-parity-v1 sibling
+milestone). Penultimate milestone before external publish.
+
+### Removed
+
+- 162 obsolete CLI integration tests for subcommands archived in prior
+  internal milestones (cfg, dfg, ssa, gvn, alias, dominators, live_vars,
+  abstract_interp, arch, behavioral, bounds, diff_impact, equivalence,
+  maintainability, mutability, purity, secrets — all moved to
+  `crates/tldr-cli/src/commands/archived/` in earlier work; CLI test
+  invocations had been left dangling). Whole-file deletions:
+  `ssa_cli_tests.rs` (26 tests) + `gvn_cli_tests.rs` (9 tests). Surgical
+  per-test deletions: 127 tests across 8 mixed files
+  (`cli_graph_tests.rs`, `cli_patterns_contracts_tests.rs`,
+  `cli_remaining_tests.rs`, `cli_tests.rs`, `contracts_test.rs`,
+  `p2_multilang_tests.rs`, `patterns_test.rs`, `remaining_test.rs`).
+  Modern equivalents (`taint`, `slice`, `whatbreaks`, `references`,
+  `dead`, `hubs`, etc.) retain full active test coverage. M3 commit
+  `cf0b2be`.
+- 8 obsolete DELETE-on-stale Cat-C tests in M4: 2
+  `test_*_returns_unsupported` for Kotlin/Swift in
+  `language_parity_test.rs` (both languages now SUPPORTED via
+  `tree_sitter_kotlin_ng` + `tree_sitter_swift`); replacement
+  parse-success tests already exist (`parser.rs:420-432`). Plus 6 other
+  DELETE-on-stale entries documented in
+  `reports/M4-fix-by-fix-capture.json`.
+
+### Fixed
+
+- 4 doctest failures in `tldr-core` (M2, commit `d17a24c`):
+  - `callgraph::cross_file_types::FuncIndexProxy` doctest rewritten to
+    use `FuncIndexProxyMut` (working impl) instead of `FuncIndexProxy`
+    (`unimplemented!()` stub at L1109)
+  - `callgraph::languages::kotlin::KotlinHandler::parse_import_node` and
+    `callgraph::languages::luau::LuauHandler::extract_aliased_require`:
+    bare ` ``` ` → ` ```text ` fence (rustdoc renders pseudo-grammar
+    block as preformatted text, not Rust source)
+  - `surface::triggers::extract_name_triggers`: stale
+    `tldr_core::contracts::triggers::...` import path →
+    `tldr_core::surface::triggers::...` (function lives in `surface/`,
+    not `contracts/`)
+- 38 Cat-C orthogonal-real test failures across `tldr-core` (M4, commit
+  `68058a5`):
+  - Empty-directory tree fixture gap
+    (`crates/tldr-core/tests/fixtures/empty-dir/.gitkeep` created)
+  - Stale Ruby-unsupported assertion in
+    `test_surface_unsupported_language_errors` (Ruby IS supported per
+    `surface/mod.rs:90-118`; changed to genuinely-unsupported language)
+  - `git_log` no-commits-yet handling: returns `Ok(String::new())` on
+    `does not have any commits yet` stderr (was bubbling as `Err`)
+  - Cognitive-complexity else-clause SonarQube-spec alignment:
+    `if x: return 1; else: return -1` cognitive == 1 (only `if` adds;
+    else does NOT)
+  - Empty-input handling: `analyze_dead_code`,
+    `compute_martin_metrics`, `parse_coverage` return
+    `Ok(<empty Report>)` instead of `Err`
+  - Cobertura/lcov coverage parser regression: parsers no longer filter
+    on filename suffix when format hint is explicit
+  - Similarity-threshold fixture distinctness for
+    `test_find_similar_no_clones` (rewrote fixture functions to fall
+    below 0.8 threshold; assertion preserved)
+  - Change-impact `NoBaseline` error reason includes `origin/<branch>`
+    substring as UX hint when only-remote-tracking-ref-exists
+  - Change-impact CLI test fixture git-init helper added
+  - Plus 22 test-fixture corrections across various tests (numeric
+    drift in expected values, schema field updates, etc.)
+
+### Retained
+
+- ALL active-subcommand CLI integration tests (every test invoking
+  variants in `main.rs` `Subcommand` enum: `Tree`, `Structure`,
+  `Calls`, `Impact`, `Dead`, `Hubs`, `Whatbreaks`, `Slice`, `Chop`,
+  `Taint`, `Resources`, `Vuln`, `ApiCheck`, `Patterns`, `Inheritance`,
+  `Deps`, `Cohesion`, `Coupling`, `Contracts`, `Specs`, `Invariants`,
+  `Verify`, `Interface`, `Diagnostics`, `Doctor`, `ChangeImpact`,
+  `Coverage`, `Search`, `Semantic`, `Similar`, `Context`, `Definition`,
+  `References`, `Explain`, `Todo`, `Diff`, `Embed`, `Daemon*`, `Warm`,
+  `Cache*`, `Loc`, `Complexity`, `Cognitive`, `Halstead`, `Churn`,
+  `Debt`, `Health`, `Hotspots`, `Clones`, `Dice`, `Smells`, `Imports`,
+  `Importers`, `Extract`, `Temporal`, `ReachingDefs`, `Available`,
+  `DeadStores`).
+- ALL `tldr search ...` invocations — `search` is the ACTIVE
+  SmartSearch CLI alias per `#[command(name = "search")]` at
+  `main.rs:141-142`, NOT archived.
+- 3 false-positives from M1 enumeration explicitly preserved (M3 commit
+  body documents): `test_debt_category_maintainability` (uses
+  `--category maintainability` as VALUE for active `debt`),
+  `test_explain_json_schema` (`purity` is JSON schema FIELD in active
+  `explain` response), `test_api_check_no_findings_clean_code` (body
+  invokes only active `api-check`).
+- ALL `test_e2e_*` vuln tests at
+  `crates/tldr-core/src/security/vuln.rs:1568-2100` (regression guard).
+- ALL daemon tests, semantic / fastembed / embedding tests,
+  non-archived `tldr-core` library tests.
+- Public API surface UNCHANGED: `Subcommand` enum preserved,
+  JSON / SARIF / text output schemas unchanged, exit codes unchanged,
+  help text unchanged.
+
+### Carry-forwards documented
+
+- 35 Cat-B failures owned by `vuln-source-parity-v1` sibling milestone:
+  - 33 originals from vuln-migration-v1 M3-CF-01 + M4-CF-01
+    (source-bank gaps across Go/Java/CSharp/Scala/Lua/Elixir × multiple
+    vuln types)
+  - +1 reclassified by Option A: `test_vuln_detects_xss` (Python Flask
+    f-string return → `HtmlOutput` sink coverage gap; vuln-migration-v1
+    M2/M3 didn't cover f-string-return-from-view-function shape;
+    absorbed into vuln-source-parity-v1 as Python scope expansion)
+  - +1 reclassified by Option A:
+    `ruby_io_popen_with_user_input_via_compute_taint` (documented FAI-v1
+    M5 bare-`gets` carry-forward; tree-sitter-ruby parses bare `gets` as
+    identifier (not call); regex `\bgets\b` retained in
+    `RUBY_PATTERNS.sources` as Option A; `analyze_ast_only` test
+    harness short-circuits regex bank, so test fails by design; future
+    `ruby-bare-call-extraction-v1` follow-on can close it)
+
+### Test infrastructure baseline restored
+
+- `cargo test --workspace --features semantic --no-fail-fast --release`:
+  35 failures EXACTLY (all Cat-B vuln-source-parity-v1 carry-forwards)
+- `cargo test --workspace --features semantic --doc --no-fail-fast`: 0
+  failures
+- `cargo build --workspace --tests --features semantic`: exit 0
+- `cargo clippy --workspace --tests --features semantic -- -D warnings`:
+  exit 0
+- After this milestone + vuln-source-parity-v1 (sibling) both land, the
+  pre-publish baseline is fully restored.
+
+### Architectural notes
+
+- This is a HYGIENE milestone — no new features, no new test coverage,
+  no public API changes.
+- The single coherent external `cargo publish` (closing #7, #23, #24,
+  #27, #28 + `tldr vuln` FP class + sanitizer correctness) is gated on
+  this milestone + vuln-source-parity-v1 both landing.
+- Premortem caught 1 critical blocker (search-vs-SmartSearch
+  disambiguation) + 2 strengthening conditions (enumeration authority,
+  mixed-file per-test delete). All 3 amended pre-/autonomous.
+- M3 worker recovered honestly from a script bug mid-flow: first
+  deletion-script attempt mishandled raw-string state across lines
+  (`r#"..."#` containing brace chars). Working tree was restored by
+  user (orchestrator authorization). Corrected script properly
+  tokenizes raw-string state with N-hash matching across line
+  boundaries.
+
+### Standing rules upheld
+
+- Internal-versioning posture honored: NO push, NO `cargo publish`, NO
+  version bumps.
+- The 5 internal tags + this one (workspace-test-infrastructure-v1) +
+  vuln-source-parity-v1 (sibling, in progress) are local-only.
+- Single coherent external publish ships AFTER both pre-publish
+  milestones land + publish-operator confirms
+  `pre-publish-binary-verification.json` (vuln-v1 M6 artifact) verdict.
+
 ## vuln-migration-v1 — internal milestone
 
 NOT a published release. Internal-versioning posture: external `cargo publish`
