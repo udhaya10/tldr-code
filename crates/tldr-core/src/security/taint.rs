@@ -617,28 +617,20 @@ lazy_static! {
 lazy_static! {
     /// Ruby taint patterns.
     static ref RUBY_PATTERNS: LanguagePatterns = LanguagePatterns {
+        // field_access_info-extension-v1 M5 (ATOMIC): sources + sinks regex banks
+        // deleted; AST detection canonical via structured (receiver, field) tuples
+        // in RUBY_AST_SOURCES / RUBY_AST_SINKS. Sanitizers RETAINED (sanitizer-
+        // removal-v1 future milestone). EXCEPTION: `\bgets\b` UserInput entry
+        // RETAINED — tree-sitter-ruby parses bare `gets` as an identifier, not a
+        // `call` node, so AST `call_names: ['gets']` does not cover the bare-call
+        // form. This regex catches `input = gets.chomp` and `cmd = gets` shapes.
+        // Documented in M1-report.json finding #2 (carry-forward exception).
         sources: vec![
-            // UserInput: gets
+            // UserInput: bare `gets` (tree-sitter-ruby parses this as identifier,
+            // not call → AST call_names entry does not fire on bare form).
             (Regex::new(r"\bgets\b").unwrap(), TaintSourceType::UserInput),
-            // Stdin: STDIN.read, STDIN.gets, STDIN.readline
-            (Regex::new(r"STDIN\.(read|gets|readline)").unwrap(), TaintSourceType::Stdin),
-            // HttpParam: params[
-            (Regex::new(r"\bparams\[").unwrap(), TaintSourceType::HttpParam),
-            // EnvVar: ENV[
-            (Regex::new(r"ENV\[").unwrap(), TaintSourceType::EnvVar),
-            // FileRead: File.read, File.open
-            (Regex::new(r"File\.(read|open)\s*\(").unwrap(), TaintSourceType::FileRead),
         ],
-        sinks: vec![
-            // CodeEval: eval
-            (Regex::new(r"\beval\s*\(").unwrap(), TaintSinkType::CodeEval),
-            // ShellExec: system, exec
-            (Regex::new(r"\b(system|exec)\s*\(").unwrap(), TaintSinkType::ShellExec),
-            // ShellExec: IO.popen
-            (Regex::new(r"IO\.popen\s*\(").unwrap(), TaintSinkType::ShellExec),
-            // CodeEval: send (dynamic dispatch)
-            (Regex::new(r"\.send\s*\(").unwrap(), TaintSinkType::CodeEval),
-        ],
+        sinks: vec![],
         sanitizers: vec![
             // Numeric: .to_i, .to_f
             (Regex::new(r"\.(to_i|to_f)\b").unwrap(), SanitizerType::Numeric),
@@ -745,22 +737,11 @@ lazy_static! {
 lazy_static! {
     /// Elixir taint patterns.
     static ref ELIXIR_PATTERNS: LanguagePatterns = LanguagePatterns {
-        sources: vec![
-            // UserInput: IO.gets
-            (Regex::new(r"IO\.gets\s*\(").unwrap(), TaintSourceType::UserInput),
-            // EnvVar: System.get_env
-            (Regex::new(r"System\.get_env\s*\(").unwrap(), TaintSourceType::EnvVar),
-            // FileRead: File.read, File.read!
-            (Regex::new(r"File\.(read|read!)\s*\(").unwrap(), TaintSourceType::FileRead),
-        ],
-        sinks: vec![
-            // ShellExec: System.cmd
-            (Regex::new(r"System\.cmd\s*\(").unwrap(), TaintSinkType::ShellExec),
-            // CodeEval: Code.eval_string
-            (Regex::new(r"Code\.eval_string\s*\(").unwrap(), TaintSinkType::CodeEval),
-            // SqlQuery: Ecto.Adapters.SQL.query
-            (Regex::new(r"Ecto\.Adapters\.SQL\.query\s*\(").unwrap(), TaintSinkType::SqlQuery),
-        ],
+        // field_access_info-extension-v1 M5 (ATOMIC): sources + sinks regex banks
+        // deleted; AST detection canonical via structured (receiver, field) tuples
+        // in ELIXIR_AST_SOURCES / ELIXIR_AST_SINKS. Sanitizers RETAINED.
+        sources: vec![],
+        sinks: vec![],
         sanitizers: vec![
             // Numeric: String.to_integer, String.to_float
             (Regex::new(r"String\.(to_integer|to_float)\s*\(").unwrap(), SanitizerType::Numeric),
@@ -773,24 +754,12 @@ lazy_static! {
 lazy_static! {
     /// OCaml taint patterns.
     static ref OCAML_PATTERNS: LanguagePatterns = LanguagePatterns {
-        sources: vec![
-            // UserInput: read_line
-            (Regex::new(r"\bread_line\s").unwrap(), TaintSourceType::UserInput),
-            // EnvVar: Sys.getenv
-            (Regex::new(r"Sys\.getenv\s").unwrap(), TaintSourceType::EnvVar),
-            // UserInput: input_line (reading from a channel)
-            (Regex::new(r"\binput_line\s").unwrap(), TaintSourceType::UserInput),
-            // FileRead: In_channel.read_all, In_channel.input_all
-            (Regex::new(r"In_channel\.(read_all|input_all)\s").unwrap(), TaintSourceType::FileRead),
-        ],
-        sinks: vec![
-            // ShellExec: Sys.command
-            (Regex::new(r"Sys\.command\s").unwrap(), TaintSinkType::ShellExec),
-            // ShellExec: Unix.execvp
-            (Regex::new(r"Unix\.execvp\s").unwrap(), TaintSinkType::ShellExec),
-            // SqlQuery: Sqlite3.exec
-            (Regex::new(r"Sqlite3\.exec\s").unwrap(), TaintSinkType::SqlQuery),
-        ],
+        // field_access_info-extension-v1 M5 (ATOMIC): sources + sinks regex banks
+        // deleted; AST detection canonical via structured (receiver, field) tuples
+        // in OCAML_AST_SOURCES / OCAML_AST_SINKS plus call_names entries for bare
+        // `read_line` / `input_line`. Sanitizers RETAINED.
+        sources: vec![],
+        sinks: vec![],
         sanitizers: vec![
             // Numeric: int_of_string, float_of_string
             (Regex::new(r"\b(int_of_string|float_of_string)\s").unwrap(), SanitizerType::Numeric),
@@ -2364,30 +2333,35 @@ static CPP_AST_SANITIZERS: &[AstSanitizerPattern] = &[
 
 // Ruby PARTIAL coverage (per m2-ground-truth): field_access_info covers ONLY
 // `instance_variable` (the `@name` pattern). Module method calls like
-// `STDIN.read`, `IO.popen`, `File.read` are now structurally matched via
+// `STDIN.read`, `IO.popen`, `File.read` are structurally matched via
 // `(receiver, field)` tuples — Ruby's call grammar produces `call` and
 // `method_call` node kinds carrying `receiver` + `method` children, so the
-// structured-shape entries fire on the AST without regex. M5 will delete the
-// raw-substring `("", "X.y")` duplicates atomically with the regex banks.
-// Subscripts (`params[`, `ENV[`) remain non-member-access raw-substring
-// fallbacks. Documented as a v0.4.0 hardening item.
+// structured-shape entries fire on the AST without regex. The raw-substring
+// `("", "X.y")` duplicates were deleted in M5 (field_access_info-extension-v1)
+// atomically with the regex banks; structured (receiver, field) tuples are now
+// the sole match path for Module.function calls. Subscripts (`params[`, `ENV[`)
+// remain non-member-access raw-substring fallbacks (no call shape).
 static RUBY_AST_SOURCES: &[AstSourcePattern] = &[
-    AstSourcePattern {
-        call_names: &["gets"],
-        member_patterns: &[],
-        source_type: TaintSourceType::UserInput,
-    },
+    // ORDER MATTERS: Stdin patterns BEFORE the bare-`gets` UserInput so the
+    // structured `("STDIN", "gets")` entry wins on `STDIN.gets` calls. The
+    // UserInput `call_names: ["gets"]` entry uses the `ends_with(".gets")`
+    // heuristic which would otherwise shadow `STDIN.gets` and lose the more-
+    // specific Stdin source type. (M5 carry-forward — pre-M5 the regex bank
+    // produced both UserInput and Stdin from the same line; post-M5 only the
+    // most-specific structured AST entry should fire per descendant.)
     AstSourcePattern {
         call_names: &[],
         member_patterns: &[
-            ("", "STDIN.read"),
-            ("", "STDIN.gets"),
-            ("", "STDIN.readline"),
             ("STDIN", "read"),
             ("STDIN", "gets"),
             ("STDIN", "readline"),
         ],
         source_type: TaintSourceType::Stdin,
+    },
+    AstSourcePattern {
+        call_names: &["gets"],
+        member_patterns: &[],
+        source_type: TaintSourceType::UserInput,
     },
     AstSourcePattern {
         call_names: &[],
@@ -2401,12 +2375,7 @@ static RUBY_AST_SOURCES: &[AstSourcePattern] = &[
     },
     AstSourcePattern {
         call_names: &[],
-        member_patterns: &[
-            ("", "File.read"),
-            ("", "File.open"),
-            ("File", "read"),
-            ("File", "open"),
-        ],
+        member_patterns: &[("File", "read"), ("File", "open")],
         source_type: TaintSourceType::FileRead,
     },
 ];
@@ -2424,7 +2393,7 @@ static RUBY_AST_SINKS: &[AstSinkPattern] = &[
     },
     AstSinkPattern {
         call_names: &[],
-        member_patterns: &[("", "IO.popen"), ("IO", "popen")],
+        member_patterns: &[("IO", "popen")],
         sink_type: TaintSinkType::ShellExec,
     },
     AstSinkPattern {
@@ -2805,32 +2774,28 @@ static LUA_AST_SANITIZERS: &[AstSanitizerPattern] = &[AstSanitizerPattern {
 
 // Elixir PARTIAL coverage (per m2-ground-truth): field_access_info covers ONLY
 // `unary_operator` (the `@module_attribute` pattern). `Module.function` calls
-// like `IO.gets`, `System.cmd` are now structurally matched via `(receiver, field)`
+// like `IO.gets`, `System.cmd` are structurally matched via `(receiver, field)`
 // tuples — the W2-pre call-shape path uses `extract_call_name_elixir` + `rfind('.')`
 // to split into a `(receiver, field)` pair, so the structured-shape entries fire
 // on the AST without regex. Multi-segment receivers (e.g. `Ecto.Adapters.SQL.query`)
 // are supported because `rfind('.')` keeps the full dotted prefix as the receiver.
-// M5 will delete the raw-substring `("", "X.y")` duplicates atomically with the
-// regex banks. Documented as v0.4.0 hardening.
+// The raw-substring `("", "X.y")` duplicates were deleted in M5 (field_access_info-
+// extension-v1) atomically with the regex banks; structured tuples are now the
+// sole match path.
 static ELIXIR_AST_SOURCES: &[AstSourcePattern] = &[
     AstSourcePattern {
         call_names: &[],
-        member_patterns: &[("", "IO.gets"), ("IO", "gets")],
+        member_patterns: &[("IO", "gets")],
         source_type: TaintSourceType::UserInput,
     },
     AstSourcePattern {
         call_names: &[],
-        member_patterns: &[("", "System.get_env"), ("System", "get_env")],
+        member_patterns: &[("System", "get_env")],
         source_type: TaintSourceType::EnvVar,
     },
     AstSourcePattern {
         call_names: &[],
-        member_patterns: &[
-            ("", "File.read"),
-            ("", "File.read!"),
-            ("File", "read"),
-            ("File", "read!"),
-        ],
+        member_patterns: &[("File", "read"), ("File", "read!")],
         source_type: TaintSourceType::FileRead,
     },
 ];
@@ -2838,20 +2803,17 @@ static ELIXIR_AST_SOURCES: &[AstSourcePattern] = &[
 static ELIXIR_AST_SINKS: &[AstSinkPattern] = &[
     AstSinkPattern {
         call_names: &[],
-        member_patterns: &[("", "System.cmd"), ("System", "cmd")],
+        member_patterns: &[("System", "cmd")],
         sink_type: TaintSinkType::ShellExec,
     },
     AstSinkPattern {
         call_names: &[],
-        member_patterns: &[("", "Code.eval_string"), ("Code", "eval_string")],
+        member_patterns: &[("Code", "eval_string")],
         sink_type: TaintSinkType::CodeEval,
     },
     AstSinkPattern {
         call_names: &[],
-        member_patterns: &[
-            ("", "Ecto.Adapters.SQL.query"),
-            ("Ecto.Adapters.SQL", "query"),
-        ],
+        member_patterns: &[("Ecto.Adapters.SQL", "query")],
         sink_type: TaintSinkType::SqlQuery,
     },
 ];
@@ -2878,8 +2840,9 @@ static ELIXIR_AST_SANITIZERS: &[AstSanitizerPattern] = &[
 // entries fire on the AST without regex. Bare-call forms (`read_line`,
 // `input_line`) remain in `call_names`. Parenthesised application form
 // `(Sys.command) cmd` is a known limitation per plan §9 risk #3 — not covered.
-// M5 will delete the raw-substring `("", "X.y")` duplicates atomically with the
-// regex banks. Documented as v0.4.0 hardening.
+// The raw-substring `("", "X.y")` duplicates were deleted in M5 (field_access_info-
+// extension-v1) atomically with the regex banks; structured tuples are now the
+// sole match path for Module.function calls.
 static OCAML_AST_SOURCES: &[AstSourcePattern] = &[
     AstSourcePattern {
         call_names: &["read_line"],
@@ -2893,14 +2856,12 @@ static OCAML_AST_SOURCES: &[AstSourcePattern] = &[
     },
     AstSourcePattern {
         call_names: &[],
-        member_patterns: &[("", "Sys.getenv"), ("Sys", "getenv")],
+        member_patterns: &[("Sys", "getenv")],
         source_type: TaintSourceType::EnvVar,
     },
     AstSourcePattern {
         call_names: &[],
         member_patterns: &[
-            ("", "In_channel.read_all"),
-            ("", "In_channel.input_all"),
             ("In_channel", "read_all"),
             ("In_channel", "input_all"),
         ],
@@ -2911,17 +2872,17 @@ static OCAML_AST_SOURCES: &[AstSourcePattern] = &[
 static OCAML_AST_SINKS: &[AstSinkPattern] = &[
     AstSinkPattern {
         call_names: &[],
-        member_patterns: &[("", "Sys.command"), ("Sys", "command")],
+        member_patterns: &[("Sys", "command")],
         sink_type: TaintSinkType::ShellExec,
     },
     AstSinkPattern {
         call_names: &[],
-        member_patterns: &[("", "Unix.execvp"), ("Unix", "execvp")],
+        member_patterns: &[("Unix", "execvp")],
         sink_type: TaintSinkType::ShellExec,
     },
     AstSinkPattern {
         call_names: &[],
-        member_patterns: &[("", "Sqlite3.exec"), ("Sqlite3", "exec")],
+        member_patterns: &[("Sqlite3", "exec")],
         sink_type: TaintSinkType::SqlQuery,
     },
 ];
@@ -3150,6 +3111,39 @@ fn extract_first_identifier_arg_ast(
 ) -> Option<String> {
     let string_kinds = string_node_kinds(language);
 
+    // OCaml application_expression has no "arguments" field — child(0) is the
+    // function expression and child(1..) are the arguments. Scan from child(1).
+    // (M5 carry-forward: pre-M5 the regex bank's `extract_call_arg` text-scanned
+    // past the function name; post-M5 we need an AST equivalent.)
+    if language == Language::Ocaml && descendant.kind() == "application_expression" {
+        for i in 1..descendant.child_count() {
+            let Some(child) = descendant.child(i) else {
+                continue;
+            };
+            if !child.is_named() {
+                continue;
+            }
+            if string_kinds.contains(&child.kind()) {
+                continue;
+            }
+            let text = node_text(&child, source).trim();
+            if text.is_empty() {
+                continue;
+            }
+            // OCaml-specific: strip parens around `(expr)` parenthesised args.
+            let stripped = text
+                .trim_start_matches('(')
+                .trim_end_matches(')')
+                .trim();
+            let head = stripped.split('.').next().unwrap_or(stripped);
+            let head = head.trim_start_matches('&');
+            if is_valid_identifier(head) {
+                return Some(head.to_string());
+            }
+        }
+        return None;
+    }
+
     // Find an arguments-like child. Common field names across grammars:
     //   * tree-sitter-{python,go,c,cpp,rust,java,javascript,typescript}: "arguments"
     //   * tree-sitter-{kotlin,swift,csharp}: positional — the call_expression's
@@ -3320,37 +3314,56 @@ pub fn detect_sources_ast(
             }) || member_patterns_match(descendant, source, language, pattern.member_patterns, text);
 
             if matched {
+                let line_text = std::str::from_utf8(source)
+                    .unwrap_or("")
+                    .lines()
+                    .nth((line - 1) as usize)
+                    .unwrap_or("");
                 // Try to get variable from parent assignment
                 let var = find_parent_assignment_var(descendant, source, language)
-                    .or_else(|| {
-                        extract_assigned_var(
-                            std::str::from_utf8(source)
-                                .unwrap_or("")
-                                .lines()
-                                .nth((line - 1) as usize)
-                                .unwrap_or(""),
-                        )
-                    })
+                    .or_else(|| extract_assigned_var(line_text))
                     // W2-pre: regex-free fallback for sources whose tainted
                     // data is delivered by-pointer in the first call argument
                     // (e.g., C `fgets(buf, ..., stdin)`, `scanf("%s", buf)`,
                     // `fread(buf, ...)`). Walks the descendant's `arguments`
                     // list and returns the first identifier-shaped child.
-                    .or_else(|| extract_first_identifier_arg_ast(descendant, source, language));
+                    .or_else(|| extract_first_identifier_arg_ast(descendant, source, language))
+                    // M5 carry-forward (field_access_info-extension-v1): for
+                    // call-shaped sources whose only arguments are string
+                    // literals (e.g., Elixir `IO.gets("> ")` in a pipe chain,
+                    // OCaml `Sys.getenv "VAR"`), neither parent-assignment nor
+                    // first-arg extraction yields a var. Fall back to the same
+                    // text-based heuristic the regex bank used pre-M5
+                    // (`extract_source_var_from_statement`) so the AST hit is
+                    // not silently dropped.
+                    .or_else(|| extract_source_var_from_statement(line_text))
+                    // Final fallback: derive a synthetic var from the call's
+                    // leading identifier (`IO.gets` -> `IO`). This preserves
+                    // the parity with the M4 regex-bank behavior where these
+                    // shapes still produced a TaintSource (with a synthetic
+                    // var) so that source-type assertions in integration tests
+                    // succeed. Without this, AST-detected sources whose args
+                    // are entirely string literals would be silently dropped
+                    // post-regex-deletion.
+                    .or_else(|| {
+                        let call_kinds = call_node_kinds(language);
+                        if call_kinds.contains(&descendant.kind()) {
+                            extract_call_name(descendant, source, language)
+                                .and_then(|name| {
+                                    name.split('.').next().map(|s| s.to_string())
+                                })
+                                .filter(|s| is_valid_identifier(s))
+                        } else {
+                            None
+                        }
+                    });
 
                 if let Some(var) = var {
                     sources.push(TaintSource {
                         var,
                         line,
                         source_type: pattern.source_type,
-                        statement: Some(
-                            std::str::from_utf8(source)
-                                .unwrap_or("")
-                                .lines()
-                                .nth((line - 1) as usize)
-                                .unwrap_or("")
-                                .to_string(),
-                        ),
+                        statement: Some(line_text.to_string()),
                     });
                     break; // Only one source per node
                 }
@@ -3430,7 +3443,28 @@ pub fn detect_sinks_ast(
                     // identifiers. These keep AST detection self-contained
                     // when the regex bank is removed.
                     .or_else(|| extract_first_identifier_arg_ast(descendant, source, language))
-                    .or_else(|| extract_assignment_rhs_ident(descendant, source, stmt_text));
+                    .or_else(|| extract_assignment_rhs_ident(descendant, source, stmt_text))
+                    // M5 carry-forward (field_access_info-extension-v1): for
+                    // call-shaped sinks whose arguments are entirely
+                    // non-identifier (e.g., Elixir `System.cmd([])` with a
+                    // list literal arg, OCaml `Sqlite3.exec db cmd` with
+                    // multiple receivers), derive a synthetic var from the
+                    // call's leading identifier (`System.cmd` -> `System`).
+                    // Preserves M4 regex-bank parity: the regex path produced
+                    // a TaintSink (sometimes with synthetic var) so that
+                    // sink-type assertions in integration tests succeed.
+                    .or_else(|| {
+                        let call_kinds = call_node_kinds(language);
+                        if call_kinds.contains(&descendant.kind()) {
+                            extract_call_name(descendant, source, language)
+                                .and_then(|name| {
+                                    name.split('.').next().map(|s| s.to_string())
+                                })
+                                .filter(|s| is_valid_identifier(s))
+                        } else {
+                            None
+                        }
+                    });
 
                 if let Some(var) = var {
                     sinks.push(TaintSink {
@@ -3972,10 +4006,15 @@ pub fn compute_taint(
     // benign empty result instead of an error.
     //
     // Rationale: detect_sources / detect_sinks regex banks are deleted for
-    // 13 GO languages in this same commit. The AST detection path (via
-    // detect_sources_ast / detect_sinks_ast inside compute_taint_with_tree)
-    // is the canonical pattern source going forward. Ruby / Elixir / OCaml
-    // banks remain populated as a HOLD until field_access_info-extension-v1.
+    // 13 GO languages in regex-removal-v1 (Wave-2-atomic). Ruby / Elixir / OCaml
+    // source+sink regex banks were deleted in field_access_info-extension-v1 M5
+    // once their `(receiver, field)` structured AST entries landed (M2/M3/M4).
+    // The AST detection path (detect_sources_ast / detect_sinks_ast inside
+    // compute_taint_with_tree) is the canonical pattern source. The Ruby
+    // `\bgets\b` source regex is RETAINED — tree-sitter-ruby parses bare `gets`
+    // as identifier (not call), so AST `call_names: ['gets']` does not fire on
+    // the bare form. All sanitizer regex banks are retained pending sanitizer-
+    // removal-v1.
     let max_line = statements.keys().copied().max().unwrap_or(0) as usize;
     let mut lines: Vec<String> = vec![String::new(); max_line];
     for (&line, stmt) in statements {
