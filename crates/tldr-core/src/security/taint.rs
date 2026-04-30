@@ -1711,9 +1711,21 @@ static PYTHON_AST_SINKS: &[AstSinkPattern] = &[
     // VULN-MIGRATION-V1 M2: HtmlOutput (Xss) sinks per vuln.rs L382-L386.
     // `Markup(`, `mark_safe(` are bare calls; `|safe` is a Jinja filter
     // (substring inside template strings) — raw fallback.
+    //
+    // VULN-SOURCE-PARITY-V1 M2: extended `member_patterns` with two structured
+    // entries — `("response", "write")` (Pyramid/WSGI lowercase response object)
+    // and `("Response", "set_data")` (Flask Response builder). The existing
+    // PYTHON_AST_SINKS FileWrite entry `("*", "write")` continues to fire on
+    // generic `.write(` calls; the new HtmlOutput entry fires alongside it on
+    // the specific lowercase-`response` receiver, emitting an additional Xss-
+    // classified finding. ADDITIVE — does not modify the broad FileWrite entry.
     AstSinkPattern {
         call_names: &["Markup", "mark_safe"],
-        member_patterns: &[("", "|safe")],
+        member_patterns: &[
+            ("", "|safe"),
+            ("response", "write"),
+            ("Response", "set_data"),
+        ],
         sink_type: TaintSinkType::HtmlOutput,
     },
     // VULN-MIGRATION-V1 M2: FileOpen (PathTraversal) sinks per vuln.rs L514-L520.
@@ -2259,6 +2271,11 @@ static JAVA_AST_SINKS: &[AstSinkPattern] = &[
     },
     // VULN-MIGRATION-V1 M2: FileOpen (PathTraversal) sinks per vuln.rs L541-L546.
     // `new File(` is an object_creation_expression — raw fallback.
+    //
+    // VULN-SOURCE-PARITY-V1 M2: extended raw-fallback `member_patterns` with
+    // FQN form `("", "new java.io.File(")`. The bare `("", "new File(")`
+    // entry above does NOT substring-match the FQN form (the package prefix
+    // interrupts the substring `"new File("`); a separate FQN entry is needed.
     AstSinkPattern {
         call_names: &[],
         member_patterns: &[
@@ -2266,6 +2283,7 @@ static JAVA_AST_SINKS: &[AstSinkPattern] = &[
             ("Files", "writeString"),
             ("Paths", "get"),
             ("", "new File("),
+            ("", "new java.io.File("),
         ],
         sink_type: TaintSinkType::FileOpen,
     },
@@ -2293,12 +2311,22 @@ static JAVA_AST_SINKS: &[AstSinkPattern] = &[
     // VULN-MIGRATION-V1 M2: Deserialize sinks per vuln.rs L719-L723.
     // `ObjectInputStream` and `XMLDecoder` are class identifiers — raw fallback.
     // `readObject(` is a method call (wildcard receiver).
+    //
+    // VULN-SOURCE-PARITY-V1 M2: extended raw-fallback `member_patterns` with
+    // FQN constructor form `("", "new java.io.ObjectInputStream(")` so the
+    // `new java.io.ObjectInputStream(...).readObject()` chain matches
+    // deterministically at the constructor-call text. The bare `("", "ObjectInputStream")`
+    // entry above does substring-match `new java.io.ObjectInputStream(...)` but
+    // the empirical evidence in M1-investigation.json line 159 showed sinks=[]
+    // for the FQN chain shape — adding the explicit FQN raw-fallback entry
+    // ensures deterministic firing across tree-sitter-java AST shapes.
     AstSinkPattern {
         call_names: &[],
         member_patterns: &[
             ("*", "readObject"),
             ("", "ObjectInputStream"),
             ("", "XMLDecoder"),
+            ("", "new java.io.ObjectInputStream("),
         ],
         sink_type: TaintSinkType::Deserialize,
     },
@@ -2487,6 +2515,15 @@ static C_AST_SINKS: &[AstSinkPattern] = &[
         member_patterns: &[],
         sink_type: TaintSinkType::FileOpen,
     },
+    // VULN-SOURCE-PARITY-V1 M2: SqlQuery sinks for C — bare DB-driver calls.
+    // Restores pre-M3 vuln.rs get_sinks coverage for (SqlInjection, C) which was
+    // lost in M2 audit. `mysql_query`, `PQexec`, `sqlite3_exec` are all bare
+    // call_expression names with no receiver.
+    AstSinkPattern {
+        call_names: &["mysql_query", "PQexec", "sqlite3_exec"],
+        member_patterns: &[],
+        sink_type: TaintSinkType::SqlQuery,
+    },
 ];
 
 static C_AST_SANITIZERS: &[AstSanitizerPattern] = &[
@@ -2510,8 +2547,12 @@ static CPP_AST_SOURCES: &[AstSourcePattern] = &[
         member_patterns: &[("", "std::cin"), ("", "std::getline")],
         source_type: TaintSourceType::UserInput,
     },
+    // VULN-SOURCE-PARITY-V1 M2: extended `call_names` to include `std::getenv`
+    // FQN form alongside bare `getenv`. `std::getenv` parses as a
+    // qualified_identifier whose extracted call_name is exactly the literal
+    // `std::getenv` — call_names exact-match suffices (no member_pattern needed).
     AstSourcePattern {
-        call_names: &["getenv"],
+        call_names: &["getenv", "std::getenv"],
         member_patterns: &[],
         source_type: TaintSourceType::EnvVar,
     },
@@ -2542,8 +2583,13 @@ static CPP_AST_SINKS: &[AstSinkPattern] = &[
     // VULN-MIGRATION-V1 M2: FileOpen (PathTraversal) sinks per vuln.rs L552-L556.
     // `std::ifstream(` / `std::ofstream(` are constructor calls (qualified
     // identifier) — raw fallback. `fopen(` is the C function (bare call).
+    //
+    // VULN-SOURCE-PARITY-V1 M2: extended call_names with `std::fopen` /
+    // `std::freopen` (qualified-identifier exact-match — `extract_call_name_c`
+    // for C++ returns the full qualified name) so the FQN forms are recognized
+    // alongside the bare C variants.
     AstSinkPattern {
-        call_names: &["fopen"],
+        call_names: &["fopen", "std::fopen", "std::freopen"],
         member_patterns: &[("", "std::ifstream"), ("", "std::ofstream")],
         sink_type: TaintSinkType::FileOpen,
     },
@@ -2556,6 +2602,13 @@ static CPP_AST_SINKS: &[AstSinkPattern] = &[
             ("", "cereal::BinaryInputArchive"),
         ],
         sink_type: TaintSinkType::Deserialize,
+    },
+    // VULN-SOURCE-PARITY-V1 M2: SqlQuery sinks for C++ — same as C bare-call
+    // shapes (no `std::` prefix on these C-API DB drivers).
+    AstSinkPattern {
+        call_names: &["mysql_query", "PQexec", "sqlite3_exec"],
+        member_patterns: &[],
+        sink_type: TaintSinkType::SqlQuery,
     },
 ];
 
@@ -2725,6 +2778,22 @@ static RUBY_AST_SINKS: &[AstSinkPattern] = &[
         ],
         sink_type: TaintSinkType::Deserialize,
     },
+    // VULN-SOURCE-PARITY-V1 M2: SqlQuery sinks for Ruby — NEW BANK. Pre-M3
+    // vuln.rs get_sinks for (SqlInjection, Ruby) was entirely absent from the
+    // canonical bank. `ActiveRecord::Base.connection.execute` is a multi-segment
+    // call chain — raw fallback substring. `raw_sql(` is a bare ActiveRecord
+    // helper. `("connection", "execute")` is the structured shape for the
+    // shorter `connection.execute(...)` form when a `connection` accessor is in
+    // scope.
+    AstSinkPattern {
+        call_names: &[],
+        member_patterns: &[
+            ("", "ActiveRecord::Base.connection.execute"),
+            ("", "raw_sql("),
+            ("connection", "execute"),
+        ],
+        sink_type: TaintSinkType::SqlQuery,
+    },
 ];
 
 static RUBY_AST_SANITIZERS: &[AstSanitizerPattern] = &[
@@ -2862,6 +2931,14 @@ static SWIFT_AST_SOURCES: &[AstSourcePattern] = &[
         member_patterns: &[("", "CommandLine.arguments")],
         source_type: TaintSourceType::UserInput,
     },
+    // VULN-SOURCE-PARITY-V1 M2: Vapor `request.query[...]` HTTP query subscript
+    // is a multi-segment subscript shape (request.query[String.self]). Raw-
+    // fallback substring match on the access prefix catches the variants.
+    AstSourcePattern {
+        call_names: &[],
+        member_patterns: &[("", "request.query[")],
+        source_type: TaintSourceType::HttpParam,
+    },
 ];
 
 static SWIFT_AST_SINKS: &[AstSinkPattern] = &[
@@ -2870,12 +2947,26 @@ static SWIFT_AST_SINKS: &[AstSinkPattern] = &[
         // mirrors vuln.rs's substring entry for Swift.
         call_names: &["system"],
         // `Process()` is a constructor call; `NSTask` is a bare identifier — raw.
-        member_patterns: &[("", "Process()"), ("", "NSTask")],
+        //
+        // VULN-SOURCE-PARITY-V1 M2: extended `member_patterns` with structured
+        // entries `("Process", "launchedProcess")` and `("Process", "run")` for
+        // Foundation Process static-method shapes that distinct from the
+        // `Process()` constructor form.
+        member_patterns: &[
+            ("", "Process()"),
+            ("", "NSTask"),
+            ("Process", "launchedProcess"),
+            ("Process", "run"),
+        ],
         sink_type: TaintSinkType::ShellExec,
     },
+    // VULN-SOURCE-PARITY-V1 M2: extended SqlQuery bank with wildcard-receiver
+    // method shapes for Swift database libraries (GRDB / SQLite.swift).
+    // `executeQuery` and `prepareStatement` are common methods on a `db` /
+    // `connection` receiver of varying type — wildcard receiver matches.
     AstSinkPattern {
         call_names: &["sqlite3_exec"],
-        member_patterns: &[],
+        member_patterns: &[("*", "executeQuery"), ("*", "prepareStatement")],
         sink_type: TaintSinkType::SqlQuery,
     },
     // VULN-MIGRATION-V1 M2: FileOpen (PathTraversal) sinks per vuln.rs L569-L573.
@@ -2883,12 +2974,17 @@ static SWIFT_AST_SINKS: &[AstSinkPattern] = &[
     // `Data(contentsOf:`) are unique syntax shapes — raw substring fallback.
     // `FileManager.default.contents(atPath:` is a chained-call labelled
     // argument — raw fallback.
+    //
+    // VULN-SOURCE-PARITY-V1 M2: extended `member_patterns` with two additional
+    // FileHandle labelled-argument constructor forms.
     AstSinkPattern {
         call_names: &[],
         member_patterns: &[
             ("", "String(contentsOfFile:"),
             ("", "Data(contentsOf:"),
             ("", "FileManager.default.contents(atPath:"),
+            ("", "FileHandle(forReadingAtPath:"),
+            ("", "FileHandle(forWritingAtPath:"),
         ],
         sink_type: TaintSinkType::FileOpen,
     },
@@ -2945,9 +3041,13 @@ static CSHARP_AST_SOURCES: &[AstSourcePattern] = &[
 ];
 
 static CSHARP_AST_SINKS: &[AstSinkPattern] = &[
+    // VULN-SOURCE-PARITY-V1 M2: extended `member_patterns` with raw-fallback
+    // (`""`, `"Process.Start"`) so qualified `System.Diagnostics.Process.Start`
+    // FQN call shape is matched via the substring path. Mirrors Java's
+    // `("", "Runtime.getRuntime().exec")` convention.
     AstSinkPattern {
         call_names: &[],
-        member_patterns: &[("Process", "Start")],
+        member_patterns: &[("Process", "Start"), ("", "Process.Start")],
         sink_type: TaintSinkType::ShellExec,
     },
     AstSinkPattern {
@@ -2969,15 +3069,25 @@ static CSHARP_AST_SINKS: &[AstSinkPattern] = &[
     // `Html.Raw(` and `AppendHtml(` are method calls. `@Html.Raw(` is a Razor
     // operator-prefix template syntax — raw fallback (carry-forward documented
     // per validator mandate razor_java_constructor_carry_forward_documented).
+    //
+    // VULN-SOURCE-PARITY-V1 M2: extended `member_patterns` with
+    // (`Response`, `Write`) restoring pre-M3 vuln.rs (Xss, CSharp) coverage that
+    // was lost in M2 audit.
     AstSinkPattern {
         call_names: &["AppendHtml"],
         member_patterns: &[
             ("Html", "Raw"),
             ("", "@Html.Raw("),
+            ("Response", "Write"),
         ],
         sink_type: TaintSinkType::HtmlOutput,
     },
     // VULN-MIGRATION-V1 M2: FileOpen (PathTraversal) sinks per vuln.rs L574-L579.
+    //
+    // VULN-SOURCE-PARITY-V1 M2: extended `member_patterns` with raw-fallback
+    // (`""`, `"System.IO.File.Open"`) for the qualified FQN form. Bare
+    // `File.Open` is already covered by the structured `("File", "Open")`
+    // entry above.
     AstSinkPattern {
         call_names: &[],
         member_patterns: &[
@@ -2985,15 +3095,25 @@ static CSHARP_AST_SINKS: &[AstSinkPattern] = &[
             ("File", "ReadAllText"),
             ("File", "WriteAllText"),
             ("Path", "Combine"),
+            ("", "System.IO.File.Open"),
         ],
         sink_type: TaintSinkType::FileOpen,
     },
     // VULN-MIGRATION-V1 M2: Deserialize sinks per vuln.rs L748-L757.
+    //
+    // VULN-SOURCE-PARITY-V1 M2: extended `member_patterns` with three
+    // raw-fallback FQN/constructor shapes for legacy .NET deserializers.
+    // `JavaScriptSerializer(` is a constructor call (followed by `.Deserialize`);
+    // `new XmlSerializer` and `new SoapFormatter` are object_creation
+    // expressions. Restores pre-M3 vuln.rs (Deserialize, CSharp) coverage.
     AstSinkPattern {
         call_names: &[],
         member_patterns: &[
             ("BinaryFormatter", "Deserialize"),
             ("NetDataContractSerializer", "Deserialize"),
+            ("", "JavaScriptSerializer("),
+            ("", "new XmlSerializer"),
+            ("", "new SoapFormatter"),
         ],
         sink_type: TaintSinkType::Deserialize,
     },
@@ -3067,6 +3187,13 @@ static SCALA_AST_SINKS: &[AstSinkPattern] = &[
         sink_type: TaintSinkType::SqlQuery,
     },
     // VULN-MIGRATION-V1 M2: FileOpen (PathTraversal) sinks per vuln.rs L580-L585.
+    //
+    // VULN-SOURCE-PARITY-V1 M2: extended `member_patterns` with raw-fallback
+    // FQN form `("", "scala.io.Source.fromFile")`. The bare `("Source", "fromFile")`
+    // structured entry only matches when the receiver text equals exactly
+    // "Source" — a fully-qualified `scala.io.Source.fromFile(...)` call has
+    // receiver text "scala.io.Source" which `rfind('.')` does not split into
+    // "Source"; the raw-fallback substring entry catches the FQN form.
     AstSinkPattern {
         call_names: &[],
         member_patterns: &[
@@ -3074,16 +3201,25 @@ static SCALA_AST_SINKS: &[AstSinkPattern] = &[
             ("Files", "readString"),
             ("Files", "writeString"),
             ("Paths", "get"),
+            ("", "scala.io.Source.fromFile"),
         ],
         sink_type: TaintSinkType::FileOpen,
     },
     // VULN-MIGRATION-V1 M2: Deserialize sinks per vuln.rs L758-L761.
     // `ObjectInputStream(` is a constructor — raw fallback.
+    //
+    // VULN-SOURCE-PARITY-V1 M2: extended `member_patterns` with explicit FQN
+    // raw-fallback `("", "new java.io.ObjectInputStream(")` so the qualified
+    // constructor form matches deterministically (the bare
+    // `("", "ObjectInputStream(")` should substring-match per the comment, but
+    // M1 empirical evidence showed the FQN shape did not fire — the explicit
+    // FQN entry resolves the gap).
     AstSinkPattern {
         call_names: &[],
         member_patterns: &[
             ("*", "readObject"),
             ("", "ObjectInputStream("),
+            ("", "new java.io.ObjectInputStream("),
         ],
         sink_type: TaintSinkType::Deserialize,
     },
@@ -3298,6 +3434,18 @@ static LUA_AST_SINKS: &[AstSinkPattern] = &[
         member_patterns: &[("io", "open")],
         sink_type: TaintSinkType::FileOpen,
     },
+    // VULN-SOURCE-PARITY-V1 M2: SqlQuery sinks for Lua/Luau — colon-method
+    // call form `db:query(...)` / `conn:execute(...)`. Lua's `:method` syntax
+    // parses distinctly from member access (`.`); raw-substring fallback on
+    // the call_expression text catches `:query(` / `:execute(` reliably.
+    // Restores pre-M3 vuln.rs (SqlInjection, Lua) coverage that was entirely
+    // absent in the canonical bank. Luau dispatches to LUA_AST_* via
+    // get_ast_patterns so the same entries cover both.
+    AstSinkPattern {
+        call_names: &[],
+        member_patterns: &[("", ":query("), ("", ":execute(")],
+        sink_type: TaintSinkType::SqlQuery,
+    },
 ];
 
 // Lua sanitizers: zero member_patterns — type-annotation flip only.
@@ -3347,9 +3495,20 @@ static ELIXIR_AST_SOURCES: &[AstSourcePattern] = &[
 ];
 
 static ELIXIR_AST_SINKS: &[AstSinkPattern] = &[
+    // VULN-SOURCE-PARITY-V1 M2: extended `member_patterns` with three
+    // additional ShellExec shapes:
+    //   * `("System","shell")` — mirrors System.cmd structural shape.
+    //   * `("Port","open")` — Port.open/2 spawns OS processes.
+    //   * `("","" :os.cmd("")` raw-fallback for atom-prefixed Erlang call
+    //     `:os.cmd(...)` (parses distinctly from Elixir Module.fn calls).
     AstSinkPattern {
         call_names: &[],
-        member_patterns: &[("System", "cmd")],
+        member_patterns: &[
+            ("System", "cmd"),
+            ("System", "shell"),
+            ("Port", "open"),
+            ("", ":os.cmd("),
+        ],
         sink_type: TaintSinkType::ShellExec,
     },
     AstSinkPattern {
@@ -3357,9 +3516,18 @@ static ELIXIR_AST_SINKS: &[AstSinkPattern] = &[
         member_patterns: &[("Code", "eval_string")],
         sink_type: TaintSinkType::CodeEval,
     },
+    // VULN-SOURCE-PARITY-V1 M2: extended `member_patterns` with bang-suffix
+    // variant `("Ecto.Adapters.SQL","query!")` and `Repo.query`/`query!`
+    // shorthand. Elixir's `!` suffix produces a distinct atom — tree-sitter-
+    // elixir parses `query!` as a separate identifier from `query`.
     AstSinkPattern {
         call_names: &[],
-        member_patterns: &[("Ecto.Adapters.SQL", "query")],
+        member_patterns: &[
+            ("Ecto.Adapters.SQL", "query"),
+            ("Ecto.Adapters.SQL", "query!"),
+            ("Repo", "query"),
+            ("Repo", "query!"),
+        ],
         sink_type: TaintSinkType::SqlQuery,
     },
     // VULN-MIGRATION-V1 M2: HtmlOutput (Xss) sinks per vuln.rs L410-L413.
@@ -3372,11 +3540,20 @@ static ELIXIR_AST_SINKS: &[AstSinkPattern] = &[
         sink_type: TaintSinkType::HtmlOutput,
     },
     // VULN-MIGRATION-V1 M2: FileOpen (PathTraversal) sinks per vuln.rs L598-L602.
+    //
+    // VULN-SOURCE-PARITY-V1 M2: extended `member_patterns` with bang-suffix
+    // variants — `read!`, `write!`, `open!`, `stream!` — Elixir's bang-
+    // convention raises on error and parses as a distinct atom in tree-sitter-
+    // elixir. The non-bang forms remain for soft-error-tuple shapes.
     AstSinkPattern {
         call_names: &[],
         member_patterns: &[
             ("File", "read"),
+            ("File", "read!"),
             ("File", "write"),
+            ("File", "write!"),
+            ("File", "open!"),
+            ("File", "stream!"),
             ("Path", "join"),
         ],
         sink_type: TaintSinkType::FileOpen,
@@ -3453,9 +3630,23 @@ static OCAML_AST_SINKS: &[AstSinkPattern] = &[
         member_patterns: &[("Unix", "execvp")],
         sink_type: TaintSinkType::ShellExec,
     },
+    // VULN-SOURCE-PARITY-V1 M2: extended `member_patterns` with three additional
+    // OCaml DB-driver shapes — `Mariadb.Stmt.execute`, `Postgresql.exec`,
+    // `Mysql.exec`, plus `Sqlite3.prepare` (parameterized-query precursor that
+    // taints when the query string is concatenated). Multi-segment receivers
+    // like `Mariadb.Stmt` are supported because OCaml's `extract_call_name_ocaml`
+    // returns the full dotted prefix and `rfind('.')` keeps it as the receiver.
+    // Restores pre-M3 vuln.rs (SqlInjection, OCaml) coverage that was reduced
+    // to a single entry in M2 audit.
     AstSinkPattern {
         call_names: &[],
-        member_patterns: &[("Sqlite3", "exec")],
+        member_patterns: &[
+            ("Sqlite3", "exec"),
+            ("Sqlite3", "prepare"),
+            ("Mariadb.Stmt", "execute"),
+            ("Postgresql", "exec"),
+            ("Mysql", "exec"),
+        ],
         sink_type: TaintSinkType::SqlQuery,
     },
     // VULN-MIGRATION-V1 M2: FileOpen (PathTraversal) sinks per vuln.rs L603-L607.
