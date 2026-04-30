@@ -738,3 +738,48 @@ let handler () =
         result.sanitized_vars
     );
 }
+
+// ---------------------------------------------------------------------------
+// sanitizer-removal-v1 M3 (Gap 2): Zod-style validator parity tests.
+//
+// The TYPESCRIPT_PATTERNS regex bank has `\.(parse|safeParse)\s*\(` (Numeric).
+// Pre-M3, TYPESCRIPT_AST_SANITIZERS lacked an equivalent; with M2 wiring in
+// place and M4 about to delete the regex bank, the AST bank now carries the
+// `("*", "parse")` / `("*", "safeParse")` wildcard entries. These tests
+// exercise the AST detection path on the regular `compute_taint_with_tree`
+// pipeline (the ast_only mirrors live in `sanitize_breaks_flow_ast_only_harness.rs`).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn typescript_zod_parse_sanitizer_truncates_flow_via_compute_taint() {
+    let src = "\
+function handler(req, res) {
+    const tainted = req.body;
+    const safe = schema.parse(tainted);
+    eval(String(safe));
+}
+";
+    let result = analyze(src, Language::TypeScript, "handler");
+    assert!(
+        result.sanitized_vars.contains("safe"),
+        "schema.parse(tainted) should mark safe as sanitized; sanitized_vars={:?}",
+        result.sanitized_vars
+    );
+}
+
+#[test]
+fn typescript_zod_safeParse_sanitizer_truncates_flow_via_compute_taint() {
+    let src = "\
+function handler(req, res) {
+    const tainted = req.body;
+    const safe = schema.safeParse(tainted);
+    eval(String(safe));
+}
+";
+    let result = analyze(src, Language::TypeScript, "handler");
+    assert!(
+        result.sanitized_vars.contains("safe"),
+        "schema.safeParse(tainted) should mark safe as sanitized; sanitized_vars={:?}",
+        result.sanitized_vars
+    );
+}

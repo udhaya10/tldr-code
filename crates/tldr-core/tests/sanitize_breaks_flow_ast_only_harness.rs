@@ -382,3 +382,47 @@ let handler () =
         result.sanitized_vars
     );
 }
+
+// ---------------------------------------------------------------------------
+// sanitizer-removal-v1 M3 (Gap 2): Zod-style validator AST-only mirrors.
+//
+// Mirror of `typescript_zod_parse_*` / `typescript_zod_safeParse_*` in
+// sanitize_breaks_flow_per_language.rs, but exercised through the
+// AST_ONLY_TEST_MODE path (regex bank disabled). These prove the new
+// `("*", "parse")` / `("*", "safeParse")` AST sanitizer entries fire on the
+// pure-AST dispatch that M4 will make canonical.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn typescript_zod_parse_sanitizer_truncates_flow_ast_only() {
+    let src = "\
+function handler(req, res) {
+    const tainted = req.body;
+    const safe = schema.parse(tainted);
+    eval(String(safe));
+}
+";
+    let result = analyze_ast_only(src, Language::TypeScript, "handler");
+    assert!(
+        result.sanitized_vars.contains("safe"),
+        "AST-only: schema.parse(tainted) should mark safe as sanitized; sanitized_vars={:?}",
+        result.sanitized_vars
+    );
+}
+
+#[test]
+fn typescript_zod_safeParse_sanitizer_truncates_flow_ast_only() {
+    let src = "\
+function handler(req, res) {
+    const tainted = req.body;
+    const safe = schema.safeParse(tainted);
+    eval(String(safe));
+}
+";
+    let result = analyze_ast_only(src, Language::TypeScript, "handler");
+    assert!(
+        result.sanitized_vars.contains("safe"),
+        "AST-only: schema.safeParse(tainted) should mark safe as sanitized; sanitized_vars={:?}",
+        result.sanitized_vars
+    );
+}

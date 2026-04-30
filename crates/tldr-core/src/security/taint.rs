@@ -1996,6 +1996,21 @@ static TYPESCRIPT_AST_SANITIZERS: &[AstSanitizerPattern] = &[
         member_patterns: &[],
         sanitizer_type: SanitizerType::Numeric,
     },
+    // sanitizer-removal-v1 M3 (Gap 2): Zod-style validator parity-add.
+    //
+    // The TYPESCRIPT_PATTERNS regex bank includes `\.(parse|safeParse)\s*\(`
+    // (Numeric) to capture `schema.parse(input)` / `schema.safeParse(input)`
+    // sanitizer flows; the AST bank lacked an equivalent, so M4's atomic
+    // deletion of the regex bank would lose detection. Wildcard receiver
+    // `"*"` matches any object via the call-shape path in
+    // `member_patterns_match` (taint.rs:3077-3079), giving the same coverage
+    // (and same over-broad surface — also matching `JSON.parse`, `Date.parse`)
+    // as the regex it replaces. Parity-preserving.
+    AstSanitizerPattern {
+        call_names: &[],
+        member_patterns: &[("*", "parse"), ("*", "safeParse")],
+        sanitizer_type: SanitizerType::Numeric,
+    },
     AstSanitizerPattern {
         call_names: &["encodeURIComponent"],
         member_patterns: &[("DOMPurify", "sanitize")],
@@ -2314,27 +2329,49 @@ static CPP_AST_SINKS: &[AstSinkPattern] = &[
 ];
 
 static CPP_AST_SANITIZERS: &[AstSanitizerPattern] = &[
+    // sanitizer-removal-v1 M3 (Gap 1, M2-FIND-01): moved from raw-substring
+    // member_patterns to call_names to fix the string-literal regression
+    // surfaced post-M2 wiring (`cpp_std_stoi_in_string_literal_does_not_sanitize`).
+    //
+    // Prior shape `member_patterns: &[("", "std::stoi"), ...]` relied on the raw-
+    // substring fallback in `member_patterns_match` (taint.rs:3094-3098), which
+    // matches the descendant's full text. When the descendant is an assignment
+    // whose RHS is a string literal containing the substring (e.g.
+    // `std::string msg = "use std::stoi to convert";`), the assignment node
+    // itself is NOT in_string, so the per-descendant `is_in_string` filter at
+    // the caller (L3508/L3564) does not exclude it, and the fallback fired.
+    //
+    // The call_names path filters by descendant.kind() ∈ call_node_kinds (L3520-
+    // 3528 in detect_sanitizer_ast and L3572-3580 in build_sanitizer_ast_index),
+    // so only `call_expression` descendants are tested. tree-sitter-cpp parses
+    // `std::stoi(x)` as a call_expression whose `function` field is a
+    // qualified_identifier with text `std::stoi`; `extract_call_name_c` returns
+    // exactly that string. String literals are not call_expression descendants,
+    // so the substring-match-in-string-literal regression cannot fire.
     AstSanitizerPattern {
-        call_names: &[],
-        member_patterns: &[
-            ("", "std::stoi"),
-            ("", "std::stol"),
-            ("", "std::stoul"),
-            ("", "std::stoll"),
-            ("", "std::stof"),
-            ("", "std::stod"),
+        call_names: &[
+            "std::stoi",
+            "std::stol",
+            "std::stoul",
+            "std::stoll",
+            "std::stof",
+            "std::stod",
         ],
+        member_patterns: &[],
         sanitizer_type: SanitizerType::Numeric,
     },
+    // `static_cast<T>(...)` parses as a call_expression whose `function` field is
+    // a template_function node; its text is `static_cast<T>`. `extract_call_name_c`
+    // returns that full text, matching the call_names entry below. Same string-
+    // literal-safety rationale as above.
     AstSanitizerPattern {
-        call_names: &[],
-        // `static_cast<T>(...)` is template-call shape, not field_expression — raw.
-        member_patterns: &[
-            ("", "static_cast<int>"),
-            ("", "static_cast<long>"),
-            ("", "static_cast<float>"),
-            ("", "static_cast<double>"),
+        call_names: &[
+            "static_cast<int>",
+            "static_cast<long>",
+            "static_cast<float>",
+            "static_cast<double>",
         ],
+        member_patterns: &[],
         sanitizer_type: SanitizerType::Numeric,
     },
 ];
