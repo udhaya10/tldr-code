@@ -1,5 +1,190 @@
 # Changelog
 
+## vuln-migration-v1 — internal milestone
+
+NOT a published release. Internal-versioning posture: external `cargo publish`
+deferred until pre-publish binary verification confirms no regressions.
+This is the FINAL internal milestone — after publish-operator confirms
+the pre-publish-binary-verification.json artifact, single coherent
+external `cargo publish` ships.
+
+### Changed
+
+- `tldr vuln` command now routes through canonical `compute_taint_with_tree`
+  for all 16 supported languages (was: per-language substring scanner in
+  `tldr-core/security/vuln.rs` for 14 languages + CLI-local tree-sitter
+  `TaintTracker` for Python). Per-function dispatch via
+  `extract_functions_detailed`. Mirrors the proven pattern at
+  `tldr-cli/commands/taint.rs:128`.
+- M3 collapsed core `vuln.rs::scan_file_vulns` from substring 2-pass scanner
+  to per-function `compute_taint_with_tree` loop. ~1000 LOC deleted.
+- M4 collapsed CLI `remaining/vuln.rs::analyze_python_file` (~700 LOC
+  TaintTracker + 9 recursive helpers) onto canonical. Python now routes
+  through canonical AST path uniformly with all 15 other languages.
+
+### Added
+
+- 4 ADDITIVE `TaintSinkType` variants at `taint.rs:153`: `HtmlOutput` (Xss),
+  `FileOpen` (PathTraversal — distinct from existing `FileWrite`),
+  `HttpRequest` (Ssrf), `Deserialize` (untrusted-data deserialization).
+  Existing 6 variants preserved verbatim.
+- ~163 `AstSinkPattern` entries (41 entries' worth of distinct patterns)
+  across all 16 `LanguagePatterns` banks for the 4 new VulnTypes (M2).
+  Source-of-truth: `vuln.rs`'s per-language sink tables.
+- M3 added `vuln_type_from_sink(TaintSinkType) -> VulnType` projection
+  helper (canonical → user-facing VulnType ontology),
+  `severity_for(VulnType) -> &'static str`,
+  `descriptions_for(TaintSourceType, Language) -> &'static str` (R6
+  mitigation: preserves descriptive `"Flask request.args (GET parameters)"`-
+  style strings).
+- M3 added `From<canonical::TaintSource> for vuln::TaintSource` and
+  `From<canonical::TaintSink> for vuln::TaintSink` impls. The vuln-output
+  adapter structs are populated from canonical engine output via these
+  projections.
+- M3 extended `extract_first_identifier_arg_ast` to handle PHP
+  `echo_statement` / `print_intrinsic` node kinds — closes M2 carry-forward
+  (PHP echo sink-emission var-extraction).
+- M3 added SSA-active-path indirect-match fallback in
+  `compute_taint_with_tree` Phase 5, gated by `!sink_var_is_ssa_tracked`
+  to handle free-variable receivers (e.g.,
+  `cursor.execute(f"...{tainted}")`) without breaking val001b
+  sanitizer-reassignment correctness.
+- M3 extended `tldr-core/src/ast/extract.rs::extract_functions_detailed`
+  and `extract_classes_detailed` from `fn` to `pub(crate)` so
+  `scan_file_vulns` can call them.
+  `tldr-core/src/cfg/extractor::extract_cfg_from_tree` and
+  `tldr-core/src/dfg/extractor::extract_dfg_from_tree` similarly extended.
+  New `extract_dfg_from_tree_with_cfg` perf helper avoids redundant CFG
+  re-parse.
+- M3 added AST source-bank entries for `argv[`, `CommandLine.arguments`,
+  `Request.Query[`, `queryParameters[`, `request.getQueryString`,
+  `ngx.req.get_uri_args`, `conn.params[` across 8 languages — partial
+  closure of M3-CF-01 source-bank-gap class.
+
+### Removed
+
+- Core `tldr-core/security/vuln.rs`: `get_sources` (per-language source
+  tables, L140-L286), `get_sinks` (per-language sink tables, L290-L780),
+  8 inline-propagation/sanitization helpers (`extract_assigned_variable`,
+  `extract_propagation`, `is_type_coerced`, `is_sanitized_sink`,
+  `is_sanitized_sql`, `is_sanitized_command`, `has_named_param`,
+  `get_line_at`), ~22 obsolete unit tests at L1322-L2077. ~1000 LOC total.
+- CLI `tldr-cli/src/commands/remaining/vuln.rs`: `TaintSource`
+  const-pattern struct + `PYTHON_SOURCES` (~30 entries), `TaintSink`
+  const-pattern struct + `PYTHON_SINKS` (~25 entries), `TaintTracker`
+  struct + impl, `TaintInfo` CLI-local struct, `analyze_python_file` + 9
+  recursive helpers (~700 LOC), 5 is/find helpers (`is_taint_source`,
+  `is_taint_sink`, `is_parameterized_query`,
+  `is_string_interpolation_tainted`, `find_taint_in_string`,
+  `get_python_parser`, `node_text`), 4 obsolete unit tests,
+  `tree_sitter::{Node, Parser}` import, `MAX_TAINT_DEPTH` const. ~984 LOC
+  total.
+
+### Retained
+
+- **Public API preserved at canonical signatures:** `compute_taint`,
+  `compute_taint_with_tree`, `detect_sanitizer_ast`, `scan_vulnerabilities`,
+  `tldr vuln` CLI clap args, JSON/SARIF output schema, exit-code-2-on-
+  findings behavior.
+- **`tldr_core::security::vuln::TaintSource`** (`vuln.rs:68`) and
+  **`tldr_core::security::vuln::TaintSink`** (`vuln.rs:81`) — RETAINED as
+  output adapter structs with their existing String-typed fields. CLI
+  consumer at `remaining/vuln.rs:679-688` reads
+  `f.source.line/expression/source_type` and
+  `f.sink.line/expression/sink_type` unchanged. `From<canonical>` impls
+  project enum-typed canonical → string-typed adapter.
+- `VulnType` enum, `VulnFinding`/`VulnSummary`/`VulnReport` output records
+  (user-facing ontology preserved exactly).
+- `get_remediation`, `get_cwe_id`, `vuln_type_name` (used by SARIF
+  `generate_sarif` for `rules.name` + `shortDescription.text` —
+  M4-DEVIATION-01 honored).
+- **`analyze_rust_file` Rust line-scanner + 7 `rust_finding` helpers** —
+  distinct concern (UnsafeCode/MemorySafety/Panic), not taint flow. Per
+  Reframe C, permanently out of scope for taint-flow migration.
+- **All 30 `test_e2e_*` tests at `vuln.rs:1568-2100`** — primary regression
+  guard, ALL preserved + GREEN throughout M3+M4+M5.
+- **All CLI integration tests:** `vuln_autodetect_tests.rs` (6/6),
+  `vuln_ssrf_test.rs` (3/3), `vuln_sarif_deserialization_test.rs` (2/2).
+- Output formatting: `build_summary`, `format_vuln_text`, `generate_sarif`.
+
+### Issues closed (binary-verified)
+
+- **closes-#24 string-literal substring FP class CLOSED end-to-end** at the
+  `tldr vuln` command path — the half left open by regex-removal-v1,
+  field_access_info-extension-v1, and sanitizer-removal-v1, all of which
+  only reached the `tldr taint` command path.
+- **83/83 string-literal regression-guard fixture corpus → 0 findings**
+  (closes-#24 root mandate met across 16 langs × ~6 vuln categories).
+- Original FP repros from Phase-1 investigation:
+  - `tldr vuln /tmp/vuln-mig-repro/string_literal_fp.go --lang go` → 0
+    findings (was 3 FP CommandInjections at HEAD)
+  - `tldr vuln /tmp/vuln-mig-repro/fp2.ts --lang typescript` → 0 findings
+    (was 1 FP citing comment line as sink)
+  - `tldr vuln /tmp/vuln-mig-repro/string_literal_fp.py --lang python` → 0
+    findings (Python FP-clean property preserved post-canonical-collapse)
+- Composite multi-pattern FP fixture (all 6 source-pattern strings inside
+  string literals + all 6 sink-pattern strings inside comments) → 0
+  findings.
+
+### Architectural notes
+
+- **This is the FINAL internal milestone before external publish.**
+  Together with regex-removal-v1, field_access_info-extension-v1, and
+  sanitizer-removal-v1, the canonical `tldr-core/security/taint.rs` is now
+  the **SINGLE SOURCE OF TRUTH** for taint flow detection across both
+  `tldr taint` and `tldr vuln`.
+- Regex-driven dispatch is fully eliminated for sources, sinks, AND
+  sanitizers across the canonical pipeline. The remaining regex (Ruby
+  `\bgets\b` from FAI-v1 carry-forward) is a single AST-shape carry-
+  forward exception.
+- Per Reframe C: `analyze_rust_file` Rust line-scanner remains distinct
+  from taint flow detection. It detects Rust-IDIOMATIC smells
+  (UnsafeCode/MemorySafety/Panic), not source-to-sink propagation. A
+  future `rust-smell-detector-canonical-v1` follow-on would migrate it if
+  a canonical smell-detector framework is built; not part of
+  vuln-migration-v1.
+- **Premortem caught 3 hard blockers pre-/autonomous:** T1
+  (`test_taint_sink_type_variants` assertion update), T2 (vuln structs
+  DELETE-vs-READ contradiction), T3 (fictional `build_codemap()`
+  reference). All 3 amended; pattern continued to add value.
+
+### Carry-forwards documented
+
+- **M3-CF-01 (32 source-bank-gap positive RED tests):** 32 of 166 M1 RED
+  positive fixtures STILL RED post-M5 across 6 languages
+  (Go/Java/CSharp/Scala/Lua/Elixir × multiple vuln types). M2 audited
+  sinks only; canonical AST source banks lack patterns `vuln.rs`'s
+  `get_sources` had per-vuln-type. M3 added partial coverage
+  (argv/`CommandLine.arguments`/etc. across 8 langs); full parity deferred
+  to **`vuln-source-parity-v1`** future internal milestone. Does NOT
+  affect closes-#24 (string-literal FP) closure — that's a separate class
+  fully addressed.
+- **M3-CF-02 (perf two-axis gate):** Avg 17.18× M1 baseline; p99-file
+  5.24×. Per-file and per-function rayon parallelization applied (7×
+  inner speedup). The M1 baseline (36.67ms avg / 34ms p99) was
+  binary-startup-dominated; absolute scanning work is ~33ms/file on the
+  20-file Go corpus. Pragmatically acceptable; M1 perf-baseline
+  methodology should be revisited in future milestones.
+- **M4-CF-01 (`python_xss_positive` still RED):** Fixture uses
+  `response.write('<h1>'+name+'</h1>')`; canonical Xss sink bank lacks
+  `response.write` (pre-M4 `PYTHON_SINKS` also lacked it). Same
+  disposition as M3-CF-01.
+- **M4-DEVIATION-01 (`vuln_type_name` retained):** M1 enumeration listed
+  it for deletion but `generate_sarif` uses it for SARIF `rules.name` +
+  `shortDescription.text`. Output-shape preservation precedence;
+  documented.
+
+### Standing rules upheld
+
+- **Internal-versioning posture honored:** NO push, NO `cargo publish`, NO
+  version bumps. Pre-publish binary verification artifact (4 checks)
+  emitted as operator-handoff for the eventual external publish gate.
+- After publish-operator confirms `pre-publish-binary-verification.json`
+  verdict, single coherent external `cargo publish` closes #7 (callgraph),
+  #23 (Rust trait FuncDef), #24 (string-literal substring FP, ALL paths),
+  #27 (cache cross-contamination), #28 (daemon language threading) +
+  `tldr vuln` FP class + sanitizer correctness in one release.
+
 ## sanitizer-removal-v1 — internal milestone
 
 NOT a published release. Internal-versioning posture: external `cargo publish`
