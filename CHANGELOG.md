@@ -1,5 +1,74 @@
 # Changelog
 
+## rust-panic-suppression-v1 — internal milestone
+
+NOT a published release. UX hardening of `tldr vuln` JSON output on
+production Rust codebases. Closes ZERO RED tests; this is a HARDENING
+milestone that closes the `rust-vuln-taint-pipeline-v1` R2 sub-elephant
+(per-`.unwrap()` Panic flood on production Rust trees). The existing
+`is_rust_test_file` mask only covered `/tests/`, `_test.rs`, and
+`tests.rs` paths — every other `.unwrap()` in the codebase produced a
+Medium-severity Panic finding regardless of context.
+`vuln_migration_v1_red` remains 168/168 GREEN. The 6 pre-existing
+`test_analyze_rust_*` unit tests STAY GREEN unchanged (they call
+`analyze_rust_file` directly; the new gate is at the `VulnArgs::run`
+filter-pipeline layer).
+
+### Changed
+
+- **vuln** (Rust, behavior on default invocation): per-`.unwrap()`
+  Panic findings emitted by `analyze_rust_file`'s line scanner are now
+  SUPPRESSED by default. The new `--include-smells` CLI flag (default
+  `false`) restores the legacy emission set. Predicate is tight —
+  `f.vuln_type == VulnType::Panic && f.title.starts_with("Potential
+  Panic")` — bound to both the canonical `VulnType::Panic` enum
+  variant AND the line scanner's emission title prefix
+  (`"Potential Panic From unwrap()"`), so it cannot accidentally
+  over-match a hypothetical future canonical-pipeline Panic finding
+  with a different title. The 6 non-Panic triggers in
+  `analyze_rust_file` (T1 UnsafeCode, T2/T3/T6 MemorySafety, T5
+  SqlInjection, T7 CommandInjection) emit unconditionally regardless
+  of `--include-smells`. Downstream consumers of the JSON output
+  observe a finding-count drop on Rust trees with `.unwrap()`
+  callsites outside `/tests/`-style paths; the per-finding JSON shape
+  is unchanged (no schema delta).
+
+### Architectural note
+
+NO public API change. `VulnFinding` struct shape unchanged.
+`analyze_rust_file` body and signature byte-for-byte unchanged.
+`is_rust_test_file` body unchanged. NO new `VulnType` /
+`TaintSinkType` / `TaintSourceType` enum variants. NO new fields on
+emitted findings. The gate is a runtime-filtered CLI flag mirroring
+the existing `include_informational` precedent (`VulnArgs::run` post-
+analysis pipeline at the same filter layer), NOT a `#[cfg(test)]` /
+`#[allow(...)]` suppression. `--include-smells=true` round-trips
+through the filter and restores the legacy Panic emission count
+verbatim. Single source-file edit
+(`crates/tldr-cli/src/commands/remaining/vuln.rs`); the field
+addition (~10 LOC), filter step (~12 LOC), `is_smell_finding` helper
+(~16 LOC), and 2 new round-trip tests
+(`test_vulnargs_run_default_suppresses_panic`,
+`test_vulnargs_run_include_smells_emits_panic`, ~125 LOC including
+helpers) ship atomically in a single commit.
+
+### Known residual gaps (out of scope; documented carry-forward)
+
+- The `analyze_rust_file` line scanner remains the sole `Panic`
+  emitter; no taint-state cross-reference is performed. The
+  long-term fix (Option D from `plan.md` §3 —
+  `panic-taint-cross-ref-v1`) would emit Panic only when the
+  unwrapped value originates from a tainted source; that requires a
+  new `TaintSinkType::Panic` variant and threading taint state into
+  `analyze_rust_file`. Out of scope for this milestone.
+- The flag is a coarse single bool. If/when ≥3 smell-class triggers
+  exist, migrate to a tier enum (Option B from `plan.md` §3 —
+  `smells-level-tier-v1`).
+
+These residual gaps are accepted in exchange for eliminating the
+high-volume default-invocation Panic flood that cluttered downstream
+JSON consumers.
+
 ## rust-wildcard-get-narrowing-v1 — internal milestone
 
 NOT a published release. Precision narrowing of the over-broad

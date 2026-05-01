@@ -91,6 +91,12 @@ pub struct VulnArgs {
     #[arg(long)]
     pub include_informational: bool,
 
+    /// Include code-smell findings (e.g., per-`.unwrap()` Panic emissions on Rust files).
+    /// Default: false (smells suppressed) to keep production-codebase JSON output focused on
+    /// real security findings. Pass `--include-smells` to restore the legacy emission set.
+    #[arg(long)]
+    pub include_smells: bool,
+
     /// Output file (optional, stdout if not specified)
     #[arg(long, short = 'O')]
     pub output: Option<PathBuf>,
@@ -193,6 +199,19 @@ impl VulnArgs {
         // Filter informational
         if !self.include_informational {
             filtered_findings.retain(|f| f.severity != Severity::Info);
+        }
+
+        // Filter code-smell findings (e.g., per-`.unwrap()` Panic emissions
+        // from analyze_rust_file's line scanner). Hardening per
+        // rust-panic-suppression-v1: suppress smell-class noise by default
+        // on production codebases; opt-in via `--include-smells` to restore
+        // legacy emission. Predicate is title-prefix bound to the
+        // line-scanner's exact emission shape ("Potential Panic From
+        // unwrap()") AND vuln_type-bound to Panic, so it cannot
+        // accidentally over-match a future canonical-pipeline Panic
+        // finding with a different title.
+        if !self.include_smells {
+            filtered_findings.retain(|f| !is_smell_finding(f));
         }
 
         // Build summary
@@ -729,6 +748,23 @@ fn is_rust_test_file(path: &Path) -> bool {
         || path_str.ends_with("tests.rs")
 }
 
+/// Predicate: a finding is classified as a code-smell (non-security) emission
+/// from `analyze_rust_file`'s line scanner.
+///
+/// Currently the only smell-class trigger is the per-`.unwrap()` Panic
+/// finding (T4 in analyze_rust_file). The predicate is intentionally tight:
+/// vuln_type-bound to `VulnType::Panic` AND title-prefix-bound to
+/// "Potential Panic" (the exact prefix of the line scanner's emission
+/// title "Potential Panic From unwrap()"). The defensive title-prefix
+/// guard prevents accidentally over-suppressing a hypothetical future
+/// canonical-pipeline Panic finding with a different title.
+///
+/// Kept local to vuln.rs (grep-near `is_rust_test_file`) so future smell
+/// triggers (if any are added) can be enumerated here in one place.
+fn is_smell_finding(f: &VulnFinding) -> bool {
+    f.vuln_type == VulnType::Panic && f.title.starts_with("Potential Panic")
+}
+
 
 // =============================================================================
 // Helper Functions
@@ -1079,5 +1115,137 @@ pub fn from_raw(bytes: &[u8]) -> &str {
             .iter()
             .any(|f| f.vuln_type == VulnType::MemorySafety
                 && f.title.contains("Unchecked Byte/String Conversion")));
+    }
+
+    // -------------------------------------------------------------------------
+    // rust-panic-suppression-v1 M2: --include-smells flag round-trip tests
+    // -------------------------------------------------------------------------
+    //
+    // These tests drive the full `VulnArgs::run` filter pipeline (NOT the
+    // raw `analyze_rust_file` direct-call path that the `test_analyze_rust_*`
+    // tests exercise). The gating layer is the filter step in
+    // `VulnArgs::run` parallel to the `include_informational` filter; the
+    // `analyze_rust_file` body is unchanged. This means the existing 6
+    // `test_analyze_rust_*` tests STAY GREEN unchanged — `analyze_rust_file`
+    // still emits the Panic finding; only `VulnArgs::run` filters it out
+    // when `include_smells` is false.
+    //
+    // The tests write JSON output to a tempfile (via `VulnArgs.output`)
+    // rather than capturing stdout, then parse + introspect the
+    // `findings` array. This is the natural integration point: it
+    // exercises the same code path a real user invocation would hit.
+
+    /// Build a JSON-mode VulnArgs targeting `path`, with `include_smells`
+    /// controlled by the caller. All other flags default to their CLI
+    /// defaults (no severity filter, no vuln-type filter, informational
+    /// findings excluded — same as a flag-less `tldr vuln <path>`).
+    fn make_vuln_args_for_test(
+        path: PathBuf,
+        output: PathBuf,
+        include_smells: bool,
+    ) -> VulnArgs {
+        VulnArgs {
+            path,
+            lang: Some(Language::Rust),
+            severity: None,
+            vuln_type: None,
+            include_informational: false,
+            include_smells,
+            output: Some(output),
+            no_default_ignore: false,
+        }
+    }
+
+    /// Run VulnArgs in JSON mode and return the parsed findings array.
+    ///
+    /// `VulnArgs::run` deliberately returns `Err(RemainingError::findings_detected(_))`
+    /// whenever the post-filter findings vector is non-empty (CLI exit-code-2
+    /// contract per spec). The JSON output file is written BEFORE that error
+    /// is constructed, so for round-trip introspection in tests we ignore the
+    /// `Result` and read the file directly.
+    fn run_and_parse_findings(args: &VulnArgs) -> Vec<serde_json::Value> {
+        let _ = args.run(OutputFormat::Json);
+        let output_path = args.output.as_ref().unwrap();
+        let raw = std::fs::read_to_string(output_path).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        parsed["findings"].as_array().cloned().unwrap_or_default()
+    }
+
+    #[test]
+    fn test_vulnargs_run_default_suppresses_panic() {
+        // Fixture: a Rust file with both a `.unwrap()` (smell-class Panic
+        // emission target) AND an `unsafe { ... }` block without a
+        // SAFETY comment (real UnsafeCode finding — regression guard
+        // against accidental over-gating that would also drop UnsafeCode).
+        // Path is OUTSIDE any /tests/ directory and does not match
+        // `_test.rs` / `tests.rs`, so `is_rust_test_file` returns false
+        // and `analyze_rust_file` DOES emit the Panic finding into the
+        // pipeline; the filter step in `VulnArgs::run` is what drops it.
+        let temp = TempDir::new().unwrap();
+        let fixture_path = temp.path().join("smelly.rs");
+        std::fs::write(
+            &fixture_path,
+            "pub fn process(s: &str) -> i32 {\n    let n: i32 = s.parse().unwrap();\n    unsafe { *(0xdead as *mut u8) = 0; }\n    n\n}\n",
+        )
+        .unwrap();
+        let output_path = temp.path().join("out.json");
+
+        let args = make_vuln_args_for_test(fixture_path, output_path, false);
+        let findings = run_and_parse_findings(&args);
+
+        // Default invocation: ZERO Panic findings reach the JSON output.
+        let panic_count = findings
+            .iter()
+            .filter(|f| f["vuln_type"].as_str() == Some("panic"))
+            .count();
+        assert_eq!(
+            panic_count, 0,
+            "default --include-smells=false must suppress Panic findings; got {} in {:?}",
+            panic_count, findings
+        );
+
+        // Regression guard: UnsafeCode (a real security finding, NOT a
+        // smell) MUST still emerge. If this assert fails, the filter
+        // predicate has accidentally over-matched.
+        let unsafe_count = findings
+            .iter()
+            .filter(|f| f["vuln_type"].as_str() == Some("unsafe_code"))
+            .count();
+        assert!(
+            unsafe_count >= 1,
+            "UnsafeCode emission must NOT be suppressed by --include-smells=false; got {} in {:?}",
+            unsafe_count,
+            findings
+        );
+    }
+
+    #[test]
+    fn test_vulnargs_run_include_smells_emits_panic() {
+        // Same fixture as the default-suppress test, but with
+        // `include_smells = true`. Asserts the Panic finding round-trips
+        // through the filter pipeline unchanged — verifying the flag is
+        // genuinely opt-in (not a one-way drop).
+        let temp = TempDir::new().unwrap();
+        let fixture_path = temp.path().join("smelly.rs");
+        std::fs::write(
+            &fixture_path,
+            "pub fn process(s: &str) -> i32 {\n    let n: i32 = s.parse().unwrap();\n    unsafe { *(0xdead as *mut u8) = 0; }\n    n\n}\n",
+        )
+        .unwrap();
+        let output_path = temp.path().join("out.json");
+
+        let args = make_vuln_args_for_test(fixture_path, output_path, true);
+        let findings = run_and_parse_findings(&args);
+
+        let panic_count = findings
+            .iter()
+            .filter(|f| f["vuln_type"].as_str() == Some("panic"))
+            .count();
+        assert!(
+            panic_count >= 1,
+            "--include-smells=true must restore Panic emission; got {} in {:?}",
+            panic_count,
+            findings
+        );
     }
 }
