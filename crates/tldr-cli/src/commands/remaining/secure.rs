@@ -388,106 +388,54 @@ fn severity_order(severity: &str) -> u8 {
 // Taint Analysis
 // =============================================================================
 
-/// Known taint sinks in Python
-const TAINT_SINKS: &[(&str, &str, &str)] = &[
-    // (pattern, vuln_type, severity)
-    ("cursor.execute", "SQL Injection", "critical"),
-    ("execute", "SQL Injection", "critical"),
-    ("os.system", "Command Injection", "critical"),
-    ("subprocess.call", "Command Injection", "critical"),
-    ("subprocess.run", "Command Injection", "high"),
-    ("subprocess.Popen", "Command Injection", "high"),
-    ("eval", "Code Injection", "critical"),
-    ("exec", "Code Injection", "critical"),
-    ("pickle.loads", "Insecure Deserialization", "critical"),
-    ("yaml.load", "Insecure Deserialization", "high"),
-    ("open", "Path Traversal", "high"),
-    ("render_template_string", "Template Injection", "high"),
-];
-
-/// Analyze taint flows in a file
-fn analyze_taint(root: Node, source: &str, file: &Path) -> Vec<SecureFinding> {
+/// Analyze taint flows in a file.
+///
+/// SECURE-TAINT-AGGREGATOR-V1: For non-Rust files this routes through the
+/// canonical `tldr_core::security::vuln::scan_vulnerabilities` pipeline —
+/// the same pipeline `tldr vuln` uses — so `secure.summary.taint_count`
+/// agrees with `tldr vuln`'s finding count. The legacy substring-based
+/// `TAINT_SINKS` matcher (which produced 0 findings on real flows because
+/// it could not see source-to-sink relationships) is retired for this
+/// purpose. For Rust files, taint is deliberately interpreted as
+/// "unsafe blocks" — a Rust-specific risk surface preserved unchanged
+/// from the prior implementation.
+fn analyze_taint(_root: Node, source: &str, file: &Path) -> Vec<SecureFinding> {
     if is_rust_file(file) {
         return analyze_rust_unsafe_blocks(source, file);
     }
 
-    let mut findings = Vec::new();
-    let source_bytes = source.as_bytes();
-
-    // Simple pattern matching for dangerous patterns
-    // In a full implementation, this would do data flow analysis
-
-    // Find f-strings and format strings used in dangerous contexts
-    analyze_fstring_injection(root, source_bytes, file, &mut findings);
-
-    // Find direct concatenation in dangerous sinks
-    analyze_string_concat_in_sinks(root, source_bytes, file, &mut findings);
-
-    findings
+    canonical_taint_findings(file)
 }
 
-fn analyze_fstring_injection(
-    root: Node,
-    source: &[u8],
-    file: &Path,
-    findings: &mut Vec<SecureFinding>,
-) {
-    traverse_for_fstrings(root, source, file, findings);
-}
+/// Run the canonical `scan_vulnerabilities` pipeline on a single file and
+/// project the resulting `VulnFinding`s onto `SecureFinding`s with
+/// `category = "taint"`. Rust files are skipped here (handled separately
+/// via `analyze_rust_unsafe_blocks`).
+fn canonical_taint_findings(file: &Path) -> Vec<SecureFinding> {
+    let report = match tldr_core::security::vuln::scan_vulnerabilities(file, None, None) {
+        Ok(r) => r,
+        Err(_) => return Vec::new(),
+    };
 
-fn traverse_for_fstrings(
-    node: Node,
-    source: &[u8],
-    file: &Path,
-    findings: &mut Vec<SecureFinding>,
-) {
-    // Check if this is a call to a dangerous function with an f-string
-    if node.kind() == "call" {
-        if let Some(func) = node.child_by_field_name("function") {
-            let func_text = node_text(func, source);
-
-            // Check if it's a dangerous sink
-            for (pattern, vuln_type, severity) in TAINT_SINKS {
-                if func_text.contains(pattern)
-                    || func_text.ends_with(pattern.split('.').next_back().unwrap_or(pattern))
-                {
-                    // Check if arguments contain f-strings or format
-                    if let Some(args) = node.child_by_field_name("arguments") {
-                        let args_text = node_text(args, source);
-                        if args_text.contains("f\"")
-                            || args_text.contains("f'")
-                            || args_text.contains(".format(")
-                            || args_text.contains(" + ")
-                        {
-                            findings.push(SecureFinding::new(
-                                "taint",
-                                *severity,
-                                format!("{}: Potential {} - user input may flow to dangerous function", 
-                                    vuln_type, vuln_type.to_lowercase()),
-                            ).with_location(file.display().to_string(), node.start_position().row as u32 + 1));
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // Recurse
-    for i in 0..node.child_count() {
-        if let Some(child) = node.child(i) {
-            traverse_for_fstrings(child, source, file, findings);
-        }
-    }
-}
-
-fn analyze_string_concat_in_sinks(
-    _root: Node,
-    _source: &[u8],
-    _file: &Path,
-    _findings: &mut Vec<SecureFinding>,
-) {
-    // Placeholder for string concatenation analysis
-    // In a full implementation, this would track string operations
+    report
+        .findings
+        .into_iter()
+        .map(|f| {
+            let severity = match f.severity.to_uppercase().as_str() {
+                "CRITICAL" => "critical",
+                "HIGH" => "high",
+                "MEDIUM" => "medium",
+                "LOW" => "low",
+                _ => "medium",
+            };
+            let description = format!(
+                "{:?}: {} with unsanitized input from {}",
+                f.vuln_type, f.sink.sink_type, f.source.source_type
+            );
+            SecureFinding::new("taint", severity, description)
+                .with_location(f.file.display().to_string(), f.sink.line)
+        })
+        .collect()
 }
 
 // =============================================================================
@@ -869,10 +817,23 @@ mod tests {
 
     #[test]
     fn test_taint_analysis_finds_sql_injection() {
+        // SECURE-TAINT-AGGREGATOR-V1: routes through canonical
+        // `scan_vulnerabilities` which requires a real source-to-sink
+        // flow (not just a literal f-string in a sink). This fixture
+        // models a Flask request → cursor.execute flow that the
+        // canonical taint engine reports.
+        let temp = TempDir::new().unwrap();
         let source = r#"
-def query(user_input):
-    cursor.execute(f"SELECT * FROM users WHERE name = '{user_input}'")
+from flask import request
+import sqlite3
+
+def query():
+    user_input = request.args.get("name")
+    conn = sqlite3.connect("db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM users WHERE name = '" + user_input + "'")
 "#;
+        let path = create_test_file(&temp, "vuln.py", source);
 
         let mut parser = Parser::new();
         parser
@@ -880,9 +841,72 @@ def query(user_input):
             .unwrap();
         let tree = parser.parse(source, None).unwrap();
 
-        let findings = analyze_taint(tree.root_node(), source, &PathBuf::from("test.py"));
-        assert!(!findings.is_empty(), "Should detect SQL injection");
-        assert!(findings.iter().any(|f| f.severity == "critical"));
+        let findings = analyze_taint(tree.root_node(), source, &path);
+        assert!(
+            !findings.is_empty(),
+            "Should detect SQL injection from request.args -> cursor.execute"
+        );
+        assert!(findings.iter().all(|f| f.category == "taint"));
+    }
+
+    /// SECURE-TAINT-AGGREGATOR-V1: secure↔vuln aggregation parity guard.
+    ///
+    /// The canonical `scan_vulnerabilities` pipeline is the single
+    /// source of truth for taint findings. `tldr secure` MUST surface
+    /// the same finding count as `tldr vuln` on the same path —
+    /// previously secure ran a substring-only matcher that missed
+    /// every real source-to-sink flow and reported `taint_count: 0`
+    /// while `vuln` reported N>0 on the same file.
+    #[test]
+    fn test_secure_taint_count_matches_vuln_findings() {
+        let temp = TempDir::new().unwrap();
+        // Fixture with a real Flask-style taint flow: HTTP param ->
+        // subprocess.call (CommandInjection) and HTTP param ->
+        // cursor.execute (SqlInjection-via-string-concat).
+        let source = r#"
+from flask import request
+import subprocess
+import sqlite3
+
+def cmd():
+    user = request.args.get("user")
+    subprocess.call("echo " + user, shell=True)
+
+def sql():
+    name = request.args.get("name")
+    conn = sqlite3.connect("db")
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM users WHERE name='" + name + "'")
+"#;
+        let path = create_test_file(&temp, "flow.py", source);
+
+        // Canonical pipeline (same call path tldr vuln uses).
+        let vuln_report =
+            tldr_core::security::vuln::scan_vulnerabilities(&path, None, None).unwrap();
+        let vuln_count = vuln_report.findings.len();
+        assert!(
+            vuln_count > 0,
+            "Fixture must produce >=1 canonical finding (got 0 - fixture is wrong)"
+        );
+
+        // secure's taint analysis on the same file.
+        let mut parser = Parser::new();
+        parser
+            .set_language(&tree_sitter_python::LANGUAGE.into())
+            .unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        let secure_findings = analyze_taint(tree.root_node(), source, &path);
+
+        assert_eq!(
+            secure_findings.len(),
+            vuln_count,
+            "secure taint findings must match vuln finding count exactly \
+             (secure={}, vuln={}). secure uses canonical scan_vulnerabilities \
+             pipeline.",
+            secure_findings.len(),
+            vuln_count
+        );
+        assert!(secure_findings.iter().all(|f| f.category == "taint"));
     }
 
     #[test]

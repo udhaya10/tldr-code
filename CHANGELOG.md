@@ -1,5 +1,62 @@
 # Changelog
 
+## secure-taint-aggregator-v1 — internal milestone
+
+NOT a published release. High-severity bug fix in the `tldr secure`
+dashboard: `summary.taint_count` was reported as `0` while `tldr vuln`
+on the SAME path reported N>0 findings (e.g., 9 on
+`/tmp/repos/flask/src/flask`). Root cause: `tldr secure` ran a
+legacy in-file substring matcher (`TAINT_SINKS` array of
+`("cursor.execute", ...)` tuples + an f-string heuristic) that had
+not been migrated to the canonical taint pipeline used by
+`tldr vuln`. The substring matcher could not see source-to-sink
+relationships and produced no findings on real Flask request →
+sink flows. `vuln_migration_v1_red`: 168/168 stays GREEN.
+
+### Changed
+
+- **secure** (`commands/remaining/secure.rs`, `analyze_taint`):
+  for non-Rust files, taint analysis now routes through
+  `tldr_core::security::vuln::scan_vulnerabilities` — the same
+  canonical pipeline `tldr vuln` uses — and projects each
+  `VulnFinding` to a `SecureFinding` with `category = "taint"`,
+  preserving severity, file, and line. The legacy `TAINT_SINKS`
+  table, `analyze_fstring_injection`, `traverse_for_fstrings`, and
+  `analyze_string_concat_in_sinks` helpers are removed (dead after
+  the rewrite). Rust files retain the existing `unsafe { ... }`
+  block scanner under the Taint sub-analysis (Rust-specific risk
+  surface, semantically distinct from Python/JS taint flow).
+- **secure** (test): the legacy
+  `test_taint_analysis_finds_sql_injection` fixture
+  (`cursor.execute(f"SELECT...{user_input}...")` with no taint
+  source) was a false positive of the substring matcher. It is
+  replaced with a Flask `request.args.get` → string-concat →
+  `cursor.execute` flow that the canonical pipeline reports
+  legitimately. A new parity test
+  (`test_secure_taint_count_matches_vuln_findings`) asserts that
+  `analyze_taint` returns exactly the same count as
+  `scan_vulnerabilities` on the same fixture — guarding the
+  aggregation contract.
+
+### Architectural note
+
+NO public API change. `SecureFinding` / `SecureSummary` /
+`SecureReport` shapes unchanged. The Resources, Bounds, Contracts,
+Behavioral, and Mutability sub-analyses are unchanged — only the
+Taint dispatch is rewired. `summary.unsafe_blocks` (set under the
+Taint analysis for Rust) and `summary.taint_critical` continue to
+be derived from the Taint findings list. CLI flags unchanged.
+
+### Validation
+
+- `cargo test -p tldr-cli --lib commands::remaining::secure` —
+  8/8 GREEN (includes the new parity test).
+- `cargo test -p tldr-cli --test vuln_migration_v1_red` —
+  168/168 GREEN.
+- Binary verify: `tldr secure /tmp/repos/flask/src/flask` reports
+  `summary.taint_count: 9`, exactly matching
+  `tldr vuln /tmp/repos/flask/src/flask` `summary.total_findings: 9`.
+
 ## rust-format-sql-fp-narrowing-v1 — internal milestone
 
 NOT a published release. Hardening of the `tldr vuln` Rust line-scanner
