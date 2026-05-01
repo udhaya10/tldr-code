@@ -1,17 +1,18 @@
 {
   "task": "var-extract-nested-constructor-v1",
   "complexity": "patch",
-  "scope": "Extend extract_first_identifier_arg_ast (crates/tldr-core/src/security/taint.rs:3934) to descend through nested constructor / call / instance / binary nodes when the first arg-list named child cannot be resolved as a direct identifier. Per-language descend-through set: Java { object_creation_expression, method_invocation, parenthesized_expression }; Scala { call_expression, instance_expression, infix_expression }; Cpp { call_expression, binary_expression } CONDITIONAL on M1 tree-sitter parse-shape resolution. BFS-over-named-descendants with bounded recursion (depth 5) and string-kind filter at every level. Closes vuln-source-parity-v1 M5 Bucket B carry-forwards (3 tests minimum; 2 if cpp Hypothesis A confirmed at M1 → cpp deferred to follow-on milestone cpp-deser-declaration-v1). NO public API change; NO new VulnType/TaintSinkType/TaintSourceType variants; NO new bank entries. The sub-helper extract_first_identifier_arg_ast_descent mirrors the BFS pattern already used for PHP echo_statement (taint.rs:3954-3982) and OCaml application_expression (taint.rs:3989-4016).",
+  "scope": "Extend extract_first_identifier_arg_ast (crates/tldr-core/src/security/taint.rs:3934) to descend through nested constructor / call / instance nodes when the first arg-list named child cannot be resolved as a direct identifier. Per-language descend-through set (post-premortem-amendment, M2 scope = Java + Scala ONLY): Java { object_creation_expression, method_invocation, parenthesized_expression }; Scala { call_expression, instance_expression, infix_expression }; Cpp DEFERRED to follow-on milestone cpp-deser-declaration-v1 (premortem REFUTED Hypothesis A via direct tree-sitter parse — cpp parses as `declaration → init_declarator → argument_list`, NOT `function_declarator`; helper invoked on `declaration` cannot reach the argument_list because (a) no `arguments` field and (b) positional fallback's kind-substring match does not match `init_declarator`). BFS-over-named-descendants with bounded recursion (depth 5) and string-kind filter at every level. Closes vuln-source-parity-v1 M5 Bucket B Java + Scala subset (2 of 3 tests; cpp deferred). NO public API change; NO new VulnType/TaintSinkType/TaintSourceType variants; NO new bank entries. The sub-helper extract_first_identifier_arg_ast_descent mirrors the BFS pattern already used for PHP echo_statement (taint.rs:3954-3982).",
   "closes_issues": [],
-  "closes_carry_forward": "vuln-source-parity-v1 M5 Bucket B (cpp/java/scala_deserialization_positive — 3 tests; minimum 2 if cpp Hypothesis A confirmed)",
+  "closes_carry_forward": "vuln-source-parity-v1 M5 Bucket B Java+Scala subset (2 of 3 tests; cpp deferred to cpp-deser-declaration-v1 follow-on)",
   "enables_followons": [
-    "cpp-deser-declaration-v1 (CONDITIONAL — only if M1 resolves Hypothesis A; closes 1 cpp_deserialization_positive)"
+    "cpp-deser-declaration-v1 (REQUIRED — premortem confirmed cpp scope-reduction is mandatory; closes 1 cpp_deserialization_positive via different fix-shape: tree-sitter-cpp `declaration` shape needs handling at sink-detection level, not helper level)"
   ],
-  "expected_post_milestone_red_count": 5,
-  "expected_post_milestone_red_count_note": "Drops vuln_migration_v1_red red count from 8 to 5 (closes 3 Bucket B). If cpp deferred under Hypothesis A: drops to 6 (closes 2 of 3); 1 cpp carry-forward documented at M3 with follow-on milestone name.",
+  "expected_post_milestone_red_count": 6,
+  "expected_post_milestone_red_count_note": "Drops vuln_migration_v1_red red count from 8 to 6 (closes 2 of 3 Bucket B: Java + Scala only). 1 cpp carry-forward documented at M3 with follow-on milestone name cpp-deser-declaration-v1. Premortem REFUTED Hypothesis A description — actual cpp shape is declaration→init_declarator→argument_list, fix-shape requires sink-detection-level work out of M2 scope.",
   "validator_verdict": "PASS_WITH_PREMORTEM_FIRST",
   "validator_mandates": {
-    "m1_cpp_shape_resolution_required": "M1 MUST resolve tree-sitter-cpp parse-shape Hypothesis A vs B for the fixture line `boost::archive::text_iarchive ia(std::stringstream(d) >> obj);` BEFORE M2 implementation. Document in reports/M1-cpp-ast-shape.txt. Hypothesis A = declaration with function_declarator (helper extension does NOT close cpp); Hypothesis B = call_expression with binary_expression first arg (helper extension closes cpp). If A: cpp scope drops to deferred follow-on milestone cpp-deser-declaration-v1; M2 scope = 2/3 (java + scala only).",
+    "m1_cpp_shape_resolution_required": "M1 MUST capture the actual tree-sitter-cpp parse-shape for the fixture line `boost::archive::text_iarchive ia(std::stringstream(d) >> obj);` and document in reports/M1-cpp-ast-shape.txt. Premortem (commit 88f5620) ALREADY REFUTED Hypothesis A's articulation in plan §3 cpp bullet via direct tree-sitter-cpp v0.23.4 parse: actual shape is `declaration → init_declarator { declarator: identifier(ia), value: argument_list { binary_expression { left: call_expression(std::stringstream → identifier(d)), right: identifier(obj) } } }` — there is NO function_declarator. M1 confirms this empirically and writes reports/M1-cpp-disposition.json with disposition=DEFERRED to follow-on milestone cpp-deser-declaration-v1. M2 scope = Java + Scala ONLY (2 of 3).",
+    "m2_cpp_excluded": "M2 MUST NOT touch any Cpp-specific node-kind handling. The descend-through set for Cpp is EMPTY (or the Cpp arm is omitted entirely from the per-language match). cpp_deserialization_positive remains as a documented carry-forward post-M2; it is the contract of the follow-on milestone cpp-deser-declaration-v1 (different fix-shape: tree-sitter-cpp `declaration` needs handling at sink-detection level, not helper level — out of M2 scope).",
     "m1_green_baseline_required": "M1 MUST capture 158-test GREEN baseline of vuln_migration_v1_red at HEAD 5d46628. Document in reports/M1-green-baseline.txt. M3 compares against this baseline for GREEN→RED regression detection.",
     "m1_red_capture_required": "M1 MUST run the 3 RED fixtures (cpp/java/scala_deserialization_positive) at HEAD 5d46628 and confirm all 3 are RED pre-fix. Document in reports/M1-red-capture.txt.",
     "m1_no_residual_test_code": "M1's cpp parse-shape inspection (if implemented as a transient #[test] in taint_tests.rs) MUST be reverted before M2 commits. Verification: `git diff crates/tldr-core/src/security/taint_tests.rs` returns empty between M1 commit and M2 commit.",
@@ -25,7 +26,7 @@
     "m2_bounded_recursion": "The recursive descent MUST be bounded (max depth 5). Unbounded recursion risks pathological performance on deeply-nested templates / generics.",
     "m3_green_regression_gate": "M3 MUST verify that all currently-GREEN tests in vuln_migration_v1_red (158 tests at HEAD), vuln_migration_v1_composite_red (1/1), rr_framework_integ_test (18/18), and test_e2e_in_security_vuln (36/36 test_e2e_*) remain GREEN. Any GREEN→RED transition triggers immediate M2 revert and root-cause investigation.",
     "m3_binary_smoke_string_literal_fp": "M3 MUST run binary smoke (`tldr vuln <fixture>`) on all 18 fixtures matching crates/tldr-cli/tests/fixtures/vuln_migration_v1/*/deserialization_string_literal_fp.* and document 0 findings each. Closes-#24 regression-guard.",
-    "m3_red_count_delta_assertion": "M3 MUST verify vuln_migration_v1_red red count drops by exactly 3 (Hypothesis B) or 2 (Hypothesis A). Any other delta triggers investigation before M4.",
+    "m3_red_count_delta_assertion": "M3 MUST verify vuln_migration_v1_red red count drops by exactly 2 (Java + Scala close; Cpp deferred). Any other delta triggers investigation before M4. Per premortem amendment, Hypothesis-B branch is no longer reachable — actual cpp shape was REFUTED via direct tree-sitter parse.",
     "m4_changelog_no_public_api_note": "M4 CHANGELOG MUST cite that NO public API change occurred and NO new TaintSinkType / TaintSourceType / VulnType variants were added (avoid future confusion).",
     "m4_no_push_no_publish_no_version_bump": "M4 MUST NOT push to remote, MUST NOT run cargo publish, MUST NOT bump any version. Local tag only.",
     "cargo_lock_never_staged": "Per-commit guard: `git checkout HEAD -- Cargo.lock` if dirty before staging."
@@ -92,14 +93,12 @@
       "red_tests": [
         {
           "file": "crates/tldr-cli/tests/vuln_migration_v1_red.rs",
-          "names_HypothesisB": [
-            "cpp_deserialization_positive",
+          "names": [
             "java_deserialization_positive",
             "scala_deserialization_positive"
           ],
-          "names_HypothesisA": [
-            "java_deserialization_positive",
-            "scala_deserialization_positive"
+          "deferred_cpp_carry_forward": [
+            "cpp_deserialization_positive (NOT closed by M2; deferred to cpp-deser-declaration-v1 per premortem refutation of Hypothesis A)"
           ]
         }
       ],
@@ -110,8 +109,8 @@
           "additions": [
             "Add new private fn extract_first_identifier_arg_ast_descent (BFS-over-named-descendants helper) below extract_first_identifier_arg_ast. Bounded recursion (depth 5). Applies string_node_kinds filter at every level. Returns Option<String> matching the existing helper's identifier-validation rules.",
             "In the existing helper's main loop body (L4039-4062), after the direct-identifier extraction attempt fails for a child, check if the child's kind is in a per-language descend-through set; if so, invoke the new sub-helper.",
-            "Per-language descend-through set: Java { object_creation_expression, method_invocation, parenthesized_expression }; Scala { call_expression, instance_expression, infix_expression }; Cpp { call_expression, binary_expression } CONDITIONAL on M1 Hypothesis B resolution.",
-            "Add VAR-EXTRACT-NESTED-CONSTRUCTOR-V1 doc-comment block citing M1 cpp disposition reference, the BFS-pattern precedent (PHP echo_statement L3954-3982; OCaml application_expression L3989-4016), and the per-language node-kind set rationale."
+            "Per-language descend-through set (M2 scope per premortem amendment): Java { object_creation_expression, method_invocation, parenthesized_expression }; Scala { call_expression, instance_expression, infix_expression }. Cpp arm OMITTED — cpp deferred to cpp-deser-declaration-v1.",
+            "Add VAR-EXTRACT-NESTED-CONSTRUCTOR-V1 doc-comment block citing M1 cpp disposition reference (DEFERRED), the BFS-pattern precedent (PHP echo_statement L3954-3982 ONLY — OCaml application_expression L3989-4016 is a flat 1-level scan, not BFS), and the per-language node-kind set rationale."
           ],
           "preserved": [
             "extract_first_identifier_arg_ast existing PHP echo_statement special-case (L3941-3983)",
@@ -127,12 +126,12 @@
       "stop_thresholds": [
         "cargo check --workspace PASS",
         "cargo clippy --all-targets --workspace -- -D warnings PASS",
-        "Hypothesis B: 3 RED → GREEN (cpp + java + scala_deserialization_positive)",
-        "Hypothesis A: 2 RED → GREEN (java + scala_deserialization_positive); cpp remains RED, deferred",
+        "2 RED → GREEN (java + scala_deserialization_positive); cpp_deserialization_positive remains RED (deferred to cpp-deser-declaration-v1 per premortem amendment)",
         "All 158 currently-GREEN tests in vuln_migration_v1_red remain GREEN (gating)",
         "vuln_migration_v1_composite_red 1/1 GREEN",
         "rr_framework_integ_test 18/18 GREEN",
-        "test_e2e_in_security_vuln 36/36 GREEN"
+        "test_e2e_in_security_vuln 36/36 GREEN",
+        "M2 source diff MUST NOT contain any Cpp-specific node-kind handling (validator mandate m2_cpp_excluded)"
       ]
     },
     {
@@ -151,24 +150,25 @@
       "green_files": [],
       "verification_steps": [
         "cargo test -p tldr-cli --release --test vuln_migration_v1_red --no-fail-fast 2>&1 | tee reports/M3-vuln-red-capture.txt",
-        "Expected red count delta: -3 (Hypothesis B; 5 RED post-fix) or -2 (Hypothesis A; 6 RED post-fix). Assert delta matches Hypothesis resolved at M1.",
+        "Expected red count delta: -2 (8 → 6). Java + Scala close; Cpp deferred per premortem amendment. Any other delta triggers investigation before M4.",
         "cargo test -p tldr-cli --release --test vuln_migration_v1_composite_red 2>&1 | tee reports/M3-composite-red-capture.txt — expect 1/1 PASS",
         "cargo test -p tldr-core --release --test rr_framework_integ_test 2>&1 | tee reports/M3-rr-framework-capture.txt — expect 18/18 PASS",
         "cargo test -p tldr-core --release --lib security::vuln 2>&1 | tee reports/M3-tldr-core-capture.txt — expect 36/36 test_e2e_* PASS",
-        "cargo test --workspace --release --no-fail-fast 2>&1 | tee reports/M3-workspace-sweep.txt — expect overall PASS modulo pre-existing carry-forwards (5 if Hypothesis B, 6 if Hypothesis A)",
+        "cargo test --workspace --release --no-fail-fast 2>&1 | tee reports/M3-workspace-sweep.txt — expect overall PASS modulo pre-existing carry-forwards (6 post-M2: 5 Bucket A + 1 Bucket B cpp deferred)",
         "Binary smoke: for f in crates/tldr-cli/tests/fixtures/vuln_migration_v1/*/deserialization_string_literal_fp.*; do tldr vuln \"$f\"; done — expect 0 findings each. Document in reports/M3-binary-smoke.json + reports/M3-binary-smoke.txt.",
-        "Write reports/M3-report.json: pre/post counts (8 → 5 or 6), fixtures closed (3 or 2), regression-sweep result, cpp disposition reference, follow-on milestone name (if cpp deferred)"
+        "Write reports/M3-report.json: pre/post counts (8 → 6), fixtures closed (2: java + scala), regression-sweep result, cpp disposition reference, follow-on milestone name cpp-deser-declaration-v1",
+        "Write reports/M3-cpp-deferred.json with rationale (premortem-refuted Hypothesis A; actual shape is declaration→init_declarator→argument_list, fix-shape requires sink-detection-level work) and follow-on milestone name cpp-deser-declaration-v1"
       ],
       "loc_delta": 0,
       "stop_thresholds": [
-        "vuln_migration_v1_red red count exactly 5 (Hypothesis B) or 6 (Hypothesis A)",
+        "vuln_migration_v1_red red count exactly 6 (8 → 6; -2 delta; Java + Scala closed; Cpp deferred)",
         "All 158 currently-GREEN tests at HEAD remain GREEN (no GREEN→RED transitions)",
         "All 18 *_string_literal_fp fixtures yield 0 findings under tldr vuln",
         "rr_framework_integ_test 18/18 PASS",
         "test_e2e_in_security_vuln 36/36 PASS",
         "vuln_migration_v1_composite_red 1/1 PASS",
         "cargo test --workspace --release --no-fail-fast PASS overall (modulo carry-forwards)",
-        "If cpp deferred: reports/M3-cpp-deferred.json written with follow-on milestone name cpp-deser-declaration-v1 and rationale"
+        "reports/M3-cpp-deferred.json written with follow-on milestone name cpp-deser-declaration-v1 and rationale (premortem-refuted Hypothesis A)"
       ]
     },
     {
@@ -201,15 +201,11 @@
       ]
     }
   ],
-  "per_language_verdict_HypothesisB": {
+  "per_language_verdict": {
     "Java": "GO",
     "Scala": "GO",
-    "Cpp": "GO"
-  },
-  "per_language_verdict_HypothesisA": {
-    "Java": "GO",
-    "Scala": "GO",
-    "Cpp": "DEFER_TO_cpp-deser-declaration-v1"
+    "Cpp": "DEFER_TO_cpp-deser-declaration-v1",
+    "_note": "Premortem (commit 88f5620) REFUTED Hypothesis A's articulation via direct tree-sitter-cpp v0.23.4 parse. Actual shape: declaration → init_declarator → argument_list (NOT function_declarator). Hypothesis-B branch unreachable. M2 scope = Java + Scala only."
   },
   "loc_delta_summary": {
     "m1_reports_only": 0,
@@ -287,19 +283,11 @@
     }
   ],
   "carry_forward_after_milestone": {
-    "HypothesisB_outcome": {
-      "vuln_migration_v1_red_red_count": 5,
-      "carry_forward_count": 5,
-      "remaining_buckets": "Bucket A only (1 Ruby + 4 Rust); Bucket B fully closed",
-      "matches_original_M5_dispatch_contract_cap": true
-    },
-    "HypothesisA_outcome": {
-      "vuln_migration_v1_red_red_count": 6,
-      "carry_forward_count": 6,
-      "remaining_buckets": "Bucket A (5: 1 Ruby + 4 Rust) + Bucket B partial (1 cpp_deserialization_positive)",
-      "matches_original_M5_dispatch_contract_cap": false,
-      "rationale": "1 over original cap of 5; explicit non-additive-resolution with documented follow-on milestone cpp-deser-declaration-v1"
-    }
+    "vuln_migration_v1_red_red_count": 6,
+    "carry_forward_count": 6,
+    "remaining_buckets": "Bucket A (5: 1 Ruby + 4 Rust) + Bucket B partial (1 cpp_deserialization_positive deferred to cpp-deser-declaration-v1)",
+    "matches_original_M5_dispatch_contract_cap": false,
+    "rationale": "1 over original cap of 5. Premortem (commit 88f5620) REFUTED Hypothesis A's articulation via direct tree-sitter parse: actual cpp shape is declaration→init_declarator→argument_list (NOT function_declarator). Helper extension cannot reach the argument_list. Cpp scope-reduction is mandatory; explicit non-additive-resolution with documented follow-on milestone cpp-deser-declaration-v1."
   },
   "pipeline_metadata": {
     "source_loops": "var-extract-nested-constructor-v1-plan",
