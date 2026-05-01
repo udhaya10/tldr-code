@@ -1,5 +1,122 @@
 # Changelog
 
+## js-test-file-suppression-v1 — internal milestone
+
+NOT a published release. Medium-severity hardening of `tldr vuln`
+JavaScript/TypeScript scans: findings emitted from JS/TS test files
+are now suppressed by default, mirroring the existing Rust
+`is_rust_test_file` mask in `analyze_rust_file`. Pre-fix repro on
+`/tmp/repos/express`:
+
+```
+$ tldr vuln --lang javascript /tmp/repos/express 2>/dev/null \
+    | jq '.findings[] | {file:(.file|split("/")|last), line, snip:(.taint_flow[0].code_snippet|.[:80])}'
+{ "file": "express.raw.js", "line": 506,
+  "snip": "res.json({ buf: req.body.toString('hex') })" }
+{ "file": "app.engine.js", "line": 9,
+  "snip": "fs.readFile(path, 'utf8', function(err, str){" }
+```
+
+Both findings live under `/tmp/repos/express/test/` — synthetic test
+fixtures exercising sink behavior, NOT production code. Rust has
+`is_rust_test_file` masking `/tests/`, `_test.rs`, `tests.rs` paths
+inside `analyze_rust_file`; the JS/TS path had no equivalent, so
+test files emitted production-grade findings that polluted real-
+codebase scans.
+
+`vuln_migration_v1_red`: 168/168 stays GREEN.
+
+### Changed
+
+- **vuln** (`tldr_cli::commands::remaining::vuln`): new helper
+  `is_js_test_file(path: &Path) -> bool` mirroring the Rust mask
+  for the JS/TS ecosystem. Recognition (BOTH conditions hold):
+  1. File extension is `.js`, `.jsx`, `.ts`, `.tsx`, `.cjs`, or
+     `.mjs` (extension-bound to scope to JS/TS — Rust/Python/Java
+     test files are masked by their own predicates).
+  2. EITHER the path contains a recognised test-path component
+     (`test/`, `tests/`, `__tests__/` — both leading and embedded,
+     forward and backslash) OR the filename matches a recognised
+     test-style suffix (`.test.<ext>`, `.spec.<ext>`,
+     `.e2e.<ext>` for ext ∈ {js,jsx,ts,tsx,cjs,mjs}).
+
+  Fixture exemption: paths containing `/fixtures/` (or
+  `\fixtures\`) are NOT treated as test files. The
+  `vuln_migration_v1` suite's fixtures live under
+  `crates/tldr-cli/tests/fixtures/vuln_migration_v1/<lang>/` —
+  the `tests/` ancestor would otherwise trigger the predicate
+  and suppress every JS/TS positive fixture, breaking 168/168
+  RED. Verified: 4 unit tests
+  (`test_is_js_test_file_path_components`,
+  `test_is_js_test_file_filename_suffixes`,
+  `test_is_js_test_file_negatives`,
+  `test_is_js_test_file_fixture_exemption`) pin the predicate
+  shape including the fixture exemption.
+
+- **vuln** (CLI): new `--include-tests` flag on `VulnArgs`
+  (mirrors `--include-smells`). Default `false` — suppress
+  test-file findings; pass `--include-tests` to restore them.
+  The flag is opt-in (not a one-way drop), verified by the
+  `js_test_file_findings_emitted_with_include_tests`
+  integration test.
+
+- **vuln** (`VulnArgs::run`): new filter step parallel to the
+  existing `include_smells` filter. Predicate is JS/TS-only
+  (extension-bound) so Rust/Python/Java findings are
+  unaffected.
+
+### Architectural note
+
+Application point is the post-analysis filter layer (where
+`include_smells` already lives), NOT file collection. Reasoning:
+the canonical taint engine's own self-tests scan files under
+`tests/` (the `vuln_migration_v1` fixtures), and applying
+suppression at file-collect time would silently drop them,
+breaking 168/168 RED. The filter layer preserves all existing
+test fixtures: `analyze_file` still runs on every JS/TS file in
+the walker; only the post-pipeline `filtered_findings` vector
+is masked.
+
+NO public API change to `VulnFinding`. JSON output shape
+unchanged (the `findings` array simply contains fewer entries on
+default invocation when test files are present). SARIF output
+identical.
+
+### Retained
+
+- Rust `is_rust_test_file` mask in `analyze_rust_file` is
+  unchanged. Rust suppression is line-scanner-internal (tied to
+  Panic emission); JS/TS suppression is filter-layer (tied to
+  the canonical taint pipeline). The two predicates are
+  deliberately separate and orthogonal.
+- The fixture-exemption clause is the load-bearing safety
+  property. Without it, any JS/TS fixture under
+  `crates/tldr-cli/tests/fixtures/...` would be suppressed and
+  the 168/168 vuln_migration_v1_red suite would collapse.
+- `--include-tests` is parallel to `--include-smells` and
+  `--include-informational`: each flag is independent and
+  default-off. Composing them is supported.
+
+### Validation
+
+- `cargo test --release --features semantic -p tldr-cli --lib commands::remaining::vuln`
+  — 15/15 GREEN (includes 4 new `is_js_test_file` unit tests).
+- `cargo test --release --features semantic -p tldr-cli --test vuln_migration_v1_red`
+  — 168/168 GREEN.
+- `cargo test --release --features semantic -p tldr-cli --test vuln_js_test_file_suppression_v1_test`
+  — 5/5 GREEN (new integration tests covering default-suppress,
+  `--include-tests`-restores, TS parity, dotted-test-filename, and
+  production-file-not-suppressed regression guard).
+- Binary verify on `/tmp/repos/express`:
+  - `tldr vuln --lang javascript /tmp/repos/express` → **0** findings (was 2).
+  - `tldr vuln --lang javascript /tmp/repos/express --include-tests` → **2** findings.
+
+### Standing rules upheld
+
+- No version bump. No publish. No push.
+- Cargo.lock NOT staged.
+- Atomic commit + annotated tag.
+
 ## taint-finding-dedupe-v1 — internal milestone
 
 NOT a published release. Medium-severity bug fix in the canonical

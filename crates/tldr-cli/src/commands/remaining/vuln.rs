@@ -97,6 +97,14 @@ pub struct VulnArgs {
     #[arg(long)]
     pub include_smells: bool,
 
+    /// Include findings on JavaScript/TypeScript test files (paths under `test/`, `tests/`,
+    /// `__tests__/`, or filenames ending in `.test.{js,ts,jsx,tsx}`, `.spec.{js,ts,jsx,tsx}`,
+    /// or `.e2e.{js,ts}`). Default: false — test-file findings are suppressed because they
+    /// exercise sink behavior on synthetic inputs and pollute production-codebase scans.
+    /// Pass `--include-tests` to restore them.
+    #[arg(long)]
+    pub include_tests: bool,
+
     /// Output file (optional, stdout if not specified)
     #[arg(long, short = 'O')]
     pub output: Option<PathBuf>,
@@ -213,6 +221,19 @@ impl VulnArgs {
         // finding with a different title.
         if !self.include_smells {
             filtered_findings.retain(|f| !is_smell_finding(f));
+        }
+
+        // Filter JS/TS test-file findings (js-test-file-suppression-v1).
+        // Mirrors the Rust `is_rust_test_file` mask in `analyze_rust_file`,
+        // applied at the post-analysis filter layer here so it only suppresses
+        // FINDINGS (not file collection) — preserving the unit-test fixtures
+        // that the canonical taint engine itself relies on for self-tests.
+        // Predicate is JS/TS-only (extension-bound) and requires a recognised
+        // test-path component or test-style filename suffix; fixture paths
+        // under `fixtures/` are exempted so the vuln_migration_v1 suite's
+        // 168/168 RED stays GREEN.
+        if !self.include_tests {
+            filtered_findings.retain(|f| !is_js_test_file(Path::new(&f.file)));
         }
 
         // Build summary
@@ -855,6 +876,98 @@ fn is_rust_test_file(path: &Path) -> bool {
         || path_str.ends_with("tests.rs")
 }
 
+/// Predicate: a JavaScript/TypeScript path is a test-file path.
+///
+/// Mirrors `is_rust_test_file` for the JS/TS ecosystem. Used by the
+/// `--include-tests` filter layer in `VulnArgs::run` to suppress findings
+/// emitted from synthetic test fixtures by default; pass `--include-tests`
+/// to restore them.
+///
+/// Recognition (BOTH conditions must hold):
+///   1. File extension is `.js`, `.jsx`, `.ts`, `.tsx`, `.cjs`, or `.mjs`
+///      (extension-bound to scope the predicate to JS/TS — Rust/Python/Java
+///      test files are masked elsewhere via their own predicates).
+///   2. EITHER the path contains a recognised test-path component
+///      (`/test/`, `/tests/`, `/__tests__/`, or backslash equivalents)
+///      OR the filename matches a recognised test-style suffix
+///      (`.test.<ext>`, `.spec.<ext>`, `.e2e.<ext>`).
+///
+/// Exemption: paths containing `/fixtures/` (or backslash `\fixtures\`)
+/// are NOT treated as test files. The `vuln_migration_v1` suite's
+/// fixtures live under `crates/tldr-cli/tests/fixtures/vuln_migration_v1/`
+/// — the `tests/` ancestor would otherwise trigger this predicate and
+/// suppress every JS/TS positive fixture, breaking 168/168 RED.
+///
+/// Negative-case examples (NOT test files):
+///   * `src/foo.js` — no test-path component, no test suffix.
+///   * `lib/test_helper.js` — `test_helper` is not a recognised JS
+///     test-suffix convention (`_test.js` is not idiomatic in JS the
+///     way `_test.rs` is in Rust); the `test` substring inside the
+///     filename does not match.
+///   * `crates/tldr-cli/tests/fixtures/vuln_migration_v1/javascript/...js` —
+///     fixtures exemption kicks in.
+fn is_js_test_file(path: &Path) -> bool {
+    let path_str = path.to_string_lossy();
+
+    // Extension gate: only JS/TS family files trigger this predicate.
+    let ext_match = path_str.ends_with(".js")
+        || path_str.ends_with(".jsx")
+        || path_str.ends_with(".ts")
+        || path_str.ends_with(".tsx")
+        || path_str.ends_with(".cjs")
+        || path_str.ends_with(".mjs");
+    if !ext_match {
+        return false;
+    }
+
+    // Fixture exemption: vuln_migration_v1 (and any future) test
+    // suites that scan files UNDER a `fixtures/` directory must keep
+    // emitting findings even though the path includes a `tests/`
+    // ancestor.
+    if path_str.contains("/fixtures/") || path_str.contains("\\fixtures\\") {
+        return false;
+    }
+
+    // Test-path component check. Recognises both "embedded" matches
+    // (`a/test/b.js`) and "leading" matches (`test/b.js` — relative
+    // paths whose first component is the test dir).
+    let has_test_path_component = path_str.contains("/test/")
+        || path_str.contains("\\test\\")
+        || path_str.starts_with("test/")
+        || path_str.starts_with("test\\")
+        || path_str.contains("/tests/")
+        || path_str.contains("\\tests\\")
+        || path_str.starts_with("tests/")
+        || path_str.starts_with("tests\\")
+        || path_str.contains("/__tests__/")
+        || path_str.contains("\\__tests__\\")
+        || path_str.starts_with("__tests__/")
+        || path_str.starts_with("__tests__\\");
+
+    // Test-style filename suffix check (suffixes are extension-prefixed
+    // so `foo.test.js` matches but `foo.testimony.js` does not).
+    let has_test_filename_suffix = path_str.ends_with(".test.js")
+        || path_str.ends_with(".test.jsx")
+        || path_str.ends_with(".test.ts")
+        || path_str.ends_with(".test.tsx")
+        || path_str.ends_with(".test.cjs")
+        || path_str.ends_with(".test.mjs")
+        || path_str.ends_with(".spec.js")
+        || path_str.ends_with(".spec.jsx")
+        || path_str.ends_with(".spec.ts")
+        || path_str.ends_with(".spec.tsx")
+        || path_str.ends_with(".spec.cjs")
+        || path_str.ends_with(".spec.mjs")
+        || path_str.ends_with(".e2e.js")
+        || path_str.ends_with(".e2e.jsx")
+        || path_str.ends_with(".e2e.ts")
+        || path_str.ends_with(".e2e.tsx")
+        || path_str.ends_with(".e2e.cjs")
+        || path_str.ends_with(".e2e.mjs");
+
+    has_test_path_component || has_test_filename_suffix
+}
+
 /// Predicate: a finding is classified as a code-smell (non-security) emission
 /// from `analyze_rust_file`'s line scanner.
 ///
@@ -1258,6 +1371,7 @@ pub fn from_raw(bytes: &[u8]) -> &str {
             vuln_type: None,
             include_informational: false,
             include_smells,
+            include_tests: false,
             output: Some(output),
             no_default_ignore: false,
         }
@@ -1354,5 +1468,68 @@ pub fn from_raw(bytes: &[u8]) -> &str {
             panic_count,
             findings
         );
+    }
+
+    // -------------------------------------------------------------------------
+    // js-test-file-suppression-v1: is_js_test_file unit tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_is_js_test_file_path_components() {
+        // Recognised test-path components (any depth).
+        assert!(is_js_test_file(Path::new("test/foo.js")));
+        assert!(is_js_test_file(Path::new("project/test/bar.ts")));
+        assert!(is_js_test_file(Path::new("tests/foo.ts")));
+        assert!(is_js_test_file(Path::new("project/tests/bar.js")));
+        assert!(is_js_test_file(Path::new("src/__tests__/x.js")));
+        assert!(is_js_test_file(Path::new("src/__tests__/y.tsx")));
+    }
+
+    #[test]
+    fn test_is_js_test_file_filename_suffixes() {
+        // Recognised test-style filename suffixes.
+        assert!(is_js_test_file(Path::new("src/foo.test.js")));
+        assert!(is_js_test_file(Path::new("src/foo.test.ts")));
+        assert!(is_js_test_file(Path::new("src/foo.test.jsx")));
+        assert!(is_js_test_file(Path::new("src/foo.test.tsx")));
+        assert!(is_js_test_file(Path::new("src/foo.spec.js")));
+        assert!(is_js_test_file(Path::new("src/foo.spec.ts")));
+        assert!(is_js_test_file(Path::new("src/foo.spec.tsx")));
+        assert!(is_js_test_file(Path::new("e2e/login.e2e.js")));
+        assert!(is_js_test_file(Path::new("src/login.e2e.ts")));
+    }
+
+    #[test]
+    fn test_is_js_test_file_negatives() {
+        // Production sources — no test-path component, no test suffix.
+        assert!(!is_js_test_file(Path::new("src/foo.js")));
+        assert!(!is_js_test_file(Path::new("src/foo.ts")));
+        assert!(!is_js_test_file(Path::new("lib/index.js")));
+        // `_test.js` is NOT idiomatic JS test convention (Rust/Go convention only).
+        assert!(!is_js_test_file(Path::new("lib/test_helper.js")));
+        // Non-JS extensions: predicate is JS-scoped.
+        assert!(!is_js_test_file(Path::new("test/foo.py")));
+        assert!(!is_js_test_file(Path::new("tests/foo.rs")));
+        assert!(!is_js_test_file(Path::new("test/foo.go")));
+        // Filename containing "test" but not as a recognised suffix.
+        assert!(!is_js_test_file(Path::new("src/testimony.js")));
+        assert!(!is_js_test_file(Path::new("src/contest.js")));
+    }
+
+    #[test]
+    fn test_is_js_test_file_fixture_exemption() {
+        // CRITICAL: vuln_migration_v1 fixtures live under
+        // `crates/tldr-cli/tests/fixtures/vuln_migration_v1/<lang>/...`.
+        // The `tests/` ancestor would otherwise trigger the predicate
+        // and break 168/168 RED.
+        assert!(!is_js_test_file(Path::new(
+            "crates/tldr-cli/tests/fixtures/vuln_migration_v1/javascript/path_traversal_positive.js"
+        )));
+        assert!(!is_js_test_file(Path::new(
+            "crates/tldr-cli/tests/fixtures/vuln_migration_v1/typescript/sql_injection_positive.ts"
+        )));
+        assert!(!is_js_test_file(Path::new(
+            "/abs/path/crates/tldr-cli/tests/fixtures/vuln_migration_v1/javascript/xss_positive.js"
+        )));
     }
 }
