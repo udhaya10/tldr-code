@@ -1,5 +1,77 @@
 # Changelog
 
+## cpp-deser-declaration-v1 — internal milestone
+
+NOT a published release. Closes the LAST remaining carry-forward from
+vuln-source-parity-v1 M5 Bucket B — Cpp subset
+(`cpp_deserialization_positive`). `vuln_migration_v1_red` now 168/168
+GREEN. Single source-file edit (`crates/tldr-core/src/security/taint.rs`)
+extending `extract_first_identifier_arg_ast` with a Cpp `declaration`
+entry arm and a forward-coverage Cpp branch in the per-language
+`descend_kinds` match.
+
+### Changed
+
+- **taint var-extraction**: `extract_first_identifier_arg_ast` gains a
+  Cpp arm placed before the generic args-list lookup. When
+  `language == Language::Cpp && descendant.kind() == "declaration"`, the
+  helper walks the descendant's named children for an `init_declarator`,
+  resolves its `value` field to the `argument_list` node, and delegates
+  to `extract_first_identifier_arg_ast_descent` (depth=0). tree-sitter-cpp
+  0.23.4 parses
+  `boost::archive::text_iarchive ia(std::stringstream(d) >> obj);` as
+  `declaration → init_declarator { value: argument_list { binary_expression
+  { left: call_expression(std::stringstream → identifier(d)) } } }`; the
+  `declaration` node has no `arguments` field and `init_declarator` does
+  not match `kind.contains("argument")`, so pre-M2 the generic args-list
+  lookup returned `None` and the source/sink pair was silently dropped.
+  The descent helper's per-level `string_node_kinds(language)` filter at
+  every recursion step preserves the closes-#24 string-literal
+  regression-guard by construction.
+
+### Added
+
+- **forward coverage**: Cpp branch added to the per-language
+  `descend_kinds` match arm with
+  `["binary_expression", "call_expression", "parenthesized_expression",
+  "argument_list"]`. This is COSMETIC for `cpp_deserialization_positive`
+  (whose flow short-circuits via the new entry arm before reaching the
+  args-list lookup) but PROVIDES PROTECTION for future Cpp
+  `call_expression` sinks whose first arg is a nested constructor /
+  parenthesised / binary expression.
+
+### Architectural note
+
+NO public API change. NO new `TaintSinkType` / `TaintSourceType` /
+`VulnType` variants. NO bank modifications (`CPP_AST_SINKS` already had
+the `boost::archive::text_iarchive` Deserialize entry). NO test
+modifications. The descent helper
+(`extract_first_identifier_arg_ast_descent`) body is unchanged — still
+unconditional BFS over named descendants with depth bound `MAX_DEPTH=5`
+and per-level string-kind filter. The new Cpp arm in the OUTER helper
+mirrors the BFS-style language-specific arms already present for PHP
+echo / Ruby subshell / OCaml application_expression. Predecessor
+milestone `var-extract-nested-constructor-v1` deferred Cpp scope per its
+premortem amendment A1; this milestone closes that deferral. Pre-dispatch
+discriminative premortem (commit `1c78826`) issued amendments A1
+(documentation: descend_kinds match arm lives in OUTER helper) and A2
+(fixture count correction: 13 deserialization-specific, 84 broader
+`*_string_literal_fp` glob); both applied.
+
+### Retained
+
+- `extract_first_identifier_arg_ast_descent` body unchanged.
+- `CPP_AST_SINKS` Deserialize entry unchanged.
+- `member_patterns_match` / `field_access_info` / `extract_call_name_*`
+  unchanged.
+- All 167 currently-GREEN `vuln_migration_v1_red` tests at HEAD remain
+  GREEN; the 1 RED transitions to GREEN (168/168 GREEN).
+- All 13 `*/deserialization_string_literal_fp.*` fixtures yield 0
+  findings post-merge (closes-#24 regression-guard preserved).
+- All 80 scanned `*_string_literal_fp.*` fixtures across the broader 84
+  glob yield 0 findings (4 luau fixtures skipped — luau ext not in
+  `tldr vuln --lang` autodetect map).
+
 ## rust-vuln-taint-pipeline-v1 — internal milestone
 
 NOT a published release. Closes 4 of the remaining carry-forwards from

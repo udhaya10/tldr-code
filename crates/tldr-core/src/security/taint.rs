@@ -4036,6 +4036,50 @@ fn extract_first_identifier_arg_ast(
         return None;
     }
 
+    // CPP-DESER-DECLARATION-V1: Cpp typed-local-declaration sink shape.
+    //
+    // tree-sitter-cpp 0.23.4 parses
+    // `boost::archive::text_iarchive ia(std::stringstream(d) >> obj);` as
+    // `declaration → init_declarator { value: argument_list { binary_expression
+    // { left: call_expression(std::stringstream → identifier(d)) ... } } }`.
+    // The descendant matched by detect_sinks_ast for the
+    // `boost::archive::text_iarchive` Deserialize sink is the `declaration`
+    // node itself. `declaration` has neither an `arguments` field nor any
+    // child whose kind contains "argument" (the `init_declarator` does not
+    // match `kind.contains("argument")`), so the generic args-list lookup at
+    // L4076 returns None and var-extraction silently drops the source/sink
+    // pair → cpp_deserialization_positive RED.
+    //
+    // Walk: descendant(declaration) → child of kind init_declarator
+    // → child_by_field_name("value") = argument_list. Then delegate to
+    // extract_first_identifier_arg_ast_descent (added by
+    // var-extract-nested-constructor-v1) which BFS-traverses the
+    // argument_list's named descendants in source order, with the
+    // string-kind filter applied at every level — so closes-#24
+    // string-literal regression-guard is preserved by construction.
+    //
+    // Mirrors the BFS-style language-specific arms at L3959-3994 (PHP echo)
+    // and L4013-4036 (Ruby subshell): early-arm short-circuits before the
+    // generic args-list lookup.
+    if language == Language::Cpp && descendant.kind() == "declaration" {
+        for i in 0..descendant.child_count() {
+            let Some(init_decl) = descendant.child(i) else {
+                continue;
+            };
+            if !init_decl.is_named() || init_decl.kind() != "init_declarator" {
+                continue;
+            }
+            if let Some(value) = init_decl.child_by_field_name("value") {
+                if let Some(found) =
+                    extract_first_identifier_arg_ast_descent(&value, source, language, 0)
+                {
+                    return Some(found);
+                }
+            }
+        }
+        return None;
+    }
+
     // OCaml application_expression has no "arguments" field — child(0) is the
     // function expression and child(1..) are the arguments. Scan from child(1).
     // (M5 carry-forward: pre-M5 the regex bank's `extract_call_arg` text-scanned
@@ -4103,17 +4147,20 @@ fn extract_first_identifier_arg_ast(
     //   * Java   : { object_creation_expression, method_invocation,
     //                parenthesized_expression }
     //   * Scala  : { call_expression, instance_expression, infix_expression }
+    //   * Cpp    : { binary_expression, call_expression,
+    //                parenthesized_expression, argument_list }
     //
-    // Cpp DEFERRED to follow-on milestone `cpp-deser-declaration-v1` per
-    // premortem amendment A1 — premortem (commit 88f5620) directly parsed
-    // `boost::archive::text_iarchive ia(std::stringstream(d) >> obj);` with
-    // tree-sitter-cpp v0.23.4 and REFUTED the `function_declarator`
-    // articulation: actual cpp shape is `declaration → init_declarator →
-    // argument_list`. The helper invoked on `declaration` cannot reach the
-    // argument_list (no `arguments` field; positional fallback's
-    // `kind.contains("argument")` does not match `init_declarator`). Different
-    // fix-shape required at sink-detection level (out of M2 scope). No Cpp
-    // arm here.
+    // CPP-DESER-DECLARATION-V1: the Cpp descend-through set is FORWARD-COVERAGE
+    // for future Cpp call_expression sinks whose first argument is a nested
+    // constructor / parenthesised / binary expression. The cpp_deserialization_
+    // positive fixture (matched on `declaration` node) does NOT consult this
+    // path — it short-circuits via the new entry arm above the generic
+    // args-list lookup at L4076 and delegates straight to the descent helper.
+    // The extension here is a separate forward-coverage hook reachable only
+    // when extract_first_identifier_arg_ast is invoked on a Cpp
+    // call_expression-shaped descendant (e.g., a future
+    // cpp/path_traversal_positive style fixture wrapping a nested constructor
+    // in the argument list).
     let descend_kinds: &[&str] = match language {
         Language::Java => &[
             "object_creation_expression",
@@ -4124,6 +4171,12 @@ fn extract_first_identifier_arg_ast(
             "call_expression",
             "instance_expression",
             "infix_expression",
+        ],
+        Language::Cpp => &[
+            "binary_expression",
+            "call_expression",
+            "parenthesized_expression",
+            "argument_list",
         ],
         _ => &[],
     };
@@ -4175,8 +4228,9 @@ fn extract_first_identifier_arg_ast(
 ///
 /// Closes vuln-source-parity-v1 M5 Bucket B Java + Scala subset
 /// (java_deserialization_positive, scala_deserialization_positive).
-/// cpp_deserialization_positive deferred to `cpp-deser-declaration-v1`
-/// follow-on per premortem amendment A1.
+/// cpp_deserialization_positive is closed by `cpp-deser-declaration-v1`
+/// via a Cpp `declaration` entry arm in the OUTER helper that delegates
+/// to this descent helper on the init_declarator's `value` argument_list.
 fn extract_first_identifier_arg_ast_descent(
     node: &tree_sitter::Node,
     source: &[u8],
