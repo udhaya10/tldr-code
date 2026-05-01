@@ -107,7 +107,7 @@ fn analyze_file(path: &Path) -> Result<Vec<VulnFinding>, RemainingError> {
 - Test fixtures asserting `≥1 command_injection` see canonical findings emerge — the line scanner's CommandInjection finding may be deduped, but at least one finding survives.
 - `tldr taint` behavior unchanged (no plumbing change at the canonical layer).
 - `map_core_vuln_type` exhaustive-match contract preserved.
-- All 9 existing `test_analyze_rust_*` unit tests in vuln.rs:925-1037 continue to GREEN — they call `analyze_rust_file` directly and don't observe the dispatcher's merged output.
+- All 9 `#[test]` fns in the `commands::remaining::vuln::tests` module at vuln.rs:925-1037 continue to GREEN — they call `analyze_rust_file` directly and don't observe the dispatcher's merged output. Of the 9, 6 prefix-match `test_analyze_rust_detects_*` (the line-scanner emit-category coverage); the remaining 3 are `test_collect_files_includes_rust`, `test_vuln_type_cwe_mapping`, `test_vuln_type_severity` (auxiliary). The regression guard is the full module, NOT just the 6 prefix-matched tests — see A4 amendment in §11.
 
 ### What Option C explicitly does NOT preserve
 
@@ -248,7 +248,9 @@ fn analyze_file(path: &Path) -> Result<Vec<VulnFinding>, RemainingError> {
 
 ### Why C's overlap risk is manageable
 
-The line scanner's `SqlInjection` trigger is `format!(... SQL keyword ...)` on a single line — narrow pattern. Its `CommandInjection` trigger is `Command::new + .arg(non-string-literal)` across a 2-line block. Neither fires on lines that aren't already structural sinks. Empirically: the 4 RED positive fixtures will fire `CommandInjection` from BOTH layers on the same line for `command_injection_positive.rs`; dedupe collapses them. The 3 other RED fixtures (deserialization/path_traversal/ssrf) have no line-scanner overlap (line scanner emits `Panic` from `.unwrap()` lines but not the canonical sink VulnType) — dedupe is a no-op on those, BOTH findings naturally co-exist with different VulnTypes.
+The line scanner's `SqlInjection` trigger is `format!(... SQL keyword ...)` on a single line — narrow pattern. Its `CommandInjection` trigger is `Command::new + .arg(non-string-literal)` across a 2-line block. Neither fires on lines that aren't already structural sinks.
+
+**Empirically (per premortem `dab0766` verification, A1):** dedupe is a NO-OP on ALL 4 RED positive fixtures, NOT a 1-finding-collapse on `command_injection_positive`. The line scanner emits ZERO findings on `rust_command_injection_positive` because the fixture's `.arg("-c").arg(&cmd)` lives on a single line — the substring `.arg("` (from `.arg("-c")`) trips the line-scanner's string-literal guard at `crates/tldr-cli/src/commands/remaining/vuln.rs:603-604` (`!trimmed.contains(".arg(\"")` evaluates false → guard fires → `CommandInjection` not emitted). The other 3 RED fixtures (deserialization / path_traversal / ssrf) lack any line-scanner trigger entirely (no `Command::new`, no `format!(...SQL...)`, no `unsafe`, no `transmute`, no `ptr::*`; `.unwrap()` is suppressed by `is_rust_test_file` because the fixture path contains `/tests/`). Net line-scanner output for ALL 4 RED fixtures at HEAD: ZERO findings. Therefore dedupe correctness MUST be verified via a CONSTRUCTED M3 ad-hoc fixture (single-line `Command::new + .arg(&cmd)` without preceding `.arg("...")`) — NOT against any of the 4 RED fixtures. This is the basis for A2/A3 amendments (M3-dedupe-verification.json scope).
 
 ---
 
@@ -443,6 +445,14 @@ Non-atomic per-milestone (each is documentation-only).
 
 **Mitigation:** Pre-existing behavior — `tldr vuln file.rs` emits 50 Panic findings TODAY. M2 doesn't change that; it only ADDS canonical findings on top. CHANGELOG note flags the behavior. Future milestone could add `--no-smells` flag or move Panic to severity-Info default-suppressed; out of scope here.
 
+**Sub-elephant (per premortem dab0766 E3, surfaced post-planning):** `is_rust_test_file` at `crates/tldr-cli/src/commands/remaining/vuln.rs:679-685` returns TRUE for any path containing `/tests/` (and `\\tests\\`, `_test.rs`, `tests.rs`) — this masks Panic emission on the 4 RED fixtures (which all live under `crates/tldr-cli/tests/fixtures/`), giving a misleading "clean" picture during M1/M2 verification. On user codebases (typical paths like `crates/foo/src/main.rs`, `src/lib.rs`), `is_rust_test_file` returns FALSE → every `.unwrap()` emits 1 Panic finding. Magnitude is unmeasured at planning time. **Carry-forward acknowledged**: out of scope for this milestone (no scope expansion); flagged for post-publish hardening (potential `--no-smells` flag or Panic→Info default-suppressed move).
+
+### R8 — Wildcard `("*", "get")` HttpRequest sink becomes live on .rs (ELEPHANT, MEDIUM-HIGH)
+
+**Failure mode (per premortem dab0766 T2/E1, upgraded LOW → MEDIUM-HIGH):** `RUST_AST_SINKS` HttpRequest member_patterns at `crates/tldr-core/src/security/taint.rs:2467` contains `("*", "get")` — wildcard receiver + method=`get`. At HEAD this entry is DEAD CODE for `.rs` files because vuln.rs:368-370 dispatch routes `.rs` away from canonical. **Post-M2 it becomes LIVE**: every `.rs` file's field-expression `<receiver>.get(<args>)` with a tainted receiver/argument emits an `Ssrf` finding. This includes `HashMap::get`, `Vec::get`, `Option::get`, `BTreeMap::get`, `IndexMap::get`, etc. — none of which are HTTP requests. Real-world Rust codebases use `.get()` extensively; production UX may degrade significantly. The 4 RED fixtures don't exercise this (no `.get(` field-expression on tainted data) and the 4 string-literal-FP fixtures don't either, so M2 stop-thresholds will pass — but the false-positive rate on user code is unknown.
+
+**Mitigation:** Out of M2 scope per atomic-commit boundary (bank cleanup is a follow-on). **A2 amendment requires M3 to QUANTIFY the FP rate**: M3 binary smoke MUST construct synthetic Rust fixtures exercising newly-live patterns (HashMap::get on tainted, Vec::get on tainted, Option::get on tainted, std::fs::read_to_string on tainted FileOpen, reqwest::blocking::get on tainted as the SSRF closure path). M3-binary-smoke.json records FP count per pattern. If FP rate >10% on synthetic patterns, surface as a follow-on bank-tightening milestone (e.g., constrain `("*", "get")` to receivers with HTTP-client types). Document as known carry-forward in M3-report.json if rate is high; ship M2 atomic commit regardless (4-RED closure is the binary contract).
+
 ### R3 — String-literal FP regression-guard tests fail (TIGER, HIGH)
 
 **Failure mode:** Canonical pipeline produces an unexpected finding on a string-literal FP fixture. E.g., the `format!("{} {}", doc, more)` line in command_injection_string_literal_fp.rs has no canonical source/sink so should emit zero — but a future bank entry could change that.
@@ -518,9 +528,24 @@ validator_mandates:
     remain GREEN. Pre-existing regression-guard from vuln-migration-v1.
 
   test_analyze_rust_unit_tests_preserved: |
-    All 9 test_analyze_rust_* unit tests in remaining/vuln.rs:925-1037
-    must remain GREEN. They call analyze_rust_file directly; M2's
-    dispatch-only change does not touch analyze_rust_file's body.
+    All 9 #[test] fns in the `commands::remaining::vuln::tests` module
+    at remaining/vuln.rs:925-1037 must remain GREEN post-merge (A4
+    amendment per premortem dab0766). The 9 fns are:
+      1. test_vuln_type_cwe_mapping
+      2. test_vuln_type_severity
+      3. test_collect_files_includes_rust
+      4. test_analyze_rust_detects_unsafe_without_safety_comment
+      5. test_analyze_rust_detects_command_and_sql_patterns
+      6. test_analyze_rust_detects_transmute_usage
+      7. test_analyze_rust_detects_raw_pointer_operation
+      8. test_analyze_rust_detects_unwrap_in_non_test_code
+      9. test_analyze_rust_detects_unchecked_bytes_patterns
+    Of these, 6 prefix-match `test_analyze_rust_detects_*` and form the
+    line-scanner emit-category coverage; the other 3 are auxiliary. The
+    M3 stop-threshold regression guard is the FULL 9, run via
+    `cargo test -p tldr-cli --release --lib commands::remaining::vuln::tests`.
+    They call analyze_rust_file directly; M2's dispatch-only change
+    does not touch analyze_rust_file's body.
 
   bank_addition_additive_only: |
     The SSRF bank patch (RUST_AST_SINKS HttpRequest member_patterns
@@ -569,9 +594,13 @@ After premortem: ready for autonomous M2 implementation under standard kraken-bu
 - [x] §6 output schema impact analyzed; no shape changes
 - [x] §7 CHANGELOG draft prepared
 - [x] §8 atomic-commit boundary defined
-- [x] §9 premortem identifies 7 risks with mitigations
+- [x] §9 premortem identifies 8 risks with mitigations (R1-R7 from planning + R8 wildcard-get added per A2/E1; R2 expanded with E3 is_rust_test_file sub-elephant)
 - [x] §10 carry-forward expected empty
 - [x] §11 validator_mandates declared
-- [ ] **CONDITION:** /premortem run once on the dedupe logic before M2 implementation launch
+- [x] **CONDITION:** /premortem completed (commit `dab0766`, verdict GO_WITH_AMENDMENTS); 5 non-blocking amendments A1-A5 applied per this commit
+- [x] **CONDITION:** plan §3 dedupe-no-op claim corrected (A1)
+- [x] **CONDITION:** §11 unit-test count clarified to 9 #[test] fns total in module (A4)
+- [x] **CONDITION:** §9 risk register expanded with R8 wildcard-get + R2 E3 is_rust_test_file sub-elephant
+- [x] **CONDITION:** dispatch-contract.json M3 stop-thresholds extended with constructed-fixture dedupe verification (A2/A3) + M1 baseline-drift check (A5)
 
-Declared **READY-PENDING-PREMORTEM** for autonomous execution. Recommended worker: kraken (Opus, full implementation context).
+Declared **/autonomous-ready** for autonomous M2 execution. Recommended worker: kraken (Opus, full implementation context).
