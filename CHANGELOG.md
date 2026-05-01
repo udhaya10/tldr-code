@@ -1,5 +1,81 @@
 # Changelog
 
+## var-extract-nested-constructor-v1 — internal milestone
+
+NOT a published release. Closes 2 of the 3 carry-forwards from
+vuln-source-parity-v1 M5 Bucket B (Java + Scala
+`{java,scala}_deserialization_positive`); cpp DEFERRED to follow-on
+milestone `cpp-deser-declaration-v1` per premortem amendment A1
+(commit `88f5620`).
+
+### Changed
+
+- `extract_first_identifier_arg_ast`
+  (`crates/tldr-core/src/security/taint.rs:3934`) now descends through
+  nested constructor / call / instance-shaped first-argument nodes
+  when the direct-identifier path fails. Per-language descend-through
+  set:
+  - Java: `{ object_creation_expression, method_invocation,
+    parenthesized_expression }`
+  - Scala: `{ call_expression, instance_expression, infix_expression }`
+  - Cpp: NONE (deferred)
+  Implementation is BFS-over-named-descendants with bounded recursion
+  (depth 5) and `string_node_kinds(language)` filter applied at every
+  level — closes-#24 string-literal regression-guard preserved at
+  every recursion step. New private sub-helper
+  `extract_first_identifier_arg_ast_descent` mirrors the BFS pattern
+  previously used for PHP `echo_statement`
+  (`taint.rs:3954-3982`); not OCaml `application_expression`
+  (`taint.rs:3989-4016`) — that is a flat 1-level scan, not a BFS.
+
+### Closes carry-forwards
+
+- vuln-source-parity-v1 M5 Bucket B Java + Scala subset:
+  - `java_deserialization_positive`
+    (`new java.io.ObjectInputStream(new java.io.ByteArrayInputStream(d.getBytes()))`):
+    BFS reaches inner `method_invocation` `d.getBytes()`,
+    `split('.').next() = "d"` → identifier valid.
+  - `scala_deserialization_positive`
+    (`new java.io.ObjectInputStream(new java.io.ByteArrayInputStream(d.getBytes))`):
+    sink fires on inner `instance_expression` via raw-substring
+    fallback; BFS descends through nested `instance_expression` to
+    reach `d.getBytes` → `"d"`.
+  `vuln_migration_v1_red` red count drops from 8 to 6 (-2 delta).
+
+### Deferred
+
+- `cpp_deserialization_positive` deferred to follow-on milestone
+  `cpp-deser-declaration-v1`. Premortem (commit `88f5620`) directly
+  parsed `boost::archive::text_iarchive ia(std::stringstream(d) >> obj);`
+  with tree-sitter-cpp v0.23.4 and REFUTED the `function_declarator`
+  articulation. Actual shape:
+  `declaration → init_declarator { declarator: identifier(ia), value:
+  argument_list { binary_expression { left:
+  call_expression(std::stringstream → identifier(d)), right:
+  identifier(obj) } } }`. The helper invoked on `declaration` cannot
+  navigate into the `init_declarator`'s `argument_list` because
+  (a) `declaration` has no `arguments` field and
+  (b) positional fallback's `kind.contains("argument") || kind == "call_suffix"`
+  does not match `init_declarator`. A different fix-shape is required
+  at the sink-detection level — out of M2 scope.
+
+### Standing rules upheld
+
+- NO public API change — `extract_first_identifier_arg_ast` signature
+  unchanged; new sub-helper is private.
+- NO new `TaintSourceType` / `TaintSinkType` / `VulnType` variants.
+- NO new bank entries.
+- NO modification of `call_node_kinds()`, `extract_call_name_*`,
+  `member_patterns_match`, or `field_access_info`.
+- Closes-#24 string-literal regression-guard preserved at every
+  recursion level — verified via `*_string_literal_fp` test sweep
+  (all GREEN, including `java_deserialization_string_literal_fp` and
+  `scala_deserialization_string_literal_fp`).
+- Bounded recursion (depth 5) prevents pathological deep-template /
+  generic recursion.
+- Local tag only (`var-extract-nested-constructor-v1`); no push, no
+  publish, no version bump.
+
 ## vuln-source-parity-v1 — internal milestone
 
 NOT a published release. Closes vuln-migration-v1 M3-CF-01 + M4-CF-01

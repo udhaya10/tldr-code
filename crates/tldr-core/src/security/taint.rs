@@ -4035,6 +4035,45 @@ fn extract_first_identifier_arg_ast(
             None
         })?;
 
+    // VAR-EXTRACT-NESTED-CONSTRUCTOR-V1: when the first NAMED non-string-literal
+    // arg-list child is itself a constructor / call / instance-shaped node and
+    // the direct-identifier path fails for it, descend into that child via BFS
+    // seeking the first identifier-shaped leaf. Mirrors the BFS-over-named-
+    // descendants pattern previously used for PHP echo_statement at L3954-3982.
+    // (NOT OCaml application_expression at L3989-4016 — that is a flat 1-level
+    // scan, not a BFS.) Bounded recursion (depth 5) with `string_kinds` filter
+    // applied at every level (closes-#24 string-literal regression-guard
+    // preserved at every level).
+    //
+    // Per-language descend-through set:
+    //   * Java   : { object_creation_expression, method_invocation,
+    //                parenthesized_expression }
+    //   * Scala  : { call_expression, instance_expression, infix_expression }
+    //
+    // Cpp DEFERRED to follow-on milestone `cpp-deser-declaration-v1` per
+    // premortem amendment A1 — premortem (commit 88f5620) directly parsed
+    // `boost::archive::text_iarchive ia(std::stringstream(d) >> obj);` with
+    // tree-sitter-cpp v0.23.4 and REFUTED the `function_declarator`
+    // articulation: actual cpp shape is `declaration → init_declarator →
+    // argument_list`. The helper invoked on `declaration` cannot reach the
+    // argument_list (no `arguments` field; positional fallback's
+    // `kind.contains("argument")` does not match `init_declarator`). Different
+    // fix-shape required at sink-detection level (out of M2 scope). No Cpp
+    // arm here.
+    let descend_kinds: &[&str] = match language {
+        Language::Java => &[
+            "object_creation_expression",
+            "method_invocation",
+            "parenthesized_expression",
+        ],
+        Language::Scala => &[
+            "call_expression",
+            "instance_expression",
+            "infix_expression",
+        ],
+        _ => &[],
+    };
+
     // Walk arg list children and return the first identifier-like text.
     for i in 0..args.child_count() {
         let Some(child) = args.child(i) else {
@@ -4049,15 +4088,91 @@ fn extract_first_identifier_arg_ast(
             continue;
         }
         let text = node_text(&child, source).trim();
-        if text.is_empty() {
+        if !text.is_empty() {
+            // For dotted identifiers (e.g., `obj.attr`), take the leading identifier.
+            let head = text.split('.').next().unwrap_or(text);
+            // Strip Rust reference operator and PHP `$` sigil.
+            let head = head.trim_start_matches('&').trim_start_matches('$');
+            if is_valid_identifier(head) {
+                return Some(head.to_string());
+            }
+        }
+
+        // VAR-EXTRACT-NESTED-CONSTRUCTOR-V1: direct path failed for this child.
+        // If its kind is in the per-language descend-through set, recurse via
+        // BFS to find the leftmost identifier-shaped leaf inside it.
+        if descend_kinds.contains(&child.kind()) {
+            if let Some(found) =
+                extract_first_identifier_arg_ast_descent(&child, source, language, 0)
+            {
+                return Some(found);
+            }
+        }
+    }
+
+    None
+}
+
+/// VAR-EXTRACT-NESTED-CONSTRUCTOR-V1: BFS-over-named-descendants helper that
+/// descends through nested constructor / call / instance / infix nodes seeking
+/// the first identifier-shaped leaf. Bounded recursion (depth 5) with explicit
+/// `string_node_kinds(language)` filter at every level so closes-#24
+/// string-literal regression-guard is preserved at every recursion step.
+///
+/// Closes vuln-source-parity-v1 M5 Bucket B Java + Scala subset
+/// (java_deserialization_positive, scala_deserialization_positive).
+/// cpp_deserialization_positive deferred to `cpp-deser-declaration-v1`
+/// follow-on per premortem amendment A1.
+fn extract_first_identifier_arg_ast_descent(
+    node: &tree_sitter::Node,
+    source: &[u8],
+    language: Language,
+    depth: u32,
+) -> Option<String> {
+    const MAX_DEPTH: u32 = 5;
+    if depth >= MAX_DEPTH {
+        return None;
+    }
+    let string_kinds = string_node_kinds(language);
+
+    // BFS over named descendants in source order. Push children in REVERSE so
+    // pop yields leftmost first.
+    let mut stack: Vec<(tree_sitter::Node, u32)> = Vec::new();
+    for i in (0..node.child_count()).rev() {
+        if let Some(c) = node.child(i) {
+            if c.is_named() {
+                stack.push((c, depth + 1));
+            }
+        }
+    }
+
+    while let Some((cur, d)) = stack.pop() {
+        if d >= MAX_DEPTH {
             continue;
         }
-        // For dotted identifiers (e.g., `obj.attr`), take the leading identifier.
-        let head = text.split('.').next().unwrap_or(text);
-        // Strip Rust reference operator and PHP `$` sigil.
-        let head = head.trim_start_matches('&').trim_start_matches('$');
-        if is_valid_identifier(head) {
-            return Some(head.to_string());
+        // Skip string-literal subtrees at every level (closes-#24 guard).
+        if string_kinds.contains(&cur.kind()) {
+            continue;
+        }
+
+        // Try as identifier-leaf via the same head-extraction rules as the
+        // outer helper.
+        let text = node_text(&cur, source).trim();
+        if !text.is_empty() {
+            let head = text.split('.').next().unwrap_or(text);
+            let head = head.trim_start_matches('&').trim_start_matches('$');
+            if is_valid_identifier(head) {
+                return Some(head.to_string());
+            }
+        }
+
+        // Push named children in reverse so leftmost child pops first.
+        for i in (0..cur.child_count()).rev() {
+            if let Some(c) = cur.child(i) {
+                if c.is_named() {
+                    stack.push((c, d + 1));
+                }
+            }
         }
     }
 
