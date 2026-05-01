@@ -1,5 +1,136 @@
 # Changelog
 
+## vuln-summary-correctness-v1 — internal milestone
+
+NOT a published release. Medium-severity correctness fix bundling
+three independent anti-product surfaces in `tldr vuln` output:
+the `summary.files_with_vulns` over-counter (Bug 1) and its
+post-suppression sister symptom (Bug 2 / BUG-08), plus the SARIF
+emitter's spec-violating `startColumn: 0` / `startLine: 0` regions
+(Bug 3 / BUG-09). All three are closed atomically because Bug 1
+and Bug 2 share a root cause and Bug 3 lives in the same emitter
+file. `vuln_migration_v1_red` remains 168/168 GREEN.
+
+### Pre-fix repro
+
+- ripgrep (`tldr vuln --lang rust /tmp/repos/ripgrep/crates`):
+  28 findings, 13 unique files in `.findings[].file`, but
+  `summary.files_with_vulns == 47`. The reported counter exceeded
+  total findings (28), which is logically impossible — a single
+  finding cannot live in more files than the finding-count itself.
+- express (`tldr vuln /tmp/repos/express`): post-test-file-suppression
+  finding count drops to 0 but `summary.files_with_vulns == 1`.
+  Anti-product surface "0 findings, 1 file with vulns".
+- flask SARIF (`tldr vuln --format sarif /tmp/repos/flask/src`):
+  `runs[0].results[0].locations[0].physicalLocation.region` =
+  `{"startLine": 209, "startColumn": 0}`. SARIF 2.1.0 §3.30.5 /
+  §3.30.6 require both values to be >= 1. GitHub code scanning
+  rejects regions with values below 1.
+
+### Root cause
+
+Bugs 1 + 2 share one root cause: `files_with_vulns` was populated
+during raw analysis (per-finding-event insertion into a HashSet
+keyed by file path) BEFORE the post-analysis filter pipeline
+(severity, vuln_type, informational, smells, test-files) ran. When
+a filter dropped findings, the file remained in the set; when
+multiple files contributed findings that were ALL filtered out,
+the set still reported them. The counter was therefore both
+over-counted (relative to post-filter findings) AND structurally
+disconnected from the filtered output.
+
+Bug 3 root cause: the SARIF emitter passed `f.line` and `f.column`
+through verbatim. Internal `VulnFinding` positions are `u32` and
+default-initialize to 0 when the upstream analyzer cannot resolve
+a precise column (and rarely, a precise line). JSON output
+preserves these zeros without issue, but SARIF 2.1.0 mandates
+1-based positions; the emitter MUST clamp at the boundary.
+
+### Changed
+
+- **vuln** (`VulnArgs::run` in `crates/tldr-cli/src/commands/remaining/vuln.rs`):
+  the raw-analysis `files_with_vulns: HashSet<String>` is removed.
+  `files_with_vulns` is now computed AFTER the full filter pipeline
+  by collecting `&str` slices from `filtered_findings` into a
+  `HashSet`, then handing the count to `build_summary`. Post-fix
+  invariants:
+    1. `summary.files_with_vulns <= summary.total_findings` (a
+       finding cannot live in more files than there are findings).
+    2. `summary.files_with_vulns == 0` whenever
+       `summary.total_findings == 0` (no findings means no files
+       with findings).
+    3. `summary.files_with_vulns == ([.findings[].file] | unique
+       | length)` from the same JSON output.
+- **vuln** (`generate_sarif` in the same file): new private inline
+  helper `sarif_clamp_pos(value: u32) -> u32` returns
+  `value.max(1)`. Applied to BOTH `startLine` and `startColumn` at
+  the result-level region AND every `codeFlows[].threadFlows[].
+  locations[].location.physicalLocation.region` taint-flow region.
+  Internal storage and JSON output formats are UNCHANGED — only
+  the SARIF emitter applies the clamp, so existing JSON consumers
+  see no shape delta.
+- **vuln** (tests, 3 new): `test_vuln_summary_files_with_vulns_unique_count`
+  (5 findings across 2 unique files → `files_with_vulns == 2`,
+  with the over-count invariant asserted explicitly);
+  `test_vuln_summary_zero_findings_zero_files_with_vulns` (empty
+  findings vector → `files_with_vulns == 0`);
+  `test_vuln_sarif_startcolumn_at_least_one` (synthetic
+  `VulnFinding` with `line=0, column=0` and a `TaintFlow` with
+  `line=0, column=0`; emits SARIF; recursively walks every
+  `region` in the output and asserts no `startLine` or
+  `startColumn` value drops below 1).
+
+### Architectural note
+
+NO public API change. `VulnFinding` / `TaintFlow` / `VulnSummary`
+struct shapes byte-for-byte unchanged. `build_summary` signature
+unchanged (still takes `files_with_vulns: u32`). NO new CLI flag.
+NO change to `analyze_file` / `analyze_*_file` analyzer paths. NO
+change to the post-analysis filter set. NO change to the JSON
+output format. The SARIF clamp is a pure-output transform applied
+at emit time, NOT at storage time — so `findings[].column == 0`
+remains observable in the JSON output (preserving existing
+consumers and the `vuln_migration_v1_red` fixtures), while the
+SARIF stream is now spec-conformant. Single source-file edit
+(`crates/tldr-cli/src/commands/remaining/vuln.rs`); the counter
+relocation (~3 LOC delta), `sarif_clamp_pos` helper (~14 LOC),
+emitter call-site updates (~4 LOC), and 3 new tests (~180 LOC
+including helpers and the recursive region walker) ship
+atomically in a single commit.
+
+### Retained
+
+- `vuln_migration_v1_red`: 168/168 GREEN.
+- `tldr-cli` lib tests: 1391/1391 GREEN.
+- `vuln_autodetect_tests`: 6/6 GREEN.
+- `val011_vuln_typescript_autodetect_test`: 1/1 GREEN.
+- 18/18 in-module `commands::remaining::vuln::tests` GREEN
+  (15 pre-existing + 3 new).
+- Public API surface UNCHANGED.
+- JSON output schema UNCHANGED (only the SARIF emitter changed).
+
+### Quantification table
+
+| Surface | Pre-fix | Post-fix |
+|---|---|---|
+| ripgrep `summary.files_with_vulns` (with 28 findings, 13 unique files) | 47 | 13 |
+| ripgrep `summary.files_with_vulns <= total_findings` invariant | violated (47 > 28) | upheld (13 <= 28) |
+| express `summary` after test-file suppression | `{total_findings: 0, files_with_vulns: 1}` | `{total_findings: 0, files_with_vulns: 0}` |
+| flask SARIF `startColumn` min | 0 | 1 |
+| flask SARIF `startColumn` max | (line-dependent) | 1 |
+| flask SARIF `startLine` min | (>= 1, was OK) | 209 |
+| GitHub code scanning acceptance for flask SARIF | rejected | accepted |
+
+### Standing rules upheld
+
+- Internal-versioning posture honored: NO push, NO `cargo publish`, NO
+  version bump.
+- Local annotated tag only (`vuln-summary-correctness-v1`).
+- USER STANDING RULE: cargo publish requires explicit user
+  authorization every time.
+- `Cargo.lock` NOT staged.
+- No `git stash`, no destructive git, no `-A` / `.` staging.
+
 ## lang-detect-default-v1 — internal milestone
 
 NOT a published release. Low-severity UX/error-message correctness

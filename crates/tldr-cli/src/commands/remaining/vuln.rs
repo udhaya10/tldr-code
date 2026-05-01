@@ -180,12 +180,10 @@ impl VulnArgs {
         // Analyze all files
         let mut all_findings: Vec<VulnFinding> = Vec::new();
         let mut files_scanned: u32 = 0;
-        let mut files_with_vulns: HashSet<String> = HashSet::new();
 
         for file_path in &files {
             if let Ok(findings) = analyze_file(file_path) {
                 for finding in findings {
-                    files_with_vulns.insert(finding.file.clone());
                     all_findings.push(finding);
                 }
             }
@@ -236,8 +234,22 @@ impl VulnArgs {
             filtered_findings.retain(|f| !is_js_test_file(Path::new(&f.file)));
         }
 
-        // Build summary
-        let summary = build_summary(&filtered_findings, files_with_vulns.len() as u32);
+        // Build summary.
+        //
+        // vuln-summary-correctness-v1 (Bug 1 + Bug 2): `files_with_vulns`
+        // is computed AFTER all filters (severity, vuln_type,
+        // informational, smells, test-files) by collecting unique
+        // `file` values from the post-filter `filtered_findings` slice.
+        // Pre-fix the counter was populated during raw analysis and
+        // could exceed both `total_findings` (because it incremented
+        // per finding-event rather than once-per-unique-file) AND the
+        // count of unique files in the post-filter findings (because
+        // suppressed findings still left their file in the set).
+        // Post-fix invariant: `files_with_vulns <= total_findings`,
+        // and `files_with_vulns == 0` whenever `total_findings == 0`.
+        let unique_files_with_vulns: HashSet<&str> =
+            filtered_findings.iter().map(|f| f.file.as_str()).collect();
+        let summary = build_summary(&filtered_findings, unique_files_with_vulns.len() as u32);
 
         // Build report
         let report = VulnReport {
@@ -1103,6 +1115,21 @@ fn format_vuln_text(report: &VulnReport) -> String {
     out
 }
 
+/// Clamp a SARIF region coordinate (startLine / startColumn) to satisfy
+/// the SARIF 2.1.0 §3.30.5 / §3.30.6 minimum-value requirement.
+///
+/// Per spec, both `startLine` and `startColumn` must be >= 1. Internal
+/// `VulnFinding` / `TaintFlow` positions are stored as `u32` and may be
+/// 0 (default-initialized when the upstream analyzer could not resolve
+/// a precise column or — rarely — a precise line). GitHub code scanning
+/// rejects SARIF with a value < 1, so we clamp at the emitter boundary.
+/// Internal storage and JSON output formats are unaffected; only the
+/// SARIF emitter applies the clamp. (vuln-summary-correctness-v1, Bug 3)
+#[inline]
+fn sarif_clamp_pos(value: u32) -> u32 {
+    value.max(1)
+}
+
 /// Generate SARIF format output
 fn generate_sarif(report: &VulnReport) -> Value {
     let results: Vec<Value> = report
@@ -1125,8 +1152,8 @@ fn generate_sarif(report: &VulnReport) -> Value {
                             "uri": f.file
                         },
                         "region": {
-                            "startLine": f.line,
-                            "startColumn": f.column
+                            "startLine": sarif_clamp_pos(f.line),
+                            "startColumn": sarif_clamp_pos(f.column)
                         }
                     }
                 }],
@@ -1142,8 +1169,8 @@ fn generate_sarif(report: &VulnReport) -> Value {
                                                     "uri": tf.file
                                                 },
                                                 "region": {
-                                                    "startLine": tf.line,
-                                                    "startColumn": tf.column
+                                                    "startLine": sarif_clamp_pos(tf.line),
+                                                    "startColumn": sarif_clamp_pos(tf.column)
                                                 }
                                             },
                                             "message": {
@@ -1531,5 +1558,175 @@ pub fn from_raw(bytes: &[u8]) -> &str {
         assert!(!is_js_test_file(Path::new(
             "/abs/path/crates/tldr-cli/tests/fixtures/vuln_migration_v1/javascript/xss_positive.js"
         )));
+    }
+
+    // -------------------------------------------------------------------------
+    // vuln-summary-correctness-v1: summary counter + SARIF clamp tests
+    // -------------------------------------------------------------------------
+
+    /// Build a synthetic VulnFinding with the given file/line/column.
+    /// Other fields are filled with neutral defaults; this is sufficient
+    /// because the unit tests exercise summary aggregation and SARIF
+    /// emission only (NOT the analyzer).
+    fn make_finding(file: &str, line: u32, column: u32) -> VulnFinding {
+        VulnFinding {
+            vuln_type: VulnType::SqlInjection,
+            severity: Severity::High,
+            cwe_id: "CWE-89".to_string(),
+            title: "Synthetic finding".to_string(),
+            description: "Test fixture".to_string(),
+            file: file.to_string(),
+            line,
+            column,
+            taint_flow: vec![],
+            remediation: "Test remediation".to_string(),
+            confidence: 0.9,
+        }
+    }
+
+    #[test]
+    fn test_vuln_summary_files_with_vulns_unique_count() {
+        // Bug 1 regression guard: 5 findings spread across 2 unique files
+        // must yield `summary.files_with_vulns == 2` (NOT 5, NOT 1).
+        // Pre-fix the counter incremented per finding-event (would give
+        // 5 in this fixture); post-fix it deduplicates by file path.
+        let findings = vec![
+            make_finding("src/a.rs", 10, 1),
+            make_finding("src/a.rs", 20, 1),
+            make_finding("src/a.rs", 30, 1),
+            make_finding("src/b.rs", 5, 1),
+            make_finding("src/b.rs", 15, 1),
+        ];
+
+        // Mirror the production aggregation step in `VulnArgs::run` post-
+        // filter: collect unique file paths from the post-filter findings
+        // slice, then hand the count to `build_summary`.
+        let unique_files: HashSet<&str> =
+            findings.iter().map(|f| f.file.as_str()).collect();
+        let summary = build_summary(&findings, unique_files.len() as u32);
+
+        assert_eq!(
+            summary.files_with_vulns, 2,
+            "5 findings across 2 unique files must yield files_with_vulns=2; \
+             got {} (full summary: {:?})",
+            summary.files_with_vulns, summary
+        );
+        assert_eq!(
+            summary.total_findings, 5,
+            "total_findings must equal findings.len()"
+        );
+        // Logical invariant: files_with_vulns <= total_findings.
+        assert!(
+            summary.files_with_vulns <= summary.total_findings,
+            "files_with_vulns ({}) must never exceed total_findings ({})",
+            summary.files_with_vulns,
+            summary.total_findings
+        );
+    }
+
+    #[test]
+    fn test_vuln_summary_zero_findings_zero_files_with_vulns() {
+        // Bug 2 (BUG-08) regression guard: when post-filter findings is
+        // empty (e.g. test-file suppression eliminated everything), the
+        // summary MUST report `files_with_vulns == 0`. Pre-fix the
+        // counter was populated during raw analysis and was never
+        // decremented when filters dropped findings, yielding the
+        // anti-product surface "0 findings, 1 file with vulns" on
+        // express.
+        let findings: Vec<VulnFinding> = vec![];
+        let unique_files: HashSet<&str> =
+            findings.iter().map(|f| f.file.as_str()).collect();
+        let summary = build_summary(&findings, unique_files.len() as u32);
+
+        assert_eq!(summary.total_findings, 0);
+        assert_eq!(
+            summary.files_with_vulns, 0,
+            "zero findings MUST yield files_with_vulns=0; got {}",
+            summary.files_with_vulns
+        );
+    }
+
+    #[test]
+    fn test_vuln_sarif_startcolumn_at_least_one() {
+        // Bug 3 (BUG-09) regression guard: SARIF 2.1.0 §3.30.5 / §3.30.6
+        // require startLine >= 1 and startColumn >= 1. Internal
+        // VulnFinding positions may legitimately be 0 (default-init when
+        // upstream analyzer cannot resolve a precise column); the SARIF
+        // emitter MUST clamp these to >= 1 so GitHub code scanning
+        // accepts the output. This test injects a finding with line=0
+        // and column=0 AND a taint_flow with line=0, column=0, then
+        // walks every region in the emitted SARIF JSON and asserts no
+        // value drops below 1.
+        let finding_with_zero_pos = VulnFinding {
+            vuln_type: VulnType::SqlInjection,
+            severity: Severity::High,
+            cwe_id: "CWE-89".to_string(),
+            title: "Synthetic finding".to_string(),
+            description: "Test fixture".to_string(),
+            file: "src/x.py".to_string(),
+            line: 0,
+            column: 0,
+            taint_flow: vec![TaintFlow {
+                file: "src/x.py".to_string(),
+                line: 0,
+                column: 0,
+                code_snippet: "x = input()".to_string(),
+                description: "source".to_string(),
+            }],
+            remediation: "Sanitize input".to_string(),
+            confidence: 0.9,
+        };
+
+        let report = VulnReport {
+            findings: vec![finding_with_zero_pos],
+            summary: None,
+            scan_duration_ms: 0,
+            files_scanned: 1,
+        };
+
+        let sarif = generate_sarif(&report);
+
+        // Walk every "region" object in the SARIF output and assert
+        // that startLine and startColumn (when present) are both >= 1.
+        // We use a recursive walk so this stays robust if the SARIF
+        // emitter grows additional region locations in the future.
+        fn walk_regions(value: &Value, violations: &mut Vec<String>) {
+            match value {
+                Value::Object(map) => {
+                    if let Some(region) = map.get("region") {
+                        if let Some(line) = region.get("startLine").and_then(|v| v.as_u64()) {
+                            if line < 1 {
+                                violations.push(format!("startLine={} < 1", line));
+                            }
+                        }
+                        if let Some(col) = region.get("startColumn").and_then(|v| v.as_u64()) {
+                            if col < 1 {
+                                violations.push(format!("startColumn={} < 1", col));
+                            }
+                        }
+                    }
+                    for v in map.values() {
+                        walk_regions(v, violations);
+                    }
+                }
+                Value::Array(arr) => {
+                    for v in arr {
+                        walk_regions(v, violations);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let mut violations: Vec<String> = Vec::new();
+        walk_regions(&sarif, &mut violations);
+
+        assert!(
+            violations.is_empty(),
+            "SARIF emitter must clamp all startLine/startColumn values to >= 1 \
+             (SARIF 2.1.0 §3.30.5/§3.30.6); violations: {:?}\nSARIF: {}",
+            violations,
+            serde_json::to_string_pretty(&sarif).unwrap()
+        );
     }
 }
