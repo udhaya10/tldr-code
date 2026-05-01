@@ -1,5 +1,223 @@
 # Changelog
 
+## churn-correctness-v1 — internal milestone
+
+NOT a published release. Medium-severity correctness fix bundling
+two independent anti-product surfaces in `tldr churn` output:
+the `summary.total_commits` over-counter (Bug 1 / BUG-03) and the
+absence of degenerate-shallow-clone gating (Bug 2 / BUG-06). Both
+bugs share the same operational consequence — `tldr churn` on a
+shallow clone produces statistics that look actionable but are
+mathematically meaningless — and both live in the same churn
+output path, so they ship atomically.
+`vuln_migration_v1_red` remains 168/168 GREEN; all 4652
+`tldr-core` library tests remain GREEN.
+
+### Pre-fix repro
+
+- flask (`tldr churn /tmp/repos/flask`, a `--depth 1` clone with
+  exactly 1 commit visible):
+    ```
+    summary: {
+      total_files: 236,
+      total_commits: 236,
+      avg_commits_per_file: 1.0,
+      most_churned_file: <some arbitrary file>
+    }
+    warnings: ["Repository is a shallow clone (~1 commits)..."]
+    ```
+  `total_commits == total_files == 236` is the smoking gun: the
+  counter was summing per-file `commit_count` (one event per
+  (file, commit) pair), and on a 1-commit-touching-all-236-files
+  clone, that sum collapses to the file count. Worse,
+  `avg_commits_per_file: 1.0` and `most_churned_file: <X>` look
+  like real signal but every file has `commit_count == 1` (a tie),
+  so the rank is arbitrary and the average is trivially 1.0 by
+  construction.
+- The shallow-clone warning DID fire, but it was advisory only
+  ("may be incomplete") — the rank and average were emitted
+  unconditionally, contradicting the warning. `tldr hotspots` on
+  the same repo correctly handled the case via the established
+  `build_empty_hotspots_report` pattern (`hotspots: [], warnings:
+  ["No files meet the minimum commit threshold."]`); `tldr churn`
+  did not.
+
+### Root cause
+
+Bug 1 (BUG-03): `build_summary` in
+`crates/tldr-core/src/quality/churn.rs` computed
+`total_commits = sum(f.commit_count for f in file_stats)`. The
+per-file `commit_count` is a count of (file, commit) parse events
+from `git log --name-only`, not a count of commits — so any commit
+touching N files is counted N times in the aggregate. The doc
+comment on the field even acknowledged this (`"A single commit
+touching 3 files counts as 3 here"`) but the field was named
+`total_commits` and consumed as such by both the JSON schema and
+the text formatter, which is the actual anti-product surface.
+
+Bug 2 (BUG-06): `analyze_churn` in
+`crates/tldr-cli/src/commands/churn.rs` emitted the shallow-clone
+advisory warning but never gated downstream output on it. There
+was no equivalent of the hotspots `build_empty_hotspots_report`
+suppression path. A degenerate shallow clone (`is_shallow == true
+&& total_unique_commits <= 1`) produced
+`avg_commits_per_file == 1.0` and an arbitrary
+`most_churned_file` regardless.
+
+### Changed
+
+- **churn** (`crates/tldr-core/src/quality/churn.rs`): new public
+  helper `count_unique_commits(path: &Path, days: u32) ->
+  Result<u32, ChurnError>` which asks git directly via
+  `git rev-list --count --since="N days ago" HEAD`. Returns 0 for
+  empty / no-commits-in-window / "does not have any commits" /
+  "bad revision" / "unknown revision" stderr conditions. This is
+  the single source of truth for `summary.total_commits` going
+  forward.
+- **churn** (same file): `build_summary` signature is now
+  `build_summary(file_stats: &HashMap<String, FileChurn>, days:
+  u32, total_unique_commits: u32) -> ChurnSummary`. The new
+  `total_unique_commits` parameter is plumbed through verbatim to
+  `summary.total_commits` and is the numerator of
+  `avg_commits_per_file`. The old `sum(f.commit_count)` formula is
+  GONE. Doc comments on `ChurnSummary::total_commits`,
+  `avg_commits_per_file`, and `most_churned_file` rewritten to
+  document the new semantics and the shallow-suppression rules.
+- **churn** (same file): new public helper
+  `is_degenerate_shallow(is_shallow: bool, total_unique_commits:
+  u32) -> bool` returning `is_shallow && total_unique_commits <=
+  1`. This is the gating predicate; CLI callers use it to mirror
+  the hotspots suppression pattern.
+- **churn CLI** (`crates/tldr-cli/src/commands/churn.rs`):
+  `analyze_churn` now calls `count_unique_commits` after
+  `get_file_churn` and passes the result to `build_summary`. When
+  `is_degenerate_shallow` returns true, a STRONGER second warning
+  is appended (`"Shallow clone with N commit in window — per-file
+  churn ranks and averages are degenerate and have been
+  suppressed. Re-run on a full clone (\`git fetch --unshallow\`)
+  for meaningful churn analysis."`), `summary.avg_commits_per_file`
+  is zeroed, and `summary.most_churned_file` is set to the empty
+  string. The original advisory shallow warning is preserved for
+  back-compat (and remains accurate for shallow-but-not-degenerate
+  cases, e.g. `--depth 50`). On legitimate single-commit FULL
+  clones (`is_shallow == false`), the gate does NOT trip — the
+  output is trivial but truthful.
+- **churn module exports** (`crates/tldr-core/src/quality/mod.rs`):
+  `count_unique_commits` and `is_degenerate_shallow` re-exported
+  from the `churn` module. No removed exports.
+- **churn tests, 2 new** (`crates/tldr-core/src/quality/churn_tests.rs`,
+  in `integration_tests` mod, `#[ignore]`-gated on git
+  availability):
+    - `test_churn_total_commits_counts_unique_shas`: builds a
+      fixture with 3 commits over 5 files (commit 1 adds 5,
+      commit 2 edits 3, commit 3 edits 2). Asserts that
+      `sum(f.commit_count) == 10` (the OLD wrong value),
+      `count_unique_commits == 3` (the NEW correct value), and
+      `build_summary(...).total_commits == 3` with
+      `avg_commits_per_file ≈ 0.6` (3 / 5).
+    - `test_churn_shallow_clone_emits_warning`: forces a real
+      shallow clone via `git clone --no-local --depth 1
+      file://<source>` (the `--no-local` flag is required because
+      modern git treats local-path clones as hardlink shares and
+      may not record the shallow file). Asserts
+      `check_shallow_clone(...).0 == true`, `count_unique_commits
+      == 1`, and `is_degenerate_shallow(true, 1) == true`. Then
+      builds a NON-shallow single-commit repo and asserts
+      `is_degenerate_shallow(false, 1) == false` — the gate does
+      not over-trigger on legitimate single-commit FULL clones.
+- **existing build_summary tests** (`churn_tests.rs` and
+  `tests/bench_remaining_multilang.rs`): both call sites updated
+  to pass an explicit `total_unique_commits` argument matching
+  the new signature, with the assertion `total_commits == <unique
+  count>` (NOT `sum(commit_count)`) reflecting the corrected
+  semantics. The previous expectation (`total_commits == 30`,
+  `total_commits == 8`) was testing the buggy behavior; per the
+  "fix the test to match correct behavior" rule, those expected
+  values are now `12` and `6` — a synthetic unique-SHA count
+  fed into `build_summary` directly.
+
+### Architectural note
+
+NO public API breakage in spirit — `build_summary` is a public
+function but it ships in the same atomic commit as its only two
+external callers (CLI churn command + bench test), both updated
+in lockstep. There is no semver-stable downstream consumer outside
+this workspace. The `ChurnSummary` struct shape is byte-for-byte
+unchanged; only the SEMANTICS of `total_commits` /
+`avg_commits_per_file` / `most_churned_file` change, in the
+correctness direction. The `ChurnReport` struct is unchanged.
+NO new CLI flag. NO change to `get_file_churn` /
+`get_file_churn_detailed` parsing — those still report per-file
+events accurately, which is what `hotspots` consumes. The fix is
+purely at the AGGREGATION layer (`build_summary`) and the
+PRESENTATION layer (`analyze_churn` shallow gating). The shallow
+gate is intentionally narrow: only `is_shallow && unique <= 1`
+trips it; deeper shallow clones (e.g. `--depth 50`) keep their
+output but retain the advisory warning.
+
+### Retained
+
+- `hotspots` continues to operate independently of `churn` summary
+  semantics (it consumes `get_file_churn_detailed` directly,
+  computes its own `total_commits` from the filtered set, and has
+  always done its own shallow gating via
+  `build_empty_hotspots_report`). No drift introduced between
+  `hotspots` and `churn`; they now agree on the meaning of
+  "commit count" (unique SHAs).
+- All 4652 `tldr-core` library tests remain GREEN.
+- `vuln_migration_v1_red` remains 168/168 GREEN.
+- The advisory-tier shallow-clone warning (the original
+  `"Repository is a shallow clone (~N commits). Churn analysis
+  may be incomplete."`) is still emitted for ALL shallow clones,
+  including the degenerate sub-case. The new degenerate-tier
+  warning is ADDITIVE.
+
+### Quantification
+
+BEFORE (`tldr churn /tmp/repos/flask | jq '.summary | {total_commits, total_files, avg_commits_per_file, most_churned_file}'`):
+```
+{ "total_files": 236, "total_commits": 236,
+  "avg_commits_per_file": 1.0,
+  "most_churned_file": "<arbitrary file>" }
+```
+
+AFTER (same command, same repo, same milestone HEAD):
+```
+{ "total_files": 236, "total_commits": 1,
+  "avg_commits_per_file": 0.0,
+  "most_churned_file": "" }
+```
+
+`tldr churn /tmp/repos/flask | jq '.warnings'` post-fix:
+```
+[ "Repository is a shallow clone (~1 commits). Churn analysis may be incomplete.",
+  "Shallow clone with 1 commit in window — per-file churn ranks and averages are degenerate and have been suppressed. Re-run on a full clone (`git fetch --unshallow`) for meaningful churn analysis." ]
+```
+
+`tldr churn .` (this repo, full clone) post-fix:
+```
+{ "total_files": 1298, "total_commits": 191,
+  "avg_commits_per_file": 0.147...,
+  "most_churned_file": "crates/tldr-core/src/security/taint.rs" }
+warnings: null
+```
+Real repos with real history are unaffected; only the degenerate
+shallow case is gated.
+
+### Standing rules upheld
+
+- No `cargo publish`. No version bump. No remote push. No
+  `Cargo.lock` staged.
+- No CHANGELOG history rewrite — entry appended at top.
+- Single atomic commit, annotated tag `churn-correctness-v1`.
+- No suppression-style fixes: the test that previously asserted
+  `total_commits == 30` was asserting the BUG; the rule "fix the
+  test to match correct behavior" applies and the assertion is
+  now `total_commits == 12` (a synthetic unique count).
+- Cross-crate refactor avoided: `tldr-core` exports a new helper
+  but signature changes are confined to `build_summary` and
+  callers ship in the same commit.
+
 ## vuln-summary-correctness-v1 — internal milestone
 
 NOT a published release. Medium-severity correctness fix bundling

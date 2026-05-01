@@ -203,7 +203,8 @@ mod churn_tests {
     #[test]
     fn test_build_summary_empty() {
         let empty: HashMap<String, FileChurn> = HashMap::new();
-        let summary = build_summary(&empty, 30);
+        // BUG-03 fix: build_summary now takes total_unique_commits.
+        let summary = build_summary(&empty, 30, 0);
         assert_eq!(summary.total_files, 0);
         assert_eq!(summary.total_commits, 0);
         assert_eq!(summary.time_window_days, 30);
@@ -242,9 +243,15 @@ mod churn_tests {
             },
         );
 
-        let summary = build_summary(&files, 90);
+        // BUG-03 fix: total_commits is now the unique-SHA count, not
+        // the sum of per-file commit_count. Synthetic value 6
+        // (e.g., 6 commits, some touching both files).
+        let summary = build_summary(&files, 90, 6);
         assert_eq!(summary.total_files, 2);
-        assert_eq!(summary.total_commits, 8); // 5 + 3
+        assert_eq!(
+            summary.total_commits, 6,
+            "total_commits is the unique-SHA count"
+        );
         assert_eq!(summary.time_window_days, 90);
         assert_eq!(summary.total_lines_changed, 180); // 120 + 60
         assert!(

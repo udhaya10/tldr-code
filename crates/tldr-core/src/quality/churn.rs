@@ -178,8 +178,13 @@ pub struct ChurnSummary {
     /// Count of files with at least one commit in window
     pub total_files: u32,
 
-    /// Sum of commit_count across all files
-    /// Note: A single commit touching 3 files counts as 3 here
+    /// Count of UNIQUE commit SHAs in the analysis window.
+    ///
+    /// This is the number of distinct commits — NOT the number of
+    /// (file, commit) events. A single commit touching 3 files
+    /// contributes 1 to this counter, not 3. Computed via
+    /// `git rev-list --count` rather than summing per-file
+    /// `commit_count` (which would double-count multi-file commits).
     pub total_commits: u32,
 
     /// Analysis period in days (from --days argument)
@@ -188,10 +193,18 @@ pub struct ChurnSummary {
     /// Sum of lines_changed across all files
     pub total_lines_changed: u64,
 
-    /// total_commits / total_files (0.0 if total_files == 0)
+    /// total_commits / total_files (0.0 if total_files == 0).
+    ///
+    /// Suppressed (set to 0.0) when the report is from a degenerate
+    /// shallow clone (`is_shallow == true && total_commits <= 1`),
+    /// because the value is meaningless without history.
     pub avg_commits_per_file: f64,
 
-    /// File path with highest commit_count
+    /// File path with highest commit_count.
+    ///
+    /// Suppressed (empty string) when the report is from a degenerate
+    /// shallow clone, because ranking 1-commit files against each
+    /// other is not informative.
     pub most_churned_file: String,
 }
 
@@ -1202,23 +1215,73 @@ pub fn get_author_stats(
     Ok(result)
 }
 
+/// Count the number of UNIQUE commit SHAs in the analysis window.
+///
+/// Uses `git rev-list --count --since="N days ago" HEAD` to ask git
+/// directly for the commit count rather than summing per-file
+/// `commit_count` (which would double-count any commit touching more
+/// than one file — see BUG-03).
+///
+/// # Behavior
+/// - Returns `Ok(0)` for an empty repo, no commits in window, or
+///   "does not have any commits" / "bad revision" stderr conditions.
+/// - Propagates other git errors.
+///
+/// # Arguments
+/// * `path` - Repository root directory (must already be a git repo)
+/// * `days` - Time window in days
+pub fn count_unique_commits(path: &Path, days: u32) -> Result<u32, ChurnError> {
+    let since_arg = format!("{} days ago", days);
+    match run_git(
+        &[
+            "rev-list",
+            "--count",
+            &format!("--since={}", since_arg),
+            "HEAD",
+        ],
+        path,
+    ) {
+        Ok(stdout) => Ok(stdout.trim().parse::<u32>().unwrap_or(0)),
+        Err(ChurnError::GitError { stderr, .. })
+            if stderr.contains("does not have any commits")
+                || stderr.contains("bad revision")
+                || stderr.contains("unknown revision") =>
+        {
+            Ok(0)
+        }
+        Err(e) => Err(e),
+    }
+}
+
 /// Build summary statistics from file churn data.
+///
+/// # Arguments
+/// * `file_stats` - Per-file churn data (file → FileChurn)
+/// * `days` - Analysis window in days
+/// * `total_unique_commits` - Count of UNIQUE commit SHAs in the
+///   window (typically from [`count_unique_commits`]). This is the
+///   correct denominator for per-file averages and the value
+///   surfaced as `summary.total_commits` (BUG-03 fix).
 ///
 /// # Formulas
 /// ```text
 /// total_files = len(file_stats)
-/// total_commits = sum(f.commit_count for f in file_stats)
+/// total_commits = total_unique_commits  // NOT sum(f.commit_count)
 /// total_lines_changed = sum(f.lines_changed for f in file_stats)
-/// avg_commits_per_file = total_commits / total_files  // 0.0 if empty
+/// avg_commits_per_file = total_unique_commits / total_files  // 0.0 if empty
 /// most_churned_file = argmax(file_stats, key=commit_count).file
 /// ```
-pub fn build_summary(file_stats: &HashMap<String, FileChurn>, days: u32) -> ChurnSummary {
+pub fn build_summary(
+    file_stats: &HashMap<String, FileChurn>,
+    days: u32,
+    total_unique_commits: u32,
+) -> ChurnSummary {
     let total_files = file_stats.len() as u32;
 
     if total_files == 0 {
         return ChurnSummary {
             total_files: 0,
-            total_commits: 0,
+            total_commits: total_unique_commits,
             time_window_days: days,
             total_lines_changed: 0,
             avg_commits_per_file: 0.0,
@@ -1226,9 +1289,8 @@ pub fn build_summary(file_stats: &HashMap<String, FileChurn>, days: u32) -> Chur
         };
     }
 
-    let total_commits: u32 = file_stats.values().map(|f| f.commit_count).sum();
     let total_lines_changed: u64 = file_stats.values().map(|f| f.lines_changed as u64).sum();
-    let avg_commits_per_file = total_commits as f64 / total_files as f64;
+    let avg_commits_per_file = total_unique_commits as f64 / total_files as f64;
 
     // Find the file with the highest commit_count
     let most_churned_file = file_stats
@@ -1239,12 +1301,30 @@ pub fn build_summary(file_stats: &HashMap<String, FileChurn>, days: u32) -> Chur
 
     ChurnSummary {
         total_files,
-        total_commits,
+        total_commits: total_unique_commits,
         time_window_days: days,
         total_lines_changed,
         avg_commits_per_file,
         most_churned_file,
     }
+}
+
+/// Sentinel for shallow-clone gating (BUG-06).
+///
+/// Returns `true` iff the report would be from a degenerate shallow
+/// clone — i.e. `is_shallow` is true AND we have at most one commit
+/// in the window. In that situation, ranking files by `commit_count`
+/// and computing `avg_commits_per_file` produce values that look
+/// actionable but are mathematically meaningless (every file has
+/// `commit_count == 1`, so every file is tied for "most churned",
+/// and the average is trivially 1.0 by construction).
+///
+/// Callers should mirror the [`crate::quality::hotspots`] pattern:
+/// emit a stronger warning, suppress the per-file rank, and zero
+/// out the average so the JSON output cannot be mistaken for
+/// real signal.
+pub fn is_degenerate_shallow(is_shallow: bool, total_unique_commits: u32) -> bool {
+    is_shallow && total_unique_commits <= 1
 }
 
 /// Get recommendation text based on hotspot score.

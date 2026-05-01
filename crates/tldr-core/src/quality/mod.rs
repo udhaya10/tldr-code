@@ -46,9 +46,10 @@ mod debt_tests;
 mod health_tests;
 
 pub use churn::{
-    build_summary, check_shallow_clone, get_author_stats, get_file_churn, get_recommendation,
-    is_bot_author, is_git_repository, matches_exclude_pattern, AuthorStats, ChurnError,
-    ChurnReport, ChurnSummary, FileChurn, Hotspot,
+    build_summary, check_shallow_clone, count_unique_commits, get_author_stats, get_file_churn,
+    get_recommendation, is_bot_author, is_degenerate_shallow, is_git_repository,
+    matches_exclude_pattern, AuthorStats, ChurnError, ChurnReport, ChurnSummary, FileChurn,
+    Hotspot,
 };
 pub use cohesion::{
     analyze_cohesion, analyze_cohesion_with_options, ClassCohesion, CohesionOptions,

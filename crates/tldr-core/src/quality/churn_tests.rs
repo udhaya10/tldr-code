@@ -13,10 +13,10 @@ use std::path::PathBuf;
 
 // Import the types that will be implemented
 use super::churn::{
-    build_summary, check_shallow_clone, format_text_output, get_author_stats, get_file_churn,
-    get_file_churn_detailed, get_recommendation, is_bot_author, is_git_repository,
-    matches_exclude_pattern, AuthorStats, ChurnError, ChurnReport, ChurnSummary, FileChurn,
-    Hotspot,
+    build_summary, check_shallow_clone, count_unique_commits, format_text_output,
+    get_author_stats, get_file_churn, get_file_churn_detailed, get_recommendation, is_bot_author,
+    is_degenerate_shallow, is_git_repository, matches_exclude_pattern, AuthorStats, ChurnError,
+    ChurnReport, ChurnSummary, FileChurn, Hotspot,
 };
 
 // =============================================================================
@@ -429,7 +429,8 @@ mod unit_tests {
     #[test]
     fn test_build_summary_empty() {
         let file_stats: HashMap<String, FileChurn> = HashMap::new();
-        let summary = build_summary(&file_stats, 365);
+        // total_unique_commits == 0 for an empty file_stats
+        let summary = build_summary(&file_stats, 365, 0);
 
         assert_eq!(summary.total_files, 0);
         assert_eq!(summary.total_commits, 0);
@@ -439,7 +440,11 @@ mod unit_tests {
         assert!(summary.most_churned_file.is_empty());
     }
 
-    /// Test: build_summary with multiple files
+    /// Test: build_summary with multiple files (BUG-03 contract)
+    ///
+    /// `total_commits` is now the number of UNIQUE commit SHAs in
+    /// the window, not the sum of per-file `commit_count`. A single
+    /// commit touching N files contributes 1, not N.
     #[test]
     fn test_build_summary_with_files() {
         let mut file_stats: HashMap<String, FileChurn> = HashMap::new();
@@ -474,13 +479,19 @@ mod unit_tests {
             },
         );
 
-        let summary = build_summary(&file_stats, 30);
+        // Synthetic: 12 unique commits produced these per-file counts.
+        // (e.g., file1 was touched in 10 of those 12, file2 in 20 of
+        // those 12 — multiple files per commit is normal.)
+        let summary = build_summary(&file_stats, 30, 12);
 
         assert_eq!(summary.total_files, 2);
-        assert_eq!(summary.total_commits, 30); // 10 + 20
+        assert_eq!(
+            summary.total_commits, 12,
+            "total_commits is the unique-SHA count, NOT the sum of per-file commit_count"
+        );
         assert_eq!(summary.time_window_days, 30);
         assert_eq!(summary.total_lines_changed, 450); // 150 + 300
-        assert!((summary.avg_commits_per_file - 15.0).abs() < 0.01); // 30 / 2
+        assert!((summary.avg_commits_per_file - 6.0).abs() < 0.01); // 12 unique / 2 files
         assert_eq!(summary.most_churned_file, "file2.rs"); // Has 20 commits
     }
 }
@@ -710,6 +721,156 @@ mod integration_tests {
         let bob = author_stats.iter().find(|a| a.email == "bob@example.com");
         assert!(bob.is_some(), "Bob should be in stats");
         assert_eq!(bob.unwrap().commits, 1);
+    }
+
+    // =============================================================================
+    // BUG-03 / BUG-06 Regression Tests (churn-correctness-v1)
+    // =============================================================================
+
+    /// BUG-03 regression: `summary.total_commits` must count UNIQUE
+    /// commit SHAs, NOT (file, commit) events.
+    ///
+    /// Pre-fix symptom on a flask shallow clone: `total_commits ==
+    /// total_files == 236` because every file was touched in the
+    /// single root commit, and the old `build_summary` summed
+    /// `commit_count` across files.
+    ///
+    /// Fixture: 3 commits over 5 files. The first commit adds all
+    /// 5 files, the second commit edits 3 of them, the third edits
+    /// 2 of them. Sum of per-file commit_count is 5 + 3 + 2 = 10.
+    /// Unique-SHA count is 3. Old code reported 10; new code
+    /// reports 3.
+    #[test]
+    #[ignore = "Requires git setup - run with --ignored"]
+    fn test_churn_total_commits_counts_unique_shas() {
+        let repo = TestRepo::new().expect("Failed to create test repo");
+
+        // Commit 1: add 5 files in one commit.
+        for i in 1..=5 {
+            repo.add_file(&format!("file{}.txt", i), "v1\n").unwrap();
+        }
+        repo.commit("c1: add 5 files").unwrap();
+
+        // Commit 2: edit 3 of them in a single commit.
+        for i in 1..=3 {
+            repo.add_file(&format!("file{}.txt", i), "v2\n").unwrap();
+        }
+        repo.commit("c2: edit 3 files").unwrap();
+
+        // Commit 3: edit 2 of them in a single commit.
+        for i in 1..=2 {
+            repo.add_file(&format!("file{}.txt", i), "v3\n").unwrap();
+        }
+        repo.commit("c3: edit 2 files").unwrap();
+
+        // Verify get_file_churn sees 5 files with the expected
+        // per-file event counts (sanity check on the fixture).
+        let file_stats = get_file_churn(repo.path(), 365, &[]).expect("get_file_churn");
+        assert_eq!(file_stats.len(), 5, "5 unique files were touched");
+        let summed_events: u32 = file_stats.values().map(|f| f.commit_count).sum();
+        assert_eq!(
+            summed_events, 10,
+            "fixture sanity: sum of per-file commit_count is 5+3+2 == 10"
+        );
+
+        // Unique-SHA count via the new helper.
+        let unique = count_unique_commits(repo.path(), 365).expect("count_unique_commits");
+        assert_eq!(
+            unique, 3,
+            "BUG-03: total_commits MUST be unique-SHA count (3), not summed file events (10)"
+        );
+
+        // build_summary plumbing: when fed the unique count, surfaces it verbatim.
+        let summary = build_summary(&file_stats, 365, unique);
+        assert_eq!(summary.total_files, 5);
+        assert_eq!(summary.total_commits, 3);
+        assert!(
+            (summary.avg_commits_per_file - 0.6).abs() < 0.01,
+            "avg_commits_per_file == 3 unique commits / 5 files == 0.6, got {}",
+            summary.avg_commits_per_file
+        );
+    }
+
+    /// BUG-06 regression: a degenerate shallow clone (1 commit) must
+    /// be flagged as degenerate so callers can suppress the
+    /// meaningless per-file rank and average.
+    ///
+    /// Pre-fix symptom on a flask `--depth 1` clone: churn reported
+    /// `avg_commits_per_file: 1.0`, `most_churned_file: <some
+    /// arbitrary file>`, with no warning — output looked actionable
+    /// but every file had `commit_count == 1` so nothing was
+    /// actually ranked.
+    #[test]
+    #[ignore = "Requires git setup - run with --ignored"]
+    fn test_churn_shallow_clone_emits_warning() {
+        use std::process::Command;
+        use tempfile::TempDir;
+
+        // Synthetic shallow clone with depth 1.
+        // NOTE: We can't use the existing TestRepo::new_shallow
+        // fixture directly because modern git (>=2.24) treats a
+        // local-path clone as a hardlink-share by default and may
+        // not record the shallow file. We force a real shallow
+        // clone with `--no-local file://...`.
+        let source = TestRepo::new().expect("Failed to create source repo");
+        source.add_file("file.txt", "v0\n").unwrap();
+        source.commit("c0").unwrap();
+        for i in 1..=5 {
+            source.add_file("file.txt", &format!("v{}\n", i)).unwrap();
+            source.commit(&format!("c{}", i)).unwrap();
+        }
+
+        let shallow_dir = TempDir::new().expect("tempdir");
+        let source_url = format!("file://{}", source.path().display());
+        let status = Command::new("git")
+            .args([
+                "clone",
+                "--no-local",
+                "--depth",
+                "1",
+                &source_url,
+                shallow_dir.path().to_str().unwrap(),
+            ])
+            .output()
+            .expect("git clone")
+            .status;
+        assert!(status.success(), "shallow clone must succeed");
+
+        let (is_shallow, _depth) =
+            check_shallow_clone(shallow_dir.path()).expect("check_shallow_clone");
+        assert!(is_shallow, "fixture sanity: clone must be shallow");
+
+        let unique = count_unique_commits(shallow_dir.path(), 365)
+            .expect("count_unique_commits on shallow");
+        assert!(
+            unique <= 1,
+            "fixture sanity: depth-1 clone must have at most 1 commit, got {}",
+            unique
+        );
+
+        // The degenerate-shallow predicate is the gating signal the
+        // CLI uses to suppress per-file rank and average.
+        assert!(
+            is_degenerate_shallow(is_shallow, unique),
+            "BUG-06: shallow clone with <=1 commit must be flagged degenerate"
+        );
+
+        // And on a NON-shallow repo with 1 commit, the gate must
+        // NOT trip — single-commit-but-full-history is legitimate
+        // (e.g., a brand-new project), and we still produce real
+        // output for it (trivial but truthful).
+        let full = TestRepo::new().expect("Failed to create test repo");
+        full.add_file("file.txt", "v1\n").unwrap();
+        full.commit("only commit").unwrap();
+
+        let (full_is_shallow, _) = check_shallow_clone(full.path()).expect("check_shallow_clone");
+        let full_unique = count_unique_commits(full.path(), 365).expect("count_unique_commits");
+        assert!(!full_is_shallow, "fixture sanity: full clone is not shallow");
+        assert_eq!(full_unique, 1);
+        assert!(
+            !is_degenerate_shallow(full_is_shallow, full_unique),
+            "BUG-06: full clone with 1 commit must NOT be flagged degenerate (legitimate single-commit repo)"
+        );
     }
 }
 

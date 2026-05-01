@@ -10,8 +10,8 @@ use anyhow::Result;
 use clap::Args;
 
 use tldr_core::quality::churn::{
-    build_summary, check_shallow_clone, get_author_stats, get_file_churn, is_git_repository,
-    ChurnError, ChurnReport,
+    build_summary, check_shallow_clone, count_unique_commits, get_author_stats, get_file_churn,
+    is_degenerate_shallow, is_git_repository, ChurnError, ChurnReport,
 };
 
 use crate::output::{OutputFormat, OutputWriter};
@@ -121,6 +121,11 @@ pub fn analyze_churn(
     // Get file churn data
     let file_stats = get_file_churn(path, days, exclude_patterns)?;
 
+    // BUG-03 fix: ask git directly for the unique-SHA count rather
+    // than summing per-file commit_count (which would double-count
+    // multi-file commits).
+    let total_unique_commits = count_unique_commits(path, days)?;
+
     // Sort files by commit_count descending and take top_k
     let mut files: Vec<_> = file_stats.values().cloned().collect();
     files.sort_by(|a, b| b.commit_count.cmp(&a.commit_count));
@@ -140,7 +145,24 @@ pub fn analyze_churn(
     let hotspots = Vec::new();
 
     // Build summary
-    let summary = build_summary(&file_stats, days);
+    let mut summary = build_summary(&file_stats, days, total_unique_commits);
+
+    // BUG-06 fix: when the repo is a shallow clone with at most one
+    // commit, the per-file rank and average are mathematically
+    // meaningless (every file is tied for "most churned" with
+    // commit_count == 1, and avg_commits_per_file collapses to 1.0
+    // by construction). Mirror the hotspots gating: emit a stronger
+    // warning, suppress the rank, and zero the average so the JSON
+    // output cannot be mistaken for actionable signal.
+    let degenerate = is_degenerate_shallow(is_shallow, total_unique_commits);
+    if degenerate {
+        warnings.push(format!(
+            "Shallow clone with {} commit in window — per-file churn ranks and averages are degenerate and have been suppressed. Re-run on a full clone (`git fetch --unshallow`) for meaningful churn analysis.",
+            total_unique_commits
+        ));
+        summary.avg_commits_per_file = 0.0;
+        summary.most_churned_file = String::new();
+    }
 
     Ok(ChurnReport {
         files,
