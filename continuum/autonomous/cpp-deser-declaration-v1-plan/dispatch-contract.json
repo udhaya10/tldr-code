@@ -1,7 +1,7 @@
 {
   "task": "cpp-deser-declaration-v1",
   "complexity": "patch",
-  "scope": "Add Cpp-specific arm to extract_first_identifier_arg_ast (crates/tldr-core/src/security/taint.rs:3945) handling tree-sitter-cpp `declaration → init_declarator(value=argument_list)` shape; extend extract_first_identifier_arg_ast_descent's per-language descend-through set with a Language::Cpp branch covering binary_expression / call_expression / parenthesized_expression / argument_list. Reuses existing descent helper (introduced by var-extract-nested-constructor-v1; depth 5; string-kind filter at every level). Closes vuln-source-parity-v1 M5 Bucket B Cpp partial (cpp_deserialization_positive — the LAST remaining carry-forward) per var-extract-nested-constructor-v1 premortem amendment A1 (commit 88f5620). NO public API change; NO new VulnType / TaintSinkType / TaintSourceType variants; NO bank entry additions; NO push, NO publish, NO version bump (USER STANDING RULE).",
+  "scope": "Add Cpp-specific arm to extract_first_identifier_arg_ast (crates/tldr-core/src/security/taint.rs:3945) handling tree-sitter-cpp `declaration → init_declarator(value=argument_list)` shape; extend the per-language descend_kinds match arm INSIDE the OUTER extract_first_identifier_arg_ast at taint.rs L4117-4129 with a Language::Cpp branch covering binary_expression / call_expression / parenthesized_expression / argument_list (the inner descent helper extract_first_identifier_arg_ast_descent at L4180+ performs unconditional BFS and has NO per-language extension point; outer-helper descend_kinds extension is FORWARD-COVERAGE for future Cpp call_expression-rooted nested-constructor sinks; the new Cpp entry arm short-circuits before L4076 for cpp_deserialization_positive). Reuses existing descent helper (introduced by var-extract-nested-constructor-v1; depth 5; string-kind filter at every level). Closes vuln-source-parity-v1 M5 Bucket B Cpp partial (cpp_deserialization_positive — the LAST remaining carry-forward) per var-extract-nested-constructor-v1 premortem amendment A1 (commit 88f5620). NO public API change; NO new VulnType / TaintSinkType / TaintSourceType variants; NO bank entry additions; NO push, NO publish, NO version bump (USER STANDING RULE).",
   "closes_issues": [],
   "closes_carry_forward": "vuln-source-parity-v1 M5 Bucket B Cpp partial (cpp_deserialization_positive); deferred from var-extract-nested-constructor-v1 per premortem A1. THE LAST REMAINING vuln-source-parity-v1 carry-forward.",
   "enables_followons": [],
@@ -24,7 +24,7 @@
     "m1_red_capture_required": "M1 MUST run cpp_deserialization_positive at HEAD 7a36df3 and confirm RED pre-fix. Document in reports/M1-red-capture.txt.",
     "m1_green_baseline_required": "M1 MUST capture 167/168 GREEN baseline of vuln_migration_v1_red at HEAD 7a36df3. Document in reports/M1-green-baseline.txt. M3 compares against this baseline for GREEN→RED regression detection.",
     "m3_red_count_delta_assertion": "M3 MUST verify vuln_migration_v1_red red count drops by exactly 1 (1 → 0; cpp_deserialization_positive closes). Any other delta triggers investigation before tag.",
-    "m3_binary_smoke_string_literal_fp": "M3 MUST run binary smoke (`tldr vuln <fixture>`) on all 18 fixtures matching crates/tldr-cli/tests/fixtures/vuln_migration_v1/*/deserialization_string_literal_fp.* and document 0 findings each. Closes-#24 regression-guard.",
+    "m3_binary_smoke_string_literal_fp": "M3 MUST run binary smoke (`tldr vuln <fixture>`) on all fixtures matching the glob crates/tldr-cli/tests/fixtures/vuln_migration_v1/*/deserialization_string_literal_fp.* (13 deserialization-specific fixtures; the broader *_string_literal_fp glob across the fixture tree expands to 84 total) and document 0 findings each. Glob is authoritative; the count corrected per premortem amendment A2. Closes-#24 regression-guard.",
     "m3_changelog_entry": "M3 CHANGELOG entry MUST cite that NO public API change occurred and NO new TaintSinkType / TaintSourceType / VulnType variants were added; MUST cite predecessor (var-extract-nested-constructor-v1) and the premortem amendment A1 reference."
   },
   "skip_blokers": true,
@@ -77,7 +77,7 @@
     {
       "id": "M2",
       "wave": "2",
-      "title": "Implement Cpp arm in extract_first_identifier_arg_ast + descend-through extension",
+      "title": "Implement Cpp arm in extract_first_identifier_arg_ast + outer-helper descend_kinds extension at L4117-4129 (forward-coverage)",
       "depends": ["M1"],
       "atomic_commit": false,
       "must_ship_in_same_release_commit": false,
@@ -90,10 +90,10 @@
       "green_files": [
         {
           "path": "crates/tldr-core/src/security/taint.rs",
-          "anchor": "extract_first_identifier_arg_ast at L3945 + extract_first_identifier_arg_ast_descent at L4180",
+          "anchor": "extract_first_identifier_arg_ast at L3945 (entry arm) + outer-helper descend_kinds match at L4117-4129 (forward-coverage). NOTE: inner descent helper extract_first_identifier_arg_ast_descent at L4180+ is body-unchanged — it does unconditional BFS and has NO per-language extension point.",
           "additions": [
             "Add new Cpp arm in extract_first_identifier_arg_ast AFTER OCaml application_expression arm (L4043) and BEFORE generic args lookup (L4076). Arm: when `language == Language::Cpp && descendant.kind() == \"declaration\"`, iterate named children, find init_declarator, extract child_by_field_name(\"value\") (must be argument_list), invoke extract_first_identifier_arg_ast_descent(value, source, language, 0). Return None on miss so outer fallback chain still runs.",
-            "Extend extract_first_identifier_arg_ast_descent's per-language descend-through set (taint.rs L4117-L4129) with a Language::Cpp arm: &[\"binary_expression\", \"call_expression\", \"parenthesized_expression\", \"argument_list\"].",
+            "Extend the per-language descend_kinds match arm INSIDE the OUTER extract_first_identifier_arg_ast (taint.rs L4117-L4129) with a Language::Cpp arm: &[\"binary_expression\", \"call_expression\", \"parenthesized_expression\", \"argument_list\"]. NOTE: this is the outer helper's descend_kinds set — the inner descent helper at L4180+ performs unconditional BFS and has no per-language extension point. This extension is FORWARD-COVERAGE for future Cpp call_expression-rooted nested-constructor sinks; the new Cpp entry arm short-circuits before L4076 for cpp_deserialization_positive, so this set is not on the critical path for the carry-forward fixture.",
             "Add CPP-DESER-DECLARATION-V1 doc-comment block citing M1 disposition (Option A), premortem 88f5620 reference, predecessor var-extract-nested-constructor-v1, and that CPP_AST_SINKS L2655-2662 is unchanged."
           ],
           "preserved": [
@@ -157,7 +157,7 @@
       "stop_thresholds": [
         "vuln_migration_v1_red red count exactly 0 (1 → 0; -1 delta; cpp_deserialization_positive closed)",
         "All 167 currently-GREEN tests at HEAD remain GREEN (no GREEN→RED transitions)",
-        "All 18 *_string_literal_fp fixtures yield 0 findings under tldr vuln",
+        "All deserialization_string_literal_fp fixtures (13 deserialization-specific via glob; 84 total *_string_literal_fp across the fixture tree) yield 0 findings under tldr vuln — glob authoritative per premortem amendment A2",
         "rr_framework_integ_test 18/18 PASS",
         "test_e2e_in_security_vuln 36/36 PASS",
         "vuln_migration_v1_composite_red 1/1 PASS",
@@ -213,7 +213,7 @@
       "id": "R3",
       "tier": "TIGER",
       "description": "string-literal regression-guard regresses (closes-#24)",
-      "mitigation": "extract_first_identifier_arg_ast_descent ALREADY applies string_node_kinds(language) filter at every recursion level — unchanged. Cpp arm reuses that helper. M3 binary smoke on all 18 *_string_literal_fp fixtures gating."
+      "mitigation": "extract_first_identifier_arg_ast_descent ALREADY applies string_node_kinds(language) filter at every recursion level — unchanged. Cpp arm reuses that helper. M3 binary smoke on all 13 deserialization-specific (or 84 total via the broader *_string_literal_fp glob) fixtures gating; glob authoritative per premortem amendment A2."
     },
     {
       "id": "R4",

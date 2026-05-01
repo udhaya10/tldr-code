@@ -90,10 +90,19 @@ Modifications confined to:
    placed BEFORE the generic `args` lookup at L4076 (mirrors the existing
    PHP/Ruby/OCaml arm placement). Arm body walks `declaration → init_declarator
    → argument_list` and delegates to `extract_first_identifier_arg_ast_descent`.
-2. **`extract_first_identifier_arg_ast_descent`** (L4180+): extend its
-   per-language descend-through set to add a `Language::Cpp` branch
-   covering `binary_expression`, `call_expression`,
-   `parenthesized_expression`, `argument_list`. (Java/Scala arms unchanged.)
+2. **`extract_first_identifier_arg_ast`** per-language descend-through
+   set (L4117-4129, inside the OUTER helper, NOT inside the inner
+   descent helper): extend it with a `Language::Cpp` branch covering
+   `binary_expression`, `call_expression`, `parenthesized_expression`,
+   `argument_list`. (Java/Scala arms unchanged.) **Note:** the inner
+   descent helper `extract_first_identifier_arg_ast_descent` at L4180+
+   performs unconditional BFS and has NO per-language extension point;
+   the per-language descend-through set lives in the OUTER helper.
+   Extending the outer descend_kinds match arm is COSMETIC for
+   `cpp_deserialization_positive` (the new Cpp entry arm short-circuits
+   before reaching the L4076 args-list lookup) but provides
+   FORWARD-COVERAGE for future Cpp `call_expression`-rooted
+   nested-constructor sinks that would reach the descend-through path.
 
 **Out of scope (explicit):**
 - NO changes to `CPP_AST_SINKS` (bank already correct).
@@ -118,7 +127,7 @@ Modifications confined to:
 
 ### M2 — Implement Cpp arm + descend-through extension
 - Add a new Cpp arm to `extract_first_identifier_arg_ast` at taint.rs L3945+, AFTER the OCaml `application_expression` arm (L4043) and BEFORE the generic `args` lookup at L4076. Arm body: when `language == Cpp && descendant.kind() == "declaration"`, walk named children for `init_declarator` → `child_by_field_name("value")` (must be `argument_list`) → invoke `extract_first_identifier_arg_ast_descent(value, source, language, 0)`. On miss, fall through to outer fallback chain so behaviour for non-matching `declaration` shapes is unchanged.
-- Extend `extract_first_identifier_arg_ast_descent` per-language descend-through set (taint.rs L4117-L4129) with a `Language::Cpp` arm covering `binary_expression`, `call_expression`, `parenthesized_expression`, `argument_list`. Java/Scala arms unchanged.
+- Extend the per-language descend-through `descend_kinds` match arm INSIDE the OUTER `extract_first_identifier_arg_ast` (taint.rs L4117-L4129) with a `Language::Cpp` arm covering `binary_expression`, `call_expression`, `parenthesized_expression`, `argument_list`. Java/Scala arms unchanged. **NOTE:** the inner descent helper `extract_first_identifier_arg_ast_descent` at L4180+ does unconditional BFS and has NO per-language extension point — only the outer helper's descend_kinds set is extended. This is FORWARD-COVERAGE for future Cpp `call_expression`-rooted nested-constructor sinks; the new Cpp entry arm above short-circuits before L4076 for `cpp_deserialization_positive`, so the descend_kinds extension is not on the critical path for this fixture.
 - Doc-comment block citing premortem `88f5620`, the cpp-deser-declaration-v1 anchor, and that `CPP_AST_SINKS` L2655-2662 is unchanged (the gap was var-extraction shape coverage, not bank entries).
 - LOC delta: ~30-45 (arm body + per-language descend-through entry + doc).
 
@@ -128,7 +137,7 @@ Modifications confined to:
 - `cargo test -p tldr-core --release --test rr_framework_integ_test` → expect 18/18.
 - `cargo test -p tldr-core --release --lib security::vuln` → expect 36/36 `test_e2e_*`.
 - `cargo test --workspace --release --no-fail-fast` → expect overall PASS.
-- Binary smoke on **all 18** `*/deserialization_string_literal_fp.*` fixtures: `for f in <fixtures>; do tldr vuln "$f"; done` → expect 0 findings each (closes-#24 regression-guard).
+- Binary smoke on **all 13 deserialization-specific** (or **84 total via glob**) `*/deserialization_string_literal_fp.*` fixtures: `for f in <fixtures>; do tldr vuln "$f"; done` → expect 0 findings each (closes-#24 regression-guard). Glob `crates/tldr-cli/tests/fixtures/vuln_migration_v1/*/deserialization_string_literal_fp.*` is authoritative.
 - Binary smoke on `cpp/deserialization_positive.cpp` directly → expect ≥1 deserialization finding.
 - CHANGELOG entry (see §5).
 - Local tag `cpp-deser-declaration-v1`.
@@ -150,7 +159,7 @@ Modifications confined to:
 
 The predecessor's premortem (commit `88f5620`) noted that the existing helper's `child_by_field_name("arguments")` and positional `kind.contains("argument")` fallback do not reach the argument_list under a `declaration`. **TRUE OF THE EXISTING HELPER.** The fix is to **add a Cpp arm** that knows the cpp shape, exactly as the existing helper has arms for PHP echo_statement (L3954-3982), Ruby subshell (L4013-4036), OCaml application_expression (L4043-4070). All three are language-specific entries at the top of the helper. The Cpp `declaration` arm is the same shape of extension.
 
-The descent helper itself (`extract_first_identifier_arg_ast_descent` at L4180+) is reused unchanged in body — only its per-language descend-through set gets one new entry. Cpp's case requires `binary_expression` (because `>>` between the two arg expressions is a binary_expression node), `call_expression` (for the inner `std::stringstream(d)`), `parenthesized_expression` (for any wrapping parens), and `argument_list` (the entry shape itself).
+The descent helper itself (`extract_first_identifier_arg_ast_descent` at L4180+) is reused unchanged — its body performs unconditional BFS and has no per-language extension point. The per-language `descend_kinds` set that DOES gate descent lives in the OUTER helper at L4117-4129, and that is where the new Cpp entry is added. Cpp's case requires `binary_expression` (because `>>` between the two arg expressions is a binary_expression node), `call_expression` (for the inner `std::stringstream(d)`), `parenthesized_expression` (for any wrapping parens), and `argument_list` (the entry shape itself).
 
 **Var-extraction trace under Option A:** entry arm fires on
 `declaration` → walks `named_child = init_declarator` →
@@ -167,7 +176,7 @@ The descent helper itself (`extract_first_identifier_arg_ast_descent` at L4180+)
 |---|---|---|---|
 | **R1** | TIGER | Cpp arm fires on UNRELATED `declaration` nodes (e.g., `int x = foo(d);`) and surfaces false positives across pre-existing GREEN cpp fixtures. | Arm is invoked ONLY when var-extraction is invoked, which itself only fires when `member_patterns_match` matched a sink pattern. The arm matches the structural chain `declaration → init_declarator(value=argument_list)`. For sinks: arm runs ONLY for descendants already filtered to sink-pattern matches. M3 GREEN-regression sweep across all 167 currently-GREEN tests is gating. |
 | **R2** | TIGER | `extract_first_identifier_arg_ast_descent` Cpp descend-through additions (`binary_expression`, etc.) regress var-extraction for Java/Scala or other-Cpp call_expression sinks (descent now traverses through wrong shapes). | Per-language descend-through set is explicitly keyed on `Language::Cpp`. Java/Scala/other-language descent paths unchanged. M3 sweep gating. |
-| **R3** | TIGER | string-literal regression-guard regresses (closes-#24): a `declaration` with `init_declarator(value=argument_list)` where the inner identifier is inside a string literal. | `extract_first_identifier_arg_ast_descent` (taint.rs L4180+) ALREADY applies `string_node_kinds(language)` filter at every recursion level — unchanged. Cpp arm reuses that helper. M3 binary smoke on all 18 `*_string_literal_fp` fixtures (including `cpp/deserialization_string_literal_fp.cpp`) is gating. |
+| **R3** | TIGER | string-literal regression-guard regresses (closes-#24): a `declaration` with `init_declarator(value=argument_list)` where the inner identifier is inside a string literal. | `extract_first_identifier_arg_ast_descent` (taint.rs L4180+) ALREADY applies `string_node_kinds(language)` filter at every recursion level — unchanged. Cpp arm reuses that helper. M3 binary smoke on all 13 deserialization-specific (or 84 total via glob) `*_string_literal_fp` fixtures (including `cpp/deserialization_string_literal_fp.cpp`) is gating. |
 | **R4** | ELEPHANT | Tree-sitter-cpp grammar version drift between HEAD's pinned 0.23.4 and a future bump renames `init_declarator` or `argument_list`. | Helper comment cites pinned grammar version; if grammar changes, arm fails closed (returns None) — not regress, fixture re-RED would surface in CI. Tunable. |
 | **R5** | ELEPHANT | `init_declarator` shape with a chain like `T x(...)` where value is a single nested constructor call (no binary_expression) — descent works but doesn't surface a different shape. | Descend-through set covers `call_expression` directly, so single-constructor case is also handled. No additional risk. |
 
