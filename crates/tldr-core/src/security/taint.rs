@@ -3982,6 +3982,49 @@ fn extract_first_identifier_arg_ast(
         return None;
     }
 
+    // RUBY-BACKTICK-EXTRACTION-V1: Ruby subshell var-extraction.
+    //
+    // tree-sitter-ruby 0.23.1 parses both `cmd` (backtick) and %x{cmd}/%x[cmd]/
+    // %x(cmd) as a single `subshell` named-node whose children are
+    // `interpolation` / `string_content` / `escape_sequence`. The generic
+    // args-list path below (post all language-specific arms) requires either
+    // `child_by_field_name("arguments")` OR a child whose kind contains
+    // "argument" or equals "call_suffix". `subshell` has NEITHER, so the
+    // generic path returns None for subshell. Without this arm, the new
+    // Ruby subshell dispatch arm in detect_sinks_ast would extract var=None
+    // and emit zero sinks → ruby_command_injection_positive stays RED.
+    //
+    // BFS over named descendants of the subshell, recursing into
+    // `interpolation` (and any other named children). Skip `string_kinds`
+    // subtrees so identifiers inside `string_content` are not picked up.
+    // Return the first non-self `identifier`'s text. Mirrors the PHP echo
+    // BFS at L3954-3982 stylistically.
+    if language == Language::Ruby && descendant.kind() == "subshell" {
+        let mut stack: Vec<tree_sitter::Node> = vec![*descendant];
+        while let Some(node) = stack.pop() {
+            // Skip string-literal subtrees (defensive).
+            if string_kinds.contains(&node.kind()) {
+                continue;
+            }
+            if node.kind() == "identifier" && node.id() != descendant.id() {
+                let text = node_text(&node, source);
+                let head = text.split('.').next().unwrap_or(text);
+                if is_valid_identifier(head) {
+                    return Some(head.to_string());
+                }
+            }
+            // Push named children for further walk.
+            for i in 0..node.child_count() {
+                if let Some(child) = node.child(i) {
+                    if child.is_named() {
+                        stack.push(child);
+                    }
+                }
+            }
+        }
+        return None;
+    }
+
     // OCaml application_expression has no "arguments" field — child(0) is the
     // function expression and child(1..) are the arguments. Scan from child(1).
     // (M5 carry-forward: pre-M5 the regex bank's `extract_call_arg` text-scanned
@@ -4471,6 +4514,64 @@ pub fn detect_sinks_ast(
                     // duplicates so removing the break does not produce extra
                     // findings for single-classification sinks.
                 }
+            }
+        }
+
+        // RUBY-BACKTICK-EXTRACTION-V1: Ruby backtick / %x{} subshell dispatch.
+        //
+        // Closes carry-forward from vuln-source-parity-v1 M5 Bucket A Ruby
+        // (ruby_command_injection_positive). Predecessor precedent:
+        // field_access_info-extension-v1 retained `\bgets\b` for a bare-call
+        // AST shape gap — same shape of carry-forward (raw-substring/AST
+        // node-kind mismatch), different localized resolution.
+        //
+        // tree-sitter-ruby 0.23.1 parses BOTH `…` (backtick) and
+        // %x{…}/%x[…]/%x(…) as a single `subshell` named-node containing
+        // `interpolation` / `string_content` / `escape_sequence` children.
+        // subshell is NOT call-shaped — it has no `method` / `receiver`
+        // field and `extract_call_name_ruby` returns None for it. The
+        // for-pattern-in-patterns.sinks loop above cannot match it via
+        // `call_names` (gated on call_node_kinds + extract_call_name) or
+        // `member_patterns` (gated on member_access_expression OR call-shape
+        // OR raw-substring with high FP risk on the backtick character).
+        // Therefore this dispatch arm IS the entire matcher for subshell.
+        //
+        // Adding `subshell` to call_node_kinds(Ruby) (Option A) would require
+        // extending extract_call_name_ruby with a synthetic name AND would
+        // affect every consumer of call_node_kinds (sources, sanitizers,
+        // references.rs is_call gate). Localized arm here (Option B) is
+        // surgically scoped to ShellExec sink detection only.
+        //
+        // Var-extraction reuses extract_first_identifier_arg_ast (extended in
+        // this milestone with a Ruby-specific subshell BFS arm — see helper
+        // body above). For `\`#{cmd}\``, the BFS yields subshell →
+        // interpolation → identifier(cmd). Pure-static subshells without
+        // interpolation (e.g., `\`ls\``) yield None and emit no sink —
+        // correct (no taint flow possible).
+        //
+        // No new RUBY_AST_SINKS entry is added: subshell is not call-shaped
+        // so any AstSinkPattern entry would be silently dead under the
+        // existing for-pattern-in-patterns.sinks loop. The dispatch arm IS
+        // the wire.
+        if language == Language::Ruby && descendant.kind() == "subshell" {
+            let stmt_text = std::str::from_utf8(source)
+                .unwrap_or("")
+                .lines()
+                .nth((line - 1) as usize)
+                .unwrap_or("");
+            let var = extract_first_identifier_arg_ast(descendant, source, language)
+                .or_else(|| extract_assignment_rhs_ident(descendant, source, stmt_text))
+                .or_else(|| extract_source_var_from_statement(stmt_text));
+            if let Some(var) = var {
+                sinks.push(TaintSink {
+                    var,
+                    line,
+                    sink_type: TaintSinkType::ShellExec,
+                    tainted: false,
+                    statement: Some(stmt_text.to_string()),
+                });
+                // Only one sink per node — same convention as the loop above.
+                continue;
             }
         }
     }

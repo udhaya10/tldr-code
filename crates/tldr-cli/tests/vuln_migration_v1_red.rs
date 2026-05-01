@@ -1000,6 +1000,29 @@ fn ruby_command_injection_string_literal_fp() {
 }
 
 #[test]
+fn ruby_command_injection_percent_x_positive() {
+    let report = run_tldr_vuln("ruby/command_injection_percent_x_positive.rb", "ruby");
+    let f = findings_of_type(&report, "command_injection");
+    assert!(
+        !f.is_empty(),
+        "expected ≥1 command_injection finding for fixture ruby/command_injection_percent_x_positive.rb (lang=ruby); got: {}",
+        serde_json::to_string_pretty(&report).unwrap_or_default()
+    );
+}
+
+#[test]
+fn ruby_command_injection_percent_x_string_literal_fp() {
+    let report = run_tldr_vuln("ruby/command_injection_percent_x_string_literal_fp.rb", "ruby");
+    let all = all_findings(&report);
+    assert!(
+        all.is_empty(),
+        "expected ZERO findings (string-literal regression-guard) for fixture ruby/command_injection_percent_x_string_literal_fp.rb (lang=ruby); got {} findings: {}",
+        all.len(),
+        serde_json::to_string_pretty(&report).unwrap_or_default()
+    );
+}
+
+#[test]
 fn rust_command_injection_positive() {
     let report = run_tldr_vuln("rust/command_injection_positive.rs", "rust");
     let f = findings_of_type(&report, "command_injection");
