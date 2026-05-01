@@ -2459,8 +2459,6 @@ static RUST_AST_SINKS: &[AstSinkPattern] = &[
     // VULN-MIGRATION-V1 M2: HttpRequest (Ssrf) sinks per vuln.rs L667-L676.
     // `reqwest::get`, `reqwest::Client`, `ureq::get`, `ureq::post`,
     // `hyper::Client`, `Url::parse` are scoped_identifier paths — raw fallback.
-    // `.get(` / `.post(` use wildcard receiver (matches reqwest/ureq client
-    // method calls).
     //
     // RUST-VULN-TAINT-PIPELINE-V1 M2: extended with `reqwest::blocking::get`
     // and `reqwest::blocking::Client` to close the SSRF bank gap surfaced in
@@ -2470,11 +2468,34 @@ static RUST_AST_SINKS: &[AstSinkPattern] = &[
     // ("reqwest::blocking::get") — same shape as the existing reqwest::get /
     // hyper::Client entries, matched via the raw-fallback path in
     // `member_patterns_match` (pat_rcv == "" → descendant_text.contains).
+    //
+    // RUST-WILDCARD-GET-NARROWING-V1 M2: the previously over-broad wildcard
+    // entries `("*", "get")` and `("*", "post")` (which fired on ANY
+    // `<receiver>.get(<tainted>)` / `.post(<tainted>)` member-access shape —
+    // including HashMap/Vec/BTreeMap/Option) have been retired. Replaced with
+    // an explicit receiver-NAME allowlist of HTTP-client conventions —
+    // `client`, `agent`, `http`, `request_builder`, `req` — paired with
+    // `get`/`post` fields. `member_patterns_match` matches receiver NAME-text,
+    // not type, so this allowlist preserves the load-bearing
+    // `let client = reqwest::Client::new(); client.get(&url)` real-world idiom
+    // while eliminating the 100% FP rate on collection `.get(<tainted>)`
+    // callers (closes premortem `dab0766` R8). Residual gaps for short
+    // receiver names (`c`, `r`) and composed access (`self.client.get`) are
+    // documented in CHANGELOG and may be addressed by a future type-aware
+    // receiver-walk milestone.
     AstSinkPattern {
         call_names: &[],
         member_patterns: &[
-            ("*", "get"),
-            ("*", "post"),
+            ("client", "get"),
+            ("client", "post"),
+            ("agent", "get"),
+            ("agent", "post"),
+            ("http", "get"),
+            ("http", "post"),
+            ("request_builder", "get"),
+            ("request_builder", "post"),
+            ("req", "get"),
+            ("req", "post"),
             ("", "reqwest::get"),
             ("", "reqwest::Client"),
             ("", "reqwest::blocking::get"),

@@ -1,5 +1,82 @@
 # Changelog
 
+## rust-wildcard-get-narrowing-v1 — internal milestone
+
+NOT a published release. Precision narrowing of the over-broad
+`RUST_AST_SINKS` HttpRequest member-access wildcards. Closes ZERO RED
+tests; this is a HARDENING milestone that closes premortem `dab0766`
+R8 (T2/E1 wildcard-get FP elephant) carried forward from
+`rust-vuln-taint-pipeline-v1` M5. `vuln_migration_v1_red` remains
+168/168 GREEN. Eliminates a 100% false-positive rate on synthetic
+`HashMap::get` / `Vec::get` / `BTreeMap::get` callers passing tainted
+arguments.
+
+### Changed
+
+- **vuln** (Rust): `RUST_AST_SINKS` HttpRequest `member_patterns` narrowed
+  — the wildcard entries `("*", "get")` and `("*", "post")` (which fired
+  on ANY `<receiver>.get(<tainted>)` / `.post(<tainted>)` member-access
+  shape, including HashMap/Vec/BTreeMap/Option) are replaced with an
+  explicit allowlist of HTTP-client receiver names: `client`, `agent`,
+  `http`, `request_builder`, `req` — paired with `get`/`post` fields (10
+  entries). `member_patterns_match` matches receiver NAME-text (not type),
+  so this allowlist eliminates the 100% FP rate on collection-`.get(...)`
+  callers measured at `rust-vuln-taint-pipeline-v1` M3 binary smoke (3/3
+  synthetic FPs → 0/3 post-narrowing). Real-world idioms like
+  `let client = reqwest::Client::new(); client.get(&url)` and
+  `let agent = ureq::agent(); agent.post(&url)` continue to be detected
+  via the new allowlist entries. Scoped-identifier raw-fallback paths
+  (`reqwest::get`, `reqwest::Client`, `reqwest::blocking::get`,
+  `reqwest::blocking::Client`, `ureq::get`, `ureq::post`, `hyper::Client`,
+  `Url::parse`) are UNCHANGED. `rust_ssrf_positive`'s closure path
+  (`reqwest::blocking::get(&u)`) uses the scoped-identifier raw-fallback
+  and is untouched by this narrowing — STAYS GREEN.
+
+### Architectural note
+
+NO public API change. `AstSinkPattern` struct shape unchanged.
+`VulnFinding` shape unchanged. `tldr_core::security::vuln::scan_vulnerabilities`
+signature unchanged. NO new `VulnType` / `TaintSinkType` /
+`TaintSourceType` variants. NO test modifications. The post-M2 match
+universe is a STRICT SUBSET of the pre-M2 wildcard universe (additive
+AND narrowing — no loosening). Single source-file edit
+(`crates/tldr-core/src/security/taint.rs`); the 2-line wildcard removal,
+10-line allowlist addition, and doc-comment update ship atomically in a
+single commit.
+
+### Known residual gaps (out of scope; documented carry-forward)
+
+- HTTP clients bound to short variable names (e.g.,
+  `let c = reqwest::Client::new(); c.get(&url)`) no longer trigger Ssrf
+  detection on the member-access shape — receiver `"c"` is not in the
+  allowlist.
+- Composed-access HTTP calls (e.g., `self.client.get(&url)` inside
+  methods) may not match — the receiver text is composed, not a single
+  identifier in the allowlist.
+- Custom-named HTTP clients (e.g., `let github = reqwest::Client::new();
+  github.get(&url)`) require additional allowlist entries OR future
+  type-aware receiver filtering.
+
+These residual gaps are accepted in exchange for eliminating the
+universal `.get(<tainted>)` false-positive class. A future
+`rust-wildcard-receiver-type-aware-v1` milestone (not yet planned) can
+layer tree-sitter type-walk inference atop the allowlist without
+conflict.
+
+### Quantification (synthetic binary smoke)
+
+| Fixture                                          | Pre-M2 Ssrf | Post-M2 Ssrf | Verdict |
+|--------------------------------------------------|-------------|--------------|---------|
+| `m: HashMap; m.get(&tainted)`                    | 3           | 0            | FP eliminated |
+| `v: Vec; v.get(tainted_idx)`                     | 2           | 0            | FP eliminated |
+| `m: BTreeMap; m.get(&tainted)`                   | 3           | 0            | FP eliminated |
+| `let client=reqwest::Client::new(); client.get(&u)` | 3        | 3            | TP preserved |
+| `let agent=ureq::agent(); agent.post(&u)`        | 3           | 3            | TP preserved |
+| `reqwest::blocking::get(&u)` (scoped-id)         | 3           | 3            | TP preserved (raw-fallback unchanged) |
+
+FP rate: 100% → 0%. TP rate: 100% → 100%. Net +100 percentage-point
+precision improvement on the `.get(<tainted>)` member-access FP class.
+
 ## cpp-deser-declaration-v1 — internal milestone
 
 NOT a published release. Closes the LAST remaining carry-forward from
