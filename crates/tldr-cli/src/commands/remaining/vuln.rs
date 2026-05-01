@@ -611,7 +611,7 @@ fn analyze_rust_file(path: &Path, source: &str) -> Vec<VulnFinding> {
         }
 
         if trimmed.contains("format!(")
-            && contains_sql_keyword(trimmed)
+            && format_string_contains_sql_keyword(trimmed)
             && (trimmed.contains("{}") || trimmed.contains("{") || trimmed.contains("+"))
         {
             findings.push(rust_finding(
@@ -734,11 +734,117 @@ fn has_nearby_safety_comment(lines: &[&str], index: usize) -> bool {
     (start..index).any(|i| lines[i].contains("SAFETY:"))
 }
 
-fn contains_sql_keyword(text: &str) -> bool {
-    let upper = text.to_uppercase();
-    ["SELECT", "INSERT", "UPDATE", "DELETE", "FROM", "WHERE"]
-        .iter()
-        .any(|kw| upper.contains(kw))
+/// Narrowed SQL-keyword predicate for the `format!(...)` SqlInjection trigger
+/// in `analyze_rust_file`.
+///
+/// Hardening per `rust-format-sql-fp-narrowing-v1` (closes a high-severity
+/// false-positive class): the legacy predicate uppercased the WHOLE line and
+/// substring-matched against {SELECT, INSERT, UPDATE, DELETE, FROM, WHERE},
+/// causing false positives on Rust call sites whose method/function names
+/// happened to contain a SQL keyword as a substring — most prominently
+/// `char::from(...)` and `Box::<T>::from(format!(...))`, where the substring
+/// `from(` uppercases to a substring matching the keyword `FROM`. Empirical
+/// repro: `tldr vuln --lang rust /tmp/repos/ripgrep/crates` produced 4
+/// critical-severity SqlInjection findings on `format!()` callsites with ZERO
+/// SQL anywhere in the file (bash/fish/powershell flag formatting + an
+/// `err!` macro `Box::<...>::from(format!(...))`).
+///
+/// The narrowed predicate:
+/// 1. Extracts the format-string literal (first `"..."` argument to
+///    `format!(`) — if no literal is present (e.g., `format!($($tt)*)`)
+///    the predicate returns false (no SQL injection candidate).
+/// 2. Applies a word-boundary uppercase substring check against the same
+///    keyword set: a keyword matches only when adjacent characters on
+///    both sides are non-alphanumeric/non-underscore (or string boundary).
+///    This rejects `from(` matching `FROM` while still firing on
+///    `"SELECT * FROM users WHERE id = {}"`.
+///
+/// Trade-off: this is a syntactic line-scanner predicate; a determined
+/// attacker can still bypass it (e.g., `format!("{}{}", "SEL", "ECT * ...")`
+/// — string concatenation across format args). The canonical taint pipeline
+/// (`crates/tldr-core/src/security/...`) handles those cases via the
+/// `taint_flow` graph; this predicate exists only to gate the line-scanner's
+/// best-effort `format!`-shaped emission and SHOULD be tight to avoid the FP
+/// floor that motivated this milestone.
+fn format_string_contains_sql_keyword(line: &str) -> bool {
+    let Some(literal) = extract_first_format_string_literal(line) else {
+        return false;
+    };
+    let upper = literal.to_uppercase();
+    let bytes = upper.as_bytes();
+    const KEYWORDS: &[&str] = &["SELECT", "INSERT", "UPDATE", "DELETE", "FROM", "WHERE"];
+    for kw in KEYWORDS {
+        let kw_bytes = kw.as_bytes();
+        let mut start = 0usize;
+        while let Some(off) = upper[start..].find(kw) {
+            let abs = start + off;
+            let before_ok = abs == 0 || !is_word_byte(bytes[abs - 1]);
+            let after_idx = abs + kw_bytes.len();
+            let after_ok = after_idx >= bytes.len() || !is_word_byte(bytes[after_idx]);
+            if before_ok && after_ok {
+                return true;
+            }
+            start = abs + 1;
+        }
+    }
+    false
+}
+
+/// Returns true if `b` is an ASCII word byte (letter, digit, or underscore).
+/// Used by `format_string_contains_sql_keyword` to enforce keyword word
+/// boundaries — rejects `from(` substring-matching `FROM` while preserving
+/// `SELECT * FROM users` matching.
+fn is_word_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
+/// Extracts the first string-literal argument to a `format!(` call on `line`,
+/// returning `Some(literal_content)` if found and `None` otherwise.
+///
+/// Handles `\"` escapes inside the literal (skips them so the closing quote
+/// is not detected prematurely). Returns `None` when:
+/// - `format!(` does not appear on the line, OR
+/// - the first non-whitespace char after `format!(` is not `"` (e.g., the
+///   `format!($($tt)*)` macro-pass-through case in `crates/ignore`'s `err!`
+///   macro), OR
+/// - the literal is unterminated (defensive — malformed source).
+fn extract_first_format_string_literal(line: &str) -> Option<String> {
+    let macro_pos = line.find("format!(")?;
+    let after_paren = &line[macro_pos + "format!(".len()..];
+    let mut chars = after_paren.char_indices();
+    // Skip leading whitespace inside the macro-arg list.
+    let (start_idx, start_ch) = loop {
+        let (i, c) = chars.next()?;
+        if !c.is_whitespace() {
+            break (i, c);
+        }
+    };
+    if start_ch != '"' {
+        return None;
+    }
+    // Walk byte-wise from just past the opening quote, honoring `\` escapes.
+    let body = &after_paren[start_idx + 1..];
+    let mut out = String::new();
+    let mut iter = body.chars();
+    while let Some(c) = iter.next() {
+        if c == '\\' {
+            // Consume one escaped char (covers `\"`, `\\`, `\n`, etc.) and
+            // preserve it literally — we do NOT need to interpret escapes
+            // because the keyword search is uppercase-substring with word
+            // boundaries; `\n` and `\t` count as non-word bytes either way.
+            if let Some(next) = iter.next() {
+                out.push(c);
+                out.push(next);
+            } else {
+                return None;
+            }
+        } else if c == '"' {
+            return Some(out);
+        } else {
+            out.push(c);
+        }
+    }
+    None
 }
 
 fn is_rust_test_file(path: &Path) -> bool {

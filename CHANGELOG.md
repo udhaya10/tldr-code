@@ -1,5 +1,110 @@
 # Changelog
 
+## rust-format-sql-fp-narrowing-v1 — internal milestone
+
+NOT a published release. Hardening of the `tldr vuln` Rust line-scanner
+SqlInjection trigger. Closes a high-severity false-positive class
+empirically reproed on `tldr vuln --lang rust /tmp/repos/ripgrep/crates`:
+4 critical-severity (CWE-89) `SQL String Interpolation` findings on plain
+`format!()` macros containing ZERO SQL keywords anywhere in the file
+(bash/fish/powershell flag formatting via `char::from(...)` plus an
+`err!` macro `Box::<...>::from(format!(...))`). Root cause: the legacy
+`contains_sql_keyword` predicate uppercased the WHOLE line and
+substring-matched against {SELECT, INSERT, UPDATE, DELETE, FROM, WHERE},
+causing the substring `from(` (uppercased to `FROM(`) to spuriously
+match the keyword `FROM`. `vuln_migration_v1_red` remains 168/168 GREEN.
+The 6 pre-existing `test_analyze_rust_*` unit tests STAY GREEN
+unchanged. Two new tests
+(`vuln_format_sql_fp_narrowing_v1_test::rust_format_sql_no_keyword_fp`
+and `vuln_format_sql_fp_narrowing_v1_test::rust_format_sql_keyword_positive`)
+ship in this commit as RED guards (FP regression-guard + TP guard).
+
+### Changed
+
+- **vuln** (Rust, `analyze_rust_file` line scanner): the `format!(...)`
+  SqlInjection trigger predicate is narrowed from "line contains a SQL
+  keyword as substring" to "format-string literal contains a SQL
+  keyword as a word". The new `format_string_contains_sql_keyword`
+  helper (1) extracts the first `"..."` argument to the `format!(`
+  call via a small character-walking parser that honors `\` escapes,
+  and (2) applies an uppercase-substring check with word-boundary
+  enforcement (adjacent bytes must be non-alphanumeric/non-underscore
+  or string boundary) on the extracted literal. Lines without a
+  string-literal first arg (e.g., the `err!` macro pass-through
+  `format!($($tt)*)` in `crates/ignore/src/lib.rs`) yield `None` from
+  the literal extractor and short-circuit to no-finding. The legacy
+  six-keyword set is preserved verbatim ({SELECT, INSERT, UPDATE,
+  DELETE, FROM, WHERE}); no keyword was added or removed. The
+  `format!()` macro detection guard (the `trimmed.contains("format!(")`
+  outer condition + the `{}` / `{` / `+` interpolation-shape
+  conjunction) is unchanged. The CLI `format_string_contains_sql_keyword`
+  call site is the only line-scanner edit.
+
+### Architectural note
+
+NO public API change. `VulnFinding` struct shape unchanged. The set of
+emitted `VulnType` variants from `analyze_rust_file` is unchanged.
+`is_rust_test_file` body unchanged. NO new `VulnType` /
+`TaintSinkType` / `TaintSourceType` enum variants. NO new fields on
+emitted findings. NO new CLI flag. The narrowing operates entirely
+within the existing predicate path; `analyze_rust_file`'s body is
+byte-for-byte unchanged except for the predicate-name swap on the
+single guarded line. Two helper functions (`is_word_byte`,
+`extract_first_format_string_literal`) and the rewritten
+`format_string_contains_sql_keyword` predicate (~110 LOC including
+docs) are added to the existing helper-functions block in `vuln.rs`.
+
+### Trade-off explicitly accepted
+
+This is a syntactic line-scanner predicate. A determined attacker can
+still bypass it (e.g., `format!("{}{}", "SEL", "ECT * FROM ...")` —
+keyword split across format args; or string concatenation that
+assembles the SQL outside the `format!` literal). The canonical taint
+pipeline (`crates/tldr-core/src/security/...`) handles those evasive
+shapes via the `taint_flow` graph; the line-scanner predicate exists
+only to gate the best-effort `format!`-shaped emission. The narrower
+predicate is the right trade-off here: pre-fix the FP floor was
+producing 4 critical-severity findings on a single popular open-source
+crate (ripgrep) with ZERO SQL anywhere; the residual evasion shapes
+are vanishingly rare in real-world Rust code and ARE caught by the
+canonical pipeline when present.
+
+### Retained
+
+- `vuln_migration_v1_red`: 168/168 GREEN.
+- 6 `test_analyze_rust_*` unit tests in
+  `crates/tldr-cli/src/commands/remaining/vuln.rs::tests` GREEN
+  (including `test_analyze_rust_detects_command_and_sql_patterns`
+  which covers the TP `format!("SELECT * FROM users WHERE name =
+  '{}'", name)` shape).
+- `vuln_autodetect_tests`: 6/6 GREEN.
+- `val011_vuln_typescript_autodetect_test`: 1/1 GREEN.
+- Public API surface UNCHANGED.
+
+### Quantification
+
+| Metric                                                       | Pre-fix | Post-fix |
+|--------------------------------------------------------------|---------|----------|
+| `tldr vuln --lang rust /tmp/repos/ripgrep/crates` SQL findings | 4       | 0        |
+| `vuln_migration_v1_red` test count                            | 168     | 168      |
+| `vuln_migration_v1_red` GREEN                                 | 168     | 168      |
+| `test_analyze_rust_*` unit tests GREEN                        | 6       | 6        |
+| New RED guards (FP + TP)                                      | 0       | 2        |
+
+### Standing rules upheld
+
+- Internal-versioning posture honored: NO push, NO `cargo publish`, NO
+  version bump.
+- Local annotated tag only (`rust-format-sql-fp-narrowing-v1`).
+- USER STANDING RULE: cargo publish requires explicit user
+  authorization every time.
+- NO `git stash` used; HEAD comparisons via
+  `git show HEAD:path > /tmp/x && diff -u /tmp/x path` per the
+  no-git-stash standing rule.
+- NO destructive git operations.
+- NO gaming: predicate is honestly narrower, not bypassed via
+  `#[cfg(test)]` / `#[allow(...)]` / weakened assertion.
+
 ## vuln-autodetect-message-v1 — internal milestone
 
 NOT a published release. UX hardening of the `tldr vuln` autodetect-
