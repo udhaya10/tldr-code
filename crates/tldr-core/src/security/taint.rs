@@ -5244,7 +5244,21 @@ pub fn compute_taint_with_tree(
                     if direct || indirect {
                         let is_sanitized = result.sanitized_vars.contains(&sink_var)
                             || result.sanitized_vars.contains(&source.var);
-                        if !is_sanitized {
+                        // TAINT-FLOW-CAUSAL-ORDERING-V1: drop causally impossible
+                        // flows where the source line is AFTER the sink line.
+                        // In dataflow analysis the source must execute before the
+                        // sink that consumes its value; a `source.line > sink.line`
+                        // pair is a label collision (e.g. `with open(f)` on line N
+                        // is paired with `f.read()` on line N+1: the engine
+                        // correctly classifies `read()` as a source and `open()`
+                        // as a `FileOpen` sink, but on the call-chain timeline the
+                        // open precedes the read so the read CANNOT taint the
+                        // open). We drop rather than swap-and-relabel because the
+                        // source/sink TYPES are correct — only the pairing is
+                        // spurious. See `taint-flow-causal-ordering-v1` rationale
+                        // in CHANGELOG.md.
+                        let causally_ordered = source.line <= sink_line;
+                        if !is_sanitized && causally_ordered {
                             let path = compute_flow_path(source_block, sink_block, &successors);
                             let flow = TaintFlow {
                                 source: source.clone(),

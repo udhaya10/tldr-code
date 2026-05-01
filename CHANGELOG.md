@@ -1,5 +1,68 @@
 # Changelog
 
+## taint-flow-causal-ordering-v1 — internal milestone
+
+NOT a published release. Medium-severity bug fix in the canonical
+taint engine: `compute_taint_with_tree` was emitting
+causally-impossible flows where `source.line > sink.line`. In
+dataflow analysis the source must execute BEFORE the sink that
+consumes its value; a flow with the source line strictly greater
+than the sink line cannot actually have flowed. Pre-fix repro:
+
+- `tldr vuln /tmp/repos/flask/src 2>/dev/null | jq '[.findings[] | select(.taint_flow[1].line < .taint_flow[0].line)] | length'` → **2** (of 9 total)
+- `tldr vuln --lang rust /tmp/repos/ripgrep/crates 2>/dev/null | jq '[.findings[] | select(.taint_flow[1].line < .taint_flow[0].line)] | length'` → **2** (of 43 total)
+
+Concrete flask example: `config.py:208` has `with open(filename, mode="rb") as config_file:` (a `FileOpen` sink); `config.py:209` has `exec(compile(config_file.read(), ...))` where `config_file.read()` is correctly classified as an `UntrustedFileRead` source. The engine then paired source-line=209 with sink-line=208 — but on the call timeline the open precedes the read, so the read CANNOT have tainted the earlier open. Pairing was happening at flow construction time without checking causal ordering.
+
+`vuln_migration_v1_red`: 168/168 stays GREEN. `secure-taint-aggregator-v1` parity preserved (`secure.taint_count == vuln.findings.length`, 7/7 on flask post-fix).
+
+### Changed
+
+- **taint engine** (`tldr_core::security::taint::compute_taint_with_tree`):
+  at the flow-emission site, after the `direct || indirect` reachability
+  check and the sanitizer check, an additional `causally_ordered =
+  source.line <= sink_line` guard is required for the flow to be pushed
+  to `result.flows`. Drop strategy chosen over swap-and-relabel because
+  the source/sink type classifications are correct in isolation — only
+  the pairing is spurious. The dropped class is narrow (2 of 9 on flask;
+  2 of 43 on ripgrep) and consists exclusively of "FileOpen + later
+  FileRead-as-source" call-chain inversions where the engine has
+  already correctly identified BOTH endpoints, just paired them in the
+  wrong direction. Swap-and-relabel would corrupt the
+  source/sink-type metadata; drop preserves it.
+- **vuln** (test): one new regression-guard test in
+  `crates/tldr-core/src/security/vuln.rs` —
+  `test_taint_flow_causal_ordering_open_then_read_no_inversion`
+  reproduces the exact flask `config.py` shape (`with open(f) as cf:
+  exec(compile(cf.read(), ...))`) and asserts every emitted flow
+  satisfies `source.line <= sink.line`.
+
+### Architectural note
+
+NO public API change. `TaintFlow` shape unchanged. CLI flags,
+output keys, JSON shape unchanged. The fix is entirely internal to
+`compute_taint_with_tree`. Drop is conservative: a legitimate
+"source defined inside a closure that runs after the sink" pattern
+(rare in practice, e.g. lazy/deferred evaluation crossing
+call-chain boundaries) would also be suppressed; this is acceptable
+because the substring/AST-based engine cannot reliably distinguish
+those from spurious label collisions, and the FALSE POSITIVE class
+suppressed dominates in real corpora.
+
+### Validation
+
+- `cargo test -p tldr-core --lib security::` — 123/123 GREEN
+  (includes the new test).
+- `cargo test -p tldr-cli --test vuln_migration_v1_red` —
+  168/168 GREEN.
+- `cargo test -p tldr-cli --test vuln_migration_v1_composite_red` —
+  1/1 GREEN.
+- Binary verify on `/tmp/repos/flask/src`: inversions 2 → 0;
+  total findings 9 → 7.
+- Binary verify on `/tmp/repos/ripgrep/crates`: inversions 2 → 0.
+- `secure-taint-aggregator-v1` parity preserved on flask
+  (`secure.taint_count == vuln.findings.length == 7`).
+
 ## health-files-analyzed-counter-v1 — internal milestone
 
 NOT a published release. Medium-severity bug fix in the `tldr health`

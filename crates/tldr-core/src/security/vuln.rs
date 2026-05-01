@@ -893,6 +893,43 @@ def handler():
         );
     }
 
+    /// TAINT-FLOW-CAUSAL-ORDERING-V1 regression guard.
+    ///
+    /// Reproduces the flask `config.py:208-209` inversion: a `with open(f)`
+    /// FileOpen sink on line N is paired with the `f.read()` source on line
+    /// N+1 (read produces tainted data, open is the file-handle sink). The
+    /// engine's source/sink classification is correct in isolation, but the
+    /// resulting flow has `source.line > sink.line` which is causally
+    /// impossible — the read CANNOT have tainted the earlier open.
+    /// `compute_taint_with_tree` must drop these flows at emission time.
+    ///
+    /// Acceptance: every emitted flow MUST satisfy `source.line <= sink.line`.
+    #[test]
+    fn test_taint_flow_causal_ordering_open_then_read_no_inversion() {
+        // Mirrors the flask config.py shape that triggered the bug.
+        let py = r#"
+def from_pyfile(filename):
+    with open(filename, mode="rb") as config_file:
+        exec(compile(config_file.read(), filename, "exec"), d.__dict__)
+    return True
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("inversion_repro.py");
+        std::fs::write(&file, py).unwrap();
+        let findings = scan_file_vulns(&file, None).unwrap();
+        for f in &findings {
+            assert!(
+                f.source.line <= f.sink.line,
+                "Causal ordering violated: source.line={} > sink.line={} \
+                 (vuln_type={:?}, file={:?})",
+                f.source.line,
+                f.sink.line,
+                f.vuln_type,
+                f.file
+            );
+        }
+    }
+
     fn assert_detects_vuln(
         filename: &str,
         content: &str,
