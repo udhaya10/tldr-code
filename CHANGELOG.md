@@ -1,5 +1,57 @@
 # Changelog
 
+## health-files-analyzed-counter-v1 — internal milestone
+
+NOT a published release. Medium-severity bug fix in the `tldr health`
+dashboard: `summary.files_analyzed` was always reported as `0` even
+when `summary.functions_analyzed` and `summary.classes_analyzed`
+were correctly populated (e.g., on `/tmp/repos/flask/src/flask`,
+pre-fix output was `files_analyzed: 0, functions_analyzed: 311,
+classes_analyzed: 53`). Root cause: `aggregate_summary` only reads
+metrics from each sub-analyzer's `details` payload, and none of the
+sub-analyzers (complexity, cohesion, dead code, martin, coupling,
+clones) emit a `files_analyzed` field — so the counter was simply
+never set. `vuln_migration_v1_red`: 168/168 stays GREEN.
+
+### Changed
+
+- **health** (`tldr_core::quality::health::run_health`): after
+  `aggregate_summary`, `summary.files_analyzed` is populated by a
+  new `count_source_files(path, detected_language)` helper which
+  walks the input path with the canonical `ProjectWalker` and
+  counts files whose extensions match `Language::extensions()` —
+  the same source-of-truth used by `collect_module_infos` for dead
+  code analysis and by `vuln`'s `files_scanned` counter. A file
+  that fails to extract still counts as analyzed (the pipeline
+  visited it), matching `vuln`'s semantics.
+- **health** (test): two new tests in
+  `crates/tldr-core/src/quality/health.rs` —
+  `test_count_source_files_directory` (helper-level: 3 .py files
+  among .txt/.cfg distractors must yield `count == 3`) and
+  `test_run_health_files_analyzed_populated` (end-to-end:
+  `run_health` on a 3-file Python directory must report
+  `files_analyzed == 3`, guarding the regression).
+
+### Architectural note
+
+NO public API change. `HealthSummary` field shape unchanged
+(`files_analyzed: usize` already existed; only its value
+population is fixed). `aggregate_summary` is unchanged — the new
+file-count source is layered atop it, not threaded through the
+sub-analyzer details payloads (which would have required adding a
+new field to multiple sub-analyzer outputs). CLI flags / output
+keys / JSON shape unchanged.
+
+### Validation
+
+- `cargo test -p tldr-core --lib quality::health::tests` —
+  16/16 GREEN (includes the two new tests).
+- `cargo test -p tldr-cli --test vuln_migration_v1_red` —
+  168/168 GREEN.
+- Binary verify: `tldr health /tmp/repos/flask/src/flask | jq
+  .summary.files_analyzed` returns `24` (matches the prior
+  `tldr vuln` `files_scanned: 24` baseline).
+
 ## secure-taint-aggregator-v1 — internal milestone
 
 NOT a published release. High-severity bug fix in the `tldr secure`

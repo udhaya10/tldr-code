@@ -812,7 +812,17 @@ pub fn run_health(
     }
 
     // Step 5: Aggregate summary from sub-results
-    let summary = aggregate_summary(&report.sub_results);
+    let mut summary = aggregate_summary(&report.sub_results);
+
+    // HEALTH-FILES-ANALYZED-COUNTER-V1: `files_analyzed` is not produced
+    // by any individual sub-analyzer's `details` payload (complexity →
+    // `functions_analyzed`, cohesion → `classes_analyzed`, etc.), so
+    // `aggregate_summary` always left it at 0. Populate it here from a
+    // direct extension-filtered walk of the input path against
+    // `detected_language.extensions()` — same source-of-truth used by
+    // `collect_module_infos` / `vuln`'s `files_scanned`.
+    summary.files_analyzed = count_source_files(path, detected_language);
+
     report.summary = summary;
 
     // Step 6: Record total elapsed time (T28: use as_secs_f64)
@@ -891,6 +901,46 @@ impl AnalysisMetrics for CouplingReport {
     fn findings_count(&self) -> usize {
         self.tight_coupling_count
     }
+}
+
+/// Count source files at `path` matching `language`'s extensions.
+///
+/// HEALTH-FILES-ANALYZED-COUNTER-V1: this is the authoritative source
+/// for `HealthSummary::files_analyzed`. It mirrors the extension filter
+/// used by `collect_module_infos` (and by sub-analyzers like complexity)
+/// but counts unconditionally — a file that fails to parse / extract
+/// still counts as "analyzed" because it was visited by the pipeline.
+/// This matches the semantics of `vuln`'s `files_scanned` counter.
+fn count_source_files(path: &Path, language: Language) -> usize {
+    let extensions = language.extensions();
+
+    if path.is_file() {
+        return match path.extension().and_then(|e| e.to_str()) {
+            Some(ext) => {
+                let ext_with_dot = format!(".{}", ext);
+                if extensions.contains(&ext_with_dot.as_str()) {
+                    1
+                } else {
+                    0
+                }
+            }
+            None => 0,
+        };
+    }
+
+    let mut count = 0usize;
+    for entry in ProjectWalker::new(path).iter() {
+        let file_path = entry.path();
+        if file_path.is_file() {
+            if let Some(ext) = file_path.extension().and_then(|e| e.to_str()) {
+                let ext_with_dot = format!(".{}", ext);
+                if extensions.contains(&ext_with_dot.as_str()) {
+                    count += 1;
+                }
+            }
+        }
+    }
+    count
 }
 
 /// Collect module infos for dead code analysis.
@@ -1224,6 +1274,59 @@ mod tests {
         assert_eq!(json["summary"]["hotspot_count"], 2);
         // T4: sub_results should be serialized as "details"
         assert!(json.get("details").is_some());
+    }
+
+    /// HEALTH-FILES-ANALYZED-COUNTER-V1: ensure `count_source_files`
+    /// returns the right count for a directory of mixed extensions.
+    #[test]
+    fn test_count_source_files_directory() {
+        use std::fs;
+        let temp = tempfile::TempDir::new().unwrap();
+        let p = temp.path();
+        fs::write(p.join("a.py"), "def f(): pass\n").unwrap();
+        fs::write(p.join("b.py"), "def g(): pass\n").unwrap();
+        fs::write(p.join("c.py"), "def h(): pass\n").unwrap();
+        fs::write(p.join("notes.txt"), "ignored\n").unwrap();
+        fs::write(p.join("setup.cfg"), "ignored\n").unwrap();
+
+        let count = count_source_files(p, Language::Python);
+        assert_eq!(count, 3, "expected 3 .py files, got {}", count);
+    }
+
+    /// HEALTH-FILES-ANALYZED-COUNTER-V1: full `run_health` pass on a
+    /// multi-file Python directory must report `files_analyzed > 0`.
+    /// Pre-fix this assertion failed with `files_analyzed: 0` while
+    /// `functions_analyzed` and `classes_analyzed` were populated
+    /// correctly.
+    #[test]
+    fn test_run_health_files_analyzed_populated() {
+        use std::fs;
+        let temp = tempfile::TempDir::new().unwrap();
+        let p = temp.path();
+        fs::write(
+            p.join("a.py"),
+            "class A:\n    def m(self):\n        return 1\n",
+        )
+        .unwrap();
+        fs::write(
+            p.join("b.py"),
+            "class B:\n    def n(self):\n        return 2\n",
+        )
+        .unwrap();
+        fs::write(p.join("c.py"), "def free():\n    return 3\n").unwrap();
+
+        let opts = HealthOptions {
+            quick: true, // skip coupling/similarity for test speed
+            ..HealthOptions::default()
+        };
+        let report = run_health(p, Some(Language::Python), opts).unwrap();
+        assert_eq!(
+            report.summary.files_analyzed, 3,
+            "expected 3 files_analyzed, got {} (functions={}, classes={})",
+            report.summary.files_analyzed,
+            report.summary.functions_analyzed,
+            report.summary.classes_analyzed,
+        );
     }
 
     #[test]
