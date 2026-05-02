@@ -1,5 +1,106 @@
 # Changelog
 
+## rust-secure-taint-aggregator-v2 — internal milestone
+
+NOT a published release. Closes the high-severity Rust regression
+where `tldr secure --lang rust <file>` returned `summary.taint_count: 0`
+on files that `tldr vuln --lang rust <file>` reported N>0 findings on.
+Surfaced by the v0.2.x 17-language sweep — Rust was the only language
+failing `secure.taint_count == vuln.findings.length` parity (16/17
+passed). Closes follow-up gap left by `secure-taint-aggregator-v1`,
+which routed the canonical pipeline ONLY for non-Rust files.
+
+### Bug fixed
+
+- **BUG-17 (rust-secure regression)** — `tldr secure` on a Rust file
+  with a real CommandInjection / PathTraversal / Deserialization /
+  SQLInjection / SSRF taint flow reported `taint_count: 0` while
+  `tldr vuln` on the SAME path reported N>0 findings. Repro on a
+  fixture that the canonical Rust pipeline already detects:
+  ```
+  F=crates/tldr-cli/tests/fixtures/vuln_migration_v1/rust/command_injection_positive.rs
+  tldr vuln   --lang rust "$F" | jq '.findings | length'      → 2
+  tldr secure --lang rust "$F" | jq '.summary.taint_count'    → 0   ← BUG
+  ```
+  Root cause in `crates/tldr-cli/src/commands/remaining/secure.rs`:
+  `analyze_taint` short-circuited on `.rs` files to ONLY the
+  unsafe-block line scanner (which produces `category="unsafe_block"`
+  findings counted under `summary.unsafe_blocks`, NOT under
+  `summary.taint_count`). The canonical
+  `tldr_core::security::vuln::scan_vulnerabilities` pipeline — the
+  same one `tldr vuln` uses — was never invoked for Rust paths. The
+  prior `secure-taint-aggregator-v1` milestone had wired this routing
+  for Python / JS / TS / 14 other languages but explicitly excluded
+  `.rs` ("For Rust files, taint is deliberately interpreted as
+  'unsafe blocks'"), missing that `tldr vuln` had since adopted dual
+  dispatch for `.rs` (canonical + line scanner with overlap dedup,
+  per `rust-vuln-taint-pipeline-v1`).
+
+  Fix: secure now mirrors `tldr vuln`'s Rust dual dispatch.
+  `analyze_taint` for `.rs` files emits (a) canonical taint findings
+  with `category="taint"`, (b) line-scanner SqlInjection /
+  CommandInjection findings (deduped against canonical on
+  `(line, vuln_type)` — same predicate as `vuln.rs::dedupe_overlap`)
+  also with `category="taint"`, and (c) unsafe-block line-scanner
+  findings unchanged with `category="unsafe_block"`. The line
+  scanner's UnsafeCode / MemorySafety / Panic emissions are
+  intentionally NOT included in the taint stream — they are
+  smell-class and surfaced by `analyze_rust_unsafe_blocks` /
+  `analyze_rust_raw_pointers` / `analyze_rust_bounds` under their own
+  categories (`unsafe_block`, `raw_pointer`, `unwrap`,
+  `todo_marker`).
+
+  `crates/tldr-cli/src/commands/remaining/vuln.rs::analyze_rust_file`
+  visibility lifted from private to `pub(super)` so secure can call
+  it directly — single source of truth for the line-scanner logic.
+  No duplication.
+
+  BEFORE / AFTER (binary verify):
+  ```
+  Rust file (command_injection_positive.rs):
+    BEFORE: vuln=2  secure.taint_count=0   ← MISMATCH
+    AFTER:  vuln=2  secure.taint_count=2   ← parity
+
+  Rust dir (vuln_migration_v1/rust/, 5 files):
+    BEFORE: vuln=10 secure.taint_count=0   ← MISMATCH
+    AFTER:  vuln=10 secure.taint_count=10  ← parity
+
+  Python file (regression guard, command_injection_positive.py):
+    AFTER:  vuln=1  secure.taint_count=1   ← unchanged
+
+  JS file (regression guard, command_injection_positive.js):
+    AFTER:  vuln=2  secure.taint_count=2   ← unchanged
+  ```
+
+### Tests
+
+- New `test_secure_taint_count_matches_vuln_rust` in
+  `crates/tldr-cli/src/commands/remaining/secure.rs` — Rust-specific
+  secure↔vuln aggregation parity guard mirroring the existing
+  Python guard `test_secure_taint_count_matches_vuln_findings`.
+  Asserts `secure.findings|filter(category="taint")|len ==
+  vuln.findings|len` on a Rust source-to-sink command-injection
+  fixture.
+- `vuln_migration_v1_red`: 168/168 GREEN.
+- `tldr-cli` lib tests: 1392/1392 GREEN.
+- Existing `test_secure_taint_count_matches_vuln_findings`,
+  `test_secure_taint_count_matches_findings_array`, and
+  `test_rust_secure_metrics_detected` remain GREEN.
+
+### Carry-forwards
+
+- Two `remaining_test.rs` integration tests
+  (`secure_command::test_secure_detects_taint`,
+  `vuln_command::test_vuln_detects_xss`) were already failing on
+  HEAD before this milestone — verified by running `tldr vuln` /
+  `tldr secure` on the test fixtures (`PYTHON_SECURE_SAMPLE`,
+  `PYTHON_VULN_XSS`). The Python secure path was unchanged by this
+  milestone (only the Rust short-circuit was lifted), so these are
+  pre-existing failures unrelated to the v2 fix. They surface a
+  separate gap in the canonical Python pipeline's coverage of
+  `pickle.loads` on function-arg sources and a Python XSS detection
+  gap — out of scope for the rust-secure parity fix.
+
 ## schema-unification-v1 — internal milestone
 
 NOT a published release. Closes the "JSON schema inconsistency

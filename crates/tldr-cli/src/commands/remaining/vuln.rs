@@ -556,7 +556,7 @@ fn map_core_vuln_type(core_ty: tldr_core::security::vuln::VulnType) -> VulnType 
     }
 }
 
-fn analyze_rust_file(path: &Path, source: &str) -> Vec<VulnFinding> {
+pub(super) fn analyze_rust_file(path: &Path, source: &str) -> Vec<VulnFinding> {
     let file_path = path.display().to_string();
     let is_test_file = is_rust_test_file(path);
     let mut findings = Vec::new();

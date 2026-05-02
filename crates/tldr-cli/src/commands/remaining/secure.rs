@@ -393,31 +393,133 @@ fn severity_order(severity: &str) -> u8 {
 /// SECURE-TAINT-AGGREGATOR-V1: For non-Rust files this routes through the
 /// canonical `tldr_core::security::vuln::scan_vulnerabilities` pipeline —
 /// the same pipeline `tldr vuln` uses — so `secure.summary.taint_count`
-/// agrees with `tldr vuln`'s finding count. The legacy substring-based
-/// `TAINT_SINKS` matcher (which produced 0 findings on real flows because
-/// it could not see source-to-sink relationships) is retired for this
-/// purpose. For Rust files, taint is deliberately interpreted as
-/// "unsafe blocks" — a Rust-specific risk surface preserved unchanged
-/// from the prior implementation.
+/// agrees with `tldr vuln`'s finding count.
+///
+/// RUST-SECURE-TAINT-AGGREGATOR-V2: For Rust files this now mirrors
+/// `tldr vuln`'s dual dispatch from `rust-vuln-taint-pipeline-v1`:
+/// canonical pipeline + line scanner with overlap dedup. The
+/// canonical findings AND the line-scanner SqlInjection /
+/// CommandInjection findings (the only line-scanner emissions that are
+/// taint-class — UnsafeCode/MemorySafety/Panic are smell-class and not
+/// counted under `summary.taint_count`) are emitted with
+/// `category = "taint"`. Unsafe-block findings retain
+/// `category = "unsafe_block"` (counted separately by
+/// `summary.unsafe_blocks`). Pre-V2, secure dropped ALL canonical Rust
+/// taint findings — `tldr vuln --lang rust file.rs` reported N>0
+/// findings while `tldr secure --lang rust file.rs` reported 0
+/// (BUG-17, surfaced by the 17-lang sweep).
+///
+/// The legacy substring-based `TAINT_SINKS` matcher (which produced 0
+/// findings on real flows because it could not see source-to-sink
+/// relationships) remains retired.
 fn analyze_taint(_root: Node, source: &str, file: &Path) -> Vec<SecureFinding> {
+    let (mut findings, canonical_lines) = canonical_taint_findings_with_index(file);
     if is_rust_file(file) {
-        return analyze_rust_unsafe_blocks(source, file);
+        findings.extend(rust_line_scanner_taint_findings(
+            file,
+            source,
+            &canonical_lines,
+        ));
+        findings.extend(analyze_rust_unsafe_blocks(source, file));
     }
+    findings
+}
 
-    canonical_taint_findings(file)
+/// Run the Rust line scanner from `vuln.rs` and project ONLY its
+/// taint-class findings (SqlInjection, CommandInjection) onto
+/// `SecureFinding`s with `category = "taint"`. Non-taint smell-class
+/// emissions (UnsafeCode, MemorySafety, Panic) are dropped here — they
+/// are surfaced by the dedicated `analyze_rust_unsafe_blocks` /
+/// `analyze_rust_raw_pointers` / `analyze_rust_bounds` paths under
+/// their own categories.
+///
+/// `canonical_index` carries the `(line, core_VulnType)` tuples the
+/// canonical pipeline already produced for this file. SqlInjection /
+/// CommandInjection line-scanner findings whose `(line, vuln_type)` is
+/// already in the canonical index are dropped — same dedup predicate as
+/// `vuln.rs::dedupe_overlap`. This keeps secure↔vuln per-file counts
+/// equal: vuln applies the same dedup, so secure must too, otherwise
+/// secure would over-count when both layers report the same finding.
+///
+/// RUST-SECURE-TAINT-AGGREGATOR-V2: closes the
+/// `sql_injection_format_keyword_positive.rs` parity gap — the
+/// canonical Rust pipeline does not produce a SqlInjection finding for
+/// `format!("SELECT … {}", x)` (no real source-to-sink), but the line
+/// scanner does (per `rust-format-sql-fp-narrowing-v1`). For
+/// secure↔vuln directory-level parity, secure must include this.
+fn rust_line_scanner_taint_findings(
+    file: &Path,
+    source: &str,
+    canonical_index: &[(u32, tldr_core::security::vuln::VulnType)],
+) -> Vec<SecureFinding> {
+    use crate::commands::remaining::types::VulnType;
+
+    super::vuln::analyze_rust_file(file, source)
+        .into_iter()
+        .filter(|f| {
+            matches!(
+                f.vuln_type,
+                VulnType::SqlInjection | VulnType::CommandInjection
+            )
+        })
+        .filter(|f| {
+            // Mirrors `vuln.rs::dedupe_overlap`: drop line-scanner finding
+            // if canonical already covers `(line, vuln_type)`.
+            let core_ty = match f.vuln_type {
+                VulnType::SqlInjection => tldr_core::security::vuln::VulnType::SqlInjection,
+                VulnType::CommandInjection => {
+                    tldr_core::security::vuln::VulnType::CommandInjection
+                }
+                _ => return true,
+            };
+            !canonical_index
+                .iter()
+                .any(|(line, ty)| *line == f.line && *ty == core_ty)
+        })
+        .map(|f| {
+            let severity = match f.severity {
+                crate::commands::remaining::types::Severity::Critical => "critical",
+                crate::commands::remaining::types::Severity::High => "high",
+                crate::commands::remaining::types::Severity::Medium => "medium",
+                crate::commands::remaining::types::Severity::Low => "low",
+                _ => "medium",
+            };
+            let description = format!("{:?}: {}", f.vuln_type, f.description);
+            SecureFinding::new("taint", severity, description).with_location(f.file, f.line)
+        })
+        .collect()
 }
 
 /// Run the canonical `scan_vulnerabilities` pipeline on a single file and
 /// project the resulting `VulnFinding`s onto `SecureFinding`s with
-/// `category = "taint"`. Rust files are skipped here (handled separately
-/// via `analyze_rust_unsafe_blocks`).
-fn canonical_taint_findings(file: &Path) -> Vec<SecureFinding> {
+/// `category = "taint"`. Returns both the projected findings AND the
+/// set of `(line, core_VulnType)` tuples covered by canonical — used by
+/// the Rust line-scanner path to dedupe overlap (SqlInjection,
+/// CommandInjection on the same line). Mirrors
+/// `vuln.rs::dedupe_overlap`.
+///
+/// Runs for ALL extensions including `.rs`
+/// (RUST-SECURE-TAINT-AGGREGATOR-V2 — mirrors `tldr vuln`'s
+/// canonical-for-all-languages dispatch from
+/// `rust-vuln-taint-pipeline-v1`).
+fn canonical_taint_findings_with_index(
+    file: &Path,
+) -> (
+    Vec<SecureFinding>,
+    Vec<(u32, tldr_core::security::vuln::VulnType)>,
+) {
     let report = match tldr_core::security::vuln::scan_vulnerabilities(file, None, None) {
         Ok(r) => r,
-        Err(_) => return Vec::new(),
+        Err(_) => return (Vec::new(), Vec::new()),
     };
 
-    report
+    let index: Vec<(u32, tldr_core::security::vuln::VulnType)> = report
+        .findings
+        .iter()
+        .map(|f| (f.sink.line, f.vuln_type))
+        .collect();
+
+    let findings = report
         .findings
         .into_iter()
         .map(|f| {
@@ -435,7 +537,9 @@ fn canonical_taint_findings(file: &Path) -> Vec<SecureFinding> {
             SecureFinding::new("taint", severity, description)
                 .with_location(f.file.display().to_string(), f.sink.line)
         })
-        .collect()
+        .collect();
+
+    (findings, index)
 }
 
 // =============================================================================
@@ -911,6 +1015,74 @@ def sql():
             vuln_count
         );
         assert!(secure_findings.iter().all(|f| f.category == "taint"));
+    }
+
+    /// RUST-SECURE-TAINT-AGGREGATOR-V2: Rust-specific secure↔vuln aggregation
+    /// parity guard. Pre-V2, `analyze_taint` short-circuited on `.rs` files
+    /// to ONLY the unsafe-block line scanner, dropping every canonical
+    /// taint finding. `tldr vuln --lang rust file.rs` reported N>0
+    /// CommandInjection/SqlInjection findings while `tldr secure --lang rust
+    /// file.rs` reported `taint_count: 0`. Surfaced by the v0.2.x 17-language
+    /// sweep — Rust was the only language failing
+    /// `secure.taint_count == vuln.findings.length` parity (16/17 passed).
+    ///
+    /// Post-V2: secure.taint_count (category="taint") MUST equal
+    /// vuln.findings.length on Rust. Unsafe-block findings are still
+    /// emitted but counted under summary.unsafe_blocks, not taint_count.
+    #[test]
+    fn test_secure_taint_count_matches_vuln_rust() {
+        let temp = TempDir::new().unwrap();
+        // Real source-to-sink command-injection flow in Rust: env input
+        // (untrusted source) flowing into Command::new(...).arg(...).output()
+        // (sink). Mirrors `command_injection_positive.rs` from
+        // `vuln_migration_v1` fixtures.
+        let source = r#"
+use std::env;
+use std::process::Command;
+
+fn run() {
+    let user = env::var("USER_INPUT").unwrap();
+    let output = Command::new("sh").arg("-c").arg(&user).output();
+    let _ = output;
+}
+"#;
+        let path = create_test_file(&temp, "cmd_inj.rs", source);
+
+        // Canonical pipeline (same call path tldr vuln uses).
+        let vuln_report =
+            tldr_core::security::vuln::scan_vulnerabilities(&path, None, None).unwrap();
+        let vuln_count = vuln_report.findings.len();
+        assert!(
+            vuln_count > 0,
+            "Fixture must produce >=1 canonical Rust finding (got 0 - fixture is wrong)"
+        );
+
+        // secure's taint analysis on the same Rust file.
+        let mut parser = Parser::new();
+        parser
+            .set_language(&tree_sitter_rust::LANGUAGE.into())
+            .unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        let secure_findings = analyze_taint(tree.root_node(), source, &path);
+
+        // Filter to category="taint" — that's what summary.taint_count counts.
+        // (analyze_taint may also include category="unsafe_block" findings
+        // for Rust, which feed summary.unsafe_blocks, not taint_count.)
+        let taint_findings: Vec<_> = secure_findings
+            .iter()
+            .filter(|f| f.category == "taint")
+            .collect();
+
+        assert_eq!(
+            taint_findings.len(),
+            vuln_count,
+            "secure taint findings (category=\"taint\") must match vuln \
+             finding count exactly on Rust (secure_taint={}, vuln={}). \
+             RUST-SECURE-TAINT-AGGREGATOR-V2 routes Rust through the \
+             canonical scan_vulnerabilities pipeline, same as tldr vuln.",
+            taint_findings.len(),
+            vuln_count
+        );
     }
 
     #[test]
