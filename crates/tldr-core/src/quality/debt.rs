@@ -220,6 +220,16 @@ pub struct DebtSummary {
     /// Debt by rule (rule_name -> minutes)
     /// Uses BTreeMap for deterministic JSON key ordering (PM-6 mitigation)
     pub by_rule: BTreeMap<String, u32>,
+    /// Debt by severity (severity_name -> finding_count)
+    ///
+    /// Severity is derived from `debt_minutes` per issue:
+    /// - low: < 15 minutes (cheap fixes, e.g. TodoComment, MissingDocs at 10m)
+    /// - medium: 15..30 minutes (LongParamList, DeepNesting at 15m; ComplexityHigh, HighCoupling at 20m)
+    /// - high: 30..60 minutes (LongMethod, ComplexityVeryHigh at 30m)
+    /// - critical: >= 60 minutes (ComplexityExtreme, GodClass at 60m)
+    ///
+    /// Uses BTreeMap for deterministic JSON key ordering.
+    pub by_severity: BTreeMap<String, u32>,
 }
 
 /// Complete debt analysis report
@@ -386,6 +396,24 @@ impl Default for DebtOptions {
 /// - Skip empty lines and comment-only lines
 /// - For Python: handle triple-quoted docstrings (both """ and ''')
 /// - Lines with code + inline comments still count as code
+/// Map a debt-minute value to a severity bucket name.
+///
+/// Buckets are aligned to the [`DebtRule::minutes`] table so that every rule
+/// lands deterministically in exactly one bucket:
+///
+/// - `low`      — `< 15`         (cheap fixes — TodoComment / MissingDocs at 10m)
+/// - `medium`   — `15..30`       (LongParamList / DeepNesting at 15m, ComplexityHigh / HighCoupling at 20m)
+/// - `high`     — `30..60`       (LongMethod / ComplexityVeryHigh at 30m)
+/// - `critical` — `>= 60`        (ComplexityExtreme / GodClass at 60m)
+pub fn severity_for_minutes(minutes: u32) -> &'static str {
+    match minutes {
+        0..=14 => "low",
+        15..=29 => "medium",
+        30..=59 => "high",
+        _ => "critical",
+    }
+}
+
 pub fn count_loc(source: &str, language: Language) -> usize {
     let mut count = 0;
     let mut in_multiline_string = false;
@@ -2477,6 +2505,14 @@ pub fn analyze_debt(options: DebtOptions) -> TldrResult<DebtReport> {
         *by_rule.entry(issue.rule.clone()).or_default() += issue.debt_minutes;
     }
 
+    // Group by severity (derived from debt_minutes per issue, counts findings)
+    let mut by_severity: BTreeMap<String, u32> = BTreeMap::new();
+    for issue in &all_issues {
+        *by_severity
+            .entry(severity_for_minutes(issue.debt_minutes).to_string())
+            .or_default() += 1;
+    }
+
     // Sort issues by debt_minutes descending
     all_issues.sort_by(|a, b| b.debt_minutes.cmp(&a.debt_minutes));
 
@@ -2496,6 +2532,7 @@ pub fn analyze_debt(options: DebtOptions) -> TldrResult<DebtReport> {
             debt_density,
             by_category,
             by_rule,
+            by_severity,
         },
     })
 }

@@ -1589,7 +1589,11 @@ mod temporal_command {
     // -------------------------------------------------------------------------
 
     #[test]
-    fn test_temporal_no_sequences_exit_2() {
+    fn test_temporal_no_sequences_exit_zero() {
+        // schema-completeness-v1: temporal should exit 0 with valid (possibly empty)
+        // output, regardless of whether any constraints/trigrams are mined. The legacy
+        // exit-2-on-empty contract was inconsistent with every other tldr command and
+        // broke shell pipelines that treat non-zero as failure.
         let temp = TempDir::new().unwrap();
         let code = "x = 1\ny = 2";
         let file_path = create_test_file(&temp, "no_calls.py", code);
@@ -1604,12 +1608,20 @@ mod temporal_command {
             .output()
             .unwrap();
 
-        // Exit code 2 means no constraints found (not an error)
         assert_eq!(
             output.status.code(),
-            Some(2),
-            "Should exit with code 2 when no constraints found"
+            Some(0),
+            "Should exit 0 with valid (possibly empty) output. stderr={}",
+            String::from_utf8_lossy(&output.stderr)
         );
+
+        // Output must still be valid JSON with the expected schema.
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let parsed: serde_json::Value = serde_json::from_str(&stdout)
+            .expect("temporal must emit valid JSON even when no constraints found");
+        assert!(parsed.get("constraints").is_some(), "must have .constraints");
+        assert!(parsed.get("trigrams").is_some(), "must have .trigrams");
+        assert!(parsed.get("metadata").is_some(), "must have .metadata");
     }
 
     #[test]
@@ -2055,7 +2067,10 @@ mod integration {
             .output()
             .unwrap();
 
-        assert!(temporal_output.status.success() || temporal_output.status.code() == Some(2));
+        // schema-completeness-v1: temporal now always exits 0 on valid output;
+        // historical exit-2-on-empty contract has been removed. Resources retains
+        // its exit-3 contract for resource-leak findings.
+        assert!(temporal_output.status.success());
         assert!(resources_output.status.success() || resources_output.status.code() == Some(3));
     }
 }

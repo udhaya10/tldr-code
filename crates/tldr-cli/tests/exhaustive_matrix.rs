@@ -198,7 +198,7 @@ fn is_panic(exit: i32, stderr: &str) -> bool {
 ///
 /// Plus subcommand-specific codes:
 /// * `change-impact` exits 3 on NoBaseline (VAL-005)
-/// * `temporal` exits 2 on no-constraints-found (temporal.rs:951-959)
+/// * `temporal` always exits 0 on valid output (schema-completeness-v1)
 /// * `diagnostics` exits 1 on diagnostic findings
 ///
 /// Anything outside [0, 99] is treated as anomalous (BAD_EXIT). The
@@ -255,6 +255,10 @@ fn check_baseline(cmd: &str, lang: &str, args: &[&str]) -> (Value, String, Strin
 /// * Exit code in 0..=49 (documented scheme)
 /// * If exit == 0: JSON output non-empty
 /// * If exit != 0: stderr non-empty (provides explanation)
+///
+/// schema-completeness-v1 note: `temporal` previously exited 2 on
+/// no-constraints-found; it now exits 0 with a populated (possibly empty)
+/// JSON object, matching every other tldr command.
 fn check_success(cmd: &str, lang: &str, args: &[&str]) -> (Value, String, String) {
     let (json, stdout, stderr, exit) = check_baseline(cmd, lang, args);
     if exit == 0 && stdout.trim().is_empty() {
@@ -752,10 +756,9 @@ fn check_context(lang: &str) {
 fn check_temporal(lang: &str) {
     let tmp = make_fixture(lang);
     let path = tmp.path().to_str().unwrap();
-    // temporal exits 2 on no-constraints-found per
-    // crates/tldr-cli/src/commands/patterns/temporal.rs:951-959. The
-    // canonical fixture has 2 calls but no recurring patterns so
-    // `metadata.files_analyzed` should still be >= 1.
+    // schema-completeness-v1: temporal now always exits 0 on valid output.
+    // The canonical fixture has 2 calls but no recurring patterns; we still
+    // require `metadata.files_analyzed >= 1` to detect silent-fail regressions.
     let (json, stdout, stderr, _exit) = check_baseline(
         "temporal",
         lang,

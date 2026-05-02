@@ -161,10 +161,18 @@ impl VerifyArgs {
 ///
 /// # Returns
 /// VerifyReport with all sub-analysis results and coverage summary.
+///
+/// # Note on `_quick`
+/// The `_quick` parameter is currently unused: per schema-completeness-v1,
+/// the only sub-analyses that ran in non-quick mode (`bounds`, `invariants`)
+/// were stub-only and have been removed from the report. The flag is preserved
+/// in the signature so that callers can pass it through unchanged, and it will
+/// regain meaning in `verify-full-integration-v1` when those analyses are
+/// wired up for real.
 pub fn run_verify(
     path: &Path,
     language: Language,
-    quick: bool,
+    _quick: bool,
     detail: Option<&str>,
 ) -> ContractsResult<VerifyReport> {
     let start_time = Instant::now();
@@ -204,32 +212,15 @@ pub fn run_verify(
         );
     }
 
-    // 3. Bounds analysis (skip in quick mode - it's expensive)
-    if !quick {
-        let bounds_result = sweep_bounds(&files, language, detail);
-        sub_results.insert("bounds".to_string(), bounds_result);
-    }
-
-    // 4. Dead stores detection
-    let dead_stores_result = sweep_dead_stores(&files, language, detail);
-    sub_results.insert("dead_stores".to_string(), dead_stores_result);
-
-    // 5. Invariants (skip in quick mode - requires test execution)
-    if !quick && !test_dirs.is_empty() {
-        sub_results.insert(
-            "invariants".to_string(),
-            SubAnalysisResult {
-                name: "invariants".to_string(),
-                status: SubAnalysisStatus::Skipped,
-                items_found: 0,
-                elapsed_ms: 0,
-                error: Some(
-                    "Invariants analysis requires test execution (not yet implemented)".to_string(),
-                ),
-                data: None,
-            },
-        );
-    }
+    // schema-completeness-v1: `bounds`, `dead_stores`, and `invariants` were
+    // emitted as stub `Skipped` entries with status messages like "not yet
+    // integrated". The verify command was effectively lying about running them.
+    // Per the milestone (option b: drop the unwired sub_results), they are no
+    // longer reported. `sweep_bounds` and `sweep_dead_stores` are retained
+    // (allow(dead_code)) so that wiring them up in a future
+    // "verify-full-integration-v1" milestone is a one-line change.
+    //
+    // Currently aggregated sub_results: contracts, specs.
 
     // Compute coverage from results
     let summary = build_verify_summary(&sub_results, files_analyzed);
@@ -439,6 +430,10 @@ fn sweep_specs(test_path: &Path, _detail: Option<&str>) -> SubAnalysisResult {
 }
 
 /// Sweep bounds analysis over all files.
+///
+/// schema-completeness-v1: not currently wired into the verify report.
+/// Retained for `verify-full-integration-v1`.
+#[allow(dead_code)]
 fn sweep_bounds(
     _files: &[PathBuf],
     _language: Language,
@@ -459,6 +454,10 @@ fn sweep_bounds(
 }
 
 /// Sweep dead stores detection over all files.
+///
+/// schema-completeness-v1: not currently wired into the verify report.
+/// Retained for `verify-full-integration-v1`.
+#[allow(dead_code)]
 fn sweep_dead_stores(
     _files: &[PathBuf],
     _language: Language,
@@ -698,16 +697,65 @@ def test_validate_raises():
 
         let report = run_verify(temp.path(), Language::Python, true, None).unwrap();
 
-        // Quick mode should skip invariants and bounds
-        if let Some(invariants) = report.sub_results.get("invariants") {
+        // schema-completeness-v1: invariants/bounds/dead_stores are no longer
+        // emitted (they were stubs). Quick mode is currently a no-op flag — the
+        // remaining sub-analyses (contracts, specs) run identically in either
+        // mode. Asserts that quick mode still produces a structurally-valid
+        // report and never resurrects the dropped keys.
+        assert!(report.sub_results.contains_key("contracts"));
+        assert!(!report.sub_results.contains_key("invariants"));
+        assert!(!report.sub_results.contains_key("bounds"));
+        assert!(!report.sub_results.contains_key("dead_stores"));
+    }
+
+    #[test]
+    fn test_verify_no_skipped_subresults() {
+        // schema-completeness-v1: every sub_result the verify command claims to
+        // produce must have actually run — no stub `Skipped` entries left over.
+        // Run on both quick and non-quick mode against a fixture with both
+        // source and tests so we exercise the full path.
+        let temp = TempDir::new().unwrap();
+        let src_dir = temp.path().join("src");
+        let test_dir = temp.path().join("tests");
+        fs::create_dir(&src_dir).unwrap();
+        fs::create_dir(&test_dir).unwrap();
+        fs::write(src_dir.join("module.py"), PYTHON_WITH_CONTRACTS).unwrap();
+        fs::write(test_dir.join("test_module.py"), PYTHON_TEST_FILE).unwrap();
+
+        for quick in [false, true] {
+            let report = run_verify(temp.path(), Language::Python, quick, None).unwrap();
+            for (name, result) in &report.sub_results {
+                assert!(
+                    !matches!(result.status, SubAnalysisStatus::Skipped),
+                    "sub_result `{name}` has status Skipped in quick={quick} — verify should never emit unwired stubs (schema-completeness-v1)"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_verify_drops_unwired_keys() {
+        // Hard regression guard for the option-(b) path: the verify report MUST
+        // NOT contain `bounds`, `dead_stores`, or `invariants` keys until they
+        // are actually wired up (deferred to verify-full-integration-v1).
+        let temp = TempDir::new().unwrap();
+        let src_dir = temp.path().join("src");
+        let test_dir = temp.path().join("tests");
+        fs::create_dir(&src_dir).unwrap();
+        fs::create_dir(&test_dir).unwrap();
+        fs::write(src_dir.join("module.py"), PYTHON_WITH_CONTRACTS).unwrap();
+        fs::write(test_dir.join("test_module.py"), PYTHON_TEST_FILE).unwrap();
+
+        let report = run_verify(temp.path(), Language::Python, false, None).unwrap();
+        for forbidden in ["bounds", "dead_stores", "invariants"] {
             assert!(
-                matches!(
-                    invariants.status,
-                    SubAnalysisStatus::Skipped | SubAnalysisStatus::Failed
-                ),
-                "Invariants should be skipped in quick mode"
+                !report.sub_results.contains_key(forbidden),
+                "verify must not emit `{forbidden}` until it is actually wired up"
             );
         }
+        // Conversely, the wired analyses must still be present.
+        assert!(report.sub_results.contains_key("contracts"));
+        assert!(report.sub_results.contains_key("specs"));
     }
 
     #[test]

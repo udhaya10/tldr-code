@@ -24,6 +24,7 @@ use super::debt::{
     find_high_coupling,
     find_missing_docs,
     find_todo_comments,
+    severity_for_minutes,
     // Enums
     DebtCategory,
     // Structs
@@ -530,6 +531,7 @@ mod unit_tests {
             debt_density: 52.0,
             by_category,
             by_rule,
+            by_severity: BTreeMap::new(),
         };
 
         let json = serde_json::to_value(&summary).unwrap();
@@ -551,6 +553,7 @@ mod unit_tests {
             debt_density: 10.0,
             by_category: BTreeMap::new(),
             by_rule: BTreeMap::new(),
+            by_severity: BTreeMap::new(),
         };
 
         let json = serde_json::to_value(&summary).unwrap();
@@ -611,6 +614,7 @@ mod unit_tests {
                 debt_density: 10.0,
                 by_category: BTreeMap::new(),
                 by_rule: BTreeMap::new(),
+                by_severity: BTreeMap::new(),
             },
         };
 
@@ -2083,6 +2087,70 @@ mod summary_tests {
     }
 
     #[test]
+    fn test_debt_summary_by_severity_populated() {
+        // schema-completeness-v1: regression test for `summary.by_severity` being null.
+        //
+        // Build a fixture that yields debt findings spanning multiple severity buckets:
+        //   - TODO comments    (10 min) -> low
+        //   - long_param_list  (15 min) -> medium
+        //   - long_method      (30 min) -> high
+        //   - god_class        (60 min) -> critical
+        //
+        // We rely on existing rule fixtures; the assertion is structural — the field
+        // must be a populated map and the sum of finding-counts must equal `findings.len()`.
+        let dir = TestDir::new().expect("Failed to create test dir");
+
+        // PYTHON_WITH_TODO produces 10-minute (low) findings.
+        // PYTHON_LONG_PARAMS produces a 15-minute (medium) finding.
+        let source = format!("{}\n{}", PYTHON_WITH_TODO, PYTHON_LONG_PARAMS);
+        dir.add_file("mixed.py", &source).unwrap();
+
+        let options = DebtOptions {
+            path: dir.path().to_path_buf(),
+            ..Default::default()
+        };
+        let report = analyze_debt(options).unwrap();
+
+        // Field must be populated (not empty) given the fixture has findings.
+        assert!(
+            !report.summary.by_severity.is_empty(),
+            "summary.by_severity must be populated when findings exist; got empty map"
+        );
+
+        // Sum of severity-bucket counts must equal the number of findings.
+        let total_count: u32 = report.summary.by_severity.values().sum();
+        assert_eq!(
+            total_count as usize,
+            report.issues.len(),
+            "by_severity bucket counts must sum to findings.len()"
+        );
+
+        // Every key must be a valid severity label.
+        for key in report.summary.by_severity.keys() {
+            assert!(
+                matches!(key.as_str(), "low" | "medium" | "high" | "critical"),
+                "unexpected severity key: {key}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_severity_for_minutes_buckets() {
+        // Boundary tests for the severity classifier — these are the boundaries every
+        // DebtRule::minutes() value lands on.
+        assert_eq!(severity_for_minutes(0), "low");
+        assert_eq!(severity_for_minutes(10), "low"); // TodoComment / MissingDocs
+        assert_eq!(severity_for_minutes(14), "low");
+        assert_eq!(severity_for_minutes(15), "medium"); // LongParamList / DeepNesting
+        assert_eq!(severity_for_minutes(20), "medium"); // ComplexityHigh / HighCoupling
+        assert_eq!(severity_for_minutes(29), "medium");
+        assert_eq!(severity_for_minutes(30), "high"); // LongMethod / ComplexityVeryHigh
+        assert_eq!(severity_for_minutes(59), "high");
+        assert_eq!(severity_for_minutes(60), "critical"); // ComplexityExtreme / GodClass
+        assert_eq!(severity_for_minutes(120), "critical");
+    }
+
+    #[test]
     fn test_debt_summary_sums_match() {
         let dir = TestDir::new().expect("Failed to create test dir");
         dir.add_file("test.py", PYTHON_WITH_TODO).unwrap();
@@ -2179,6 +2247,7 @@ mod output_tests {
                 debt_density: 30.0,
                 by_category: BTreeMap::new(),
                 by_rule: BTreeMap::new(),
+                by_severity: BTreeMap::new(),
             },
         };
 
@@ -2223,6 +2292,7 @@ mod output_tests {
                 debt_density: 50.0,
                 by_category: BTreeMap::new(),
                 by_rule: BTreeMap::new(),
+                by_severity: BTreeMap::new(),
             },
         };
 

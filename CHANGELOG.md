@@ -1,5 +1,94 @@
 # Changelog
 
+## schema-completeness-v1 — internal milestone
+
+NOT a published release. Closes the "schema completeness" anti-product
+surface — three independent bugs where tldr commands either lied about
+their output schema or used inconsistent exit-code semantics. Fixed
+together because each fix is small and the failure mode is the same:
+"the JSON schema/exit code does not match the documented contract".
+
+### Bugs fixed
+
+- **MEDIUM — `tldr debt` reported `summary.by_severity = null`.**
+  The `DebtSummary` struct had populated `by_category` and `by_rule`
+  fields but no `by_severity` field at all. Repro:
+  `tldr debt /tmp/repos/flask | jq '.summary.by_severity'` returned
+  `null`. Fix: added `by_severity: BTreeMap<String, u32>` to
+  `DebtSummary`, populated it by classifying each issue's
+  `debt_minutes` into one of `low` (`<15`), `medium` (`15..30`),
+  `high` (`30..60`), or `critical` (`>=60`) — buckets aligned 1:1
+  with `DebtRule::minutes()` so every rule lands deterministically in
+  exactly one bucket. Each bucket value is a finding count (sum
+  equals `findings.length`). After fix on flask:
+  `{"high": 12, "low": 540, "medium": 20}`.
+
+- **MEDIUM — `tldr temporal` exited 2 when no constraints were
+  mined.** The legacy "exit 2 = no constraints found" contract was
+  inconsistent with every other tldr command (which use `0` for any
+  successful analysis, including empty results). It also broke shell
+  pipelines that treat non-zero as failure, and made cross-language
+  sweeps spuriously red on small fixtures. Fix: `temporal` now exits
+  `0` whenever it produces valid JSON output, regardless of whether
+  any constraints/trigrams were mined. Non-zero exits are reserved
+  for parse failures and IO errors. Verified across 5 languages
+  (Python/JS/Rust/Swift/Kotlin) — all exit 0.
+
+- **MEDIUM — `tldr verify` listed `bounds`, `dead_stores`, and
+  `invariants` as `Skipped — not yet integrated` sub-results.** The
+  command was effectively lying about running these analyses. Per
+  the milestone (option b: drop the unwired sub_results), these keys
+  are no longer emitted at all — the verify report now only
+  aggregates `contracts` and `specs`. The `sweep_bounds` and
+  `sweep_dead_stores` helpers are retained (under `#[allow(dead_code)]`)
+  so wiring them up in a future `verify-full-integration-v1`
+  milestone is a one-line change. Bounds and invariants integration
+  is **deferred** to that milestone.
+
+### Tests added
+
+- `quality::debt::summary_tests::test_debt_summary_by_severity_populated`
+  — fixture with mixed-severity findings, asserts `by_severity` is
+  populated and bucket counts sum to `findings.len()`.
+- `quality::debt::summary_tests::test_severity_for_minutes_buckets`
+  — boundary tests for the severity classifier (every
+  `DebtRule::minutes()` value lands in exactly one documented bucket).
+- `temporal_command::test_temporal_no_sequences_exit_zero` (renamed
+  from `test_temporal_no_sequences_exit_2`) — exit 0 + valid JSON
+  schema (`.constraints`, `.trigrams`, `.metadata`) on empty result.
+- `commands::contracts::verify::tests::test_verify_no_skipped_subresults`
+  — runs verify in both quick and non-quick modes; asserts no
+  sub_result has status `Skipped`.
+- `commands::contracts::verify::tests::test_verify_drops_unwired_keys`
+  — hard regression guard: `bounds`/`dead_stores`/`invariants`
+  must not appear in the report; `contracts`/`specs` must.
+
+### Files changed
+
+- `crates/tldr-core/src/quality/debt.rs` — `DebtSummary.by_severity`
+  field, `severity_for_minutes()` helper, populate in
+  `analyze_debt()`.
+- `crates/tldr-core/src/quality/debt_tests.rs` — 5 existing
+  construction sites updated, 2 new tests.
+- `crates/tldr-cli/src/commands/patterns/temporal.rs` — removed
+  `process::exit(2)` on empty result; emit JSON and return `Ok(())`.
+- `crates/tldr-cli/src/commands/contracts/verify.rs` — dropped
+  `bounds`/`dead_stores`/`invariants` insertions; renamed `quick` to
+  `_quick`; `#[allow(dead_code)]` on retained sweep helpers.
+- `crates/tldr-cli/tests/patterns_test.rs`,
+  `crates/tldr-cli/tests/cli_patterns_contracts_tests.rs`,
+  `crates/tldr-cli/tests/exhaustive_matrix.rs` — updated exit-code
+  assertions and comments to match new contract.
+
+### Carry-forwards
+
+- `verify-full-integration-v1` — wire `bounds`, `dead_stores`, and
+  `invariants` into the verify report for real (the helpers are kept
+  in place for this).
+- `quick` flag is now a no-op since the only sub-analyses it gated
+  (`bounds`, `invariants`) are gone. Will regain meaning once the
+  full integration milestone lands.
+
 ## js-extract-function-expressions-v1 — internal milestone
 
 NOT a published release. Fixes a HIGH-severity gap in the JS/TS

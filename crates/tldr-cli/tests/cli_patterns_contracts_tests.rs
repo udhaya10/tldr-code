@@ -268,14 +268,13 @@ fn test_temporal_basic_json() {
         .output()
         .expect("Failed to execute tldr temporal");
 
-    // Temporal exits 2 when no constraint/trigram patterns are mined from
-    // the corpus (the small fixture project rarely has enough sequences).
-    // Both exit 0 (patterns found) and exit 2 (none found) are valid
-    // success states; failures (signals, panics, parse errors) are not.
+    // schema-completeness-v1: temporal exits 0 on any valid output, including the
+    // empty-result case. Non-zero exits are reserved for parse/IO failures.
     let code = output.status.code();
-    assert!(
-        matches!(code, Some(0) | Some(2)),
-        "temporal command should exit 0 or 2; got {:?}, stderr={}",
+    assert_eq!(
+        code,
+        Some(0),
+        "temporal command should exit 0 on valid output; got {:?}, stderr={}",
         code,
         String::from_utf8_lossy(&output.stderr)
     );

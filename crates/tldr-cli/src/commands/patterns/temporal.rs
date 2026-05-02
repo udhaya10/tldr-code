@@ -1270,17 +1270,10 @@ pub fn run(args: TemporalArgs, global_format: GlobalOutputFormat) -> anyhow::Res
     let use_text = matches!(global_format, GlobalOutputFormat::Text)
         || matches!(args.output_format, OutputFormat::Text);
 
-    // Check if no constraints found -> exit code 2
-    if report.constraints.is_empty() && report.trigrams.is_empty() {
-        if use_text {
-            println!("{}", format_temporal_text(&report));
-        } else {
-            let json = serde_json::to_string_pretty(&report)?;
-            println!("{}", json);
-        }
-        std::process::exit(2);
-    }
-
+    // schema-completeness-v1: emit valid output and exit 0 regardless of whether
+    // any constraints/trigrams were mined. Reserve non-zero exit codes for parse
+    // failures and IO errors only — "found nothing" is a successful analysis,
+    // matching the convention used by every other tldr command.
     if use_text {
         println!("{}", format_temporal_text(&report));
     } else {
