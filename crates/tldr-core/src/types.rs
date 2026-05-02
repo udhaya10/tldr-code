@@ -932,12 +932,19 @@ pub struct FileStructure {
     /// + signatures).
     pub methods: Vec<String>,
     /// Detailed method information that distinguishes overloads by line
-    /// number and signature. Parallel to `methods`; same length and order,
-    /// but each element carries `(name, signature, line)` so consumers can
-    /// disambiguate same-name methods. Only emitted in JSON when non-empty.
+    /// number and signature. Each element carries `(name, signature, line)`
+    /// so consumers can disambiguate same-name methods (e.g. three
+    /// `getPet(...)` overloads in Java/Kotlin/Scala/C++).
+    ///
+    /// structure-method-infos-all-langs-v1: ALWAYS emitted in JSON output
+    /// (as `[]` for languages whose file contains no methods, e.g. C / OCaml
+    /// modules / Lua / shell scripts) so consumers can rely on the field
+    /// being present across all 17 supported languages. Without this, code
+    /// that does `files[0].method_infos` would error on languages where
+    /// the file has no class scope.
     ///
     /// schema-unification-v1 BUG-21: ADDITIVE companion to `methods`.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub method_infos: Vec<MethodInfo>,
     /// Import statements found in this file
     pub imports: Vec<ImportInfo>,

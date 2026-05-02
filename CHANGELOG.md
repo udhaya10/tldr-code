@@ -1,5 +1,159 @@
 # Changelog
 
+## structure-method-infos-all-langs-v1 — internal milestone
+
+NOT a published release. Closes the medium-severity follow-up gap left
+by `schema-unification-v1` (commit `8d71463`): the BUG-21 fix added
+`FileStructure::method_infos: Vec<MethodInfo>` to distinguish overloaded
+methods, but the field was serialized with
+`#[serde(skip_serializing_if = "Vec::is_empty")]`. Languages whose file
+fixture had no class scope (so `definitions` filtered to `kind="method"`
+yielded zero entries) silently dropped the key from JSON output.
+Surfaced by the v0.2.x 17-language sweep — only 3 of 17 languages
+actually emitted the field on the canonical `vuln_migration_v1`
+fixtures.
+
+### Bug fixed
+
+- **BUG-21 (incomplete) — `tldr structure` JSON drops `method_infos`
+  for 14 of 17 languages.** Repro on HEAD before this milestone:
+  ```
+  for lang in c cpp csharp elixir go java javascript kotlin lua luau \
+              ocaml php python ruby rust scala swift typescript; do
+    D=crates/tldr-cli/tests/fixtures/vuln_migration_v1/$lang
+    has_mi=$(tldr structure --lang $lang "$D" \
+      | jq '.files[0] | has("method_infos")')
+    printf "  %-12s method_infos=%s\n" "$lang" "$has_mi"
+  done
+  ```
+  Output:
+  - HAD field: `csharp`, `java`, `ruby` (3) — fixtures had class scope
+  - MISSED field: `c`, `cpp`, `elixir`, `go`, `javascript`, `kotlin`,
+    `lua`, `luau`, `ocaml`, `php`, `python`, `rust`, `scala`, `swift`,
+    `typescript` (14) — fixtures had no class scope, so the empty
+    `method_infos: []` was suppressed at serialization time.
+
+  Languages with method overloading (`cpp`, `kotlin`, `scala`)
+  particularly suffered downstream — overloaded methods always collapse
+  to identical strings in the legacy `methods: [String]` array, leaving
+  consumers no way to disambiguate them when feeding the structure
+  output back to a planner / refactor / coverage tool.
+
+  Root cause in `crates/tldr-core/src/types.rs::FileStructure`:
+  ```rust
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub method_infos: Vec<MethodInfo>,
+  ```
+  The population path in `crates/tldr-core/src/ast/extractor.rs::
+  extract_file_structure` was already language-agnostic — it derives
+  `method_infos` from `definitions` filtered by `kind == "method"`,
+  which works for every grammar that classifies class-scope functions
+  via the existing `is_inside_class_or_impl` helper. The bug was
+  purely in serialization: an empty vector was correct for languages
+  without class-scope methods, but suppressing the empty array meant
+  consumer code that does `obj.method_infos` (without `has(...)`
+  guards) would error on 14 of 17 languages.
+
+  Fix: drop `skip_serializing_if = "Vec::is_empty"` on
+  `FileStructure::method_infos` so the field is ALWAYS emitted as `[]`
+  when the file contains no class-scope methods. The population logic
+  (already present, already correct) is unchanged. Overload
+  distinction (BUG-21 original contract) keeps working — verified on
+  C++ / Kotlin / Scala overload fixtures: three same-name methods
+  produce three distinct `method_infos` entries with different `line`
+  AND different `signature` values, while the legacy `methods:
+  [String]` array retains all three duplicate name entries (additive,
+  no breakage).
+
+  BEFORE / AFTER (binary verify across the 17-language fixture sweep):
+  ```
+  Language     BEFORE method_infos  AFTER method_infos  ENTRIES
+  ---------    -------------------  ------------------  -------
+  c            absent               present (=[])       0
+  cpp          absent               present (=[])       0  *
+  csharp       present              present             1
+  elixir       absent               present (=[])       0
+  go           absent               present (=[])       0
+  java         present              present             1
+  javascript   absent               present (=[])       0
+  kotlin       absent               present (=[])       0  *
+  lua          absent               present (=[])       0
+  luau         absent               present (=[])       0
+  ocaml        absent               present (=[])       0
+  php          absent               present (=[])       0
+  python       absent               present (=[])       0
+  ruby         present              present             1
+  rust         absent               present (=[])       0
+  scala        absent               present (=[])       0  *
+  swift        absent               present (=[])       0
+  typescript   absent               present (=[])       0
+  ```
+  (* The fixture corpus does not include class-scope code for these
+  languages — empty `[]` is the correct output. Overload distinction
+  is verified separately in
+  `test_structure_method_infos_distinguishes_overloads_cpp_kotlin_scala`
+  using inline source: 3 overloaded `bar` methods → 3 distinct
+  `method_infos` entries with distinct lines AND distinct signatures.)
+
+  Kotlin overload BEFORE / AFTER on inline source:
+  ```
+  class Foo {
+    fun bar(x: Int) {}
+    fun bar(x: Int, y: Int) {}
+    fun bar(x: Double) {}
+  }
+
+  BEFORE: files[0] | has("method_infos") = false  ← BUG (field absent)
+  AFTER:  files[0].method_infos = [
+            { name: "bar", signature: "fun bar(x: Int) {}",       line: 2 },
+            { name: "bar", signature: "fun bar(x: Int, y: Int) {}", line: 3 },
+            { name: "bar", signature: "fun bar(x: Double) {}",     line: 4 },
+          ]
+  ```
+
+### Tests
+
+- New `crates/tldr-cli/tests/structure_method_infos_all_langs_v1.rs`
+  with 4 integration tests (covering the 17-language matrix in two
+  passes — inline-source per-language fixtures + project-fixture
+  sweep — plus C++ / Kotlin / Scala overload distinction and a Java
+  regression guard pinning the prior schema-unification-v1 BUG-21 test
+  invariants).
+- `vuln_migration_v1_red`: 168/168 GREEN.
+- `tldr-core` lib tests: 4657/4657 GREEN.
+- `tldr-cli` lib tests: 1392/1392 GREEN.
+- `schema_unification_v1`: 6/6 GREEN (no regression on the original
+  Java overload test).
+
+### Files modified
+
+```
+CHANGELOG.md                                                       (this entry, prepended)
+crates/tldr-core/src/types.rs                                      (drop skip_serializing_if on method_infos)
+crates/tldr-cli/tests/structure_method_infos_all_langs_v1.rs       (new test file, 4 tests)
+```
+
+### Carry-forwards
+
+- The population logic in `extract_file_structure` derives
+  `method_infos` from `definitions` filtered by `kind == "method"`,
+  which depends on `is_inside_class_or_impl` correctly identifying
+  class-scope nodes. The current helper covers Python / TS / JS /
+  Rust / Java / C# / C++ / Ruby / Kotlin (companion_object,
+  object_declaration, class_body) and treats `module` as
+  class-scope for non-Python grammars. Languages that lack class
+  semantics (C, OCaml top-level, Lua, Go, Elixir defmodule) emit
+  `method_infos: []` — correct under the spec contract. If a future
+  fixture introduces (say) a Lua `:` method-call shorthand or a Go
+  receiver method that should be classified as `method`, the helper
+  may need targeted extension; that is independent of this milestone.
+
+- Consumers that special-cased the historical `has("method_infos")`
+  guard can now drop the guard. The field is unconditionally an
+  array. Old consumers continue to work (a present empty array
+  serializes the same way the absent field would deserialize via
+  `#[serde(default)]`).
+
 ## rust-secure-taint-aggregator-v2 — internal milestone
 
 NOT a published release. Closes the high-severity Rust regression
