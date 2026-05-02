@@ -174,9 +174,6 @@ pub fn run(args: SecureArgs, format: OutputFormat) -> anyhow::Result<()> {
     for analysis in analyses {
         let (findings, raw_result) = run_security_analysis(*analysis, &files, &mut cache)?;
 
-        // Update summary
-        update_summary(&mut report.summary, *analysis, &findings);
-
         // Collect findings
         all_findings.extend(findings);
 
@@ -188,6 +185,17 @@ pub fn run(args: SecureArgs, format: OutputFormat) -> anyhow::Result<()> {
 
     // Sort findings by severity (critical first)
     all_findings.sort_by(|a, b| severity_order(&a.severity).cmp(&severity_order(&b.severity)));
+
+    // WRAPPER-CROSS-CONSISTENCY-V1 (BUG-15, BUG-16): compute the summary
+    // counters from the FINAL `findings` array via category group-by,
+    // post-aggregation and post-sort. The previous implementation set
+    // `taint_count = findings.len()` inside the per-analysis update where
+    // `analyze_taint` on Rust files returns `category="unsafe_block"`
+    // findings — so `taint_count` ghosted to N while the findings array
+    // had zero `category=="taint"` entries (BUG-16). Group-by on the
+    // canonical findings array makes the summary match the array by
+    // construction.
+    report.summary = compute_summary_from_findings(&all_findings);
 
     report.findings = all_findings;
     report.sub_results = sub_results;
@@ -324,51 +332,43 @@ fn run_security_analysis(
     Ok((findings, raw_result))
 }
 
-/// Update summary based on findings
-fn update_summary(
-    summary: &mut SecureSummary,
-    analysis: SecurityAnalysis,
-    findings: &[SecureFinding],
-) {
-    match analysis {
-        SecurityAnalysis::Taint => {
-            summary.taint_count = findings.len() as u32;
-            summary.taint_critical =
-                findings.iter().filter(|f| f.severity == "critical").count() as u32;
-            summary.unsafe_blocks = findings
-                .iter()
-                .filter(|f| f.category == "unsafe_block")
-                .count() as u32;
-        }
-        SecurityAnalysis::Resources => {
-            summary.leak_count = findings
-                .iter()
-                .filter(|f| f.category == "resource_leak")
-                .count() as u32;
-            summary.raw_pointer_ops = findings
-                .iter()
-                .filter(|f| f.category == "raw_pointer")
-                .count() as u32;
-        }
-        SecurityAnalysis::Bounds => {
-            summary.bounds_warnings =
-                findings.iter().filter(|f| f.category == "bounds").count() as u32;
-            summary.unwrap_calls =
-                findings.iter().filter(|f| f.category == "unwrap").count() as u32;
-            summary.todo_markers = findings
-                .iter()
-                .filter(|f| f.category == "todo_marker")
-                .count() as u32;
-        }
-        SecurityAnalysis::Contracts => {
-            summary.missing_contracts = findings.len() as u32;
-        }
-        SecurityAnalysis::Behavioral => {
-            // Not tracked in summary
-        }
-        SecurityAnalysis::Mutability => {
-            summary.mutable_params = findings.len() as u32;
-        }
+/// Compute the summary by category group-by over the FINAL findings array.
+///
+/// WRAPPER-CROSS-CONSISTENCY-V1 (BUG-15, BUG-16): every `*_count` field
+/// derives from `findings[].category`, so the schema invariant
+/// `taint_count + leak_count + bounds_warnings + behavioral_count +
+///  unsafe_blocks + raw_pointer_ops + unwrap_calls + todo_markers +
+///  missing_contracts + mutable_params == findings.len()`
+/// holds by construction. `taint_critical` is a severity refinement of
+/// `taint_count` (subset, not its own category) and is excluded from the
+/// invariant.
+///
+/// Categories emitted by sub-analyzers (must remain in sync with the
+/// `analyze_*` functions below):
+/// - taint analysis: `taint` (Python/JS/etc.) | `unsafe_block` (Rust)
+/// - resource analysis: `resource_leak` (Python) | `raw_pointer` (Rust)
+/// - bounds analysis: `bounds` (Python) | `unwrap`, `todo_marker` (Rust)
+/// - behavioral analysis: `behavioral`
+/// - contracts analysis: `missing_contract` (placeholder, currently unused)
+/// - mutability analysis: `mutable_param` (placeholder, currently unused)
+fn compute_summary_from_findings(findings: &[SecureFinding]) -> SecureSummary {
+    let count_cat = |cat: &str| findings.iter().filter(|f| f.category == cat).count() as u32;
+
+    SecureSummary {
+        taint_count: count_cat("taint"),
+        taint_critical: findings
+            .iter()
+            .filter(|f| f.category == "taint" && f.severity == "critical")
+            .count() as u32,
+        leak_count: count_cat("resource_leak"),
+        bounds_warnings: count_cat("bounds"),
+        behavioral_count: count_cat("behavioral"),
+        missing_contracts: count_cat("missing_contract"),
+        mutable_params: count_cat("mutable_param"),
+        unsafe_blocks: count_cat("unsafe_block"),
+        raw_pointer_ops: count_cat("raw_pointer"),
+        unwrap_calls: count_cat("unwrap"),
+        todo_markers: count_cat("todo_marker"),
     }
 }
 
@@ -750,6 +750,10 @@ fn format_text_report(report: &SecureReport) -> String {
     output.push_str(&format!(
         "  Bounds warnings:   {}\n",
         report.summary.bounds_warnings
+    ));
+    output.push_str(&format!(
+        "  Behavioral:        {}\n",
+        report.summary.behavioral_count
     ));
     output.push_str(&format!(
         "  Missing contracts: {}\n",

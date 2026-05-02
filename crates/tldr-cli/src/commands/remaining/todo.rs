@@ -34,7 +34,7 @@ use crate::output::OutputWriter;
 // Import existing analysis modules
 use crate::commands::dead::collect_module_infos_with_refcounts;
 use tldr_core::analysis::dead::dead_code_analysis_refcount;
-use tldr_core::{collect_all_functions, get_code_structure, FunctionRef, IgnoreSpec, Language};
+use tldr_core::{collect_all_functions, FunctionRef, Language};
 
 // =============================================================================
 // Constants
@@ -292,7 +292,7 @@ fn run_sub_analysis(
     match analysis {
         SubAnalysis::Dead => run_dead_analysis(path, language),
         SubAnalysis::Complexity => run_complexity_analysis(path, language),
-        SubAnalysis::Cohesion => run_cohesion_analysis(path),
+        SubAnalysis::Cohesion => run_cohesion_analysis(path, language),
         SubAnalysis::Equivalence => run_equivalence_analysis(path),
         SubAnalysis::Similar => run_similar_analysis(path),
     }
@@ -338,99 +338,88 @@ fn run_dead_analysis(path: &Path, language: Language) -> RemainingResult<(Vec<To
 }
 
 /// Run complexity analysis (hotspots)
+///
+/// WRAPPER-CROSS-CONSISTENCY-V1 (BUG-04): delegates to
+/// `tldr_core::quality::complexity::analyze_complexity` with the same
+/// `hotspot_threshold = 10` that `tldr health` uses (default
+/// `ThresholdPreset::Default`). Previously this routed through
+/// `tldr_core::calculate_complexity` per-function — a different code path
+/// — and produced divergent hotspot counts vs. health (e.g. flask
+/// health=11 vs todo=6). Sharing the canonical analyzer makes
+/// `tldr health` and `tldr todo` agree by construction on the same path.
 fn run_complexity_analysis(
     path: &Path,
     language: Language,
 ) -> RemainingResult<(Vec<TodoItem>, Value)> {
-    // Get structure to find functions
-    let structure = get_code_structure(path, language, 0, Some(&IgnoreSpec::default()))
-        .map_err(|e| RemainingError::analysis_error(format!("Failed to get structure: {}", e)))?;
+    use tldr_core::quality::complexity::{analyze_complexity, ComplexityOptions};
 
-    let mut items = Vec::new();
+    let options = ComplexityOptions {
+        hotspot_threshold: 10,
+        // Don't truncate: `health` aggregates the full hotspot count,
+        // so todo must enumerate all hotspots to match.
+        max_hotspots: usize::MAX,
+        ..Default::default()
+    };
 
-    // Check each function for high complexity (threshold: cyclomatic > 10).
-    // BUG-05: previously hardcoded line=1; now look up the real start line
-    // from the structure's `definitions` table (built from tree-sitter AST).
-    for file in &structure.files {
-        // Build a name -> start line map from the file's definitions. A
-        // function name may appear multiple times (e.g., overloads); take
-        // the FIRST occurrence to match `tldr complexity` semantics.
-        let mut name_to_line: std::collections::HashMap<&str, u32> =
-            std::collections::HashMap::with_capacity(file.definitions.len());
-        for def in &file.definitions {
-            name_to_line.entry(def.name.as_str()).or_insert(def.line_start);
-        }
+    let report = analyze_complexity(path, Some(language), Some(options))
+        .map_err(|e| RemainingError::analysis_error(format!("Complexity analysis failed: {}", e)))?;
 
-        for func_name in &file.functions {
-            let file_path = path.join(&file.path);
-            if let Ok(metrics) = tldr_core::calculate_complexity(
-                file_path.to_str().unwrap_or_default(),
-                func_name,
-                language,
-            ) {
-                if metrics.cyclomatic > 10 {
-                    let line = name_to_line.get(func_name.as_str()).copied().unwrap_or(0);
-                    items.push(
-                        TodoItem::new(
-                            "complexity",
-                            PRIORITY_COMPLEXITY,
-                            format!(
-                                "High complexity in {}: cyclomatic={}, consider refactoring",
-                                func_name, metrics.cyclomatic
-                            ),
-                        )
-                        .with_location(file.path.display().to_string(), line)
-                        .with_severity(if metrics.cyclomatic > 20 {
-                            "high"
-                        } else {
-                            "medium"
-                        })
-                        .with_score(metrics.cyclomatic as f64 / 50.0),
-                    );
-                }
-            }
-        }
-    }
+    let items: Vec<TodoItem> = report
+        .hotspots
+        .iter()
+        .map(|h| {
+            TodoItem::new(
+                "complexity",
+                PRIORITY_COMPLEXITY,
+                format!(
+                    "High complexity in {}: cyclomatic={}, consider refactoring",
+                    h.name, h.cyclomatic
+                ),
+            )
+            .with_location(h.file.display().to_string(), h.line as u32)
+            .with_severity(if h.cyclomatic > 20 { "high" } else { "medium" })
+            .with_score(h.cyclomatic as f64 / 50.0)
+        })
+        .collect();
 
-    let result_value = serde_json::json!({
-        "hotspots": items.len(),
-        "threshold": 10
-    });
+    let result_value = serde_json::to_value(&report).unwrap_or(Value::Null);
 
     Ok((items, result_value))
 }
 
 /// Run cohesion analysis (LCOM4)
-fn run_cohesion_analysis(path: &Path) -> RemainingResult<(Vec<TodoItem>, Value)> {
-    use crate::commands::patterns::cohesion::{run as run_cohesion, CohesionArgs};
+///
+/// WRAPPER-CROSS-CONSISTENCY-V1 (BUG-04): delegates to
+/// `tldr_core::quality::cohesion::analyze_cohesion` with the same
+/// `threshold = 2` that `tldr health` uses (default
+/// `ThresholdPreset::Default`). Previously this routed through
+/// `crate::commands::patterns::cohesion::run` (a different impl) and
+/// applied `lcom4 > 1` — both differed from health's `lcom4 > 2`. Sharing
+/// the canonical analyzer + threshold makes `tldr health` and
+/// `tldr todo` agree by construction on the same path.
+fn run_cohesion_analysis(
+    path: &Path,
+    language: Language,
+) -> RemainingResult<(Vec<TodoItem>, Value)> {
+    use tldr_core::quality::cohesion::analyze_cohesion;
 
-    let args = CohesionArgs {
-        path: path.to_path_buf(),
-        min_methods: 1,
-        include_dunder: false,
-        output_format: crate::commands::patterns::cohesion::OutputFormat::Json,
-        timeout: 30,
-        project_root: None,
-        lang: None,
-    };
-
-    let report = run_cohesion(args)
+    let report = analyze_cohesion(path, Some(language), 2)
         .map_err(|e| RemainingError::analysis_error(format!("Cohesion analysis failed: {}", e)))?;
 
     let items: Vec<TodoItem> = report
         .classes
         .iter()
-        .filter(|c| c.lcom4 > 1)
+        .filter(|c| c.lcom4 > 2)
         .map(|c| {
             TodoItem::new(
                 "cohesion",
                 PRIORITY_COHESION,
                 format!(
                     "Low cohesion in class {}: LCOM4={}, consider splitting",
-                    c.class_name, c.lcom4
+                    c.name, c.lcom4
                 ),
             )
-            .with_location(c.file_path.clone(), c.line)
+            .with_location(c.file.display().to_string(), c.line as u32)
             .with_severity(if c.lcom4 > 3 { "high" } else { "medium" })
             .with_score(c.lcom4 as f64 / 5.0)
         })

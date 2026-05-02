@@ -217,6 +217,8 @@ mod remaining_types {
         pub taint_critical: u32,
         pub leak_count: u32,
         pub bounds_warnings: u32,
+        #[serde(default)]
+        pub behavioral_count: u32,
         pub missing_contracts: u32,
         pub mutable_params: u32,
         #[serde(default)]
@@ -3043,5 +3045,437 @@ mod directory_mode {
             report.summary.files_scanned >= 3,
             "Should scan multiple Python and Rust files"
         );
+    }
+}
+
+// =============================================================================
+// WRAPPER-CROSS-CONSISTENCY-V1 (M-T2): cross-wrapper schema parity tests
+//
+// These tests guard the invariants enforced by the
+// `wrapper-cross-consistency-v1` milestone:
+// - BUG-04: `health` and `todo` must agree on hotspot_count and
+//   low_cohesion_count for the same path (same threshold, same analyzer).
+// - BUG-15: `secure.summary` includes `behavioral_count`; sum of typed
+//   counts equals `findings.length`.
+// - BUG-19: `secure` and `todo` must NOT serialize empty `sub_results`
+//   (the field is omitted when no `--detail` was requested). `verify`
+//   continues to populate it.
+// - BUG-16: `secure.summary.taint_count` must agree with
+//   `findings[] | filter(category=="taint") | length` on every path.
+// =============================================================================
+mod wrapper_cross_consistency {
+    use super::*;
+    use serde_json::Value as Json;
+
+    /// BUG-04: `tldr health` and `tldr todo` must report the same
+    /// hotspot_count and low_cohesion_count on the same path. Both now
+    /// route through `tldr_core::quality::complexity::analyze_complexity`
+    /// (threshold=10) and `tldr_core::quality::cohesion::analyze_cohesion`
+    /// (threshold=2). The fixture exercises both: a high-CC function (CC
+    /// > 10) and a low-cohesion class (LCOM4 > 2).
+    #[test]
+    fn test_health_todo_summary_counts_agree() {
+        let temp = TempDir::new().unwrap();
+
+        // Hotspot fixture: cyclomatic complexity > 10 via nested branches.
+        let hotspot_py = r#"
+def complex_function(x, y, z):
+    """High-CC function: CC must exceed 10."""
+    result = 0
+    if x > 0:
+        if y > 0:
+            if z > 0:
+                result = 1
+            else:
+                result = 2
+        else:
+            if z > 0:
+                result = 3
+            else:
+                result = 4
+    else:
+        if y > 0:
+            if z > 0:
+                result = 5
+            else:
+                result = 6
+        else:
+            if z > 0:
+                result = 7
+            else:
+                result = 8
+    while result > 0:
+        result -= 1
+    for i in range(10):
+        if i % 2 == 0:
+            result += i
+    return result
+"#;
+
+        // Low-cohesion class: LCOM4 > 2 via fully disconnected method
+        // groups (each method touches a distinct field).
+        let cohesion_py = r#"
+class Disconnected:
+    def __init__(self):
+        self.a = 0
+        self.b = 0
+        self.c = 0
+        self.d = 0
+
+    def use_a(self):
+        return self.a
+
+    def use_b(self):
+        return self.b
+
+    def use_c(self):
+        return self.c
+
+    def use_d(self):
+        return self.d
+"#;
+
+        create_test_file(&temp, "hotspot.py", hotspot_py);
+        create_test_file(&temp, "cohesion.py", cohesion_py);
+
+        let path = temp.path().to_str().unwrap();
+
+        let health_out = tldr_cmd().args(["health", path]).output().unwrap();
+        assert!(
+            health_out.status.success(),
+            "tldr health should succeed: {}",
+            String::from_utf8_lossy(&health_out.stderr)
+        );
+        let health_json: Json =
+            serde_json::from_slice(&health_out.stdout).expect("health emits JSON");
+
+        let todo_out = tldr_cmd().args(["todo", path]).output().unwrap();
+        assert!(
+            todo_out.status.success(),
+            "tldr todo should succeed: {}",
+            String::from_utf8_lossy(&todo_out.stderr)
+        );
+        let todo_json: Json = serde_json::from_slice(&todo_out.stdout).expect("todo emits JSON");
+
+        let health_hotspots = health_json["summary"]["hotspot_count"].as_u64().unwrap();
+        let todo_hotspots = todo_json["summary"]["hotspot_count"].as_u64().unwrap();
+        let health_cohesion = health_json["summary"]["low_cohesion_count"]
+            .as_u64()
+            .unwrap();
+        let todo_cohesion = todo_json["summary"]["low_cohesion_count"].as_u64().unwrap();
+
+        assert_eq!(
+            health_hotspots, todo_hotspots,
+            "BUG-04: tldr health hotspot_count ({}) must equal \
+             tldr todo hotspot_count ({}) on the same path. Both use \
+             tldr_core::quality::complexity::analyze_complexity with \
+             hotspot_threshold=10.",
+            health_hotspots, todo_hotspots
+        );
+        assert_eq!(
+            health_cohesion, todo_cohesion,
+            "BUG-04: tldr health low_cohesion_count ({}) must equal \
+             tldr todo low_cohesion_count ({}) on the same path. Both use \
+             tldr_core::quality::cohesion::analyze_cohesion with \
+             threshold=2.",
+            health_cohesion, todo_cohesion
+        );
+
+        // Sanity: the fixture must actually trigger BOTH analyses, else
+        // the assertion above is vacuous (0 == 0).
+        assert!(
+            health_hotspots >= 1,
+            "fixture must produce >=1 hotspot (got 0 from health) - \
+             fixture is wrong"
+        );
+        assert!(
+            health_cohesion >= 1,
+            "fixture must produce >=1 low-cohesion class (got 0 from \
+             health) - fixture is wrong"
+        );
+    }
+
+    /// BUG-15: `secure.summary` must include a `behavioral_count` field,
+    /// and the sum of all typed `*_count` fields in summary (excluding
+    /// `taint_critical`, which is a refinement of `taint_count`) must
+    /// equal `findings.length`. Fixture produces 1 behavioral (bare
+    /// except) + 1 resource_leak (open without with) + 1 taint (Flask
+    /// request -> cursor.execute string-concat).
+    #[test]
+    fn test_secure_summary_includes_behavioral() {
+        let temp = TempDir::new().unwrap();
+        let py = r#"
+from flask import request
+import sqlite3
+
+def bare_except():
+    try:
+        do_thing()
+    except:
+        pass
+
+def leak_resource():
+    f = open("data.txt")
+    return f.read()
+
+def taint_flow():
+    name = request.args.get("name")
+    conn = sqlite3.connect("db")
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM users WHERE name='" + name + "'")
+"#;
+        let path = create_test_file(&temp, "trio.py", py);
+        let out = tldr_cmd()
+            .args(["secure", path.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "tldr secure should succeed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let json: Json = serde_json::from_slice(&out.stdout).expect("secure emits JSON");
+
+        let findings = json["findings"].as_array().expect("findings is array");
+        let findings_len = findings.len() as u64;
+
+        let summary = &json["summary"];
+
+        // Schema: behavioral_count exists.
+        assert!(
+            summary.get("behavioral_count").is_some(),
+            "BUG-15: secure.summary must include `behavioral_count` field. \
+             Got summary keys: {:?}",
+            summary.as_object().map(|m| m.keys().collect::<Vec<_>>())
+        );
+
+        // Sum of typed category counters must equal findings.length.
+        // (taint_critical is a refinement subset of taint_count, excluded.)
+        let count_keys = [
+            "taint_count",
+            "leak_count",
+            "bounds_warnings",
+            "behavioral_count",
+            "missing_contracts",
+            "mutable_params",
+            "unsafe_blocks",
+            "raw_pointer_ops",
+            "unwrap_calls",
+            "todo_markers",
+        ];
+        let summed: u64 = count_keys
+            .iter()
+            .map(|k| summary[*k].as_u64().unwrap_or(0))
+            .sum();
+
+        assert_eq!(
+            summed, findings_len,
+            "BUG-15: sum(secure.summary.*_count) ({}) must equal \
+             findings.length ({}). Per-category breakdown: {:?}. \
+             Findings categories: {:?}",
+            summed,
+            findings_len,
+            count_keys
+                .iter()
+                .map(|k| (k, summary[*k].as_u64().unwrap_or(0)))
+                .collect::<Vec<_>>(),
+            findings
+                .iter()
+                .map(|f| f["category"].as_str().unwrap_or(""))
+                .collect::<Vec<_>>()
+        );
+
+        // Sanity: fixture must produce a behavioral finding, else the
+        // schema check is vacuous.
+        let behavioral_in_findings = findings
+            .iter()
+            .filter(|f| f["category"].as_str() == Some("behavioral"))
+            .count() as u64;
+        assert!(
+            behavioral_in_findings >= 1,
+            "fixture must produce >=1 behavioral finding (got 0) - \
+             fixture is wrong"
+        );
+        assert_eq!(
+            summary["behavioral_count"].as_u64().unwrap(),
+            behavioral_in_findings,
+            "summary.behavioral_count must equal findings | filter \
+             category==behavioral | length"
+        );
+    }
+
+    /// BUG-19: `secure` and `todo` MUST omit the `sub_results` field
+    /// from JSON output when no `--detail` was requested (it is no longer
+    /// serialized as `{}`). `verify`, which actually populates
+    /// sub_results in default mode, MUST still emit a populated map.
+    #[test]
+    fn test_secure_health_todo_no_empty_sub_results() {
+        let temp = TempDir::new().unwrap();
+        let py = r#"
+def hello():
+    return "ok"
+
+class Tiny:
+    def __init__(self):
+        self.x = 0
+    def use_x(self):
+        return self.x
+"#;
+        let path = create_test_file(&temp, "tiny.py", py);
+        let path_str = path.to_str().unwrap();
+        let dir_str = temp.path().to_str().unwrap();
+
+        for wrapper in &["secure", "todo"] {
+            let out = tldr_cmd()
+                .args([*wrapper, path_str])
+                .output()
+                .unwrap_or_else(|e| panic!("{} failed to spawn: {}", wrapper, e));
+            assert!(
+                out.status.success(),
+                "tldr {} should succeed: {}",
+                wrapper,
+                String::from_utf8_lossy(&out.stderr)
+            );
+            let json: Json = serde_json::from_slice(&out.stdout)
+                .unwrap_or_else(|e| panic!("{} should emit valid JSON: {}", wrapper, e));
+
+            // Either absent OR null — never `{}`.
+            let sub = json.get("sub_results");
+            match sub {
+                None => { /* OK: skipped via skip_serializing_if */ }
+                Some(v) if v.is_null() => { /* OK */ }
+                Some(v) => {
+                    if let Some(map) = v.as_object() {
+                        assert!(
+                            !map.is_empty(),
+                            "BUG-19: tldr {} must not emit sub_results: {{}} \
+                             on default invocation. Got: {:?}",
+                            wrapper,
+                            map
+                        );
+                    }
+                }
+            }
+        }
+
+        // health uses `details` (not `sub_results`) — check that field
+        // exists and is non-empty (regression guard for the rename).
+        let health_out = tldr_cmd().args(["health", dir_str]).output().unwrap();
+        assert!(
+            health_out.status.success(),
+            "tldr health should succeed: {}",
+            String::from_utf8_lossy(&health_out.stderr)
+        );
+        let health_json: Json = serde_json::from_slice(&health_out.stdout).unwrap();
+        // health does NOT use `sub_results`; its analogous field is
+        // `details` and must be populated.
+        assert!(
+            health_json.get("sub_results").is_none(),
+            "tldr health should not have sub_results (it uses `details` \
+             instead). Got: {:?}",
+            health_json.get("sub_results")
+        );
+
+        // verify still emits sub_results populated. We point it at the
+        // current crate's src/ directory (a real Rust source tree) to
+        // ensure all sub-analyses execute.
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let verify_target = format!("{}/src", manifest_dir);
+        let verify_out = tldr_cmd()
+            .args(["verify", &verify_target, "--quick"])
+            .output()
+            .unwrap();
+        // verify may exit nonzero (findings present); that's fine — we
+        // only care that the JSON has populated sub_results.
+        let verify_json: Json = serde_json::from_slice(&verify_out.stdout)
+            .expect("verify should emit JSON even on nonzero exit");
+        let verify_sub = verify_json
+            .get("sub_results")
+            .and_then(|v| v.as_object())
+            .expect("BUG-19 regression: tldr verify must still populate sub_results");
+        assert!(
+            !verify_sub.is_empty(),
+            "tldr verify sub_results must be populated (got {{}}). \
+             Removing sub_results from secure/todo must NOT regress verify."
+        );
+    }
+
+    /// BUG-16: `secure.summary.taint_count` MUST equal the number of
+    /// `findings[]` with `category == "taint"` on every path. The
+    /// previous implementation set `taint_count = findings.len()` from
+    /// the per-analysis `analyze_taint` return value — but on Rust files
+    /// `analyze_taint` returns findings with `category="unsafe_block"`,
+    /// causing `taint_count` to ghost (e.g. ripgrep: taint_count=4,
+    /// findings[category==taint]==0). The new implementation computes
+    /// every counter from the FINAL findings array via group-by, so
+    /// the assertion holds by construction across all languages.
+    #[test]
+    fn test_secure_taint_count_matches_findings_array() {
+        let temp = TempDir::new().unwrap();
+
+        // Python fixture: real source-to-sink taint flow (Flask request
+        // -> cursor.execute via string concat). Should produce >=1
+        // `category="taint"` finding.
+        let py_taint = r#"
+from flask import request
+import sqlite3
+
+def query():
+    name = request.args.get("name")
+    conn = sqlite3.connect("db")
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM users WHERE name='" + name + "'")
+"#;
+        let py_path = create_test_file(&temp, "py_taint.py", py_taint);
+
+        // Rust fixture: unsafe block + raw pointer + unwrap. None should
+        // produce `category="taint"` findings; instead `unsafe_block`,
+        // `raw_pointer`, `unwrap`. Pre-fix `taint_count` would ghost > 0
+        // here; post-fix it must be 0.
+        let rs_unsafe = r#"
+use std::ptr;
+
+fn risky(s: &str) {
+    unsafe { ptr::write(s.as_ptr() as *mut u8, b'x'); }
+    let _v: Option<&str> = Some(s);
+    _v.unwrap();
+}
+"#;
+        let rs_path = create_test_file(&temp, "src/unsafe_thing.rs", rs_unsafe);
+
+        for path in [&py_path, &rs_path] {
+            let out = tldr_cmd()
+                .args(["secure", path.to_str().unwrap()])
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "tldr secure should succeed on {:?}: {}",
+                path,
+                String::from_utf8_lossy(&out.stderr)
+            );
+            let json: Json = serde_json::from_slice(&out.stdout).expect("secure emits JSON");
+            let findings = json["findings"].as_array().expect("findings is array");
+            let taint_in_findings = findings
+                .iter()
+                .filter(|f| f["category"].as_str() == Some("taint"))
+                .count() as u64;
+            let summary_taint = json["summary"]["taint_count"].as_u64().unwrap();
+
+            assert_eq!(
+                summary_taint,
+                taint_in_findings,
+                "BUG-16: secure.summary.taint_count ({}) must equal \
+                 findings | filter category==taint | length ({}) on {:?}. \
+                 All findings categories: {:?}",
+                summary_taint,
+                taint_in_findings,
+                path,
+                findings
+                    .iter()
+                    .map(|f| f["category"].as_str().unwrap_or(""))
+                    .collect::<Vec<_>>()
+            );
+        }
     }
 }

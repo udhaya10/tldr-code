@@ -205,8 +205,14 @@ pub struct TodoReport {
     pub items: Vec<TodoItem>,
     /// Summary statistics
     pub summary: TodoSummary,
-    /// Raw results from sub-analyses (when --detail is used)
-    #[serde(default)]
+    /// Raw results from sub-analyses (only present when `--detail <name>`
+    /// is used; otherwise omitted from JSON output).
+    ///
+    /// WRAPPER-CROSS-CONSISTENCY-V1 (BUG-19): previously serialized as
+    /// `sub_results: {}` on every todo invocation. The empty `{}` was
+    /// misleading: todo does not populate sub_results unless `--detail`
+    /// is passed. Skipped when empty.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub sub_results: HashMap<String, Value>,
     /// Total elapsed time in milliseconds
     pub total_elapsed_ms: f64,
@@ -272,6 +278,14 @@ impl SecureFinding {
 }
 
 /// Security summary.
+///
+/// WRAPPER-CROSS-CONSISTENCY-V1: every `*_count` field is computed from the
+/// FINAL `SecureReport.findings` array via category group-by. The sum of
+/// all category counters in this struct (taint + leak + bounds + behavioral
+/// + unsafe_blocks + raw_pointer_ops + unwrap_calls + todo_markers +
+/// missing_contracts + mutable_params) MUST equal `findings.len()`.
+/// `taint_critical` is a sub-count of `taint_count` (severity refinement,
+/// not its own category) and is excluded from that invariant.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SecureSummary {
     /// Number of taint-related findings
@@ -282,6 +296,14 @@ pub struct SecureSummary {
     pub leak_count: u32,
     /// Number of bounds/overflow warnings
     pub bounds_warnings: u32,
+    /// Number of behavioral findings (e.g. bare `except:`)
+    ///
+    /// WRAPPER-CROSS-CONSISTENCY-V1 (BUG-15): previously the `behavioral`
+    /// category was emitted into `findings[]` but had no corresponding
+    /// summary counter, so `sum(*_count) != findings.len()`. Adding this
+    /// counter restores the invariant.
+    #[serde(default)]
+    pub behavioral_count: u32,
     /// Number of missing contracts
     pub missing_contracts: u32,
     /// Number of mutable parameter issues
@@ -311,8 +333,16 @@ pub struct SecureReport {
     pub findings: Vec<SecureFinding>,
     /// Summary statistics
     pub summary: SecureSummary,
-    /// Raw results from sub-analyses (when --detail is used)
-    #[serde(default)]
+    /// Raw results from sub-analyses (only present when `--detail <name>`
+    /// is used; otherwise omitted from JSON output).
+    ///
+    /// WRAPPER-CROSS-CONSISTENCY-V1 (BUG-19): previously serialized as
+    /// `sub_results: {}` on every secure invocation — a cargo-cult of
+    /// `verify`'s schema. The empty `{}` was misleading: secure does not
+    /// populate sub_results unless `--detail` is passed. Skipped when
+    /// empty so consumers don't conflate "no detail requested" with "no
+    /// sub-analyses ran".
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub sub_results: HashMap<String, Value>,
     /// Total elapsed time in milliseconds
     pub total_elapsed_ms: f64,

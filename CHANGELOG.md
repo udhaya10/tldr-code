@@ -1,6 +1,133 @@
 # Changelog
 
-## error-handling-and-data-v1 — internal milestone
+## wrapper-cross-consistency-v1 — internal milestone
+
+NOT a published release. Closes the "wrapper consistency anti-product
+surface" by aligning summary↔findings invariants and inter-wrapper
+threshold parity across `tldr secure`, `tldr health`, `tldr todo`. All
+four bugs ship atomically since they all live on the wrapper
+aggregation/serialization path. `vuln_migration_v1_red` remains 168/168
+GREEN; all 4657 `tldr-core` library tests + 1391 `tldr-cli` library
+tests remain GREEN. The four pre-existing failures called out in
+`error-handling-and-data-v1` (`test_vuln_detects_xss`,
+`test_secure_detects_taint`,
+`nextjs_response_json_reflected_xss_via_compute_taint`, plus the
+`test_embed_*` / `test_semantic_*` / `test_similar_*` env-dependent
+tests in `exhaustive_matrix.rs`) persist unchanged — verified to be
+present at HEAD before this milestone and NOT regressions.
+
+### Bugs fixed
+
+- **BUG-04** — `tldr health` and `tldr todo` reported divergent
+  `hotspot_count` and `low_cohesion_count` on the same path because
+  they ran two different cohesion/complexity analyzers with two
+  different thresholds. Pre-fix repro on flask:
+  ```
+  tldr health /tmp/repos/flask | jq '.summary | {hotspot_count, low_cohesion_count}'
+    → { "hotspot_count": 11, "low_cohesion_count": 26 }
+  tldr todo  /tmp/repos/flask | jq '.summary | {hotspot_count, low_cohesion_count}'
+    → { "hotspot_count": 6,  "low_cohesion_count": 20 }
+  ```
+  `health` aggregated `tldr_core::quality::complexity::analyze_complexity`
+  (threshold 10) and `tldr_core::quality::cohesion::analyze_cohesion`
+  (threshold 2). `todo` (`crates/tldr-cli/src/commands/remaining/todo.rs`)
+  re-implemented complexity hotspot detection per-function via
+  `tldr_core::calculate_complexity` (threshold 10 — coincident) and
+  routed cohesion through `crate::commands::patterns::cohesion::run`
+  (a different impl, threshold `> 1`). Three differences for the same
+  metric. Now both wrappers delegate to the canonical
+  `tldr_core::quality::{complexity, cohesion}` analyzers with the
+  same default thresholds (10 and 2), so the counts match by
+  construction. Post-fix on flask: both report `hotspot_count=11,
+  low_cohesion_count=26`.
+- **BUG-15** — `tldr secure` summary was missing a `behavioral_count`
+  field even though `behavioral` was a category emitted into
+  `findings[]` (e.g. bare `except:` clauses). Pre-fix repro on flask:
+  ```
+  tldr secure /tmp/repos/flask | jq '.findings | length'              → 16
+  tldr secure /tmp/repos/flask | jq '[.summary | values | add]'        → 15
+  tldr secure /tmp/repos/flask | jq '[.findings[].category] | group_by(.) | map({key:.[0],count:length})'
+    → [{"key":"behavioral","count":1}, {"key":"resource_leak","count":11}, {"key":"taint","count":4}]
+  ```
+  The summary's typed counters summed to 15 while the findings array
+  had 16 entries — exactly the 1 behavioral finding was unaccounted
+  for. Added `behavioral_count: u32` to `SecureSummary` and the
+  text-output formatter; the schema invariant
+  `taint_count + leak_count + bounds_warnings + behavioral_count +
+   missing_contracts + mutable_params + unsafe_blocks +
+   raw_pointer_ops + unwrap_calls + todo_markers == findings.len()`
+  now holds (verified post-fix on flask: 4+11+0+1+0+0+0+0+0+0 = 16).
+  `taint_critical` is excluded as a severity refinement subset of
+  `taint_count`.
+- **BUG-19** — `tldr secure`, `tldr todo` (and previously expected of
+  `tldr health` — see clarification below) emitted `sub_results: {}`
+  on every default invocation, cargo-culting `tldr verify`'s schema
+  even though they don't populate it without `--detail`. Pre-fix
+  repro:
+  ```
+  tldr secure /tmp/repos/flask | jq '.sub_results'  → {}
+  tldr todo   /tmp/repos/flask | jq '.sub_results'  → {}
+  tldr verify /tmp/repos/flask --quick | jq '.sub_results | keys'
+    → ["contracts","dead_stores","specs"]
+  ```
+  Now `SecureReport.sub_results` and `TodoReport.sub_results` carry
+  `#[serde(skip_serializing_if = "HashMap::is_empty")]`, so the field
+  is omitted from JSON unless `--detail` populated it. `tldr verify`
+  is unaffected (different report type, populates the field by
+  default and remains 5 keys). Clarification: `tldr health` already
+  uses a renamed `details` field (not `sub_results`) and was never
+  affected by this bug — verified post-fix that `tldr health` still
+  emits `details` populated.
+- **BUG-16** — `tldr secure` summary `taint_count` ghosted on Rust
+  paths because `update_summary` set it to `findings.len()` from the
+  per-analysis `analyze_taint` return value, but on Rust files
+  `analyze_taint` returns `category="unsafe_block"` findings (not
+  `category="taint"`). Pre-fix repro on ripgrep:
+  ```
+  tldr secure /tmp/repos/ripgrep | jq '.summary.taint_count'                    → 4
+  tldr secure /tmp/repos/ripgrep | jq '[.findings[] | select(.category=="taint")] | length'
+                                                                                 → 0
+  ```
+  Summary claimed 4 taint findings; findings array had zero. The
+  prior `secure-taint-aggregator-v1` milestone wired `analyze_taint`
+  to canonical `scan_vulnerabilities` for non-Rust paths, but the
+  summary writer still consulted a separate (per-analysis) count
+  enumeration. Now every `*_count` field in `SecureSummary` is
+  computed in a single `compute_summary_from_findings(&findings)`
+  pass over the FINAL findings array via `category` group-by — so
+  `summary.taint_count == findings | filter category=="taint" |
+  length` holds on every path by construction. Post-fix on ripgrep:
+  `summary.taint_count=0, findings[category==taint]=0`; the 4 unsafe
+  blocks are correctly counted as `unsafe_blocks=4` only.
+
+### Tests added (`crates/tldr-cli/tests/remaining_test.rs`)
+
+`mod wrapper_cross_consistency`:
+
+- `test_health_todo_summary_counts_agree` — fixture with a CC>10
+  hotspot function and a fully-disconnected (LCOM4>2) class; asserts
+  `tldr health` and `tldr todo` report identical `hotspot_count` and
+  `low_cohesion_count`. Sanity-checks both metrics are non-zero so
+  the assertion isn't vacuous.
+- `test_secure_summary_includes_behavioral` — fixture producing
+  exactly one finding per category (1 behavioral via bare except, 1
+  resource_leak via `open()` outside `with`, 1 taint via Flask
+  request → `cur.execute` string-concat). Asserts (a) summary has a
+  `behavioral_count` field, (b) the sum of all typed counters equals
+  `findings.length`.
+- `test_secure_health_todo_no_empty_sub_results` — runs `secure` and
+  `todo` on a tiny fixture and asserts `sub_results` is either
+  absent or null in JSON output (never `{}`). Asserts `health` does
+  not emit a `sub_results` key (it uses `details` instead). Asserts
+  `tldr verify` (run on the test crate's own `src/` tree) still
+  emits a populated `sub_results` map — guards against accidentally
+  regressing the only wrapper that legitimately populates it.
+- `test_secure_taint_count_matches_findings_array` — runs `secure`
+  on both a Python file with a real Flask taint flow and a Rust file
+  with `unsafe { ... }` + raw pointer + `.unwrap()`, then asserts
+  `summary.taint_count == findings | filter category=="taint" |
+  length` on both. Pre-fix the Rust path would assert-fail with
+  `summary_taint=N, actual=0`.
 
 NOT a published release. Bundles three independent
 correctness/consistency fixes that share the same anti-product
