@@ -2543,39 +2543,16 @@ fn normalize_path(path: &Path) -> PathBuf {
     result
 }
 
-/// Detect the dominant language in a directory by counting file extensions
+/// Detect the dominant language in a directory.
+///
+/// Delegates to [`Language::from_directory`], which uses the same
+/// manifest-priority + extension-majority detection used by every other
+/// subcommand (`structure`, `calls`, `extract`, etc.). This ensures `deps`
+/// autodetects the same set of languages those commands do — including
+/// Java (pom.xml/build.gradle) and Scala (build.sbt) sources buried multiple
+/// directory levels deep, which the previous shallow 1-level walk missed.
 fn detect_dominant_language(root: &Path) -> TldrResult<Language> {
-    let mut counts: HashMap<Language, usize> = HashMap::new();
-
-    // Simple extension-based detection
-    if let Ok(entries) = std::fs::read_dir(root) {
-        for entry in entries.filter_map(|e| e.ok()) {
-            let path = entry.path();
-            if path.is_file() {
-                if let Some(lang) = Language::from_path(&path) {
-                    *counts.entry(lang).or_insert(0) += 1;
-                }
-            } else if path.is_dir() {
-                // Check subdirectories one level deep
-                if let Ok(sub_entries) = std::fs::read_dir(&path) {
-                    for sub_entry in sub_entries.filter_map(|e| e.ok()) {
-                        let sub_path = sub_entry.path();
-                        if sub_path.is_file() {
-                            if let Some(lang) = Language::from_path(&sub_path) {
-                                *counts.entry(lang).or_insert(0) += 1;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // Return the most common language, defaulting to Python
-    counts
-        .into_iter()
-        .max_by_key(|(_, count)| *count)
-        .map(|(lang, _)| lang)
+    Language::from_directory(root)
         .ok_or_else(|| crate::error::TldrError::UnsupportedLanguage("unknown".to_string()))
 }
 

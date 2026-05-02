@@ -1,5 +1,99 @@
 # Changelog
 
+## autodetect-correctness-v1 — internal milestone
+
+NOT a published release. Closes the "language autodetect anti-product
+surface" by fixing two HIGH-severity correctness bugs in the directory-
+level language detector.
+
+### Bugs fixed
+
+- **HIGH — `tldr structure` mis-detected Swift projects as C** when a
+  shared build-system manifest (CMakeLists.txt / meson.build /
+  configure.ac / Makefile.am) was present alongside dominant `.swift`
+  sources.
+  Repro: `tldr structure /tmp/repos/swift-collections/Sources` returned
+  `language: c, files: 0` even though `Sources/` contains 689 `.swift`
+  files. The Swift-Collections repo (and many other Apple projects)
+  ships a top-level `CMakeLists.txt` for embedded-build targets next
+  to its `Package.swift`. The manifest-priority detector blindly
+  forced the C/C++ tie-break and returned C with zero files.
+
+- **HIGH — `tldr deps` failed autodetect for java / scala** when
+  source files lived more than one directory deep.
+  Repro: `tldr deps /tmp/repos/spring-petclinic/src` and
+  `tldr deps /tmp/repos/scala-cats-effect/core` both exited with
+  `Error: Unsupported language: unknown`. Passing `--lang java` /
+  `--lang scala` worked, but every other subcommand (`structure`,
+  `calls`, `extract`) autodetected these projects correctly.
+
+### Root cause
+
+1. **Shared build-system manifest tie-break.** `c_vs_cpp_tie_break`
+   in `crates/tldr-core/src/types.rs` only counted `.c`/`.cpp`-family
+   extensions. When CMake/Meson/Autotools/Makefile.am were the
+   manifest winners but the project was actually Swift or Rust, the
+   tie-break still returned C (the default on empty counts) — a
+   silent mis-detection with zero downstream files.
+
+2. **Shallow deps autodetect.** `detect_dominant_language` in
+   `crates/tldr-core/src/analysis/deps.rs` walked only the root and
+   its immediate child directories (depth ≤ 1). Java sources under
+   `src/main/java/com/example/...` and Scala sources under
+   `core/.../src/main/scala/...` are 4–7 levels deep, so the counter
+   saw zero recognised files and returned `UnsupportedLanguage`.
+
+### Fix
+
+- `c_vs_cpp_tie_break` now also counts `.swift` and `.rs` files
+  during the project walk. If a non-C/C++ language family strictly
+  exceeds the combined C+C++ count, the function returns that
+  language instead of falling back to C. This fixes Bug 1 without
+  perturbing legitimate C/C++ projects (where `.c` / `.cpp` counts
+  always dominate). The classic C-vs-C++ tie-break logic is preserved
+  on the C/C++ path.
+
+- `analyze_dependencies` now delegates language detection to
+  `Language::from_directory` — the canonical detector used by every
+  other subcommand. This unifies autodetect behaviour across the CLI
+  and gives `deps` access to the same manifest-priority +
+  recursive-extension-majority logic, fixing Bug 2 for java, scala,
+  and any future language whose typical source layout is deeper than
+  one directory.
+
+### Files modified
+
+- `crates/tldr-core/src/types.rs` — extend `c_vs_cpp_tie_break` with
+  Swift and Rust extension-majority overrides.
+- `crates/tldr-core/src/analysis/deps.rs` — replace shallow
+  `detect_dominant_language` with delegation to
+  `Language::from_directory`.
+- `crates/tldr-cli/tests/language_autodetect_tests.rs` — add
+  `test_swift_autodetect_with_cmakelists_at_root` and
+  `test_deps_autodetect_java_scala`.
+
+### Validation
+
+- `language_autodetect_tests`: 20/20 pass (18 pre-existing + 2 new).
+- `tldr-core` `types::tests`: 298/298 pass — all manifest-priority
+  unit tests stay green (Cargo.toml, tsconfig.json, pyproject.toml,
+  go.mod, pom.xml, etc.).
+- `tldr-core` `analysis::deps`: 79/79 pass (20 ignored as before).
+- `vuln_migration_v1_red`: 168/168 GREEN — no regression.
+- Binary verify (post-fix):
+  - `tldr structure /tmp/repos/swift-collections/Sources` →
+    `language=swift`, `files_count=543` (was `c`, `0`).
+  - `tldr deps /tmp/repos/spring-petclinic/src` → exits 0, JSON
+    `language=java` (was `Error: Unsupported language: unknown`).
+  - `tldr deps /tmp/repos/scala-cats-effect/core` → exits 0, JSON
+    `language=scala` (was `Error: Unsupported language: unknown`).
+  - Regression check on synthetic fixtures: python, rust, typescript,
+    javascript still autodetect correctly.
+
+### Out of scope
+
+- No version bump. No publish. Bug-fix-only milestone.
+
 ## references-clap-conflict-v1 — internal milestone
 
 NOT a published release. Fixes a CRITICAL unhandled Rust panic in the

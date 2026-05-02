@@ -531,10 +531,18 @@ fn global_json_has_sdk_key(contents: &str) -> bool {
     }
 }
 
-/// Decide C vs. C++ for a project whose winning manifest is one of the
-/// shared C/C++ families (CMake, Meson, Autotools).
+/// Decide the language for a project whose winning manifest is one of the
+/// shared build-system families (CMake, Meson, Autotools, Makefile.am).
 ///
-/// Strategy: count source files in the project walk by family.
+/// These manifests are not language-specific — they can build C, C++, Swift,
+/// Rust, Fortran, etc. CMake in particular is widely used by Swift packages
+/// (see e.g. swift-collections/Sources/CMakeLists.txt) and can mislead a
+/// pure-manifest detector into reporting C for a Swift codebase.
+///
+/// Strategy: walk the project counting source files per language family.
+/// If a non-C/C++ language family has strictly more source files than the
+/// combined C+C++ count, return that language. Otherwise, fall back to the
+/// classic C-vs-C++ tie-break:
 /// - C++ family: `.cpp`, `.cc`, `.cxx`, `.hpp`, `.hh`, `.hxx`.
 /// - C family:   `.c` (NOT `.h` — ambiguous with C++).
 ///
@@ -543,6 +551,11 @@ fn global_json_has_sdk_key(contents: &str) -> bool {
 fn c_vs_cpp_tie_break(root: &std::path::Path) -> Language {
     let mut c_family = 0usize;
     let mut cpp_family = 0usize;
+    // Track other languages that commonly use shared build-system manifests
+    // (CMake, Meson, Autotools). Swift is the canonical case (Apple ships
+    // CMakeLists.txt alongside Package.swift in many official repos).
+    let mut swift_count = 0usize;
+    let mut rust_count = 0usize;
     for entry in crate::walker::walk_project(root) {
         let p = entry.path();
         if !p.is_file() {
@@ -553,8 +566,19 @@ fn c_vs_cpp_tie_break(root: &std::path::Path) -> Language {
                 cpp_family += 1
             }
             Some("c") => c_family += 1,
+            Some("swift") => swift_count += 1,
+            Some("rs") => rust_count += 1,
             _ => {}
         }
+    }
+    let c_total = c_family + cpp_family;
+    // Extension-majority override: if a non-C/C++ language family strictly
+    // dominates, prefer it over the manifest-implied C/C++ default.
+    if swift_count > c_total && swift_count >= rust_count {
+        return Language::Swift;
+    }
+    if rust_count > c_total && rust_count > swift_count {
+        return Language::Rust;
     }
     if cpp_family > c_family {
         Language::Cpp

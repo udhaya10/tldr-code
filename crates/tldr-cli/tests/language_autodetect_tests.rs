@@ -302,3 +302,144 @@ fn test_tldr_structure_autodetects_ocaml() {
     sprinkle_python_bait(tmp.path(), 3);
     assert_detected(tmp.path(), "ocaml");
 }
+
+// =============================================================================
+// autodetect-correctness-v1: shared build-system manifests must not silently
+// override extension-majority for non-C/C++ languages.
+// =============================================================================
+
+/// Bug: A Swift project that ships a CMakeLists.txt (e.g. swift-collections)
+/// was misdetected as C because CMake's manifest precedence blindly forced
+/// the C/C++ tie-break, returning C even when 689 .swift files dominate the
+/// directory.
+///
+/// Fix: extension-majority overrides shared CMake/Meson/Autotools manifests
+/// when a non-C/C++ language family strictly dominates the file count.
+#[test]
+fn test_swift_autodetect_with_cmakelists_at_root() {
+    let tmp = TempDir::new().unwrap();
+    // Mirror the swift-collections layout: CMakeLists.txt at root + many
+    // .swift sources in a subdirectory, plus a nested CMakeLists.txt.
+    write_file(
+        &tmp.path().join("CMakeLists.txt"),
+        "cmake_minimum_required(VERSION 3.16)\nproject(MySwift)\n",
+    );
+    write_file(
+        &tmp.path().join("Sources/CMakeLists.txt"),
+        "add_subdirectory(Foo)\n",
+    );
+    // Multiple .swift files to ensure the extension count clearly dominates.
+    for i in 0..5 {
+        write_file(
+            &tmp.path().join(format!("Sources/Foo/File{}.swift", i)),
+            "public struct Foo {}\n",
+        );
+    }
+    let v = run_structure_and_parse_json(tmp.path());
+    let actual_lang = v.get("language").and_then(|s| s.as_str()).unwrap_or("");
+    assert_eq!(
+        actual_lang, "swift",
+        "Swift project with CMakeLists.txt should autodetect as swift, not c. Got: {}",
+        actual_lang
+    );
+    let files = v.get("files").and_then(|f| f.as_array()).map_or(0, |a| a.len());
+    assert!(
+        files >= 1,
+        "expected at least 1 swift file in structure output, got {}",
+        files
+    );
+}
+
+/// Bug: `tldr deps` autodetect failed for java/scala projects whose source
+/// files lived 3+ directory levels deep (e.g. spring-petclinic's
+/// src/main/java/.../*.java, scala-cats-effect's core/.../src/main/scala/...).
+/// The pre-fix `detect_dominant_language` only walked 1 level deep.
+///
+/// Fix: deps now delegates to `Language::from_directory`, which is the same
+/// detector used by `structure`, `calls`, etc.
+#[test]
+fn test_deps_autodetect_java_scala() {
+    // --- Java fixture: pom.xml at root, sources nested deep ---
+    let java_tmp = TempDir::new().unwrap();
+    write_file(
+        &java_tmp.path().join("pom.xml"),
+        "<project><groupId>x</groupId><artifactId>y</artifactId><version>1</version></project>\n",
+    );
+    write_file(
+        &java_tmp.path().join("src/main/java/com/example/App.java"),
+        "package com.example;\npublic class App { public static void main(String[] a) {} }\n",
+    );
+    write_file(
+        &java_tmp.path().join("src/main/java/com/example/Util.java"),
+        "package com.example;\npublic class Util { public int x() { return 1; } }\n",
+    );
+
+    let mut cmd = tldr_cmd();
+    cmd.arg("deps")
+        .arg(java_tmp.path())
+        .arg("--format")
+        .arg("json")
+        .arg("--quiet");
+    let output = cmd.output().expect("spawn tldr");
+    assert!(
+        output.status.success(),
+        "tldr deps must autodetect java without --lang. status={:?}\nstdout={}\nstderr={}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let v: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("deps json output for java fixture");
+    let lang = v
+        .get("language")
+        .and_then(|s| s.as_str())
+        .unwrap_or("")
+        .to_lowercase();
+    assert_eq!(
+        lang, "java",
+        "deps should autodetect java for pom.xml fixture, got {:?}",
+        lang
+    );
+
+    // --- Scala fixture: build.sbt at root, sources nested deep ---
+    let scala_tmp = TempDir::new().unwrap();
+    write_file(
+        &scala_tmp.path().join("build.sbt"),
+        "name := \"demo\"\nscalaVersion := \"3.3.0\"\n",
+    );
+    write_file(
+        &scala_tmp.path().join("core/src/main/scala/cats/effect/IO.scala"),
+        "package cats.effect\nclass IO {}\n",
+    );
+    write_file(
+        &scala_tmp.path().join("core/src/main/scala/cats/effect/Helper.scala"),
+        "package cats.effect\nclass Helper {}\n",
+    );
+
+    let mut cmd = tldr_cmd();
+    cmd.arg("deps")
+        .arg(scala_tmp.path())
+        .arg("--format")
+        .arg("json")
+        .arg("--quiet");
+    let output = cmd.output().expect("spawn tldr");
+    assert!(
+        output.status.success(),
+        "tldr deps must autodetect scala without --lang. status={:?}\nstdout={}\nstderr={}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let v: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("deps json output for scala fixture");
+    let lang = v
+        .get("language")
+        .and_then(|s| s.as_str())
+        .unwrap_or("")
+        .to_lowercase();
+    assert_eq!(
+        lang, "scala",
+        "deps should autodetect scala for build.sbt fixture, got {:?}",
+        lang
+    );
+}
