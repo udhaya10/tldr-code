@@ -346,6 +346,31 @@ pub struct SecureReport {
     pub sub_results: HashMap<String, Value>,
     /// Total elapsed time in milliseconds
     pub total_elapsed_ms: f64,
+    /// Number of files skipped (e.g. non-UTF-8 input).
+    ///
+    /// SECURE-UTF8-TOLERANCE-V1: parser-test corpora (notably the Luau
+    /// `tests/conformance/literals.luau`, `pm.luau`, `sort.luau`) contain
+    /// raw non-UTF-8 bytes. Pre-fix, `tldr secure --lang luau` aborted
+    /// the entire scan on the first such file with `Error: stream did
+    /// not contain valid UTF-8`. Post-fix, those files are skipped and
+    /// surfaced via `files_skipped` + `warnings` while the rest of the
+    /// scan completes. Skipped from JSON when zero so existing consumers
+    /// don't observe a schema delta on UTF-8-clean inputs.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub files_skipped: u32,
+    /// Per-file warnings (e.g. non-UTF-8 skip messages with byte offsets).
+    ///
+    /// SECURE-UTF8-TOLERANCE-V1: companion to `files_skipped`. Each entry
+    /// pinpoints the file path and first invalid-UTF-8 byte offset so
+    /// callers can audit what was skipped. Skipped from JSON when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+}
+
+/// Helper for `serde(skip_serializing_if)` on `u32` count fields that should
+/// be omitted from JSON when zero (preserves backward-compat schema).
+fn is_zero_u32(n: &u32) -> bool {
+    *n == 0
 }
 
 impl SecureReport {
@@ -358,6 +383,8 @@ impl SecureReport {
             summary: SecureSummary::default(),
             sub_results: HashMap::new(),
             total_elapsed_ms: 0.0,
+            files_skipped: 0,
+            warnings: Vec::new(),
         }
     }
 }
@@ -1561,6 +1588,22 @@ pub struct VulnReport {
     pub scan_duration_ms: u64,
     /// Number of files scanned
     pub files_scanned: u32,
+    /// Number of files skipped (e.g. non-UTF-8 input).
+    ///
+    /// SECURE-UTF8-TOLERANCE-V1: parser-test corpora intentionally
+    /// contain raw non-UTF-8 bytes. Pre-fix the vuln scanner silently
+    /// dropped those files via an `if let Ok(..)` guard around
+    /// `analyze_file`, so the user had no way to tell coverage was
+    /// degraded. Post-fix the count is surfaced explicitly. Skipped from
+    /// JSON when zero so UTF-8-clean inputs see no schema delta.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub files_skipped: u32,
+    /// Per-file warnings (e.g. non-UTF-8 skip messages with byte offsets).
+    ///
+    /// SECURE-UTF8-TOLERANCE-V1: companion to `files_skipped`. Skipped
+    /// from JSON when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 impl VulnReport {
@@ -1571,6 +1614,8 @@ impl VulnReport {
             summary: None,
             scan_duration_ms: 0,
             files_scanned: 0,
+            files_skipped: 0,
+            warnings: Vec::new(),
         }
     }
 }

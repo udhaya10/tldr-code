@@ -1,5 +1,106 @@
 # Changelog
 
+## secure-utf8-tolerance-v1 — internal milestone
+
+NOT a published release. HIGH ship-blocker fix: `tldr secure --lang luau
+<repo>` aborted the entire scan with `Error: stream did not contain
+valid UTF-8` and exited 1 on the first non-UTF-8 file in the tree
+(e.g. the upstream luau-luau repo's `tests/conformance/literals.luau`,
+`pm.luau`, `sort.luau` parser-test fixtures with raw 0xFF/0xFE bytes).
+
+### Bug fixed
+
+The prior `luau-utf8-tolerance-v1` (commit 4c61af8) added the tolerant
+`read_to_string_tolerant` helper in `crates/tldr-core/src/fs/mod.rs`
+and wired it into `surface/luau.rs` and `surface/lua.rs` only — but
+`tldr secure` has its own file-iteration path
+(`run_security_analysis` in
+`crates/tldr-cli/src/commands/remaining/secure.rs`) that called
+strict `std::fs::read_to_string(file)?`. The `?` propagated the
+`io::Error("stream did not contain valid UTF-8")` returned by
+`String::from_utf8` and aborted the scan on the first bad file —
+losing all 111/114 perfectly-scannable files.
+
+### Fix
+
+Pre-filter the candidate file set ONCE in
+`crates/tldr-cli/src/commands/remaining/secure.rs::run` via the new
+`partition_utf8_clean` helper, which uses `read_to_string_tolerant`
+and emits a structured warning (`"Skipped <path>: invalid UTF-8 at
+byte <N>"`) per non-UTF-8 file. The 6 sub-analyses then iterate the
+clean set; a defense-in-depth tolerant re-read inside
+`run_security_analysis` covers TOCTOU races (file replaced between
+the partition pass and the analysis pass).
+
+`SecureReport` gains two backward-compatible fields
+(`crates/tldr-cli/src/commands/remaining/types.rs`):
+
+- `files_skipped: u32` — count of non-UTF-8 files dropped
+- `warnings: Vec<String>` — per-file skip messages with byte offsets
+
+Both use `serde(default, skip_serializing_if = ...)` so UTF-8-clean
+inputs see no JSON schema delta — existing consumers are unaffected.
+
+### Coverage extended to `vuln`
+
+`tldr vuln` previously silently dropped non-UTF-8 files via an
+`if let Ok(..)` guard around `analyze_file`, so the user had no
+signal that coverage was degraded. Same pre-classification pattern
+applied in `crates/tldr-cli/src/commands/remaining/vuln.rs`,
+populating the new `files_skipped` + `warnings` fields on
+`VulnReport`.
+
+### Carry-forwards (intentional non-scope)
+
+- `tldr structure` and `tldr calls` already route through
+  `tldr_core::ast::parser::parse_file_with_lang` which uses
+  `String::from_utf8_lossy` (M2 mitigation) — they continue with
+  lossy decode for non-UTF-8 files. Adding `warnings`/`files_skipped`
+  to those reports is left to a follow-up; binary-verified to
+  succeed cleanly on luau-luau.
+- `tldr smells` uses `std::fs::read_to_string(path).unwrap_or_default()`
+  in `crates/tldr-core/src/quality/smells.rs:564` — non-UTF-8 files
+  scan as empty source. Defensive, no abort, but no warning surfaced.
+  Behavior unchanged in this milestone; binary-verified to succeed.
+- `tldr api-check` succeeded on luau-luau pre-fix (it currently has no
+  `.luau` rule corpus so the bad files never reach
+  `analyze_file`'s `fs::read_to_string`). No fix required for this
+  repro; `analyze_file` itself remains strict and would fail on a
+  hypothetical non-UTF-8 file in a supported language.
+
+### Verification
+
+- Repro pre-fix: `tldr secure --lang luau /tmp/repos/luau-luau` →
+  `Error: IO error: stream did not contain valid UTF-8`, exit 1.
+- Post-fix: same command → exit 0, JSON valid, `files_skipped: 3`,
+  3 warnings naming the 3 luau-luau parser-test fixtures with byte
+  offsets 2112, 2335, 2772.
+- M-X5 surface preserved: `tldr surface --lang luau /tmp/repos/luau-luau`
+  still reports `files_skipped: 3` with the same 3 warnings.
+- `vuln_migration_v1_red`: 168/168 stays GREEN.
+- `tldr-core` lib: 4680/4680 pass.
+- New tests:
+  - `secure_sweep_tests::test_secure_continues_after_bad_file_in_dir`
+  - `secure_sweep_tests::test_secure_clean_input_has_no_skip_fields`
+    (schema backward-compat guard)
+  - `secure_utf8_tolerance_v1::test_smells_continues_after_bad_file_in_dir`
+  - `secure_utf8_tolerance_v1::test_structure_continues_after_bad_file_in_dir`
+  - `secure_utf8_tolerance_v1::test_vuln_continues_after_bad_file_in_dir`
+
+### Files modified
+
+- `crates/tldr-cli/src/commands/remaining/secure.rs` —
+  `partition_utf8_clean` helper; `run` threads warnings/skip count
+  into report; `run_security_analysis` defensive tolerant read
+- `crates/tldr-cli/src/commands/remaining/vuln.rs` — pre-classify
+  non-UTF-8 files; thread `files_skipped` + `warnings`
+- `crates/tldr-cli/src/commands/remaining/types.rs` — `SecureReport`
+  + `VulnReport` gain `files_skipped: u32` and `warnings:
+  Vec<String>` (both `skip_serializing_if`)
+- `crates/tldr-cli/tests/secure_sweep_tests.rs` — 2 new tests
+- `crates/tldr-cli/tests/secure_utf8_tolerance_v1.rs` — new file, 3
+  tests covering smells / structure / vuln
+
 ## java-debt-stackoverflow-v1 — internal milestone
 
 NOT a published release. Fixes a CRITICAL bug: `tldr debt --lang java

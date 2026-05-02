@@ -180,8 +180,34 @@ impl VulnArgs {
         // Analyze all files
         let mut all_findings: Vec<VulnFinding> = Vec::new();
         let mut files_scanned: u32 = 0;
+        let mut files_skipped: u32 = 0;
+        let mut warnings: Vec<String> = Vec::new();
 
         for file_path in &files {
+            // SECURE-UTF8-TOLERANCE-V1: classify non-UTF-8 inputs (e.g.
+            // luau parser-test fixtures) before invoking `analyze_file`,
+            // which uses strict `fs::read_to_string` and would otherwise
+            // surface the failure as an opaque "file_not_found" via its
+            // error mapping. Tolerant pre-check lets us emit a structured
+            // warning + bump `files_skipped` while still letting genuine
+            // I/O failures fall through to the existing silent-skip path.
+            match tldr_core::fs::read_to_string_tolerant(file_path) {
+                Ok(tldr_core::fs::ReadOutcome::NonUtf8 { byte_offset }) => {
+                    files_skipped += 1;
+                    warnings.push(format!(
+                        "Skipped {}: invalid UTF-8 at byte {}",
+                        file_path.display(),
+                        byte_offset
+                    ));
+                    files_scanned += 1;
+                    continue;
+                }
+                _ => {
+                    // Either a clean read or an I/O error — defer to the
+                    // existing analyze_file path, which already silently
+                    // skips on Err().
+                }
+            }
             if let Ok(findings) = analyze_file(file_path) {
                 for finding in findings {
                     all_findings.push(finding);
@@ -269,6 +295,8 @@ impl VulnArgs {
             summary: Some(summary),
             scan_duration_ms: start.elapsed().as_millis() as u64,
             files_scanned,
+            files_skipped,
+            warnings,
         };
 
         // Output
@@ -1702,6 +1730,8 @@ pub fn from_raw(bytes: &[u8]) -> &str {
             summary: None,
             scan_duration_ms: 0,
             files_scanned: 1,
+            files_skipped: 0,
+            warnings: Vec::new(),
         };
 
         let sarif = generate_sarif(&report);

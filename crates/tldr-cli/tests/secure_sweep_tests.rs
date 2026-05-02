@@ -515,3 +515,127 @@ fn test_secure_reports_elapsed_time() {
         .success()
         .stdout(predicate::str::contains("elapsed"));
 }
+
+// =============================================================================
+// SECURE-UTF8-TOLERANCE-V1: Non-UTF-8 file tolerance
+// =============================================================================
+//
+// Pre-fix: `tldr secure` aborted the entire scan with
+// `Error: stream did not contain valid UTF-8` on the first non-UTF-8
+// file in the directory (e.g. the upstream luau-luau repo's
+// `tests/conformance/literals.luau`, `pm.luau`, `sort.luau` parser-test
+// fixtures with raw 0xFF/0xFE bytes).
+//
+// Post-fix: such files are skipped with a structured warning (file path
+// + first invalid-byte offset) and the rest of the scan completes.
+
+/// Synthetic 1-valid + 1-invalid-UTF-8 fixture: `secure` must succeed,
+/// scan the valid file, and surface the bad file in `warnings` with
+/// `files_skipped == 1`. Mirrors the M-X5 surface tolerance test.
+#[test]
+fn test_secure_continues_after_bad_file_in_dir() {
+    let dir = tempdir().unwrap();
+
+    // Valid Python source — secure has a native `.py` analysis path so
+    // this guarantees the scan does real work, not just a no-op walk.
+    create_test_file(
+        dir.path(),
+        "good.py",
+        "def safe():\n    return 1\n",
+    );
+
+    // Synthetic bad file: valid prefix + raw 0xFF/0xFE (never valid as
+    // UTF-8 leading bytes) + valid suffix. Mirrors the actual luau-luau
+    // parser-test corpus shape.
+    let bad_path = dir.path().join("bad.py");
+    let mut bytes: Vec<u8> = Vec::new();
+    bytes.extend_from_slice(b"# valid prefix\n");
+    bytes.extend_from_slice(&[0xFFu8, 0xFEu8]);
+    bytes.extend_from_slice(b"\n# valid suffix\n");
+    fs::write(&bad_path, bytes).unwrap();
+
+    let output = tldr_cmd()
+        .arg("secure")
+        .arg(dir.path().to_str().unwrap())
+        .arg("-f")
+        .arg("json")
+        .output()
+        .expect("secure must execute");
+
+    assert!(
+        output.status.success() || output.status.code() == Some(2),
+        "secure must NOT abort on non-UTF-8 input (got status {:?}, stderr: {})",
+        output.status,
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let report: serde_json::Value =
+        serde_json::from_str(&stdout).unwrap_or_else(|e| {
+            panic!("secure stdout must be valid JSON; err: {}; stdout: {}", e, stdout)
+        });
+
+    let files_skipped = report
+        .get("files_skipped")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    assert_eq!(
+        files_skipped, 1,
+        "secure must report files_skipped=1 for the synthetic bad file; report={}",
+        report
+    );
+
+    let warnings = report
+        .get("warnings")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(
+        warnings.len(),
+        1,
+        "secure must emit exactly one warning for the bad file; warnings={:?}",
+        warnings
+    );
+    let warning = warnings[0].as_str().unwrap_or("");
+    assert!(
+        warning.contains("bad.py"),
+        "warning must reference the skipped file path; got: {}",
+        warning
+    );
+    assert!(
+        warning.contains("invalid UTF-8") || warning.contains("byte"),
+        "warning must describe the UTF-8 failure with a byte offset; got: {}",
+        warning
+    );
+}
+
+/// UTF-8-clean inputs MUST NOT have `files_skipped` or `warnings` in the
+/// JSON output (backward-compat schema preservation).
+#[test]
+fn test_secure_clean_input_has_no_skip_fields() {
+    let dir = tempdir().unwrap();
+    create_test_file(dir.path(), "good.py", "def safe():\n    return 1\n");
+
+    let output = tldr_cmd()
+        .arg("secure")
+        .arg(dir.path().to_str().unwrap())
+        .arg("-f")
+        .arg("json")
+        .output()
+        .expect("secure must execute");
+    assert!(output.status.success());
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // `serde(skip_serializing_if)` policy: zero/empty values must be omitted
+    // so existing JSON consumers see no schema delta.
+    assert!(
+        !stdout.contains("\"files_skipped\""),
+        "files_skipped must be omitted on UTF-8-clean input; stdout: {}",
+        stdout
+    );
+    assert!(
+        !stdout.contains("\"warnings\""),
+        "warnings must be omitted on UTF-8-clean input; stdout: {}",
+        stdout
+    );
+}

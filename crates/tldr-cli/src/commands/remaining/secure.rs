@@ -44,6 +44,7 @@ use std::time::Instant;
 use clap::Args;
 use colored::Colorize;
 use serde_json::Value;
+use tldr_core::fs::{read_to_string_tolerant, ReadOutcome};
 use tldr_core::walker::ProjectWalker;
 use tldr_core::Language;
 use tree_sitter::Node;
@@ -165,7 +166,18 @@ pub fn run(args: SecureArgs, format: OutputFormat) -> anyhow::Result<()> {
     };
 
     // Collect files to analyze (auto-detect Python files)
-    let files = collect_files(&args.path, args.lang, args.no_default_ignore)?;
+    let candidate_files = collect_files(&args.path, args.lang, args.no_default_ignore)?;
+
+    // SECURE-UTF8-TOLERANCE-V1: pre-filter for UTF-8 validity ONCE up front.
+    // The 6 sub-analyses (taint, resources, bounds, contracts, behavioral,
+    // mutability) each re-iterate the same files, so doing the read here
+    // (a) dedupes warnings (1 message per bad file, not 6) and
+    // (b) avoids each analysis having to know about the tolerance policy.
+    // The Luau parser-test corpus (`tests/conformance/literals.luau`,
+    // `pm.luau`, `sort.luau`) intentionally embeds raw 0xFF/0xFE bytes —
+    // pre-fix `tldr secure --lang luau /tmp/repos/luau-luau` aborted with
+    // `Error: stream did not contain valid UTF-8` on the first such file.
+    let (files, warnings, files_skipped) = partition_utf8_clean(&candidate_files);
 
     // Run sub-analyses and collect findings
     let mut all_findings = Vec::new();
@@ -200,6 +212,9 @@ pub fn run(args: SecureArgs, format: OutputFormat) -> anyhow::Result<()> {
     report.findings = all_findings;
     report.sub_results = sub_results;
     report.total_elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+    // SECURE-UTF8-TOLERANCE-V1: surface skipped files in the report.
+    report.files_skipped = files_skipped;
+    report.warnings = warnings;
 
     // Output
     let output_str = match format {
@@ -299,6 +314,57 @@ fn is_rust_test_file(path: &std::path::Path) -> bool {
         || p.ends_with("tests.rs")
 }
 
+/// Partition the candidate file set into UTF-8-clean files (kept) and
+/// non-UTF-8 files (skipped + warned).
+///
+/// SECURE-UTF8-TOLERANCE-V1: pre-fix, `run_security_analysis` called
+/// `fs::read_to_string(file)?` which propagates the
+/// `Err(io::Error("stream did not contain valid UTF-8"))` returned by
+/// `String::from_utf8` for files like `tests/conformance/literals.luau`
+/// in the upstream luau-luau repo. That `?` aborts the entire scan on
+/// the first such file, so `tldr secure --lang luau /tmp/repos/luau-luau`
+/// failed with `Error: IO error: stream did not contain valid UTF-8`
+/// and exited 1, even though 111/114 files were perfectly scannable.
+///
+/// Mirrors the policy already in
+/// `crates/tldr-core/src/surface/luau.rs` (M-X5,
+/// `luau-utf8-tolerance-v1`): skip with a structured warning,
+/// continue. Genuine I/O errors (file vanished mid-scan) still drop
+/// the file but are NOT counted as a UTF-8 skip — they appear as a
+/// generic warning instead. We intentionally do NOT abort on I/O
+/// errors here: the `secure` walk is best-effort across hundreds of
+/// files and one transient failure should not lose the rest.
+fn partition_utf8_clean(candidates: &[PathBuf]) -> (Vec<PathBuf>, Vec<String>, u32) {
+    let mut clean: Vec<PathBuf> = Vec::with_capacity(candidates.len());
+    let mut warnings: Vec<String> = Vec::new();
+    let mut skipped: u32 = 0;
+    for file in candidates {
+        match read_to_string_tolerant(file) {
+            Ok(ReadOutcome::Ok(_)) => clean.push(file.clone()),
+            Ok(ReadOutcome::NonUtf8 { byte_offset }) => {
+                skipped += 1;
+                warnings.push(format!(
+                    "Skipped {}: invalid UTF-8 at byte {}",
+                    file.display(),
+                    byte_offset
+                ));
+            }
+            Err(e) => {
+                // Genuine I/O failure (permissions, vanished, etc.).
+                // Drop the file with a warning rather than aborting the
+                // whole scan. This is NOT counted under `files_skipped`,
+                // which is reserved for the UTF-8-tolerance policy.
+                warnings.push(format!(
+                    "Skipped {}: I/O error: {}",
+                    file.display(),
+                    e
+                ));
+            }
+        }
+    }
+    (clean, warnings, skipped)
+}
+
 /// Run a specific security analysis on files
 fn run_security_analysis(
     analysis: SecurityAnalysis,
@@ -308,7 +374,18 @@ fn run_security_analysis(
     let mut findings = Vec::new();
 
     for file in files {
-        let source = fs::read_to_string(file)?;
+        // SECURE-UTF8-TOLERANCE-V1 (defense-in-depth): the file set was
+        // pre-filtered by `partition_utf8_clean` in `run`, so a clean
+        // read is the expected path. We still use the tolerant reader
+        // here so that a TOCTOU race (file replaced with non-UTF-8
+        // content between the partition pass and the analysis pass)
+        // skips the file instead of aborting the scan. No warning is
+        // emitted here — the partition pass owns warning emission to
+        // avoid duplicate messages across the 6 sub-analyses.
+        let source = match read_to_string_tolerant(file)? {
+            ReadOutcome::Ok(s) => s,
+            ReadOutcome::NonUtf8 { .. } => continue,
+        };
 
         // Get or parse the AST
         let tree = cache.get_or_parse(file, &source)?;
