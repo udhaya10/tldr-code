@@ -3869,6 +3869,160 @@ fn get_ast_patterns(language: Language) -> AstLanguagePatterns {
 }
 
 // ---------------------------------------------------------------------------
+// Fast-path substring prefilter (vuln-fastpath-substring-prefilter-v1)
+// ---------------------------------------------------------------------------
+
+/// Cached per-language source+sink substring needles for the
+/// `scan_file_vulns` per-function fast-path skip.
+///
+/// **Correctness contract.** A `TaintFlow` requires BOTH a source AND a sink
+/// in the same function body. If NEITHER any source nor sink call-name
+/// appears anywhere in the function body's source text, no `TaintFlow` is
+/// possible and the expensive CFG/DFG/taint construction can be safely
+/// skipped. The substring check is a SUPERSET of the AST detector — a hit
+/// inside a string literal or comment still runs the full analysis (the
+/// canonical AST sanitizer / `is_in_string` filters resolve those FPs at
+/// the detector layer); a clean miss is a true negative.
+///
+/// **Needle construction.**
+/// - `call_names: [N]` → needle `N` (e.g. `eval`, `exec`, `raw`).
+/// - `member_patterns: [(R, F)]` with `R` non-empty and `R != "*"` →
+///   needle `R.F` (e.g. `request.args`, `os.system`).
+/// - `member_patterns: [(R, F)]` with `R == ""` or `R == "*"` →
+///   needle `.F` (e.g. `.execute`, `.read`). The leading `.` keeps the
+///   needle length ≥ 2 even for short fields like `("*", "get")` and
+///   prevents the prefilter from matching identifier substrings (e.g.
+///   `getter` would not match `.get`).
+///
+/// No length filter is applied to call_names: dropping short bare-call
+/// names like `raw` (Phoenix HTML helper, Ruby ERB helper) would risk
+/// false-negative skips when a function uses ONLY the bare-call form. The
+/// safe default is to include them; the cost is just less skipping when
+/// such names happen to appear in non-vulnerable code.
+pub fn fastpath_pattern_strings(language: Language) -> &'static [&'static str] {
+    use std::sync::OnceLock;
+
+    macro_rules! fastpath_static {
+        ($name:ident, $lang:expr) => {{
+            static CELL: OnceLock<Vec<&'static str>> = OnceLock::new();
+            CELL.get_or_init(|| build_fastpath_needles($lang))
+                .as_slice()
+        }};
+    }
+
+    match language {
+        Language::Python => fastpath_static!(PY, Language::Python),
+        Language::TypeScript => fastpath_static!(TS, Language::TypeScript),
+        Language::JavaScript => fastpath_static!(JS, Language::JavaScript),
+        Language::Go => fastpath_static!(GO, Language::Go),
+        Language::Java => fastpath_static!(JAVA, Language::Java),
+        Language::Rust => fastpath_static!(RUST, Language::Rust),
+        Language::C => fastpath_static!(C, Language::C),
+        Language::Cpp => fastpath_static!(CPP, Language::Cpp),
+        Language::Ruby => fastpath_static!(RB, Language::Ruby),
+        Language::Kotlin => fastpath_static!(KT, Language::Kotlin),
+        Language::Swift => fastpath_static!(SW, Language::Swift),
+        Language::CSharp => fastpath_static!(CS, Language::CSharp),
+        Language::Scala => fastpath_static!(SC, Language::Scala),
+        Language::Php => fastpath_static!(PHP, Language::Php),
+        Language::Lua => fastpath_static!(LUA, Language::Lua),
+        Language::Luau => fastpath_static!(LUAU, Language::Luau),
+        Language::Elixir => fastpath_static!(EX, Language::Elixir),
+        Language::Ocaml => fastpath_static!(OCAML, Language::Ocaml),
+    }
+}
+
+/// Build the deduplicated needle list for one language. Called once per
+/// language by the `OnceLock` cells in `fastpath_pattern_strings`.
+fn build_fastpath_needles(language: Language) -> Vec<&'static str> {
+    let patterns = get_ast_patterns(language);
+    // Use a HashSet keyed by &'static str to dedupe before flattening to a
+    // Vec. Both `call_names` and `member_patterns` arrays contain `&'static
+    // str` references, so the resulting needles inherit that lifetime when
+    // they originate from `call_names` directly. For composed needles
+    // (`R.F`, `.F`) we must allocate a `String`, then leak it to obtain a
+    // `&'static str` — leak is bounded (one call per language per process,
+    // bounded by the static pattern table size).
+    use std::collections::HashSet;
+    let mut set: HashSet<&'static str> = HashSet::new();
+
+    fn intern_needle(s: String) -> &'static str {
+        // Box::leak is the canonical way to obtain &'static str from a
+        // dynamically built String. Bounded leak: this function is called
+        // O(patterns) times per language, once per process.
+        Box::leak(s.into_boxed_str())
+    }
+
+    for src in patterns.sources {
+        for &name in src.call_names {
+            if !name.is_empty() {
+                set.insert(name);
+            }
+        }
+        for &(receiver, field) in src.member_patterns {
+            if field.is_empty() {
+                continue;
+            }
+            if receiver.is_empty() {
+                // Empty receiver = scoped_identifier path / bare-name
+                // raw-fallback shape (e.g. Rust `("", "env::var")`,
+                // PHP `("", "$_GET")`, Elixir `("", "Code.eval_string")`).
+                // The path appears as-is in source text; use it directly.
+                set.insert(field);
+            } else if receiver == "*" {
+                // Wildcard receiver = member access with arbitrary
+                // receiver name (e.g. Python `("*", "execute")`). The
+                // source text always contains a leading `.` for member
+                // access — `.execute` won't match the keyword in
+                // identifiers like `executor`.
+                set.insert(intern_needle(format!(".{}", field)));
+            } else {
+                // Specific receiver (e.g. Python `("os", "system")` →
+                // `os.system`).
+                set.insert(intern_needle(format!("{}.{}", receiver, field)));
+            }
+        }
+    }
+    for sink in patterns.sinks {
+        for &name in sink.call_names {
+            if !name.is_empty() {
+                set.insert(name);
+            }
+        }
+        for &(receiver, field) in sink.member_patterns {
+            if field.is_empty() {
+                continue;
+            }
+            if receiver.is_empty() {
+                // See source-loop comment for the empty / "*" / specific
+                // receiver convention.
+                set.insert(field);
+            } else if receiver == "*" {
+                set.insert(intern_needle(format!(".{}", field)));
+            } else {
+                set.insert(intern_needle(format!("{}.{}", receiver, field)));
+            }
+        }
+    }
+    set.into_iter().collect()
+}
+
+/// Returns `true` iff the given function body text contains AT LEAST one
+/// substring from the language's source-or-sink needle set. When `false`,
+/// the caller may safely skip the CFG/DFG/taint analysis for that function
+/// (no `TaintFlow` is possible — see `fastpath_pattern_strings`).
+///
+/// O(N · M) worst case where N = body length, M = pattern count. M ≤ ~80
+/// per language; for typical function bodies the inner loop short-circuits
+/// on the first hit. Profiled simple-loop is fast enough; Aho-Corasick was
+/// considered (see plan) but the linear scan dominates the savings from
+/// avoiding CFG/DFG construction.
+pub fn function_body_has_taint_pattern(body_text: &str, language: Language) -> bool {
+    let needles = fastpath_pattern_strings(language);
+    needles.iter().any(|n| body_text.contains(n))
+}
+
+// ---------------------------------------------------------------------------
 // AST-Based Detection Functions
 // ---------------------------------------------------------------------------
 

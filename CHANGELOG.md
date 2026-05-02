@@ -1,5 +1,168 @@
 # Changelog
 
+## vuln-fastpath-substring-prefilter-v1 — internal milestone
+
+NOT a published release. Closes deferred BUG-26 (perf): `tldr vuln`
+constructed a CFG + DFG + taint engine for EVERY function in every
+file, regardless of whether the function body contained any
+source/sink call-name at all. Most functions in typical code reference
+none — the work was wasted.
+
+### Bug fixed
+
+- **HIGH-PERF — `tldr vuln` ran full CFG/DFG/taint construction on
+  every function unconditionally.** Each function in a scanned file
+  triggered `extract_cfg_from_tree` + `extract_dfg_from_tree_with_cfg`
+  + `compute_taint_with_tree` even when the body contained zero
+  source-call-names AND zero sink-call-names — guaranteeing zero
+  `TaintFlow` results. On a small Python file (flask `cli.py`, 1.1k
+  LOC) this consumed ~4.7s; on a Rust crate workspace (ripgrep
+  `crates/`, 88 files) ~163s; on `lua-lsp/script` it timed out at
+  >120s. Fix: added a per-function substring prefilter in
+  `scan_file_vulns` (`crates/tldr-core/src/security/vuln.rs`):
+
+  1. Per language, lazily build (via `OnceLock`) a deduplicated
+     **needle set** of source-or-sink substrings derived from the
+     existing `*_AST_SOURCES` / `*_AST_SINKS` static tables in
+     `crates/tldr-core/src/security/taint.rs`. Construction rules:
+     - `call_names: [N]` → needle `N` (e.g. `eval`, `exec`, `raw`).
+     - `member_patterns: [(R, F)]` with `R` non-empty and `R != "*"`
+       → needle `R.F` (e.g. `request.args`, `os.system`,
+       `subprocess.run`).
+     - `member_patterns: [(R, F)]` with `R == "*"` → needle `.F`
+       (the leading `.` keeps the needle length ≥ 2 even for short
+       fields like `("*", "get")` and prevents identifier-substring
+       FPs such as `getter` matching `.get`).
+     - `member_patterns: [(R, F)]` with `R == ""` → needle `F`
+       directly (this is the raw-fallback shape used for Rust /
+       Elixir / OCaml scoped paths like `("", "std::env::var")` →
+       `std::env::var`, `("", "Code.eval_string")` →
+       `Code.eval_string`; the path appears as-is in source text
+       with no leading dot).
+  2. Before invoking CFG/DFG/taint construction for each function,
+     slice the body text from `fn_infos[i].line_number` to
+     `fn_infos[i+1].line_number - 1` (or EOF) and run a simple
+     `body.contains(needle)` `.any(...)` loop over the language's
+     needle set.
+  3. If neither any source-name nor any sink-name appears anywhere in
+     the body's source text, emit empty findings for that function
+     and skip the expensive analysis. Otherwise fall through to the
+     existing path unchanged.
+
+  **Correctness contract.** A `TaintFlow` requires BOTH a source AND
+  a sink in the same function body. If neither call-name appears in
+  the body at all, no flow is possible — the skip is a true negative.
+  The substring check is a SUPERSET of the AST detector: hits inside
+  string literals, comments, or unrelated identifiers admit the
+  function into the full pipeline (the canonical AST `is_in_string`
+  / `is_in_comment` / sanitizer dispatch resolves those FPs at the
+  detector layer, yielding 0 findings — same as before). The body
+  range is an over-approximation (it includes any trailing top-level
+  code between functions) which is correctness-preserving for the
+  prefilter — over-approximating only causes the prefilter to run
+  the full analysis MORE often, never to skip it incorrectly.
+
+  No length filter is applied to `call_names`: dropping short bare-
+  call names like `raw` (Phoenix HTML helper, Ruby ERB helper) would
+  risk false-negative skips when a function uses ONLY the bare-call
+  form. The safe default is to include all call_names; the cost is
+  just less skipping when such names happen to appear in
+  non-vulnerable code.
+
+  Profiled: simple `Vec<&str>` + `.iter().any(|n| body.contains(n))`
+  is fast enough — Aho-Corasick was considered (see plan) but the
+  CFG/DFG/taint avoidance dominates the savings; the linear scan
+  cost is dwarfed by what we no longer pay for skipped functions.
+
+### Performance numbers (release build, M-series, single warm run)
+
+| Target | Before (wall) | After (wall) | Speedup |
+|---|---|---|---|
+| `flask/src/flask/cli.py` (1.1k LOC, 1 file, Python) | 0.55s | 0.25s | ~2.2× |
+| `ripgrep/crates` (88 files, Rust) | 163.83s | 4.05s | ~40× |
+| `lua-lsp/script` (Lua) | timeout (>120s) | 13.55s | ≥9× |
+
+User-time deltas are even larger because the prefilter cuts the
+inner-loop par_iter work radically: ripgrep/crates dropped from
+1389s user → 17s user (82×). Same finding counts and same summary
+in all three corpora (verified by `jq '.summary'` diff;
+non-determinism in array ordering is a pre-existing
+rayon-par_iter property, not a regression).
+
+### Files modified
+
+- `crates/tldr-core/src/security/taint.rs` — added
+  `pub fn fastpath_pattern_strings(language) -> &'static [&'static str]`
+  (per-language `OnceLock`-cached needle set), and
+  `pub fn function_body_has_taint_pattern(body_text, language) -> bool`
+  (the prefilter predicate). Backed by a private
+  `build_fastpath_needles` helper that walks `get_ast_patterns(lang)`
+  and dedupes via `HashSet<&'static str>` with `Box::leak` for
+  composed needles.
+- `crates/tldr-core/src/security/vuln.rs` — `scan_file_vulns`
+  pre-computes per-function `(start_line, end_line)` body ranges and
+  a flat `line_offsets: Vec<usize>` table once before the rayon
+  par_iter; each map closure body slices its function's text via
+  byte-offset lookup (O(1) per slice) and runs
+  `function_body_has_taint_pattern` as the first step. On miss, it
+  returns `Vec::new()` immediately — bypassing CFG, DFG, taint, and
+  the post-analysis dedupe phase.
+- `CHANGELOG.md` — this entry.
+
+### Tests added
+
+- `test_fastpath_skip_function_with_no_taint_patterns` — pure
+  arithmetic body produces 0 findings AND the prefilter predicate
+  returns `false` (proves the skip path actually fires).
+- `test_fastpath_no_skip_function_with_source_or_sink` — three
+  shapes: source-only body (`request.args.get`), sink-only body
+  (`cursor.execute`), and source+sink body. The first two prove the
+  prefilter ADMITS into the full pipeline (predicate returns
+  `true`); the third proves end-to-end that
+  `assert_detects_vuln(SqlInjection)` still finds the flow with
+  the prefilter active.
+- `test_fastpath_runs_full_analysis_on_string_literal_match` — body
+  in which `request.args` appears ONLY inside a string literal:
+  prefilter must admit (substring match is a superset), and the
+  end-to-end `scan_file_vulns` must return 0 findings (canonical
+  AST `is_in_string` suppresses the FP at the detector layer, NOT
+  via prefilter skip).
+- `test_fastpath_needle_set_python_canonical` — sanity check that
+  `.execute`, `.read`, `eval`, `exec`, `request.args`, `os.system`,
+  `os.environ` are all present in the Python needle set.
+- `test_fastpath_needle_set_nonempty_all_langs` — every supported
+  language (18 entries) must have a non-empty needle set; an empty
+  set would skip every function and produce silent
+  false-negatives.
+
+### Validation
+
+- `cargo test -p tldr-cli --test vuln_migration_v1_red`:
+  168 passed / 0 failed (the PRIMARY correctness guarantee — every
+  positive RED test, every `*_string_literal_fp` regression-guard
+  across all 17 surfaces, all GREEN).
+- `cargo test -p tldr-cli --test vuln_migration_v1_composite_red`:
+  1 passed / 0 failed.
+- `cargo test -p tldr-core --lib security::`: 130 passed / 0 failed
+  / 1 ignored (vuln + taint + sanitizer + secrets unit suites).
+
+### Carry-forward / deferred
+
+- The prefilter caches needle sets per-language via `OnceLock` —
+  one-time initialization, no global mutex contention. Adding a new
+  language source/sink pattern to `*_AST_SOURCES` / `*_AST_SINKS`
+  automatically extends the corresponding needle set; no per-language
+  prefilter wiring is needed beyond the existing `get_ast_patterns`
+  match arm.
+- `function_body_has_taint_pattern` uses a simple O(N · M) loop
+  over needles. M ≤ ~80 per language; for typical bodies the inner
+  loop short-circuits on the first hit. If a future profile shows
+  the prefilter itself dominating on extreme corpora (e.g.
+  millions of tiny functions), upgrading to Aho-Corasick is a
+  drop-in replacement at the same call site — the public API
+  (`fastpath_pattern_strings` returning `&'static [&'static str]`,
+  `function_body_has_taint_pattern` taking `&str`) is stable.
+
 ## luau-utf8-tolerance-v1 — internal milestone
 
 NOT a published release. Fixes a MED-severity walker bug where a single

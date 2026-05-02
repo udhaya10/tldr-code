@@ -620,12 +620,78 @@ fn scan_file_vulns(path: &Path, vuln_filter: Option<VulnType>) -> TldrResult<Vec
     // (where the outer loop has only 1 element), this inner par_iter is the
     // primary parallelism source.
     use rayon::prelude::*;
+
+    // VULN-FASTPATH-SUBSTRING-PREFILTER-V1 (BUG-26 perf):
+    // Pre-compute the (start_line, end_line) body range for each function
+    // BEFORE the par_iter so the cheap substring prefilter can run without
+    // touching CFG. `fn_infos` is already sorted by `line_number` ascending;
+    // the body of fn[i] runs from `fn_infos[i].line_number` to either
+    // `fn_infos[i+1].line_number - 1` or EOF. This is a coarse over-
+    // approximation (it includes any trailing top-level code between
+    // functions in the file), which is correctness-preserving for the
+    // prefilter — over-approximating the body text only causes the
+    // prefilter to RUN the full analysis more often, never to skip it
+    // incorrectly.
+    let total_lines = content.lines().count() as u32;
+    let mut fn_body_ranges: Vec<(u32, u32)> = Vec::with_capacity(fn_infos.len());
+    for (i, fi) in fn_infos.iter().enumerate() {
+        let start = fi.line_number.max(1);
+        let end = if i + 1 < fn_infos.len() {
+            fn_infos[i + 1].line_number.saturating_sub(1).max(start)
+        } else {
+            total_lines.max(start)
+        };
+        fn_body_ranges.push((start, end));
+    }
+    // Slice each function's body text once, lazily-shared via Vec<&str>.
+    // `String::lines` allocates iterators not slices; use byte-offset slicing
+    // for O(N) total instead of O(N²) for line-walking each function.
+    let line_offsets: Vec<usize> = {
+        let mut v: Vec<usize> = Vec::with_capacity(total_lines as usize + 1);
+        v.push(0);
+        for (i, b) in content.bytes().enumerate() {
+            if b == b'\n' {
+                v.push(i + 1);
+            }
+        }
+        // Push end-of-content sentinel so range slicing always has an upper
+        // bound for the last line.
+        if *v.last().unwrap_or(&0) != content.len() {
+            v.push(content.len());
+        }
+        v
+    };
+    let body_slice = |start_line: u32, end_line: u32| -> &str {
+        let s = (start_line.saturating_sub(1) as usize).min(line_offsets.len() - 1);
+        let e_idx = (end_line as usize).min(line_offsets.len() - 1);
+        let start_byte = line_offsets[s];
+        let end_byte = line_offsets[e_idx];
+        &content[start_byte..end_byte]
+    };
+
     // TAINT-FINDING-DEDUPE-V1: tag each candidate finding with its canonical
     // `TaintSinkType` so the merge phase can rank colliding entries by sink
     // specificity (most-specific wins; see `sink_type_precedence`).
     let per_fn_findings: Vec<Vec<(VulnFinding, TaintSinkType)>> = fn_infos
         .par_iter()
-        .map(|fn_info| {
+        .enumerate()
+        .map(|(idx, fn_info)| {
+            // VULN-FASTPATH-SUBSTRING-PREFILTER-V1: cheap substring check
+            // before any CFG/DFG/taint construction. A `TaintFlow` requires
+            // BOTH a source AND a sink in the same function; if neither
+            // call-name appears anywhere in the body's source text, no
+            // flow is possible. Substring match is a SUPERSET of the AST
+            // detector — hits inside string literals or comments still
+            // run the full analysis (canonical AST `is_in_string` /
+            // sanitizer dispatch resolves those FPs at the detector
+            // layer). A clean miss is a true negative and safe to skip.
+            // See `crate::security::taint::fastpath_pattern_strings` for
+            // the needle-set construction and correctness contract.
+            let (start_line, end_line) = fn_body_ranges[idx];
+            let body_text = body_slice(start_line, end_line);
+            if !crate::security::taint::function_body_has_taint_pattern(body_text, language) {
+                return Vec::new();
+            }
             let cfg = match extract_cfg_from_tree(&tree, &content, &fn_info.name, language) {
                 Ok(c) if !c.blocks.is_empty() => c,
                 _ => return Vec::new(),
@@ -1471,5 +1537,178 @@ def from_pyfile(filename):
             "VAL-007: SSRF must be included in the default vuln_types list. Got findings: {:?}",
             findings.iter().map(|f| f.vuln_type).collect::<Vec<_>>()
         );
+    }
+
+    // ========================================================================
+    // VULN-FASTPATH-SUBSTRING-PREFILTER-V1 — fast-path skip correctness tests
+    // ========================================================================
+
+    /// FAST-PATH-1: A function containing only arithmetic — no source AND
+    /// no sink call-name in the body — must produce zero findings (the
+    /// substring prefilter is expected to skip CFG/DFG/taint construction
+    /// entirely; we observe the externally-visible contract: 0 findings,
+    /// no panic, no CFG construction errors leaking through).
+    #[test]
+    fn test_fastpath_skip_function_with_no_taint_patterns() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("arith.py");
+        // Pure arithmetic — no source-name (no `request.`, no `input(`,
+        // no `sys.stdin`, no `os.environ`, no `.read`) and no sink-name
+        // (no `.execute`, no `eval`, no `exec`, no `subprocess.`,
+        // no `os.system`, no `open(`, no `Path(`).
+        std::fs::write(
+            &file,
+            "def add(a, b):\n    total = a + b\n    return total * 2\n",
+        )
+        .unwrap();
+        let findings = scan_file_vulns(&file, None).unwrap();
+        assert!(
+            findings.is_empty(),
+            "FAST-PATH-1: pure-arithmetic function must produce 0 findings; got: {:?}",
+            findings.iter().map(|f| f.vuln_type).collect::<Vec<_>>()
+        );
+        // Independent assertion: verify the prefilter predicate itself
+        // returns false on this body (the externally observable contract
+        // that drives the skip).
+        let body = "def add(a, b):\n    total = a + b\n    return total * 2\n";
+        assert!(
+            !crate::security::taint::function_body_has_taint_pattern(
+                body,
+                Language::Python
+            ),
+            "FAST-PATH-1: prefilter must report no source/sink pattern in pure-arithmetic body."
+        );
+    }
+
+    /// FAST-PATH-2: A function that DOES contain a source (or a sink)
+    /// must run the full analysis. Here we use a body with the source
+    /// `request.args.get` (Python HttpParam) AND the sink `cursor.execute`
+    /// (SqlQuery) so a flow IS produced — proving that the prefilter
+    /// correctly admits real-pattern bodies into the full pipeline.
+    #[test]
+    fn test_fastpath_no_skip_function_with_source_or_sink() {
+        // Source-only — no sink: prefilter MUST still admit (because
+        // `request.args` substring is present); the AST analysis then
+        // returns 0 flows because there is no sink. The point is
+        // proving the predicate fired (admit, not skip).
+        let body_source_only = "def h():\n    target = request.args.get(\"q\")\n    return target.upper()\n";
+        assert!(
+            crate::security::taint::function_body_has_taint_pattern(
+                body_source_only,
+                Language::Python
+            ),
+            "FAST-PATH-2: prefilter must admit a body containing the source pattern `request.args`."
+        );
+
+        // Sink-only — no source: prefilter MUST still admit (because
+        // `.execute` substring is present).
+        let body_sink_only = "def h(q):\n    cursor.execute(\"SELECT 1\")\n";
+        assert!(
+            crate::security::taint::function_body_has_taint_pattern(
+                body_sink_only,
+                Language::Python
+            ),
+            "FAST-PATH-2: prefilter must admit a body containing the sink pattern `.execute`."
+        );
+
+        // End-to-end: source + sink → finding produced (full analysis ran).
+        let findings = assert_detects_vuln(
+            "vuln.py",
+            "def h():\n    q = request.args.get(\"q\")\n    cursor.execute(q)\n",
+            VulnType::SqlInjection,
+        )
+        .unwrap();
+        assert!(
+            !findings.is_empty(),
+            "FAST-PATH-2: source + sink in same function must yield >= 1 SqlInjection finding (proves full analysis ran)."
+        );
+    }
+
+    /// FAST-PATH-3: A function in which the source-name appears ONLY
+    /// inside a string literal must run the full analysis (substring
+    /// prefilter is a SUPERSET of the AST detector — string literals
+    /// match it). The canonical AST detector is expected to suppress
+    /// the literal at the detector layer (`is_in_string`), so the final
+    /// finding count is 0 — but the prefilter MUST have admitted the
+    /// body into the full pipeline (otherwise it would have produced 0
+    /// findings via skip, not via the AST suppression we are
+    /// validating).
+    #[test]
+    fn test_fastpath_runs_full_analysis_on_string_literal_match() {
+        // A function whose body contains "request.args" only inside a
+        // string literal. The prefilter sees the substring and admits;
+        // the AST detector's string-literal filter suppresses the FP,
+        // yielding 0 findings.
+        let body = "def doc():\n    msg = \"see request.args in flask docs\"\n    return msg\n";
+        assert!(
+            crate::security::taint::function_body_has_taint_pattern(
+                body,
+                Language::Python
+            ),
+            "FAST-PATH-3: prefilter must admit a body where the source substring appears inside a string literal (correctness — superset of AST detector)."
+        );
+        // End-to-end: 0 findings expected (canonical AST `is_in_string`
+        // suppresses the literal at the detector layer).
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("doc.py");
+        std::fs::write(&file, body).unwrap();
+        let findings = scan_file_vulns(&file, None).unwrap();
+        assert!(
+            findings.is_empty(),
+            "FAST-PATH-3: string-literal-only match must produce 0 findings via AST suppression (not via prefilter skip); got: {:?}",
+            findings.iter().map(|f| (f.vuln_type, f.sink.line)).collect::<Vec<_>>()
+        );
+    }
+
+    /// FAST-PATH-NEEDLES: Sanity check the per-language needle set is
+    /// non-empty for every supported language and contains the canonical
+    /// shapes we expect from the spec (Python `.execute`, `.read`, `eval`,
+    /// `exec`, `request.args`, `os.system`, `os.environ`).
+    #[test]
+    fn test_fastpath_needle_set_python_canonical() {
+        let needles = crate::security::taint::fastpath_pattern_strings(Language::Python);
+        assert!(!needles.is_empty(), "Python needle set must not be empty.");
+        for canonical in &[".execute", ".read", "eval", "exec", "request.args", "os.system", "os.environ"] {
+            assert!(
+                needles.contains(canonical),
+                "Python needle set missing canonical needle `{}`. Got: {:?}",
+                canonical,
+                needles
+            );
+        }
+    }
+
+    /// FAST-PATH-NEEDLES-ALL-LANGS: every supported language must have a
+    /// non-empty needle set (otherwise the prefilter would skip every
+    /// function in that language → false-negative).
+    #[test]
+    fn test_fastpath_needle_set_nonempty_all_langs() {
+        for lang in [
+            Language::Python,
+            Language::TypeScript,
+            Language::JavaScript,
+            Language::Go,
+            Language::Java,
+            Language::Rust,
+            Language::C,
+            Language::Cpp,
+            Language::Ruby,
+            Language::Kotlin,
+            Language::Swift,
+            Language::CSharp,
+            Language::Scala,
+            Language::Php,
+            Language::Lua,
+            Language::Luau,
+            Language::Elixir,
+            Language::Ocaml,
+        ] {
+            let needles = crate::security::taint::fastpath_pattern_strings(lang);
+            assert!(
+                !needles.is_empty(),
+                "FAST-PATH-NEEDLES-ALL-LANGS: needle set empty for {:?} — prefilter would skip every function and produce false-negatives.",
+                lang
+            );
+        }
     }
 }
