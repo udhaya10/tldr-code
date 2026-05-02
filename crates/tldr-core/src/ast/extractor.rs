@@ -34,6 +34,14 @@ pub fn get_code_structure(
     max_results: usize,
     ignore_spec: Option<&IgnoreSpec>,
 ) -> TldrResult<CodeStructure> {
+    // typescript-large-file-perf-v1: oversize files are surfaced as
+    // a warning + a non-zero `files_skipped` counter on the result,
+    // never a hard error. The single-file path returns an empty
+    // `files` vec with `files_skipped = 1`; the dir-walk path
+    // accumulates them as it iterates.
+    let mut warnings: Vec<String> = Vec::new();
+    let mut files_skipped: u32 = 0;
+
     // Handle single file case: extract structure directly
     if root.is_file() {
         let parent = root.parent().unwrap_or(root);
@@ -43,6 +51,46 @@ pub fn get_code_structure(
                     root: root.to_path_buf(),
                     language,
                     files: vec![structure],
+                    files_skipped: 0,
+                    warnings: Vec::new(),
+                });
+            }
+            Err(crate::error::TldrError::FileTooLarge {
+                path,
+                size_mb: _,
+                max_mb: _,
+            }) => {
+                files_skipped += 1;
+                // Re-stat the file so the warning uses the same
+                // KB/MB-aware formatter as the rest of the policy
+                // (`fs::oversize::format_oversize_warning`). The
+                // `size_mb` / `max_mb` fields on `FileTooLarge` are
+                // pre-rounded to MB and would render the 512 KB
+                // cap as "1MB" — confusing for users.
+                let (size_bytes, max_bytes) =
+                    match crate::fs::oversize::check_size(&path) {
+                        crate::fs::oversize::SizeCheck::Oversize {
+                            size_bytes,
+                            max_bytes,
+                            ..
+                        } => (size_bytes, max_bytes),
+                        // Fallback: file vanished between the
+                        // failed parse and the warning emission.
+                        // Use the rounded fields from the error.
+                        _ => (0, 0),
+                    };
+                warnings.push(crate::fs::oversize::format_oversize_warning(
+                    &path,
+                    size_bytes,
+                    max_bytes,
+                    crate::fs::oversize::is_autogen_file(&path),
+                ));
+                return Ok(CodeStructure {
+                    root: root.to_path_buf(),
+                    language,
+                    files: Vec::new(),
+                    files_skipped,
+                    warnings,
                 });
             }
             Err(e) => {
@@ -72,6 +120,27 @@ pub fn get_code_structure(
         // Try to extract structure, skip on error (per spec edge case handling)
         match extract_file_structure(&file_path, root, language) {
             Ok(structure) => file_structures.push(structure),
+            Err(crate::error::TldrError::FileTooLarge {
+                path,
+                size_mb,
+                max_mb,
+            }) => {
+                // typescript-large-file-perf-v1: structured skip
+                // surfaced via `files_skipped` + `warnings`, mirrors
+                // the M-X5/M-Y2 UTF-8-tolerance pattern.
+                files_skipped += 1;
+                warnings.push(format!(
+                    "Skipped {}: {}MB exceeds {}MB cap for {}",
+                    path.display(),
+                    size_mb,
+                    max_mb,
+                    if crate::fs::oversize::is_autogen_file(&path) {
+                        "auto-generated/minified files"
+                    } else {
+                        "source files"
+                    }
+                ));
+            }
             Err(e) => {
                 // Log error but continue - recoverable errors per spec
                 if e.is_recoverable() {
@@ -87,6 +156,8 @@ pub fn get_code_structure(
         root: root.to_path_buf(),
         language,
         files: file_structures,
+        files_skipped,
+        warnings,
     })
 }
 

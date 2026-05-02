@@ -402,6 +402,8 @@ fn test_code_structure_creation() {
         root: PathBuf::from("/project"),
         language: Language::Python,
         files: vec![],
+        files_skipped: 0,
+        warnings: vec![],
     };
 
     assert_eq!(structure.root, PathBuf::from("/project"));

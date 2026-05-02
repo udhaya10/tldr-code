@@ -314,6 +314,33 @@ impl ParserPool {
             })?,
         };
 
+        // typescript-large-file-perf-v1: enforce the file-size policy
+        // BEFORE reading the file into memory. `parse_file_with_lang`
+        // is the single chokepoint every parse-based command goes
+        // through (structure, calls, smells, dead, secure, …), so
+        // applying the cap here gives uniform skip behaviour across
+        // commands. Auto-generated / minified files (`.d.ts`,
+        // `.min.js`, `.bundle.css`, …) get a stricter 5 MB cap;
+        // normal source files keep the historical 10 MB cap.
+        // See `crate::fs::oversize` for the full policy.
+        match crate::fs::oversize::check_size(path) {
+            crate::fs::oversize::SizeCheck::Oversize {
+                size_bytes,
+                max_bytes,
+                ..
+            } => {
+                return Err(TldrError::FileTooLarge {
+                    path: path.to_path_buf(),
+                    size_mb: (size_bytes as usize).div_ceil(1024 * 1024),
+                    max_mb: (max_bytes as usize).div_ceil(1024 * 1024),
+                });
+            }
+            // WithinLimit / Unknown: fall through to the existing
+            // read path. `Unknown` (stat failed) lets the existing
+            // I/O error handling produce the right error variant.
+            _ => {}
+        }
+
         // Read file content with UTF-8 lossy fallback - M2 mitigation
         let bytes = std::fs::read(path).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {

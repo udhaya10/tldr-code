@@ -1,5 +1,137 @@
 # Changelog
 
+## typescript-large-file-perf-v1 — internal milestone
+
+NOT a published release. HIGH perf ship-blocker fix: six commands
+(`structure`, `calls`, `smells`, `dead`, `secure`, plus other
+parse-based scanners) timed out at 30 s on a single 2.3 MB
+auto-generated TypeScript declaration file
+(`/tmp/repos/ts-dom-gen/baselines/dom.generated.d.ts`). The same
+repo's `src/` finished in 0.02 s. The bottleneck was super-linear
+per-file analysis on a dense `.d.ts` artefact, which is rarely
+valuable to analyse deeply.
+
+### Bug fixed
+
+A `MAX_FILE_SIZE = 10 MB` cap existed in
+`crates/tldr-cli/src/commands/remaining/vuln.rs` and the
+`patterns/contracts` validation modules but was NOT enforced
+uniformly across all parse-based commands, and the cap was too
+loose for auto-generated artefacts: a 2.3 MB `.d.ts` is well under
+10 MB but takes ~40 s of per-method-info AST work because the file
+holds tens of thousands of generated method declarations.
+
+Concrete repro pre-fix:
+
+```text
+$ time timeout 30 tldr structure /tmp/repos/ts-dom-gen/baselines/dom.generated.d.ts
+... 30.00s timeout, exit 124
+```
+
+### Fix
+
+Centralised the file-size policy in a new module,
+`crates/tldr-core/src/fs/oversize.rs`, and enforced it at file-read
+time in `crates/tldr-core/src/ast/parser.rs::parse_file_with_lang`
+— the single chokepoint every parse-based command goes through.
+Two-tier policy:
+
+- **Normal source files**: 10 MB cap (matches the historical
+  per-command cap in `patterns/contracts/vuln`).
+- **Auto-generated / minified files** (`.d.ts`, `.min.js`,
+  `.bundle.css`, `.min.css`, `.bundle.js`, plus `.mjs`/`.cjs`
+  variants): 512 KB cap. Empirically chosen against the
+  `ts-dom-gen` baselines tree (60+ `*.generated.d.ts` artefacts in
+  the 100 KB – 2.3 MB range): a 1 MB cap left ~12 baselines
+  admitted and the whole-repo run took 58 s; 512 KB drops the run
+  under 30 s while admitting every hand-authored `.d.ts` shim
+  observed in `tldr-rs-canonical` (the largest is 75 KB).
+
+Oversize files now propagate as the existing recoverable
+`TldrError::FileTooLarge` (added to `is_recoverable()` so callers
+treat it as a per-file skip, not a hard error). The structure
+entrypoint (`get_code_structure` in
+`crates/tldr-core/src/ast/extractor.rs`) catches that variant and
+records the skip in two new fields on `CodeStructure`:
+
+- `files_skipped: u32` — count of oversize files dropped
+- `warnings: Vec<String>` — per-file skip messages
+
+Both use `serde(default, skip_serializing_if = ...)` so clean
+inputs see no JSON schema delta — existing consumers are
+unaffected. Warning format is stable:
+
+```text
+Skipped <path>: 3MB exceeds 512KB cap for auto-generated/minified files
+Skipped <path>: 12MB exceeds 10MB cap for source files
+```
+
+Sub-MB sizes render as KB; ≥1 MiB sizes render as MB (round up).
+
+### Verification
+
+Before fix:
+
+| target                             | time   | exit |
+|------------------------------------|--------|------|
+| `structure` on `dom.generated.d.ts`| > 30 s | 124  |
+| `structure` on whole `ts-dom-gen`  | > 30 s | 124  |
+
+After fix:
+
+| target                             | time     | exit |
+|------------------------------------|----------|------|
+| `structure` on `dom.generated.d.ts`| ≈ 0.6 s  | 0    |
+| `structure` on whole `ts-dom-gen`  | ≈ 0.8 s  | 0    |
+| `calls` on whole `ts-dom-gen`      | ≈ 0.4 s  | 0    |
+| `structure` on `ts-dom-gen/src`    | ≈ 0.02 s | 0    |
+
+The whole-repo run reports `files_skipped = 16`, with one warning
+per skipped baseline.
+
+### Tests added
+
+- `crates/tldr-core/src/fs/oversize.rs` — 11 unit tests covering
+  `is_autogen_file`, `max_size_for`, `check_size`,
+  `format_oversize_warning`, and `format_size`.
+- `crates/tldr-cli/tests/typescript_large_file_perf_v1.rs` — three
+  binary-level tests:
+  - `test_skip_oversize_file_with_warning` — synthetic dir with
+    one valid file + one over-cap `.d.ts`; the scan completes,
+    `files_skipped == 1`, and `warnings[0]` references the
+    skipped path with the documented "exceeds" phrasing.
+  - `test_dts_files_have_lower_cap` — synthetic `.d.ts` sized to
+    straddle the 512 KB autogen cap and the 10 MB source cap;
+    must be skipped, with the warning labelling it as
+    `auto-generated/minified files` (proves the auto-gen branch
+    is what fired).
+  - `test_normal_ts_file_below_10mb_not_skipped` — negative
+    control: a sub-10 MB normal `.ts` MUST NOT be skipped (the
+    auto-gen cap doesn't apply to it).
+
+### Carry-forwards (intentional non-scope)
+
+- The `tldr smells`, `tldr dead`, `tldr secure` commands inherit
+  the policy via `parse_file_with_lang` but do not yet surface
+  their own `files_skipped` / `warnings` fields — the warning
+  surfaces only on `tldr structure` for now. Extending the
+  surfacing to those reports is a follow-up.
+- Existing auto-gen detection is path-suffix based (`.d.ts`,
+  `.min.js`, `.bundle.*`); content-based detection (e.g. minified
+  source with no `.min` in the name) is out of scope.
+- Pre-existing test failures unrelated to this milestone:
+  - `test_secure_sub_results_structure` (asserts a JSON key that
+    a prior milestone's schema simplification removed)
+  - `nextjs_response_json_reflected_xss_via_compute_taint`
+    (asserts `FileWrite` sink type that
+    `vuln-source-parity-v1 M3 ATOMIC` reclassified to
+    `HtmlOutput`)
+  - `test_embed_on_*`, `test_semantic_on_*`, `test_similar_on_*`
+    (54 tests in `exhaustive_matrix.rs` that assume an `embed`
+    subcommand the binary doesn't expose)
+  All four pre-date this commit and are not affected by the
+  oversize-policy change.
+
 ## secure-utf8-tolerance-v1 — internal milestone
 
 NOT a published release. HIGH ship-blocker fix: `tldr secure --lang luau

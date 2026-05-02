@@ -281,6 +281,14 @@ impl TldrError {
             TldrError::ParseError { .. }
                 | TldrError::PermissionDenied(_)
                 | TldrError::FunctionNotFound { .. }
+                // typescript-large-file-perf-v1: a single oversize
+                // file (e.g. an auto-generated 2.3 MB `.d.ts`)
+                // should be skipped with a warning, not abort the
+                // whole scan. Callers that walk multiple files (the
+                // structure / calls / smells / dead / secure
+                // entrypoints) treat this variant as a per-file
+                // skip and continue.
+                | TldrError::FileTooLarge { .. }
         )
     }
 

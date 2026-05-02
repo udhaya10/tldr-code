@@ -2,11 +2,16 @@
 //!
 //! This module provides file tree traversal and ignore pattern handling.
 
+pub mod oversize;
 pub mod tree;
 
 use std::io;
 use std::path::Path;
 
+pub use oversize::{
+    check_size, format_oversize_warning, is_autogen_file, max_size_for, SizeCheck,
+    MAX_AUTOGEN_FILE_SIZE_BYTES, MAX_FILE_SIZE_BYTES,
+};
 pub use tree::get_file_tree;
 
 /// Outcome of a tolerant UTF-8 file read.

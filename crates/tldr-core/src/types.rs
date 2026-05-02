@@ -920,6 +920,20 @@ pub struct CodeStructure {
     pub language: Language,
     /// Structural information for each source file
     pub files: Vec<FileStructure>,
+    /// Files that were skipped during the scan (with reason).
+    ///
+    /// typescript-large-file-perf-v1: populated when a file exceeded
+    /// the size policy (`crate::fs::oversize`). Omitted from the
+    /// JSON output when zero, so existing snapshot consumers stay
+    /// unchanged on clean inputs.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub files_skipped: u32,
+    /// Per-file skip warnings (one entry per skipped file).
+    ///
+    /// Format: `Skipped <path>: <size>MB exceeds <cap>MB cap for
+    /// <category>`. Omitted from the JSON output when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 /// Definition-level information with line ranges and signatures.
