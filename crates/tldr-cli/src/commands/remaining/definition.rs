@@ -471,6 +471,19 @@ fn resolve_local_scope(
             | Language::TypeScript
             | Language::Rust
             | Language::Go
+            | Language::Java
+            | Language::C
+            | Language::Cpp
+            | Language::Ruby
+            | Language::Kotlin
+            | Language::Swift
+            | Language::Scala
+            | Language::Php
+            | Language::Lua
+            | Language::Luau
+            | Language::Elixir
+            | Language::Ocaml
+            | Language::CSharp
     ) {
         return Ok(None);
     }
@@ -544,7 +557,106 @@ fn is_scope_node(kind: &str, language: Language) -> bool {
             kind,
             "function_declaration" | "method_declaration" | "block" | "source_file"
         ),
-        _ => false,
+        Language::Java => matches!(
+            kind,
+            "method_declaration"
+                | "constructor_declaration"
+                | "lambda_expression"
+                | "block"
+                | "program"
+        ),
+        Language::C => matches!(
+            kind,
+            "function_definition" | "compound_statement" | "translation_unit"
+        ),
+        Language::Cpp => matches!(
+            kind,
+            "function_definition"
+                | "lambda_expression"
+                | "compound_statement"
+                | "translation_unit"
+        ),
+        Language::Ruby => matches!(
+            kind,
+            "method"
+                | "singleton_method"
+                | "do_block"
+                | "block"
+                | "lambda"
+                | "program"
+        ),
+        Language::Kotlin => matches!(
+            kind,
+            "function_declaration"
+                | "anonymous_function"
+                | "lambda_literal"
+                | "function_body"
+                | "statements"
+                | "source_file"
+        ),
+        Language::Swift => matches!(
+            kind,
+            "function_declaration"
+                | "init_declaration"
+                | "deinit_declaration"
+                | "lambda_literal"
+                | "function_body"
+                | "statements"
+                | "source_file"
+        ),
+        Language::Scala => matches!(
+            kind,
+            "function_definition"
+                | "function_declaration"
+                | "lambda_expression"
+                | "block"
+                | "compilation_unit"
+        ),
+        Language::Php => matches!(
+            kind,
+            "function_definition"
+                | "method_declaration"
+                | "anonymous_function_creation_expression"
+                | "arrow_function"
+                | "compound_statement"
+                | "program"
+        ),
+        Language::Lua | Language::Luau => matches!(
+            kind,
+            "function_declaration"
+                | "function_definition"
+                | "function_definition_statement"
+                | "function_statement"
+                | "local_function"
+                | "local_function_statement"
+                | "function"
+                | "function_body"
+                | "do_statement"
+                | "block"
+                | "chunk"
+        ),
+        Language::Elixir => matches!(
+            kind,
+            "call" | "do_block" | "anonymous_function" | "stab_clause" | "source"
+        ),
+        Language::Ocaml => matches!(
+            kind,
+            "let_binding"
+                | "value_definition"
+                | "fun_expression"
+                | "function_expression"
+                | "compilation_unit"
+        ),
+        Language::CSharp => matches!(
+            kind,
+            "method_declaration"
+                | "constructor_declaration"
+                | "local_function_statement"
+                | "lambda_expression"
+                | "anonymous_method_expression"
+                | "block"
+                | "compilation_unit"
+        ),
     }
 }
 
@@ -566,7 +678,17 @@ fn scan_scope_for_binding(
         Language::JavaScript | Language::TypeScript => scan_jslike_scope(node, bytes, symbol, file),
         Language::Rust => scan_rust_scope(node, bytes, symbol, file),
         Language::Go => scan_go_scope(node, bytes, symbol, file),
-        _ => None,
+        Language::Java => scan_java_scope(node, bytes, symbol, file),
+        Language::C | Language::Cpp => scan_clike_scope(node, bytes, symbol, file),
+        Language::Ruby => scan_ruby_scope(node, bytes, symbol, file),
+        Language::Kotlin => scan_kotlin_scope(node, bytes, symbol, file),
+        Language::Swift => scan_swift_scope(node, bytes, symbol, file),
+        Language::Scala => scan_scala_scope(node, bytes, symbol, file),
+        Language::Php => scan_php_scope(node, bytes, symbol, file),
+        Language::Lua | Language::Luau => scan_lua_scope(node, bytes, symbol, file),
+        Language::Elixir => scan_elixir_scope(node, bytes, symbol, file),
+        Language::Ocaml => scan_ocaml_scope(node, bytes, symbol, file),
+        Language::CSharp => scan_csharp_scope(node, bytes, symbol, file),
     }
 }
 
@@ -994,6 +1116,1351 @@ fn go_walk_for_binding(
     }
 }
 
+// =============================================================================
+// Local-scope scanners for the 13 additional languages
+// (definition-additional-langs-v1)
+// =============================================================================
+
+/// Build a (Variable, Location) pair from a name node.
+fn make_var_location(name: Node, file: &Path) -> (SymbolKind, Location) {
+    (
+        SymbolKind::Variable,
+        Location::with_column(
+            file.display().to_string(),
+            name.start_position().row as u32 + 1,
+            name.start_position().column as u32,
+        ),
+    )
+}
+
+/// Walk all descendants of `node` looking for the FIRST identifier-typed
+/// child whose text matches `symbol`. Stops descent at scope-introducing
+/// boundaries provided by `is_scope_boundary`. Used by language scanners
+/// that share a common AST shape.
+fn name_node_matches(n: Node, src: &[u8], symbol: &str) -> bool {
+    if let Ok(t) = n.utf8_text(src) {
+        t == symbol
+    } else {
+        false
+    }
+}
+
+/// Java scope binding scanner. Handles formal parameters, local variable
+/// declarations, and enhanced-for loop parameters.
+fn scan_java_scope(
+    node: Node,
+    src: &[u8],
+    symbol: &str,
+    file: &Path,
+) -> Option<(SymbolKind, Location)> {
+    if matches!(
+        node.kind(),
+        "method_declaration" | "constructor_declaration" | "lambda_expression"
+    ) {
+        if let Some(params) = node
+            .child_by_field_name("parameters")
+            .or_else(|| node.child_by_field_name("formal_parameters"))
+        {
+            if let Some(loc) = java_scan_params(params, src, symbol, file) {
+                return Some(loc);
+            }
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if let Some(loc) = java_walk_for_binding(child, src, symbol, file) {
+            return Some(loc);
+        }
+    }
+    None
+}
+
+fn java_scan_params(
+    params: Node,
+    src: &[u8],
+    symbol: &str,
+    file: &Path,
+) -> Option<(SymbolKind, Location)> {
+    let mut cursor = params.walk();
+    for child in params.children(&mut cursor) {
+        if matches!(child.kind(), "formal_parameter" | "spread_parameter") {
+            if let Some(name) = child.child_by_field_name("name") {
+                if name_node_matches(name, src, symbol) {
+                    return Some(make_param_location(name, file));
+                }
+            }
+        } else if child.kind() == "identifier" && name_node_matches(child, src, symbol) {
+            // Lambda-style `(x, y) -> ...`
+            return Some(make_param_location(child, file));
+        } else if child.kind() == "inferred_parameters" {
+            let mut c = child.walk();
+            for n in child.children(&mut c) {
+                if n.kind() == "identifier" && name_node_matches(n, src, symbol) {
+                    return Some(make_param_location(n, file));
+                }
+            }
+        }
+    }
+    None
+}
+
+fn java_walk_for_binding(
+    node: Node,
+    src: &[u8],
+    symbol: &str,
+    file: &Path,
+) -> Option<(SymbolKind, Location)> {
+    match node.kind() {
+        "method_declaration"
+        | "constructor_declaration"
+        | "class_declaration"
+        | "interface_declaration"
+        | "lambda_expression" => None,
+        "local_variable_declaration" => {
+            // children include variable_declarator nodes
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                if child.kind() == "variable_declarator" {
+                    if let Some(name) = child.child_by_field_name("name") {
+                        if name_node_matches(name, src, symbol) {
+                            return Some(make_var_location(name, file));
+                        }
+                    }
+                }
+            }
+            None
+        }
+        "enhanced_for_statement" => {
+            if let Some(name) = node.child_by_field_name("name") {
+                if name_node_matches(name, src, symbol) {
+                    return Some(make_var_location(name, file));
+                }
+            }
+            // Continue into body
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                if let Some(loc) = java_walk_for_binding(child, src, symbol, file) {
+                    return Some(loc);
+                }
+            }
+            None
+        }
+        _ => {
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                if let Some(loc) = java_walk_for_binding(child, src, symbol, file) {
+                    return Some(loc);
+                }
+            }
+            None
+        }
+    }
+}
+
+/// C / C++ scope binding scanner. Handles function parameters and local
+/// variable declarations (declarator with init_declarator).
+fn scan_clike_scope(
+    node: Node,
+    src: &[u8],
+    symbol: &str,
+    file: &Path,
+) -> Option<(SymbolKind, Location)> {
+    if node.kind() == "function_definition" {
+        // Parameters live under `declarator` -> `function_declarator` -> `parameters`
+        if let Some(decl) = node.child_by_field_name("declarator") {
+            if let Some(loc) = clike_scan_declarator_params(decl, src, symbol, file) {
+                return Some(loc);
+            }
+        }
+    }
+    if node.kind() == "lambda_expression" {
+        // C++ lambdas: `[capture](params) { body }`
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if child.kind() == "abstract_function_declarator" || child.kind() == "parameter_list" {
+                if let Some(loc) = clike_scan_param_list(child, src, symbol, file) {
+                    return Some(loc);
+                }
+            }
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if let Some(loc) = clike_walk_for_binding(child, src, symbol, file) {
+            return Some(loc);
+        }
+    }
+    None
+}
+
+fn clike_scan_declarator_params(
+    declarator: Node,
+    src: &[u8],
+    symbol: &str,
+    file: &Path,
+) -> Option<(SymbolKind, Location)> {
+    // Walk to find a `parameter_list`.
+    let mut cursor = declarator.walk();
+    for child in declarator.children(&mut cursor) {
+        if child.kind() == "parameter_list" {
+            if let Some(loc) = clike_scan_param_list(child, src, symbol, file) {
+                return Some(loc);
+            }
+        } else if matches!(
+            child.kind(),
+            "function_declarator" | "parenthesized_declarator"
+        ) {
+            if let Some(loc) = clike_scan_declarator_params(child, src, symbol, file) {
+                return Some(loc);
+            }
+        }
+    }
+    None
+}
+
+fn clike_scan_param_list(
+    params: Node,
+    src: &[u8],
+    symbol: &str,
+    file: &Path,
+) -> Option<(SymbolKind, Location)> {
+    let mut cursor = params.walk();
+    for child in params.children(&mut cursor) {
+        if child.kind() == "parameter_declaration" {
+            // Walk descendants for a `identifier` (the parameter name).
+            if let Some(name) = clike_find_param_identifier(child, src, symbol) {
+                return Some(make_param_location(name, file));
+            }
+        }
+    }
+    None
+}
+
+fn clike_find_param_identifier<'a>(
+    node: Node<'a>,
+    src: &[u8],
+    symbol: &str,
+) -> Option<Node<'a>> {
+    if matches!(node.kind(), "identifier" | "field_identifier") && name_node_matches(node, src, symbol)
+    {
+        return Some(node);
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if let Some(n) = clike_find_param_identifier(child, src, symbol) {
+            return Some(n);
+        }
+    }
+    None
+}
+
+fn clike_walk_for_binding(
+    node: Node,
+    src: &[u8],
+    symbol: &str,
+    file: &Path,
+) -> Option<(SymbolKind, Location)> {
+    match node.kind() {
+        "function_definition" | "lambda_expression" => None,
+        "declaration" | "init_declarator" => {
+            // Find the declarator name(s).
+            if let Some(name) = clike_extract_decl_name(node, src, symbol) {
+                return Some(make_var_location(name, file));
+            }
+            // Continue into siblings.
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                if let Some(loc) = clike_walk_for_binding(child, src, symbol, file) {
+                    return Some(loc);
+                }
+            }
+            None
+        }
+        _ => {
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                if let Some(loc) = clike_walk_for_binding(child, src, symbol, file) {
+                    return Some(loc);
+                }
+            }
+            None
+        }
+    }
+}
+
+fn clike_extract_decl_name<'a>(node: Node<'a>, src: &[u8], symbol: &str) -> Option<Node<'a>> {
+    // For `declaration`, look for `init_declarator` or `declarator` -> identifier.
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        match child.kind() {
+            "init_declarator" => {
+                if let Some(decl) = child.child_by_field_name("declarator") {
+                    if let Some(n) = clike_extract_decl_name(decl, src, symbol) {
+                        return Some(n);
+                    }
+                }
+            }
+            "identifier" | "field_identifier" => {
+                if name_node_matches(child, src, symbol) {
+                    return Some(child);
+                }
+            }
+            "pointer_declarator" | "array_declarator" | "parenthesized_declarator"
+            | "reference_declarator" => {
+                if let Some(n) = clike_extract_decl_name(child, src, symbol) {
+                    return Some(n);
+                }
+                // Or deeper: declarator field
+                if let Some(inner) = child.child_by_field_name("declarator") {
+                    if let Some(n) = clike_extract_decl_name(inner, src, symbol) {
+                        return Some(n);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Ruby scope binding scanner. Handles method parameters and simple
+/// local-variable assignments (`name = expr`). Recurses into block forms.
+fn scan_ruby_scope(
+    node: Node,
+    src: &[u8],
+    symbol: &str,
+    file: &Path,
+) -> Option<(SymbolKind, Location)> {
+    if matches!(node.kind(), "method" | "singleton_method" | "lambda" | "do_block" | "block") {
+        // Parameters: method_parameters / block_parameters / lambda_parameters
+        if let Some(params) = node
+            .child_by_field_name("parameters")
+            .or_else(|| node.child_by_field_name("method_parameters"))
+            .or_else(|| node.child_by_field_name("block_parameters"))
+        {
+            if let Some(loc) = ruby_scan_params(params, src, symbol, file) {
+                return Some(loc);
+            }
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if let Some(loc) = ruby_walk_for_binding(child, src, symbol, file) {
+            return Some(loc);
+        }
+    }
+    None
+}
+
+fn ruby_scan_params(
+    params: Node,
+    src: &[u8],
+    symbol: &str,
+    file: &Path,
+) -> Option<(SymbolKind, Location)> {
+    let mut cursor = params.walk();
+    for child in params.children(&mut cursor) {
+        match child.kind() {
+            "identifier" => {
+                if name_node_matches(child, src, symbol) {
+                    return Some(make_param_location(child, file));
+                }
+            }
+            "optional_parameter"
+            | "keyword_parameter"
+            | "splat_parameter"
+            | "hash_splat_parameter"
+            | "block_parameter" => {
+                if let Some(name) = child.child_by_field_name("name") {
+                    if name_node_matches(name, src, symbol) {
+                        return Some(make_param_location(name, file));
+                    }
+                } else {
+                    // fallback first identifier child
+                    let mut c = child.walk();
+                    for n in child.children(&mut c) {
+                        if n.kind() == "identifier" && name_node_matches(n, src, symbol) {
+                            return Some(make_param_location(n, file));
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn ruby_walk_for_binding(
+    node: Node,
+    src: &[u8],
+    symbol: &str,
+    file: &Path,
+) -> Option<(SymbolKind, Location)> {
+    match node.kind() {
+        "method" | "singleton_method" | "class" | "module" | "lambda" => None,
+        "assignment" => {
+            if let Some(left) = node.child_by_field_name("left") {
+                if left.kind() == "identifier" && name_node_matches(left, src, symbol) {
+                    return Some(make_var_location(left, file));
+                }
+            }
+            None
+        }
+        _ => {
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                if let Some(loc) = ruby_walk_for_binding(child, src, symbol, file) {
+                    return Some(loc);
+                }
+            }
+            None
+        }
+    }
+}
+
+/// Kotlin scope binding scanner. Handles function value parameters and
+/// `val`/`var` property declarations.
+fn scan_kotlin_scope(
+    node: Node,
+    src: &[u8],
+    symbol: &str,
+    file: &Path,
+) -> Option<(SymbolKind, Location)> {
+    if matches!(
+        node.kind(),
+        "function_declaration" | "anonymous_function" | "lambda_literal"
+    ) {
+        // `function_value_parameters` field "parameters", or direct child
+        let params = node
+            .child_by_field_name("parameters")
+            .or_else(|| {
+                let mut c = node.walk();
+                let found = node.children(&mut c).find(|n| {
+                    matches!(
+                        n.kind(),
+                        "function_value_parameters" | "lambda_parameters"
+                    )
+                });
+                found
+            });
+        if let Some(params) = params {
+            if let Some(loc) = kotlin_scan_params(params, src, symbol, file) {
+                return Some(loc);
+            }
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if let Some(loc) = kotlin_walk_for_binding(child, src, symbol, file) {
+            return Some(loc);
+        }
+    }
+    None
+}
+
+fn kotlin_scan_params(
+    params: Node,
+    src: &[u8],
+    symbol: &str,
+    file: &Path,
+) -> Option<(SymbolKind, Location)> {
+    let mut cursor = params.walk();
+    for child in params.children(&mut cursor) {
+        if matches!(
+            child.kind(),
+            "parameter" | "function_value_parameter" | "value_parameter"
+        ) {
+            // first descendant identifier — but prefer field "name" / "simple_identifier"
+            let name = child
+                .child_by_field_name("name")
+                .or_else(|| {
+                    let mut c = child.walk();
+                    let found = child
+                        .children(&mut c)
+                        .find(|n| matches!(n.kind(), "identifier" | "simple_identifier"));
+                    found
+                });
+            if let Some(name) = name {
+                if name_node_matches(name, src, symbol) {
+                    return Some(make_param_location(name, file));
+                }
+            }
+        } else if matches!(child.kind(), "identifier" | "simple_identifier")
+            && name_node_matches(child, src, symbol)
+        {
+            return Some(make_param_location(child, file));
+        }
+    }
+    None
+}
+
+fn kotlin_walk_for_binding(
+    node: Node,
+    src: &[u8],
+    symbol: &str,
+    file: &Path,
+) -> Option<(SymbolKind, Location)> {
+    match node.kind() {
+        "function_declaration"
+        | "anonymous_function"
+        | "lambda_literal"
+        | "class_declaration"
+        | "object_declaration" => None,
+        "property_declaration" => {
+            // variable_declaration child has the name
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                if child.kind() == "variable_declaration" {
+                    let mut c = child.walk();
+                    for n in child.children(&mut c) {
+                        if matches!(n.kind(), "identifier" | "simple_identifier")
+                            && name_node_matches(n, src, symbol)
+                        {
+                            return Some(make_var_location(n, file));
+                        }
+                    }
+                }
+            }
+            None
+        }
+        _ => {
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                if let Some(loc) = kotlin_walk_for_binding(child, src, symbol, file) {
+                    return Some(loc);
+                }
+            }
+            None
+        }
+    }
+}
+
+/// Swift scope binding scanner. Handles function parameters and
+/// `let`/`var` property bindings.
+fn scan_swift_scope(
+    node: Node,
+    src: &[u8],
+    symbol: &str,
+    file: &Path,
+) -> Option<(SymbolKind, Location)> {
+    if matches!(
+        node.kind(),
+        "function_declaration" | "init_declaration" | "lambda_literal"
+    ) {
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if matches!(
+                child.kind(),
+                "parameter" | "value_parameter" | "lambda_function_type_parameters"
+            ) {
+                let name = child
+                    .child_by_field_name("name")
+                    .or_else(|| {
+                        let mut c = child.walk();
+                        let found = child
+                            .children(&mut c)
+                            .find(|n| matches!(n.kind(), "identifier" | "simple_identifier"));
+                        found
+                    });
+                if let Some(name) = name {
+                    if name_node_matches(name, src, symbol) {
+                        return Some(make_param_location(name, file));
+                    }
+                }
+            }
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if let Some(loc) = swift_walk_for_binding(child, src, symbol, file) {
+            return Some(loc);
+        }
+    }
+    None
+}
+
+fn swift_walk_for_binding(
+    node: Node,
+    src: &[u8],
+    symbol: &str,
+    file: &Path,
+) -> Option<(SymbolKind, Location)> {
+    match node.kind() {
+        "function_declaration" | "init_declaration" | "class_declaration"
+        | "struct_declaration" | "enum_declaration" | "lambda_literal" => None,
+        "property_declaration" => {
+            // pattern: `let name = expr` or `var name = expr`
+            // The `name` field or first `pattern` child holds the binding.
+            let name = node.child_by_field_name("name").or_else(|| {
+                let mut c = node.walk();
+                let found = node.children(&mut c)
+                    .find(|n| matches!(n.kind(), "identifier" | "simple_identifier" | "pattern"));
+                found
+            });
+            if let Some(name) = name {
+                // If it's a pattern, drill down to first identifier
+                if name.kind() == "pattern" {
+                    let mut c = name.walk();
+                    for n in name.children(&mut c) {
+                        if matches!(n.kind(), "identifier" | "simple_identifier")
+                            && name_node_matches(n, src, symbol)
+                        {
+                            return Some(make_var_location(n, file));
+                        }
+                    }
+                } else if name_node_matches(name, src, symbol) {
+                    return Some(make_var_location(name, file));
+                }
+            }
+            None
+        }
+        _ => {
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                if let Some(loc) = swift_walk_for_binding(child, src, symbol, file) {
+                    return Some(loc);
+                }
+            }
+            None
+        }
+    }
+}
+
+/// Scala scope binding scanner. Handles function parameters and
+/// `val`/`var`/`def` bindings within a block.
+fn scan_scala_scope(
+    node: Node,
+    src: &[u8],
+    symbol: &str,
+    file: &Path,
+) -> Option<(SymbolKind, Location)> {
+    if matches!(
+        node.kind(),
+        "function_definition" | "function_declaration" | "lambda_expression"
+    ) {
+        // Parameters live under `parameters` field (a `parameters` node containing `parameter` items).
+        if let Some(params) = node.child_by_field_name("parameters") {
+            if let Some(loc) = scala_scan_params(params, src, symbol, file) {
+                return Some(loc);
+            }
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if let Some(loc) = scala_walk_for_binding(child, src, symbol, file) {
+            return Some(loc);
+        }
+    }
+    None
+}
+
+fn scala_scan_params(
+    params: Node,
+    src: &[u8],
+    symbol: &str,
+    file: &Path,
+) -> Option<(SymbolKind, Location)> {
+    let mut cursor = params.walk();
+    for child in params.children(&mut cursor) {
+        if matches!(child.kind(), "parameter" | "class_parameter" | "binding") {
+            let name = child.child_by_field_name("name").or_else(|| {
+                let mut c = child.walk();
+                let found = child
+                    .children(&mut c)
+                    .find(|n| n.kind() == "identifier");
+                found
+            });
+            if let Some(name) = name {
+                if name_node_matches(name, src, symbol) {
+                    return Some(make_param_location(name, file));
+                }
+            }
+        } else if matches!(child.kind(), "identifier") && name_node_matches(child, src, symbol) {
+            return Some(make_param_location(child, file));
+        } else if matches!(child.kind(), "parameters" | "bindings") {
+            // Nested parameter group (currying)
+            if let Some(loc) = scala_scan_params(child, src, symbol, file) {
+                return Some(loc);
+            }
+        }
+    }
+    None
+}
+
+fn scala_walk_for_binding(
+    node: Node,
+    src: &[u8],
+    symbol: &str,
+    file: &Path,
+) -> Option<(SymbolKind, Location)> {
+    match node.kind() {
+        "function_definition" | "function_declaration" | "class_definition"
+        | "object_definition" | "trait_definition" | "lambda_expression" => None,
+        "val_definition" | "var_definition" | "val_declaration" | "var_declaration" => {
+            // pattern field or identifier
+            let name = node.child_by_field_name("pattern").or_else(|| {
+                let mut c = node.walk();
+                let found = node.children(&mut c).find(|n| n.kind() == "identifier");
+                found
+            });
+            if let Some(name) = name {
+                if name.kind() == "identifier" && name_node_matches(name, src, symbol) {
+                    return Some(make_var_location(name, file));
+                }
+            }
+            None
+        }
+        _ => {
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                if let Some(loc) = scala_walk_for_binding(child, src, symbol, file) {
+                    return Some(loc);
+                }
+            }
+            None
+        }
+    }
+}
+
+/// PHP scope binding scanner. Handles function parameters and simple
+/// variable assignments (`$x = ...`).
+fn scan_php_scope(
+    node: Node,
+    src: &[u8],
+    symbol: &str,
+    file: &Path,
+) -> Option<(SymbolKind, Location)> {
+    if matches!(
+        node.kind(),
+        "function_definition"
+            | "method_declaration"
+            | "anonymous_function_creation_expression"
+            | "arrow_function"
+    ) {
+        if let Some(params) = node.child_by_field_name("parameters") {
+            if let Some(loc) = php_scan_params(params, src, symbol, file) {
+                return Some(loc);
+            }
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if let Some(loc) = php_walk_for_binding(child, src, symbol, file) {
+            return Some(loc);
+        }
+    }
+    None
+}
+
+fn php_scan_params(
+    params: Node,
+    src: &[u8],
+    symbol: &str,
+    file: &Path,
+) -> Option<(SymbolKind, Location)> {
+    // PHP variable names always include the `$`. Accept both forms.
+    let target_with_dollar = if symbol.starts_with('$') {
+        symbol.to_string()
+    } else {
+        format!("${}", symbol)
+    };
+    let mut cursor = params.walk();
+    for child in params.children(&mut cursor) {
+        if matches!(
+            child.kind(),
+            "simple_parameter"
+                | "variadic_parameter"
+                | "property_promotion_parameter"
+        ) {
+            // The name child is `variable_name` containing `$identifier`.
+            if let Some(name) = child
+                .child_by_field_name("name")
+                .or_else(|| {
+                    let mut c = child.walk();
+                    let found = child
+                        .children(&mut c)
+                        .find(|n| n.kind() == "variable_name");
+                    found
+                })
+            {
+                if let Ok(t) = name.utf8_text(src) {
+                    if t == target_with_dollar || t.trim_start_matches('$') == symbol.trim_start_matches('$') {
+                        return Some(make_param_location(name, file));
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn php_walk_for_binding(
+    node: Node,
+    src: &[u8],
+    symbol: &str,
+    file: &Path,
+) -> Option<(SymbolKind, Location)> {
+    match node.kind() {
+        "function_definition"
+        | "method_declaration"
+        | "anonymous_function_creation_expression"
+        | "arrow_function"
+        | "class_declaration" => None,
+        "assignment_expression" => {
+            if let Some(left) = node.child_by_field_name("left") {
+                if left.kind() == "variable_name" {
+                    if let Ok(t) = left.utf8_text(src) {
+                        let bare = t.trim_start_matches('$');
+                        if bare == symbol.trim_start_matches('$') {
+                            return Some(make_var_location(left, file));
+                        }
+                    }
+                }
+            }
+            None
+        }
+        _ => {
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                if let Some(loc) = php_walk_for_binding(child, src, symbol, file) {
+                    return Some(loc);
+                }
+            }
+            None
+        }
+    }
+}
+
+/// Lua / Luau scope binding scanner. Handles function parameters and
+/// `local x = ...` declarations.
+fn scan_lua_scope(
+    node: Node,
+    src: &[u8],
+    symbol: &str,
+    file: &Path,
+) -> Option<(SymbolKind, Location)> {
+    // Function parameters
+    if matches!(
+        node.kind(),
+        "function_declaration"
+            | "function_definition"
+            | "function_definition_statement"
+            | "function_statement"
+            | "local_function"
+            | "local_function_statement"
+            | "function"
+    ) {
+        // parameters under field "parameters" or as a direct child of kind "parameters"
+        let params = node.child_by_field_name("parameters").or_else(|| {
+            let mut c = node.walk();
+            let found = node.children(&mut c).find(|n| n.kind() == "parameters");
+            found
+        });
+        if let Some(params) = params {
+            let mut cursor = params.walk();
+            for child in params.children(&mut cursor) {
+                match child.kind() {
+                    "identifier" | "name" => {
+                        if name_node_matches(child, src, symbol) {
+                            return Some(make_param_location(child, file));
+                        }
+                    }
+                    // Luau wraps params in `parameter` nodes containing
+                    // an `identifier` child (and optional type annotation).
+                    "parameter" => {
+                        let mut c = child.walk();
+                        for n in child.children(&mut c) {
+                            if matches!(n.kind(), "identifier" | "name")
+                                && name_node_matches(n, src, symbol)
+                            {
+                                return Some(make_param_location(n, file));
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if let Some(loc) = lua_walk_for_binding(child, src, symbol, file) {
+            return Some(loc);
+        }
+    }
+    None
+}
+
+fn lua_walk_for_binding(
+    node: Node,
+    src: &[u8],
+    symbol: &str,
+    file: &Path,
+) -> Option<(SymbolKind, Location)> {
+    match node.kind() {
+        "function_declaration"
+        | "function_definition"
+        | "function_definition_statement"
+        | "function_statement"
+        | "local_function"
+        | "local_function_statement"
+        | "function" => None,
+        "local_variable_declaration"
+        | "local_declaration"
+        | "local_variable_declaration_statement"
+        | "variable_declaration" => {
+            // Walk children for name(s)
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                match child.kind() {
+                    "identifier" | "name" => {
+                        if name_node_matches(child, src, symbol) {
+                            return Some(make_var_location(child, file));
+                        }
+                    }
+                    "variable_list" | "name_list" | "attnamelist" => {
+                        let mut c = child.walk();
+                        for n in child.children(&mut c) {
+                            if matches!(n.kind(), "identifier" | "name")
+                                && name_node_matches(n, src, symbol)
+                            {
+                                return Some(make_var_location(n, file));
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            None
+        }
+        _ => {
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                if let Some(loc) = lua_walk_for_binding(child, src, symbol, file) {
+                    return Some(loc);
+                }
+            }
+            None
+        }
+    }
+}
+
+/// Elixir scope binding scanner. Handles `def`/`defp` parameters via
+/// AST surface scan. Note: Elixir's tree-sitter grammar models function
+/// definitions as `call` nodes (call to `def`/`defp`/`defmacro`) so we
+/// must check the call target name.
+fn scan_elixir_scope(
+    node: Node,
+    src: &[u8],
+    symbol: &str,
+    file: &Path,
+) -> Option<(SymbolKind, Location)> {
+    // For a `call` whose first identifier child is one of
+    // def/defp/defmacro/defmacrop, walk its argument list to find the first
+    // call (the function head) and scan its arguments for identifier params.
+    if node.kind() == "call" {
+        if let Some(name) = elixir_call_head_name(node, src) {
+            if matches!(
+                name.as_str(),
+                "def" | "defp" | "defmacro" | "defmacrop"
+            ) {
+                // Find the `arguments` child and scan
+                let mut cursor = node.walk();
+                for child in node.children(&mut cursor) {
+                    if child.kind() == "arguments" {
+                        if let Some(loc) = elixir_scan_def_args(child, src, symbol, file) {
+                            return Some(loc);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if node.kind() == "stab_clause" {
+        // `fn x -> ... end` style anonymous functions
+        if let Some(left) = node.child_by_field_name("left") {
+            if let Some(loc) = elixir_scan_stab_left(left, src, symbol, file) {
+                return Some(loc);
+            }
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if let Some(loc) = elixir_walk_for_binding(child, src, symbol, file) {
+            return Some(loc);
+        }
+    }
+    None
+}
+
+/// For an Elixir `call` node, return the name of the call head — the first
+/// `identifier` child (e.g. "def", "defp", "alias", "import").
+fn elixir_call_head_name(node: Node, src: &[u8]) -> Option<String> {
+    for i in 0..node.child_count() {
+        if let Some(child) = node.child(i) {
+            if child.kind() == "identifier" {
+                return child.utf8_text(src).ok().map(|s| s.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn elixir_scan_def_args(
+    args: Node,
+    src: &[u8],
+    symbol: &str,
+    file: &Path,
+) -> Option<(SymbolKind, Location)> {
+    // The first argument is typically a `call` (the function head).
+    // For `def f(x) when guard(x)` the first argument is a `binary_operator`
+    // whose left child is the head call.
+    let mut cursor = args.walk();
+    for child in args.children(&mut cursor) {
+        let head_call = match child.kind() {
+            "call" => Some(child),
+            "binary_operator" => {
+                // `when` guard form — the function head is the left child.
+                let mut found: Option<Node> = None;
+                let mut bc = child.walk();
+                for bch in child.children(&mut bc) {
+                    if bch.kind() == "call" {
+                        found = Some(bch);
+                        break;
+                    }
+                }
+                found
+            }
+            _ => None,
+        };
+        if let Some(head) = head_call {
+            // The head's arguments are an `arguments` child of the inner call.
+            let mut cc = head.walk();
+            for inner in head.children(&mut cc) {
+                if inner.kind() == "arguments" {
+                    let mut c = inner.walk();
+                    for arg in inner.children(&mut c) {
+                        if let Some(loc) = elixir_match_param(arg, src, symbol, file) {
+                            return Some(loc);
+                        }
+                    }
+                }
+            }
+            return None;
+        } else if child.kind() == "identifier" && name_node_matches(child, src, symbol) {
+            // Zero-arity def: `def foo, do: ...` — no params to match
+            return None;
+        }
+    }
+    None
+}
+
+fn elixir_scan_stab_left(
+    left: Node,
+    src: &[u8],
+    symbol: &str,
+    file: &Path,
+) -> Option<(SymbolKind, Location)> {
+    let mut cursor = left.walk();
+    for child in left.children(&mut cursor) {
+        if let Some(loc) = elixir_match_param(child, src, symbol, file) {
+            return Some(loc);
+        }
+    }
+    None
+}
+
+fn elixir_match_param(
+    arg: Node,
+    src: &[u8],
+    symbol: &str,
+    file: &Path,
+) -> Option<(SymbolKind, Location)> {
+    match arg.kind() {
+        "identifier" => {
+            if name_node_matches(arg, src, symbol) {
+                Some(make_param_location(arg, file))
+            } else {
+                None
+            }
+        }
+        // Default args: `x \\ 0` are represented as `binary_operator`
+        "binary_operator" => {
+            if let Some(left) = arg.child_by_field_name("left") {
+                if left.kind() == "identifier" && name_node_matches(left, src, symbol) {
+                    return Some(make_param_location(left, file));
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+fn elixir_walk_for_binding(
+    node: Node,
+    src: &[u8],
+    symbol: &str,
+    file: &Path,
+) -> Option<(SymbolKind, Location)> {
+    // Don't descend into nested defs.
+    if node.kind() == "call" {
+        if let Some(name) = elixir_call_head_name(node, src) {
+            if matches!(
+                name.as_str(),
+                "def" | "defp" | "defmacro" | "defmacrop" | "defmodule"
+            ) {
+                return None;
+            }
+        }
+    }
+    // Match-pattern bindings: `x = expr`
+    if node.kind() == "binary_operator" {
+        if let Some(op) = node.child_by_field_name("operator") {
+            if let Ok(o) = op.utf8_text(src) {
+                if o == "=" {
+                    if let Some(left) = node.child_by_field_name("left") {
+                        if left.kind() == "identifier" && name_node_matches(left, src, symbol) {
+                            return Some(make_var_location(left, file));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if let Some(loc) = elixir_walk_for_binding(child, src, symbol, file) {
+            return Some(loc);
+        }
+    }
+    None
+}
+
+/// OCaml scope binding scanner. Handles `let f x = ...` parameters and
+/// `let x = ...` value bindings.
+fn scan_ocaml_scope(
+    node: Node,
+    src: &[u8],
+    symbol: &str,
+    file: &Path,
+) -> Option<(SymbolKind, Location)> {
+    // `value_definition` wraps one or more `let_binding` children — recurse
+    // into them.
+    if node.kind() == "value_definition" {
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if child.kind() == "let_binding" {
+                if let Some(loc) = ocaml_scan_let_binding_params(child, src, symbol, file) {
+                    return Some(loc);
+                }
+            }
+        }
+    }
+    if node.kind() == "let_binding" {
+        if let Some(loc) = ocaml_scan_let_binding_params(node, src, symbol, file) {
+            return Some(loc);
+        }
+    }
+    if matches!(node.kind(), "fun_expression" | "function_expression") {
+        // anon `fun x -> ...`
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if matches!(child.kind(), "parameter" | "value_pattern") {
+                if let Some(name) = ocaml_find_first_ident(child, src, symbol) {
+                    return Some(make_param_location(name, file));
+                }
+            }
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if let Some(loc) = ocaml_walk_for_binding(child, src, symbol, file) {
+            return Some(loc);
+        }
+    }
+    None
+}
+
+/// Scan a `let_binding` node's parameters (skipping the bound name).
+fn ocaml_scan_let_binding_params(
+    binding: Node,
+    src: &[u8],
+    symbol: &str,
+    file: &Path,
+) -> Option<(SymbolKind, Location)> {
+    let mut cursor = binding.walk();
+    for child in binding.children(&mut cursor) {
+        if child.kind() == "parameter" {
+            if let Some(name) = ocaml_find_first_ident(child, src, symbol) {
+                return Some(make_param_location(name, file));
+            }
+        }
+    }
+    None
+}
+
+fn ocaml_find_first_ident<'a>(node: Node<'a>, src: &[u8], symbol: &str) -> Option<Node<'a>> {
+    if matches!(
+        node.kind(),
+        "value_name" | "value_pattern" | "lowercase_identifier" | "identifier"
+    ) && name_node_matches(node, src, symbol)
+    {
+        return Some(node);
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if let Some(n) = ocaml_find_first_ident(child, src, symbol) {
+            return Some(n);
+        }
+    }
+    None
+}
+
+fn ocaml_walk_for_binding(
+    node: Node,
+    src: &[u8],
+    symbol: &str,
+    file: &Path,
+) -> Option<(SymbolKind, Location)> {
+    match node.kind() {
+        "fun_expression" | "function_expression" => None,
+        "let_binding" | "value_definition" => {
+            // Match the bound name (first value_name / value_pattern that is a plain identifier).
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                if matches!(child.kind(), "value_name" | "value_pattern") {
+                    if let Some(name) = ocaml_find_first_ident(child, src, symbol) {
+                        return Some(make_var_location(name, file));
+                    }
+                    // Stop after first — subsequent names are parameters.
+                    break;
+                }
+            }
+            None
+        }
+        _ => {
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                if let Some(loc) = ocaml_walk_for_binding(child, src, symbol, file) {
+                    return Some(loc);
+                }
+            }
+            None
+        }
+    }
+}
+
+/// C# scope binding scanner. Handles parameters and local variable
+/// declarations (`int x = ...`, `var x = ...`).
+fn scan_csharp_scope(
+    node: Node,
+    src: &[u8],
+    symbol: &str,
+    file: &Path,
+) -> Option<(SymbolKind, Location)> {
+    if matches!(
+        node.kind(),
+        "method_declaration"
+            | "constructor_declaration"
+            | "local_function_statement"
+            | "lambda_expression"
+            | "anonymous_method_expression"
+    ) {
+        if let Some(params) = node.child_by_field_name("parameters") {
+            if let Some(loc) = csharp_scan_params(params, src, symbol, file) {
+                return Some(loc);
+            }
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if let Some(loc) = csharp_walk_for_binding(child, src, symbol, file) {
+            return Some(loc);
+        }
+    }
+    None
+}
+
+fn csharp_scan_params(
+    params: Node,
+    src: &[u8],
+    symbol: &str,
+    file: &Path,
+) -> Option<(SymbolKind, Location)> {
+    let mut cursor = params.walk();
+    for child in params.children(&mut cursor) {
+        if matches!(child.kind(), "parameter") {
+            if let Some(name) = child.child_by_field_name("name") {
+                if name_node_matches(name, src, symbol) {
+                    return Some(make_param_location(name, file));
+                }
+            }
+        } else if child.kind() == "identifier" && name_node_matches(child, src, symbol) {
+            // Lambda implicit-typed: `(x, y) => ...`
+            return Some(make_param_location(child, file));
+        } else if child.kind() == "implicit_parameter_list" {
+            let mut c = child.walk();
+            for n in child.children(&mut c) {
+                if n.kind() == "identifier" && name_node_matches(n, src, symbol) {
+                    return Some(make_param_location(n, file));
+                }
+            }
+        }
+    }
+    None
+}
+
+fn csharp_walk_for_binding(
+    node: Node,
+    src: &[u8],
+    symbol: &str,
+    file: &Path,
+) -> Option<(SymbolKind, Location)> {
+    match node.kind() {
+        "method_declaration"
+        | "constructor_declaration"
+        | "local_function_statement"
+        | "class_declaration"
+        | "struct_declaration"
+        | "interface_declaration"
+        | "lambda_expression"
+        | "anonymous_method_expression" => None,
+        "variable_declaration" => {
+            // children include `variable_declarator` nodes
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                if child.kind() == "variable_declarator" {
+                    if let Some(name) = child.child_by_field_name("name") {
+                        if name_node_matches(name, src, symbol) {
+                            return Some(make_var_location(name, file));
+                        }
+                    } else {
+                        // fallback: first identifier child
+                        let mut c = child.walk();
+                        for n in child.children(&mut c) {
+                            if n.kind() == "identifier" && name_node_matches(n, src, symbol) {
+                                return Some(make_var_location(n, file));
+                            }
+                        }
+                    }
+                }
+            }
+            None
+        }
+        _ => {
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                if let Some(loc) = csharp_walk_for_binding(child, src, symbol, file) {
+                    return Some(loc);
+                }
+            }
+            None
+        }
+    }
+}
+
 /// Pass 3: import-scope resolution.
 ///
 /// Scans the source for `import` / `from ... import` (Python),
@@ -1012,7 +2479,18 @@ fn resolve_import_scope(
         Language::Python => python_import_line(source, symbol),
         Language::JavaScript | Language::TypeScript => jslike_import_line(source, symbol),
         Language::Rust => rust_use_line(source, symbol),
-        _ => None,
+        Language::Java => java_import_line(source, symbol),
+        Language::Kotlin | Language::Scala => jvm_import_line(source, symbol),
+        Language::Swift => swift_import_line(source, symbol),
+        Language::Php => php_use_line(source, symbol),
+        Language::CSharp => csharp_using_line(source, symbol),
+        Language::Lua | Language::Luau => lua_require_line(source, symbol),
+        Language::Elixir => elixir_alias_line(source, symbol),
+        Language::Ocaml => ocaml_open_line(source, symbol),
+        // C / C++ have only `#include` (preprocessor), which doesn't bind
+        // symbols at the language level. Ruby's `require` doesn't bind a
+        // symbol either. They fall through to the file-scope pass.
+        Language::C | Language::Cpp | Language::Ruby | Language::Go => None,
     };
 
     let Some((line_no, col)) = line_idx else {
@@ -1193,6 +2671,290 @@ fn rust_use_line(source: &str, symbol: &str) -> Option<(u32, u32)> {
         };
         if bound == symbol {
             return Some((idx as u32 + 1, leading as u32));
+        }
+    }
+    None
+}
+
+// =============================================================================
+// Import-line finders for the additional languages
+// (definition-additional-langs-v1)
+// =============================================================================
+
+/// Bound name for a dotted import path: `a.b.c` → `c` (the last segment).
+fn last_dotted_segment(path: &str) -> &str {
+    path.rsplit('.').next().unwrap_or(path).trim()
+}
+
+/// Java: `import com.foo.Bar;` binds `Bar`. `import static com.foo.X.Y;`
+/// binds `Y`. Wildcards (`import com.foo.*;`) don't bind a specific name.
+fn java_import_line(source: &str, symbol: &str) -> Option<(u32, u32)> {
+    for (idx, raw) in source.lines().enumerate() {
+        let line = raw.trim_start();
+        let leading = raw.len() - line.len();
+        let Some(rest) = line.strip_prefix("import ") else {
+            continue;
+        };
+        let rest = rest.trim_end_matches(';').trim();
+        let rest = rest.strip_prefix("static ").map(|r| r.trim()).unwrap_or(rest);
+        if rest.ends_with('*') {
+            continue;
+        }
+        if last_dotted_segment(rest) == symbol {
+            return Some((idx as u32 + 1, leading as u32));
+        }
+    }
+    None
+}
+
+/// Kotlin/Scala: `import x.y.Z` binds `Z`; `import x.y.{ A, B => C }` (Scala)
+/// binds `A` and `C`; `import x.y.*` (Kotlin) is a wildcard. `import x.y.Z as W`
+/// (Kotlin) binds `W`.
+fn jvm_import_line(source: &str, symbol: &str) -> Option<(u32, u32)> {
+    for (idx, raw) in source.lines().enumerate() {
+        let line = raw.trim_start();
+        let leading = raw.len() - line.len();
+        let Some(rest) = line.strip_prefix("import ") else {
+            continue;
+        };
+        let rest = rest.trim_end_matches(';').trim();
+        // Scala selector group `pkg.{a, b => c}`
+        if let Some(brace_idx) = rest.find('{') {
+            let inside = rest[brace_idx..]
+                .trim_start_matches('{')
+                .trim_end_matches('}')
+                .trim();
+            for sel in inside.split(',') {
+                let sel = sel.trim();
+                if sel.is_empty() {
+                    continue;
+                }
+                // `a => b` → bound is `b`; `a => _` → not bound; plain `a` → `a`
+                let bound = if let Some((_, alias)) = sel.split_once("=>") {
+                    let a = alias.trim();
+                    if a == "_" {
+                        continue;
+                    }
+                    a
+                } else {
+                    sel
+                };
+                if bound == symbol {
+                    return Some((idx as u32 + 1, leading as u32));
+                }
+            }
+            continue;
+        }
+        if rest.ends_with('*') || rest.ends_with('_') {
+            continue;
+        }
+        // Kotlin alias: `import a.b.C as D`
+        let bound = if let Some((_, alias)) = rest.split_once(" as ") {
+            alias.trim()
+        } else {
+            last_dotted_segment(rest)
+        };
+        if bound == symbol {
+            return Some((idx as u32 + 1, leading as u32));
+        }
+    }
+    None
+}
+
+/// Swift: `import Foundation` binds the module name `Foundation`.
+/// `import class Foo.Bar` binds `Bar`. `import struct/enum/protocol/typealias/var/func`
+/// follow the same pattern.
+fn swift_import_line(source: &str, symbol: &str) -> Option<(u32, u32)> {
+    for (idx, raw) in source.lines().enumerate() {
+        let line = raw.trim_start();
+        let leading = raw.len() - line.len();
+        let Some(rest) = line.strip_prefix("import ") else {
+            continue;
+        };
+        let rest = rest.trim();
+        // Strip the optional kind keyword.
+        let rest = ["class ", "struct ", "enum ", "protocol ", "typealias ", "var ", "func "]
+            .iter()
+            .find_map(|prefix| rest.strip_prefix(prefix))
+            .unwrap_or(rest)
+            .trim();
+        let bound = last_dotted_segment(rest);
+        if bound == symbol {
+            return Some((idx as u32 + 1, leading as u32));
+        }
+    }
+    None
+}
+
+/// PHP: `use Foo\Bar\Baz;` binds `Baz`. `use Foo\Bar\Baz as Qux;` binds `Qux`.
+/// `use function Foo\bar;` binds `bar`. `use Foo\{A, B as C};` binds `A` and `C`.
+fn php_use_line(source: &str, symbol: &str) -> Option<(u32, u32)> {
+    for (idx, raw) in source.lines().enumerate() {
+        let line = raw.trim_start();
+        let leading = raw.len() - line.len();
+        let Some(rest) = line.strip_prefix("use ") else {
+            continue;
+        };
+        let rest = rest.trim_end_matches(';').trim();
+        let rest = ["function ", "const "]
+            .iter()
+            .find_map(|p| rest.strip_prefix(p))
+            .unwrap_or(rest)
+            .trim();
+        // Group `Foo\{A, B as C}`
+        if let Some(brace_idx) = rest.find('{') {
+            let inside = rest[brace_idx..]
+                .trim_start_matches('{')
+                .trim_end_matches('}')
+                .trim();
+            for sel in inside.split(',') {
+                let sel = sel.trim();
+                if sel.is_empty() {
+                    continue;
+                }
+                let bound = if let Some((_, alias)) = sel.split_once(" as ") {
+                    alias.trim()
+                } else {
+                    sel.rsplit('\\').next().unwrap_or(sel).trim()
+                };
+                if bound == symbol {
+                    return Some((idx as u32 + 1, leading as u32));
+                }
+            }
+            continue;
+        }
+        let bound = if let Some((_, alias)) = rest.split_once(" as ") {
+            alias.trim()
+        } else {
+            rest.rsplit('\\').next().unwrap_or(rest).trim()
+        };
+        if bound == symbol {
+            return Some((idx as u32 + 1, leading as u32));
+        }
+    }
+    None
+}
+
+/// C#: `using System;` binds `System` (top namespace). `using X = Foo.Bar;`
+/// binds `X`. `using static Foo.Bar;` doesn't bind a symbol-name.
+fn csharp_using_line(source: &str, symbol: &str) -> Option<(u32, u32)> {
+    for (idx, raw) in source.lines().enumerate() {
+        let line = raw.trim_start();
+        let leading = raw.len() - line.len();
+        let Some(rest) = line.strip_prefix("using ") else {
+            continue;
+        };
+        let rest = rest.trim_end_matches(';').trim();
+        if rest.starts_with("static ") {
+            continue;
+        }
+        // Alias: `X = Foo.Bar`
+        let bound = if let Some((alias, _)) = rest.split_once('=') {
+            alias.trim()
+        } else {
+            // `using System` binds top-level segment.
+            rest.split('.').next().unwrap_or(rest).trim()
+        };
+        if bound == symbol {
+            return Some((idx as u32 + 1, leading as u32));
+        }
+    }
+    None
+}
+
+/// Lua / Luau: `local foo = require("path.to.foo")` — the `local`
+/// declaration is the binding. Plain `require(...)` without `local`
+/// doesn't bind a name.
+fn lua_require_line(source: &str, symbol: &str) -> Option<(u32, u32)> {
+    for (idx, raw) in source.lines().enumerate() {
+        let line = raw.trim_start();
+        let leading = raw.len() - line.len();
+        let Some(rest) = line.strip_prefix("local ") else {
+            continue;
+        };
+        // Form: `<name> = require(...)` (with optional type annotation `<name>: T = require(...)`)
+        let Some(eq_idx) = rest.find('=') else {
+            continue;
+        };
+        let lhs = rest[..eq_idx].trim();
+        let rhs = rest[eq_idx + 1..].trim();
+        if !rhs.starts_with("require") {
+            continue;
+        }
+        // Strip type annotation if present: `name : Type`
+        let bound = lhs.split(':').next().unwrap_or(lhs).trim();
+        if bound == symbol {
+            return Some((idx as u32 + 1, leading as u32));
+        }
+    }
+    None
+}
+
+/// Elixir: `alias Foo.Bar` binds `Bar`; `alias Foo.Bar, as: Qux` binds `Qux`;
+/// `import Foo.Bar` brings functions into scope (we treat the module name as bound);
+/// `use Foo.Bar` similar.
+fn elixir_alias_line(source: &str, symbol: &str) -> Option<(u32, u32)> {
+    for (idx, raw) in source.lines().enumerate() {
+        let line = raw.trim_start();
+        let leading = raw.len() - line.len();
+        for kw in &["alias ", "import ", "use ", "require "] {
+            if let Some(rest) = line.strip_prefix(kw) {
+                let rest = rest.trim().trim_end_matches(',');
+                // `alias Foo.Bar, as: Qux`
+                let bound = if let Some(as_idx) = rest.find(", as:") {
+                    let after = rest[as_idx + 5..].trim();
+                    after.trim_end_matches(',').trim()
+                } else {
+                    // Path with possible parameters/options after a comma
+                    let path = rest.split(',').next().unwrap_or(rest).trim();
+                    // Brace-grouped: `alias Foo.{A, B}`
+                    if let Some(brace_idx) = path.find('{') {
+                        let prefix = &path[..brace_idx];
+                        let inside = path[brace_idx..]
+                            .trim_start_matches('{')
+                            .trim_end_matches('}')
+                            .trim();
+                        for sel in inside.split(',') {
+                            let sel = sel.trim();
+                            if !sel.is_empty() && sel == symbol {
+                                return Some((idx as u32 + 1, leading as u32));
+                            }
+                        }
+                        let _ = prefix;
+                        return None;
+                    }
+                    path.rsplit('.').next().unwrap_or(path).trim()
+                };
+                if bound == symbol {
+                    return Some((idx as u32 + 1, leading as u32));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// OCaml: `open Foo` brings module `Foo`'s contents into scope (we treat
+/// `Foo` as bound). `module M = Foo.Bar` binds `M`.
+fn ocaml_open_line(source: &str, symbol: &str) -> Option<(u32, u32)> {
+    for (idx, raw) in source.lines().enumerate() {
+        let line = raw.trim_start();
+        let leading = raw.len() - line.len();
+        if let Some(rest) = line.strip_prefix("open ") {
+            let rest = rest.trim_end_matches(";;").trim_end_matches(';').trim();
+            // `open Foo.Bar` binds `Bar`'s contents but the canonical bound name is `Bar`.
+            let bound = rest.rsplit('.').next().unwrap_or(rest).trim();
+            if bound == symbol {
+                return Some((idx as u32 + 1, leading as u32));
+            }
+        } else if let Some(rest) = line.strip_prefix("module ") {
+            // `module M = Foo.Bar`
+            if let Some((alias, _)) = rest.split_once('=') {
+                let alias = alias.trim();
+                if alias == symbol {
+                    return Some((idx as u32 + 1, leading as u32));
+                }
+            }
         }
     }
     None
@@ -2401,5 +4163,329 @@ from . import types
             "let counter is on line 2, got {}",
             def.line
         );
+    }
+
+    // =========================================================================
+    // definition-additional-langs-v1: local-scope + import-scope tests for
+    // the 13 additional languages (java, c, cpp, ruby, kotlin, swift, scala,
+    // php, lua, luau, elixir, ocaml, csharp).
+    // =========================================================================
+
+
+    fn assert_resolves_param(
+        file: &Path,
+        line: u32,
+        column: u32,
+        lang: &str,
+        expected_name: &str,
+        expected_def_line: u32,
+    ) {
+        let result = find_definition_by_position(file, line, column, None, lang)
+            .unwrap_or_else(|e| panic!("{} resolution should succeed: {}", lang, e));
+        assert_eq!(result.symbol.name, expected_name);
+        assert_eq!(
+            result.symbol.kind,
+            SymbolKind::Parameter,
+            "{}: expected Parameter, got {:?}",
+            lang,
+            result.symbol.kind
+        );
+        let def = result.definition.expect("definition must be Some");
+        assert_eq!(
+            def.line, expected_def_line,
+            "{}: param declared on line {}, got {}",
+            lang, expected_def_line, def.line
+        );
+    }
+
+    #[test]
+    fn test_definition_resolves_local_param_java() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("Foo.java");
+        // Line 1: class Foo {
+        // Line 2:   int add(int a, int b) {
+        // Line 3:     return a + b;
+        // Line 4:   }
+        // Line 5: }
+        fs::write(
+            &file,
+            "class Foo {\n  int add(int a, int b) {\n    return a + b;\n  }\n}\n",
+        )
+        .unwrap();
+        // Cursor on `a` in `return a + b` — column 11 of line 3.
+        assert_resolves_param(&file, 3, 11, "java", "a", 2);
+    }
+
+    #[test]
+    fn test_definition_resolves_local_param_c() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("foo.c");
+        // Line 1: int add(int a, int b) {
+        // Line 2:   return a + b;
+        // Line 3: }
+        fs::write(&file, "int add(int a, int b) {\n  return a + b;\n}\n").unwrap();
+        // Cursor on `a` in line 2.
+        assert_resolves_param(&file, 2, 9, "c", "a", 1);
+    }
+
+    #[test]
+    fn test_definition_resolves_local_param_cpp() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("foo.cpp");
+        fs::write(&file, "int add(int a, int b) {\n  return a + b;\n}\n").unwrap();
+        assert_resolves_param(&file, 2, 9, "cpp", "a", 1);
+    }
+
+    #[test]
+    fn test_definition_resolves_local_param_ruby() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("foo.rb");
+        // Line 1: def add(a, b)
+        // Line 2:   a + b
+        // Line 3: end
+        fs::write(&file, "def add(a, b)\n  a + b\nend\n").unwrap();
+        assert_resolves_param(&file, 2, 2, "ruby", "a", 1);
+    }
+
+    #[test]
+    fn test_definition_resolves_local_param_kotlin() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("foo.kt");
+        // Line 1: fun add(a: Int, b: Int): Int {
+        // Line 2:   return a + b
+        // Line 3: }
+        fs::write(
+            &file,
+            "fun add(a: Int, b: Int): Int {\n  return a + b\n}\n",
+        )
+        .unwrap();
+        // Cursor on `a` in line 2.
+        assert_resolves_param(&file, 2, 9, "kotlin", "a", 1);
+    }
+
+    #[test]
+    fn test_definition_resolves_local_param_swift() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("foo.swift");
+        // Line 1: func add(a: Int, b: Int) -> Int {
+        // Line 2:   return a + b
+        // Line 3: }
+        fs::write(
+            &file,
+            "func add(a: Int, b: Int) -> Int {\n  return a + b\n}\n",
+        )
+        .unwrap();
+        // Cursor on `a` in line 2.
+        assert_resolves_param(&file, 2, 9, "swift", "a", 1);
+    }
+
+    #[test]
+    fn test_definition_resolves_local_param_scala() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("foo.scala");
+        // Line 1: def add(a: Int, b: Int): Int = {
+        // Line 2:   a + b
+        // Line 3: }
+        fs::write(
+            &file,
+            "def add(a: Int, b: Int): Int = {\n  a + b\n}\n",
+        )
+        .unwrap();
+        assert_resolves_param(&file, 2, 2, "scala", "a", 1);
+    }
+
+    #[test]
+    fn test_definition_resolves_local_param_php() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("foo.php");
+        // Line 1: <?php
+        // Line 2: function add($a, $b) {
+        // Line 3:   return $a + $b;
+        // Line 4: }
+        fs::write(
+            &file,
+            "<?php\nfunction add($a, $b) {\n  return $a + $b;\n}\n",
+        )
+        .unwrap();
+        // Cursor on `$a` (or `a` portion) in line 3.
+        let result = find_definition_by_position(&file, 3, 10, None, "php")
+            .expect("php resolution should succeed");
+        // The symbol may resolve as `$a` or `a` depending on tokenization.
+        let name = result.symbol.name.trim_start_matches('$');
+        assert_eq!(name, "a");
+        assert_eq!(result.symbol.kind, SymbolKind::Parameter);
+        let def = result.definition.expect("definition must be Some");
+        assert_eq!(def.line, 2);
+    }
+
+    #[test]
+    fn test_definition_resolves_local_param_lua() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("foo.lua");
+        // Line 1: local function add(a, b)
+        // Line 2:   return a + b
+        // Line 3: end
+        fs::write(&file, "local function add(a, b)\n  return a + b\nend\n").unwrap();
+        assert_resolves_param(&file, 2, 9, "lua", "a", 1);
+    }
+
+    #[test]
+    fn test_definition_resolves_local_param_luau() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("foo.luau");
+        fs::write(&file, "local function add(a, b)\n  return a + b\nend\n").unwrap();
+        assert_resolves_param(&file, 2, 9, "luau", "a", 1);
+    }
+
+    #[test]
+    fn test_definition_resolves_local_param_elixir() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("foo.ex");
+        // Line 1: defmodule Foo do
+        // Line 2:   def add(a, b) do
+        // Line 3:     a + b
+        // Line 4:   end
+        // Line 5: end
+        fs::write(
+            &file,
+            "defmodule Foo do\n  def add(a, b) do\n    a + b\n  end\nend\n",
+        )
+        .unwrap();
+        // Cursor on `a` in line 3.
+        assert_resolves_param(&file, 3, 4, "elixir", "a", 2);
+    }
+
+    #[test]
+    fn test_definition_resolves_local_param_ocaml() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("foo.ml");
+        // Line 1: let add a b = a + b
+        fs::write(&file, "let add a b = a + b\n").unwrap();
+        // Cursor on `a` in `a + b` — column 14 of line 1.
+        assert_resolves_param(&file, 1, 14, "ocaml", "a", 1);
+    }
+
+    #[test]
+    fn test_definition_resolves_local_param_csharp() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("Foo.cs");
+        // Line 1: class Foo {
+        // Line 2:   int Add(int a, int b) {
+        // Line 3:     return a + b;
+        // Line 4:   }
+        // Line 5: }
+        fs::write(
+            &file,
+            "class Foo {\n  int Add(int a, int b) {\n    return a + b;\n  }\n}\n",
+        )
+        .unwrap();
+        assert_resolves_param(&file, 3, 11, "csharp", "a", 2);
+    }
+
+    // ----- Broader tests: import-scope and var-decl forms -----
+
+    #[test]
+    fn test_definition_resolves_import_alias_java() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("Foo.java");
+        // Line 1: import java.util.List;
+        // Line 2: class Foo {
+        // Line 3:   List<String> xs;
+        // Line 4: }
+        fs::write(
+            &file,
+            "import java.util.List;\nclass Foo {\n  List<String> xs;\n}\n",
+        )
+        .unwrap();
+        // Cursor on `List` in line 3.
+        let result = find_definition_by_position(&file, 3, 2, None, "java")
+            .expect("java import resolution should succeed");
+        assert_eq!(result.symbol.name, "List");
+        let def = result.definition.expect("definition must be Some");
+        assert_eq!(def.line, 1, "import is on line 1, got {}", def.line);
+    }
+
+    #[test]
+    fn test_definition_resolves_local_var_kotlin() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("foo.kt");
+        // Line 1: fun main() {
+        // Line 2:   val counter = 42
+        // Line 3:   println(counter)
+        // Line 4: }
+        fs::write(
+            &file,
+            "fun main() {\n  val counter = 42\n  println(counter)\n}\n",
+        )
+        .unwrap();
+        // Cursor on `counter` in line 3.
+        let result = find_definition_by_position(&file, 3, 10, None, "kotlin")
+            .expect("kotlin val resolution should succeed");
+        assert_eq!(result.symbol.name, "counter");
+        assert_eq!(result.symbol.kind, SymbolKind::Variable);
+        let def = result.definition.expect("definition must be Some");
+        assert_eq!(def.line, 2);
+    }
+
+    #[test]
+    fn test_definition_resolves_param_swift() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("foo.swift");
+        // Line 1: func greet(name: String) -> String {
+        // Line 2:   return "Hello, " + name
+        // Line 3: }
+        fs::write(
+            &file,
+            "func greet(name: String) -> String {\n  return \"Hello, \" + name\n}\n",
+        )
+        .unwrap();
+        // Cursor on `name` at end of line 2.
+        assert_resolves_param(&file, 2, 21, "swift", "name", 1);
+    }
+
+    #[test]
+    fn test_definition_resolves_use_statement_php() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("foo.php");
+        // Line 1: <?php
+        // Line 2: use App\Models\User;
+        // Line 3: function get(): User {
+        // Line 4:   return new User();
+        // Line 5: }
+        fs::write(
+            &file,
+            "<?php\nuse App\\Models\\User;\nfunction get(): User {\n  return new User();\n}\n",
+        )
+        .unwrap();
+        // Cursor on `User` in line 4.
+        let result = find_definition_by_position(&file, 4, 14, None, "php")
+            .expect("php use resolution should succeed");
+        assert_eq!(result.symbol.name, "User");
+        let def = result.definition.expect("definition must be Some");
+        assert_eq!(def.line, 2, "use statement on line 2, got {}", def.line);
+    }
+
+    #[test]
+    fn test_definition_resolves_local_var_csharp() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("Foo.cs");
+        // Line 1: class Foo {
+        // Line 2:   void M() {
+        // Line 3:     var counter = 42;
+        // Line 4:     System.Console.WriteLine(counter);
+        // Line 5:   }
+        // Line 6: }
+        fs::write(
+            &file,
+            "class Foo {\n  void M() {\n    var counter = 42;\n    System.Console.WriteLine(counter);\n  }\n}\n",
+        )
+        .unwrap();
+        // Cursor on `counter` in line 4.
+        let result = find_definition_by_position(&file, 4, 29, None, "csharp")
+            .expect("csharp var resolution should succeed");
+        assert_eq!(result.symbol.name, "counter");
+        assert_eq!(result.symbol.kind, SymbolKind::Variable);
+        let def = result.definition.expect("definition must be Some");
+        assert_eq!(def.line, 3);
     }
 }

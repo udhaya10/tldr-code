@@ -1,5 +1,127 @@
 # Changelog
 
+## definition-additional-langs-v1 — internal milestone
+
+NOT a published release. Extends the M-B3 (`definition-name-resolution-v1`)
+local-scope and import-scope resolvers to the 13 supported languages that
+were previously falling through to file-scope only: java, c, cpp, ruby,
+kotlin, swift, scala, php, lua, luau, elixir, ocaml, csharp.
+
+### Repro pre-fix
+
+```text
+$ tldr definition /tmp/repos/spring-petclinic/.../Vet.java 71 32
+Error: symbol 'specialty' not found in scope    # param usage unresolved
+$ tldr definition /tmp/repos/elixir-plug/lib/plug/html.ex 20 35
+Error: symbol 'data' not found in scope         # param usage unresolved
+```
+
+Before this fix, `tldr definition` only knew how to resolve parameters,
+local variables, and imports for Python, JavaScript, TypeScript, Rust,
+and Go. For the other 13 languages it would walk the AST looking for
+top-level functions/classes only, returning an `unresolved` error for
+any local-scope or import-scope symbol — which is the common case in
+real codebases (most usage sites are inside method bodies referencing
+either parameters or imported names).
+
+### Fix
+
+`crates/tldr-cli/src/commands/remaining/definition.rs` gains:
+
+1. **Per-language local-scope scanners** (`scan_<lang>_scope` +
+   `<lang>_walk_for_binding` helpers) that walk tree-sitter ancestors
+   from the cursor position and find:
+   - **Java/C#**: formal parameters, `local_variable_declaration`s,
+     enhanced-for loop variables, lambda parameters
+   - **C/C++**: function parameters via `declarator` chain,
+     `init_declarator` locals, C++ lambda parameters
+   - **Ruby**: method/block parameters (regular, optional, splat,
+     keyword, hash-splat, block), simple `=` assignments
+   - **Kotlin**: function value parameters, lambda parameters,
+     `val`/`var` property declarations
+   - **Swift**: function/init parameters, lambda parameters,
+     `let`/`var` property bindings
+   - **Scala**: function parameters (including currying), `val`/`var`
+     definitions
+   - **PHP**: simple/variadic/property-promotion parameters (with
+     `$` prefix tolerance), `$x = ...` assignments
+   - **Lua/Luau**: function parameters (Lua flat `identifier` form,
+     Luau `parameter`-wrapped form), `local` variable declarations
+   - **Elixir**: `def`/`defp`/`defmacro`/`defmacrop` parameters
+     including the `when guard(x)` form (left side of `binary_operator`),
+     `stab_clause` anonymous function parameters, simple `=` matches
+   - **OCaml**: `let_binding` parameters (`parameter` > `value_pattern`),
+     anonymous `fun`/`function` parameters, top-level `let` bindings
+2. **Per-language import-scope finders** (`<lang>_<keyword>_line`):
+   - **Java**: `import com.foo.Bar;` → `Bar`; `import static X.Y;` → `Y`
+   - **Kotlin/Scala**: `import a.b.C` → `C`; `import a.b.C as D` (Kotlin) → `D`;
+     `import a.b.{X, Y => Z}` (Scala) → `X` and `Z`
+   - **Swift**: `import Foundation` → `Foundation`; `import class Foo.Bar` → `Bar`
+   - **PHP**: `use Foo\Bar\Baz;` → `Baz`; `use Foo\Bar\Baz as Qux;` → `Qux`;
+     `use Foo\{A, B as C};` → `A` and `C`
+   - **C#**: `using System;` → `System`; `using X = Foo.Bar;` → `X`
+   - **Lua/Luau**: `local foo = require("...")` → `foo`
+   - **Elixir**: `alias Foo.Bar` → `Bar`; `alias Foo.Bar, as: Qux` → `Qux`;
+     `alias Foo.{A, B}` → `A` and `B`; same for `import`/`use`/`require`
+   - **OCaml**: `open Foo.Bar` → `Bar`; `module M = Foo.Bar` → `M`
+
+C, C++, and Ruby don't bind specific symbol names at the import/include
+level (`#include` is preprocessor; Ruby's `require` registers a global
+side-effect). Those languages get local-scope resolution only and fall
+through to file-scope for cross-module names.
+
+### Validation
+
+18 new unit tests in `definition.rs::tests` cover every new language:
+
+- 13 `test_definition_resolves_local_param_<lang>` (java, c, cpp, ruby,
+  kotlin, swift, scala, php, lua, luau, elixir, ocaml, csharp) — synthetic
+  source + cursor on parameter usage resolves to the parameter declaration
+- 5 broader tests (`test_definition_resolves_import_alias_java`,
+  `test_definition_resolves_local_var_kotlin`,
+  `test_definition_resolves_param_swift`,
+  `test_definition_resolves_use_statement_php`,
+  `test_definition_resolves_local_var_csharp`) cover import statements
+  and var-decl forms
+
+Binary-verified on cloned repos:
+
+- `spring-petclinic` (Java): `Vet.java:71:32` → `specialty` resolves to
+  param decl at `Vet.java:70:36` (PASS)
+- `kotlin-datetime` (Kotlin): `CommonFormats.kt:44:9` → `blackhole`
+  resolves to param decl at `CommonFormats.kt:24:34` (PASS)
+- `elixir-plug` (Elixir): `html.ex:20:35` → `data` resolves to param decl
+  at `html.ex:19:18` (with `when is_binary(data)` guard, exercising the
+  `binary_operator` head form) (PASS)
+
+The full tldr-cli test suite (1418 tests) passes; M-B3's existing 5
+languages are untouched.
+
+### Carry-forward
+
+Languages with grammars that have multiple AST shapes for the same
+construct may have edge cases not covered by the synthetic tests:
+
+- **C/C++**: function-pointer-typed parameters, K&R-style declarations,
+  template parameters in C++ — the scanner recognises the common
+  `parameter_declaration` + `init_declarator` shapes and falls through
+  for exotic forms
+- **Scala**: implicit parameter blocks (separate parameter group) work
+  via the `parameters | bindings` recursion; given/extension methods are
+  not specifically handled and may return None (acceptable fallback)
+- **Lua**: vararg `...` parameters bind to a special name; we don't
+  resolve `...` references — this is consistent with how the existing
+  language handlers ignore varargs
+- **Elixir**: pin operator `^x` references aren't traced back to outer
+  bindings — this is a future enhancement
+- **OCaml**: pattern-bound parameters (`let f (Some x) = ...`) work for
+  simple cases via the recursive `ocaml_find_first_ident`; record-pattern
+  destructuring isn't specially handled
+
+These gaps are documented as future enhancements; they don't block the
+canonical "param usage → param decl" and "imported name → import line"
+resolutions which were the user-visible gaps motivating this milestone.
+
 ## complexity-class-method-qualified-v1 — internal milestone
 
 NOT a published release. Per-function commands (`complexity`, `explain`,
