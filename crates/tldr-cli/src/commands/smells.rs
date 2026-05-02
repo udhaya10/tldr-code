@@ -156,6 +156,15 @@ impl SmellsArgs {
     pub fn run(&self, format: OutputFormat, quiet: bool) -> Result<()> {
         let writer = OutputWriter::new(format, quiet);
 
+        // BUG-11: validate path exists BEFORE any analysis. Without this
+        // check, a missing path silently slipped through: `is_dir()` returned
+        // false, the file branch ran with no files to scan, and the command
+        // returned exit 0 with empty results. Now: missing path => exit 1
+        // (matches `health`, `structure`, `deps`, `vuln`).
+        if !self.path.exists() {
+            anyhow::bail!("Path not found: {}", self.path.display());
+        }
+
         // v0.2.3 (#1.D): when `--files` is non-empty, the caller explicitly named
         // each path. Trust them and force `include_tests=true` so user-listed
         // test files are not silently filtered.

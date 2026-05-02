@@ -348,9 +348,11 @@ class BigClass:
         assert_eq!(lines.len(), 1, "Compact output should be single line");
     }
 
-    /// Test smells command with nonexistent path
+    /// Test smells command with nonexistent path.
+    /// Fixed in `error-handling-and-data-v1` (BUG-11): previously smells
+    /// returned exit 0 with empty output for any missing path; now it
+    /// fails with `Path not found: ...` like `health`, `structure`, etc.
     #[test]
-    #[ignore = "BUG: See bugs_cli_quality.md - Issue 9"]
     fn test_smells_nonexistent_path() {
         let mut cmd = tldr_cmd();
         cmd.args(["smells", "/nonexistent/path/xyz123", "-q"]);

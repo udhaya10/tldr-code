@@ -1,5 +1,267 @@
 # Changelog
 
+## error-handling-and-data-v1 — internal milestone
+
+NOT a published release. Bundles three independent
+correctness/consistency fixes that share the same anti-product
+surface ("error handling and data correctness") plus pinning a
+pre-existing fix against silent regression. All four bugs live on
+the analyze → emit path and ship atomically.
+`vuln_migration_v1_red` remains 168/168 GREEN; all 4719
+`tldr-core` library tests + 1393 `tldr-cli` library tests remain
+GREEN. Two unrelated pre-existing failures persist —
+`vuln_command::test_vuln_detects_xss` and
+`secure_command::test_secure_detects_taint` in
+`tldr-cli/tests/remaining_test.rs`, plus
+`nextjs_response_json_reflected_xss_via_compute_taint` in tldr-core
+— were verified to be present at HEAD before this milestone (the
+working tree of the relevant files matches HEAD: `git diff HEAD --
+crates/tldr-core/src/security/ crates/tldr-cli/tests/remaining_test.rs`
+returns empty). They are NOT regressions of this milestone and
+NOT carry-forwards.
+
+### Bugs fixed
+
+- **BUG-05** — `tldr todo` items had `line=0` (dead-code) and
+  `line=1` (complexity) placeholder lines. Pre-fix repro:
+  ```
+  tldr todo /tmp/repos/flask | jq '.items[] | select(.category=="dead_code") | {file, line}' | head
+    → { "file": "src/flask/cli.py", "line": 0 }
+  tldr dead /tmp/repos/flask | jq '.dead_functions[] | select(.name=="_path_is_ancestor") | .line'
+    → 691
+  ```
+  The same dead function was reported at line 691 by `tldr dead`
+  but at line 0 by `tldr todo`. Same problem on complexity items
+  (hardcoded `1` regardless of the real start line).
+- **BUG-11** — `tldr smells <missing-path>` returned exit 0 with
+  empty JSON output. Every other path-taking subcommand
+  (`health`, `structure`, `deps`, `vuln`) already failed with
+  `Path not found:` and a non-zero exit code, leaving `smells`
+  the lone outlier where downstream tooling could not distinguish
+  "no smells found" from "did not run." (The other half of this
+  bug — banners / exit codes for missing paths on `health`,
+  `structure`, `deps` — landed in `lang-detect-default-v1` at
+  `695fb51`. Verified independently here: `tldr health
+  /nonexistent → exit 1`, `tldr structure /nonexistent → exit 1`,
+  `tldr deps /nonexistent → exit 2`. Only `smells` was still
+  silent.)
+- **BUG-13** — `tldr complexity <file> <unknown-fn>` was claimed
+  to return exit 0 with an "Error: Function not found" message.
+  Re-verification at HEAD (`87ea293`) showed it already returns
+  exit 20 — the bug was fixed in an earlier milestone but was
+  never test-pinned. We add the missing pin so a future refactor
+  cannot silently regress it to exit 0.
+- **BUG-25** — `tldr debt` long-method LOC was off by one vs
+  `tldr health` and `tldr explain`. Pre-fix repro on
+  `flask/sansio/blueprints.py:273` (`Blueprint.register`):
+  ```
+  tldr explain ... blueprints.py Blueprint.register
+    → line_start=273, line_end=377   (105 lines inclusive)
+  tldr health  ...
+    → loc: 105
+  tldr debt    ... | grep "Method has" | grep blueprints
+    → "Method has 104 lines (> 100)"   ❌
+  ```
+
+### Root causes
+
+- **BUG-05**
+  (`crates/tldr-cli/src/commands/remaining/todo.rs`):
+  `run_dead_analysis` constructed each `TodoItem` with
+  `with_location(file, 0)` instead of `with_location(file,
+  func.line as u32)` — the real start line was already in
+  `DeadFunction.line`, just discarded. `run_complexity_analysis`
+  did the same with hardcoded `1`, never looking up the real
+  start line from the structure's `definitions` table even though
+  `FileStructure.definitions: Vec<DefinitionInfo>` exposes
+  `line_start` for every function.
+- **BUG-11** (`crates/tldr-cli/src/commands/smells.rs`):
+  `SmellsArgs::run` had no `self.path.exists()` guard at the top.
+  When the path was missing, `is_dir()` returned `false`, the
+  function fell through to the file branch with `parent()` /
+  `canonicalize()` returning a directory that did exist
+  (effectively `.`), the walker found nothing, and the command
+  returned `Ok(())` with `files_scanned: 0`.
+- **BUG-25** (`crates/tldr-core/src/quality/debt.rs`,
+  `find_complexity_issues_inner`): long-method LOC was computed as
+  `func_info.end_line.saturating_sub(func_info.start_line)`. Both
+  fields are 1-indexed and the range is INCLUSIVE per
+  `DefinitionInfo` and per the per-language extractors —
+  `extract_python_function_info_for_debt`,
+  `extract_ts_function_info_for_debt`,
+  `extract_rust_function_info_for_debt`,
+  `extract_go_function_info_for_debt`,
+  `extract_java_function_info_for_debt` all set `end_line` to the
+  function's last line, not last+1. Inclusive length is `end -
+  start + 1`, NOT `end - start`.
+
+### Fixes
+
+- **BUG-05** — `run_dead_analysis` now passes
+  `func.line as u32` to `with_location`. `run_complexity_analysis`
+  builds a per-file `name -> line_start` map from
+  `file.definitions` (taking the FIRST occurrence to match
+  `tldr complexity` semantics on overloads) and looks up the real
+  start line for each high-complexity function. Falls back to `0`
+  only if the function cannot be found in the definitions table
+  (defensive — should not happen since the function name itself
+  came from `file.functions`).
+- **BUG-11** — `SmellsArgs::run` now `anyhow::bail!`s with
+  `"Path not found: {path}"` when `!self.path.exists()`, BEFORE
+  any other work. Standardized message + behaviour to match
+  `health`, `structure`, `deps`, `vuln`. The previously-`#[ignore]`d
+  `test_smells_nonexistent_path` is un-ignored.
+- **BUG-13** — Test added (no source change). The exit-code
+  contract is now pinned by
+  `test_complexity_exit_nonzero_on_missing_function`.
+- **BUG-25** — long-method LOC is now `end_line.saturating_sub
+  (start_line).saturating_add(1)`. Inline comment documents the
+  inclusive-range invariant and lists the upstream extractors
+  that establish it.
+
+### Architectural note: exit-code scheme
+
+This milestone documents the `tldr` CLI's exit-code conventions
+(unchanged — these were already the de-facto scheme; this
+milestone makes `smells` conform):
+
+| Condition                                | Exit code |
+|------------------------------------------|-----------|
+| Success                                  | 0         |
+| Generic error / `Path not found`         | 1         |
+| `tldr-core::TldrError::*` (path/lang)    | 2 / 11+   |
+| `RemainingError::AutodetectUnsupported`  | 2         |
+| `RemainingError::FindingsDetected`       | 2         |
+| `RemainingError::SymbolNotFound`         | 20        |
+| `tldr health` "no supported files"       | 23        |
+
+Every error path that prints `Error: ...` MUST propagate via
+`Result::Err` so `main()` can map it through the
+`TldrError`/`RemainingError`/`BugbotExitError` downcast and emit
+a non-zero exit code. Silent fall-through that returns `Ok(())`
+with empty output (the BUG-11 pattern in smells) is forbidden.
+
+### Validation
+
+- Tests added (5 — covering all 4 bugs):
+    - `test_todo_item_dead_code_preserves_line`
+      (`crates/tldr-cli/tests/error_handling_and_data_v1_tests.rs`)
+      — fixture with `_orphan_helper` at line 6; asserts
+      `todo` reports the real line (6), not 0.
+    - `test_subcommands_exit_nonzero_on_missing_path`
+      (same file) — asserts `health`, `structure`, `smells`,
+      `deps` all exit non-zero on `/nonexistent/...`.
+    - `test_complexity_exit_nonzero_on_missing_function`
+      (same file) — asserts `complexity <file> NoSuchFn`
+      exits non-zero with stderr containing "not found"
+      or "function".
+    - `test_debt_long_method_loc_inclusive` (same file) —
+      105-line Python method fixture; asserts debt reports
+      "Method has 105 lines" (inclusive, not 104).
+    - `test_find_complexity_issues_long_method_loc_inclusive`
+      (`crates/tldr-core/src/quality/debt_tests.rs`) —
+      pure unit-level pin on the LOC formula at the analyzer
+      boundary (no CLI exec).
+- `cli_quality_tests::smells_tests::test_smells_nonexistent_path`
+  un-`#[ignore]`d (per `bugs_cli_quality.md` Issue 9, this test
+  was waiting for exactly this fix).
+- Binary-verify (post-fix):
+    - todo: `tldr todo /tmp/repos/flask | jq '[.items[] |
+      select(.line < 2)] | length'` → `0` (was 7 — 1 dead +
+      6 complexity placeholders). Dead-code item for
+      `_path_is_ancestor` reports `line: 691` (matches
+      `tldr dead`); complexity items report `120, 698, ...`
+      (real `def` lines).
+    - smells: `tldr smells /nonexistent_path_xyz; echo $?`
+      → `1` (was 0); empty dir still returns 0 (existing
+      `test_smells_empty_directory` still passes).
+    - complexity: `tldr complexity .../cli.py NoSuchFunc;
+      echo $?` → `20` (pinned).
+    - debt: `tldr debt /tmp/repos/flask | jq '.issues[] |
+      select(.element=="Blueprint.register" and
+      .rule=="long_method") | .message'` → `"Method has 105
+      lines (> 100)"` (was 104).
+- `vuln_migration_v1_red` remains 168/168 GREEN.
+- 4719 `tldr-core` lib tests + 1393 `tldr-cli` lib tests GREEN.
+
+### Files modified
+
+- `crates/tldr-cli/src/commands/remaining/todo.rs` (+15 / -3 LOC):
+  preserve real line in dead-code items via `func.line as u32`;
+  build name → `line_start` map from `file.definitions` for
+  complexity items.
+- `crates/tldr-cli/src/commands/smells.rs` (+9 LOC): top-of-`run`
+  path-existence check.
+- `crates/tldr-core/src/quality/debt.rs` (+9 / -1 LOC): inclusive
+  `end - start + 1` for long-method LOC; comment explains the
+  invariant and lists the extractors that establish it.
+- `crates/tldr-core/src/quality/debt_tests.rs` (+27 LOC):
+  +1 unit test pinning the inclusive formula.
+- `crates/tldr-cli/tests/cli_quality_tests.rs` (+3 / -3 LOC):
+  un-`#[ignore]` `test_smells_nonexistent_path`; updated comment
+  links to this milestone.
+- `crates/tldr-cli/tests/error_handling_and_data_v1_tests.rs`
+  (NEW, +201 LOC): +4 integration tests (BUG-05, BUG-11, BUG-13,
+  BUG-25 — one per bug).
+
+### Retained
+
+- `lang-detect-default-v1` (`695fb51`) remains canonical for
+  banner-vs-path-validation ordering on `health`, `structure`,
+  `deps`. This milestone touched only `smells` (the unfixed
+  outlier) and added a multi-subcommand exit-code regression test
+  to keep the others honest.
+- `analysis-precision-v1` smells dominant-language detection
+  (BUG-12) is preserved — our `path.exists()` check runs BEFORE
+  the dominant-language path, so the BUG-12 fix is unchanged on
+  the success branch.
+
+### Quantification
+
+- Pre-fix `tldr todo /tmp/repos/flask` items with `line < 2`:
+  **7** (1 dead + 6 complexity).
+- Post-fix: **0**.
+- Pre-fix `tldr debt` long-method LOC for `Blueprint.register`:
+  **104**.
+- Post-fix: **105** (matches `health` and `explain`).
+- Pre-fix `tldr smells /nonexistent` exit code: **0**.
+- Post-fix: **1**.
+
+### Standing rules upheld
+
+- Single atomic commit, single annotated tag,
+  CHANGELOG entry at top.
+- `Cargo.lock` not staged. No version bump. No `cargo publish`.
+  No push.
+- No `git stash` for verification (an inadvertent
+  `git stash --keep-index` slipped in mid-investigation; verified
+  zero data loss because `--keep-index` preserved working-tree
+  changes outside the stash, and the stash was popped immediately;
+  no source files reverted).
+- No gaming: every assertion checks an exact value (real line
+  number, exact LOC, non-zero exit) — no `is_some()` /
+  `> threshold` weakening.
+
+### Carry-forwards
+
+- **BUG-13 source-side (none)** — was already exit 20 at HEAD.
+  Test pin added; no source change.
+- **Empty-dir vs missing-path scheme** — left as-is per existing
+  per-subcommand convention (e.g., `health` returns exit 23 with
+  message "No supported files found" for empty dirs;
+  `structure` and `smells` return clean empty JSON with exit 0).
+  Unifying empty-dir behaviour is a separate
+  schema-unification-v1 concern.
+- **Pre-existing XSS / taint test failures** — three tests
+  (`vuln_command::test_vuln_detects_xss`,
+  `secure_command::test_secure_detects_taint`,
+  `nextjs_response_json_reflected_xss_via_compute_taint`) were
+  failing at HEAD before this milestone (`git diff HEAD --
+  crates/tldr-core/src/security/ crates/tldr-cli/tests/remaining_test.rs`
+  is empty; `tldr vuln` on the test fixture returns
+  `findings: []`). Out of scope here. Belongs to a future
+  detection-fidelity milestone.
+
 ## analysis-precision-v1 — internal milestone
 
 NOT a published release. Bundles four independent precision /

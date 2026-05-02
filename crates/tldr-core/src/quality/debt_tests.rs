@@ -1331,6 +1331,39 @@ def moderately_complex(a, b, c, d, e):
         assert_eq!(long_method_issues[0].category, "maintainability");
     }
 
+    /// BUG-25: long-method LOC must be inclusive (`end - start + 1`), NOT
+    /// `end - start`. A method whose body spans lines 1..=N is N lines, not
+    /// N-1. Previously every long-method finding was 1 line short of the
+    /// real count, contradicting `tldr health` and `tldr explain`.
+    ///
+    /// We pin a Python file with exactly 105 contiguous lines of method
+    /// body (1 def line + 104 statement lines) and assert the message
+    /// reports 105.
+    #[test]
+    fn test_find_complexity_issues_long_method_loc_inclusive() {
+        // 105 lines: line 1 = `def big_method():`, lines 2..=105 = body.
+        let mut src = String::from("def big_method():\n");
+        for i in 1..=104 {
+            src.push_str(&format!("    x = {}\n", i));
+        }
+
+        let issues = find_complexity_issues(&src, Path::new("inclusive.py"), Language::Python);
+        let long_method_issues: Vec<_> = issues
+            .iter()
+            .filter(|i| i.rule == "long_method")
+            .collect();
+
+        assert!(
+            !long_method_issues.is_empty(),
+            "Expected a long_method issue for 105-line method"
+        );
+        assert!(
+            long_method_issues[0].message.contains("105 lines"),
+            "Inclusive LOC should be 105 (end - start + 1), got: {}",
+            long_method_issues[0].message
+        );
+    }
+
     #[test]
     fn test_find_complexity_issues_long_param_list() {
         let issues =

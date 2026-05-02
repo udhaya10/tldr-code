@@ -840,8 +840,16 @@ fn find_complexity_issues_inner(
         }
         // PM-3: On error, silently skip complexity check (don't add issue, don't default CC=1)
 
-        // Long method check (LOC > 100)
-        let func_loc = func_info.end_line.saturating_sub(func_info.start_line);
+        // Long method check (LOC > 100).
+        // BUG-25: line range is 1-indexed and INCLUSIVE
+        // (`DefinitionInfo`/extractors set `end_line` to the function's last
+        // line). Inclusive length = `end - start + 1`, NOT `end - start`.
+        // Previously this off-by-one made every long method report 1 line
+        // shorter than `tldr health` / `tldr explain` (e.g. 104 vs 105).
+        let func_loc = func_info
+            .end_line
+            .saturating_sub(func_info.start_line)
+            .saturating_add(1);
         if func_loc > 100 {
             issues.push(DebtIssue {
                 file: file.clone(),

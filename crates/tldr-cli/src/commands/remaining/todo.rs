@@ -316,7 +316,8 @@ fn run_dead_analysis(path: &Path, language: Language) -> RemainingResult<(Vec<To
     let report = dead_code_analysis_refcount(&all_functions, &merged_ref_counts, None)
         .map_err(|e| RemainingError::analysis_error(format!("Dead code analysis failed: {}", e)))?;
 
-    // Convert to TodoItems
+    // Convert to TodoItems. Preserve the real start line from DeadFunction
+    // (BUG-05: previously hardcoded 0, losing the line of the dead symbol).
     let items: Vec<TodoItem> = report
         .dead_functions
         .iter()
@@ -326,7 +327,7 @@ fn run_dead_analysis(path: &Path, language: Language) -> RemainingResult<(Vec<To
                 PRIORITY_DEAD_CODE,
                 format!("Unused function: {}", func.name),
             )
-            .with_location(func.file.display().to_string(), 0)
+            .with_location(func.file.display().to_string(), func.line as u32)
             .with_severity("medium")
         })
         .collect();
@@ -347,8 +348,19 @@ fn run_complexity_analysis(
 
     let mut items = Vec::new();
 
-    // Check each function for high complexity (threshold: cyclomatic > 10)
+    // Check each function for high complexity (threshold: cyclomatic > 10).
+    // BUG-05: previously hardcoded line=1; now look up the real start line
+    // from the structure's `definitions` table (built from tree-sitter AST).
     for file in &structure.files {
+        // Build a name -> start line map from the file's definitions. A
+        // function name may appear multiple times (e.g., overloads); take
+        // the FIRST occurrence to match `tldr complexity` semantics.
+        let mut name_to_line: std::collections::HashMap<&str, u32> =
+            std::collections::HashMap::with_capacity(file.definitions.len());
+        for def in &file.definitions {
+            name_to_line.entry(def.name.as_str()).or_insert(def.line_start);
+        }
+
         for func_name in &file.functions {
             let file_path = path.join(&file.path);
             if let Ok(metrics) = tldr_core::calculate_complexity(
@@ -357,6 +369,7 @@ fn run_complexity_analysis(
                 language,
             ) {
                 if metrics.cyclomatic > 10 {
+                    let line = name_to_line.get(func_name.as_str()).copied().unwrap_or(0);
                     items.push(
                         TodoItem::new(
                             "complexity",
@@ -366,7 +379,7 @@ fn run_complexity_analysis(
                                 func_name, metrics.cyclomatic
                             ),
                         )
-                        .with_location(file.path.display().to_string(), 1)
+                        .with_location(file.path.display().to_string(), line)
                         .with_severity(if metrics.cyclomatic > 20 {
                             "high"
                         } else {
