@@ -49,6 +49,17 @@ use crate::quality::cohesion::extract_self_accesses;
 use crate::types::Language;
 use crate::TldrResult;
 
+/// Maximum AST recursion depth for debt-analysis walks.
+///
+/// Tree-sitter ASTs from well-formed source files are typically <100
+/// deep. A bound of 256 leaves comfortable headroom for legitimately
+/// deep code while ensuring that pathological inputs (mismatched
+/// language, fuzzed inputs, F-bounded generics) cannot blow the
+/// rayon worker stack, which is small (~512KB) by default. On hit,
+/// recursion stops early and any partial results gathered so far are
+/// returned. See `java-debt-stackoverflow-v1`.
+const DEBT_MAX_AST_DEPTH: usize = 256;
+
 // =============================================================================
 // Enums
 // =============================================================================
@@ -932,13 +943,15 @@ fn extract_function_infos_for_debt(
     let mut functions = Vec::new();
 
     match language {
-        Language::Python => extract_python_functions_for_debt(root, source, &mut functions, None),
+        Language::Python => {
+            extract_python_functions_for_debt(root, source, &mut functions, None, 0)
+        }
         Language::TypeScript | Language::JavaScript => {
-            extract_ts_functions_for_debt(root, source, &mut functions, None)
+            extract_ts_functions_for_debt(root, source, &mut functions, None, 0)
         }
         Language::Go => extract_go_functions_for_debt(root, source, &mut functions),
-        Language::Rust => extract_rust_functions_for_debt(root, source, &mut functions, None),
-        Language::Java => extract_java_functions_for_debt(root, source, &mut functions, None),
+        Language::Rust => extract_rust_functions_for_debt(root, source, &mut functions, None, 0),
+        Language::Java => extract_java_functions_for_debt(root, source, &mut functions, None, 0),
         _ => {} // Unsupported language - return empty
     }
 
@@ -946,12 +959,20 @@ fn extract_function_infos_for_debt(
 }
 
 /// Extract Python functions for debt analysis
+///
+/// Recursion is bounded by `DEBT_MAX_AST_DEPTH` to prevent stack
+/// overflows when fed pathologically deep ASTs (e.g. wrong-language
+/// override). On hit, returns with whatever has been gathered so far.
 fn extract_python_functions_for_debt(
     node: Node,
     source: &str,
     functions: &mut Vec<FunctionInfoForDebt>,
     class_name: Option<&str>,
+    depth: usize,
 ) {
+    if depth > DEBT_MAX_AST_DEPTH {
+        return;
+    }
     let mut cursor = node.walk();
 
     for child in node.children(&mut cursor) {
@@ -980,14 +1001,20 @@ fn extract_python_functions_for_debt(
                 if let Some(name_node) = child.child_by_field_name("name") {
                     let cls_name = get_node_text(&name_node, source);
                     if let Some(body) = child.child_by_field_name("body") {
-                        extract_python_functions_for_debt(body, source, functions, Some(&cls_name));
+                        extract_python_functions_for_debt(
+                            body,
+                            source,
+                            functions,
+                            Some(&cls_name),
+                            depth + 1,
+                        );
                     }
                 }
             }
             _ => {
                 // Recurse into other nodes (but not class bodies, handled above)
                 if class_name.is_none() {
-                    extract_python_functions_for_debt(child, source, functions, None);
+                    extract_python_functions_for_debt(child, source, functions, None, depth + 1);
                 }
             }
         }
@@ -1062,12 +1089,18 @@ fn extract_python_params_for_debt(node: &Node, source: &str) -> Vec<String> {
 }
 
 /// Extract TypeScript/JavaScript functions for debt analysis
+///
+/// Recursion bounded by `DEBT_MAX_AST_DEPTH`.
 fn extract_ts_functions_for_debt(
     node: Node,
     source: &str,
     functions: &mut Vec<FunctionInfoForDebt>,
     class_name: Option<&str>,
+    depth: usize,
 ) {
+    if depth > DEBT_MAX_AST_DEPTH {
+        return;
+    }
     let mut cursor = node.walk();
 
     for child in node.children(&mut cursor) {
@@ -1086,13 +1119,19 @@ fn extract_ts_functions_for_debt(
                 if let Some(name_node) = child.child_by_field_name("name") {
                     let cls_name = get_node_text(&name_node, source);
                     if let Some(body) = child.child_by_field_name("body") {
-                        extract_ts_functions_for_debt(body, source, functions, Some(&cls_name));
+                        extract_ts_functions_for_debt(
+                            body,
+                            source,
+                            functions,
+                            Some(&cls_name),
+                            depth + 1,
+                        );
                     }
                 }
             }
             _ => {
                 if class_name.is_none() {
-                    extract_ts_functions_for_debt(child, source, functions, None);
+                    extract_ts_functions_for_debt(child, source, functions, None, depth + 1);
                 }
             }
         }
@@ -1250,12 +1289,17 @@ fn extract_go_params_for_debt(node: &Node, source: &str) -> Vec<String> {
 }
 
 /// Extract Rust functions for debt analysis
+/// Recursion bounded by `DEBT_MAX_AST_DEPTH`.
 fn extract_rust_functions_for_debt(
     node: Node,
     source: &str,
     functions: &mut Vec<FunctionInfoForDebt>,
     impl_name: Option<&str>,
+    depth: usize,
 ) {
+    if depth > DEBT_MAX_AST_DEPTH {
+        return;
+    }
     let mut cursor = node.walk();
 
     for child in node.children(&mut cursor) {
@@ -1270,13 +1314,19 @@ fn extract_rust_functions_for_debt(
                 if let Some(type_node) = child.child_by_field_name("type") {
                     let type_name = get_node_text(&type_node, source);
                     if let Some(body) = child.child_by_field_name("body") {
-                        extract_rust_functions_for_debt(body, source, functions, Some(&type_name));
+                        extract_rust_functions_for_debt(
+                            body,
+                            source,
+                            functions,
+                            Some(&type_name),
+                            depth + 1,
+                        );
                     }
                 }
             }
             _ => {
                 if impl_name.is_none() {
-                    extract_rust_functions_for_debt(child, source, functions, None);
+                    extract_rust_functions_for_debt(child, source, functions, None, depth + 1);
                 }
             }
         }
@@ -1339,12 +1389,19 @@ fn extract_rust_params_for_debt(node: &Node, source: &str) -> Vec<String> {
 }
 
 /// Extract Java functions for debt analysis
+/// Recursion bounded by `DEBT_MAX_AST_DEPTH`. This is the path that
+/// originally triggered the `java-debt-stackoverflow-v1` SIGABRT when
+/// non-Java files were force-parsed as Java under `--lang java`.
 fn extract_java_functions_for_debt(
     node: Node,
     source: &str,
     functions: &mut Vec<FunctionInfoForDebt>,
     class_name: Option<&str>,
+    depth: usize,
 ) {
+    if depth > DEBT_MAX_AST_DEPTH {
+        return;
+    }
     let mut cursor = node.walk();
 
     for child in node.children(&mut cursor) {
@@ -1359,13 +1416,19 @@ fn extract_java_functions_for_debt(
                 if let Some(name_node) = child.child_by_field_name("name") {
                     let cls_name = get_node_text(&name_node, source);
                     if let Some(body) = child.child_by_field_name("body") {
-                        extract_java_functions_for_debt(body, source, functions, Some(&cls_name));
+                        extract_java_functions_for_debt(
+                            body,
+                            source,
+                            functions,
+                            Some(&cls_name),
+                            depth + 1,
+                        );
                     }
                 }
             }
             _ => {
                 if class_name.is_none() {
-                    extract_java_functions_for_debt(child, source, functions, None);
+                    extract_java_functions_for_debt(child, source, functions, None, depth + 1);
                 }
             }
         }
@@ -1687,6 +1750,20 @@ fn get_function_body<'a>(node: &Node<'a>, language: Language) -> Option<Node<'a>
 
 /// Recursively walk the AST and calculate max nesting depth
 fn walk_nesting_depth(node: &Node, nesting_kinds: &[&str], current_depth: usize) -> usize {
+    walk_nesting_depth_bounded(node, nesting_kinds, current_depth, 0)
+}
+
+/// Recursive helper bounded by `DEBT_MAX_AST_DEPTH`.
+///
+/// `recursion_depth` tracks AST traversal depth (NOT logical nesting
+/// depth — those are independent). On hit, recursion stops and the
+/// best `current_depth` seen so far is returned.
+fn walk_nesting_depth_bounded(
+    node: &Node,
+    nesting_kinds: &[&str],
+    current_depth: usize,
+    recursion_depth: usize,
+) -> usize {
     let kind = node.kind();
     let new_depth = if nesting_kinds.contains(&kind) {
         current_depth + 1
@@ -1694,12 +1771,17 @@ fn walk_nesting_depth(node: &Node, nesting_kinds: &[&str], current_depth: usize)
         current_depth
     };
 
+    if recursion_depth > DEBT_MAX_AST_DEPTH {
+        return new_depth;
+    }
+
     let mut max_depth = new_depth;
 
     // Recurse into children
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        let child_max = walk_nesting_depth(&child, nesting_kinds, new_depth);
+        let child_max =
+            walk_nesting_depth_bounded(&child, nesting_kinds, new_depth, recursion_depth + 1);
         max_depth = max_depth.max(child_max);
     }
 
@@ -1827,20 +1909,26 @@ fn find_missing_docs_inner(
 
     // Currently only Python is fully supported for docstring detection
     if language == Language::Python {
-        find_python_missing_docs(&root, source, filepath, &mut issues, None);
+        find_python_missing_docs(&root, source, filepath, &mut issues, None, 0);
     }
 
     issues
 }
 
 /// Find Python functions and classes missing documentation
+///
+/// Recursion bounded by `DEBT_MAX_AST_DEPTH`.
 fn find_python_missing_docs(
     node: &Node,
     source: &str,
     filepath: &Path,
     issues: &mut Vec<DebtIssue>,
     class_name: Option<&str>,
+    depth: usize,
 ) {
+    if depth > DEBT_MAX_AST_DEPTH {
+        return;
+    }
     let mut cursor = node.walk();
 
     for child in node.children(&mut cursor) {
@@ -1854,17 +1942,17 @@ fn find_python_missing_docs(
                     if def.kind() == "function_definition" {
                         check_python_function_docs(&def, source, filepath, issues, class_name);
                     } else if def.kind() == "class_definition" {
-                        check_python_class_docs(&def, source, filepath, issues);
+                        check_python_class_docs(&def, source, filepath, issues, depth + 1);
                     }
                 }
             }
             "class_definition" => {
-                check_python_class_docs(&child, source, filepath, issues);
+                check_python_class_docs(&child, source, filepath, issues, depth + 1);
             }
             _ => {
                 // Recurse into other nodes (but not class bodies, handled separately)
                 if class_name.is_none() {
-                    find_python_missing_docs(&child, source, filepath, issues, None);
+                    find_python_missing_docs(&child, source, filepath, issues, None, depth + 1);
                 }
             }
         }
@@ -1927,11 +2015,15 @@ fn check_python_function_docs(
 }
 
 /// Check if a Python class has documentation and recurse into methods
+///
+/// `depth` is the AST recursion depth carried from the caller, used to
+/// bound transitive recursion via `find_python_missing_docs`.
 fn check_python_class_docs(
     node: &Node,
     source: &str,
     filepath: &Path,
     issues: &mut Vec<DebtIssue>,
+    depth: usize,
 ) {
     if let Some(name_node) = node.child_by_field_name("name") {
         let name = get_node_text(&name_node, source);
@@ -1962,7 +2054,7 @@ fn check_python_class_docs(
 
         // Check methods within this class
         if let Some(body) = node.child_by_field_name("body") {
-            find_python_missing_docs(&body, source, filepath, issues, Some(&name));
+            find_python_missing_docs(&body, source, filepath, issues, Some(&name), depth + 1);
         }
     }
 }
@@ -2170,18 +2262,24 @@ fn extract_classes_for_lcom4(
     let mut classes = Vec::new();
 
     if language == Language::Python {
-        extract_python_classes_for_lcom4(root, source, &mut classes);
+        extract_python_classes_for_lcom4(root, source, &mut classes, 0);
     }
 
     classes
 }
 
 /// Extract Python classes for LCOM4 analysis
+///
+/// Recursion bounded by `DEBT_MAX_AST_DEPTH`.
 fn extract_python_classes_for_lcom4(
     node: Node,
     source: &str,
     classes: &mut Vec<ClassInfoForLcom4>,
+    depth: usize,
 ) {
+    if depth > DEBT_MAX_AST_DEPTH {
+        return;
+    }
     let mut cursor = node.walk();
 
     for child in node.children(&mut cursor) {
@@ -2204,7 +2302,7 @@ fn extract_python_classes_for_lcom4(
             }
             _ => {
                 // Recurse into other nodes (module level)
-                extract_python_classes_for_lcom4(child, source, classes);
+                extract_python_classes_for_lcom4(child, source, classes, depth + 1);
             }
         }
     }
@@ -2424,10 +2522,37 @@ pub fn analyze_debt(options: DebtOptions) -> TldrResult<DebtReport> {
         // Post-filter for `.venv`/`venv`/`.tox`/`.mypy_cache` which are
         // in this module's historical SKIP_DIRS but not in the walker's
         // defaults.
+        //
+        // BUG-java-debt-stackoverflow-v1: when `--lang X` is provided,
+        // restrict to files whose extension matches X (or files with no
+        // detectable language). Previously every file in the tree —
+        // including HTML templates, .properties, .sql, .scss — was
+        // force-parsed as the requested language, producing pathological
+        // tree-sitter ASTs that blew the rayon worker stack and aborted
+        // the process with SIGABRT. Restricting by extension is also the
+        // semantically correct interpretation of `--lang`: "analyze
+        // <language> files only".
         let file_paths: Vec<PathBuf> = crate::walker::walk_project(path)
             .filter(|e| !debt_has_skipped_component(e.path(), path))
             .filter(|e| e.file_type().map(|ft| ft.is_file()).unwrap_or(false))
-            .filter(|e| Language::from_path(e.path()).is_some() || options.language.is_some())
+            .filter(|e| {
+                let detected = Language::from_path(e.path());
+                match options.language {
+                    Some(forced) => match detected {
+                        // Native match for the requested language: include.
+                        Some(d) if d == forced => true,
+                        // Different known language (e.g. .html when
+                        // --lang java was passed): exclude. Parsing it
+                        // as the wrong language would either be useless
+                        // or — for tree-sitter on extremely off-grammar
+                        // input — risk pathological deep ASTs.
+                        Some(_) => false,
+                        // Unknown extension: allow the user override.
+                        None => true,
+                    },
+                    None => detected.is_some(),
+                }
+            })
             .filter(|e| {
                 e.metadata()
                     .map(|m| m.len() <= MAX_FILE_SIZE)

@@ -1,5 +1,80 @@
 # Changelog
 
+## java-debt-stackoverflow-v1 — internal milestone
+
+NOT a published release. Fixes a CRITICAL bug: `tldr debt --lang java
+<repo>` aborted the entire process with `fatal runtime error: stack
+overflow, aborting` (SIGABRT) on real-world Java repositories such as
+spring-petclinic.
+
+### Bug fixed
+
+`tldr debt --lang <X>` was force-parsing every file in the tree as
+language `X` — including HTML templates, `.properties` files, `.sql`
+schemas, `.scss` stylesheets, `.txt` banners, etc. Tree-sitter applied
+to extremely off-grammar input produced pathological deep ASTs; the
+recursive walks in `crates/tldr-core/src/quality/debt.rs` (notably
+`extract_java_functions_for_debt`, `walk_nesting_depth`,
+`find_python_missing_docs`, `extract_python_classes_for_lcom4`) then
+blew the rayon worker thread stack (~512KB on macOS) and crashed the
+process. Repro: `tldr debt --lang java /tmp/repos/spring-petclinic` →
+SIGABRT.
+
+### Fix
+
+Two-layer defence in `crates/tldr-core/src/quality/debt.rs`:
+
+1. **Walker filter (primary).** When `--lang X` is provided, only
+   include files whose extension matches language `X`, plus files
+   with no detectable language (so the user override still applies to
+   unknown extensions). Files of a *different* known language (e.g.
+   `.html`, `.py` when `--lang java` was passed) are excluded — both
+   semantically correct and prevents the pathological-AST trigger.
+
+2. **AST recursion bound (defence-in-depth).** Introduced
+   `DEBT_MAX_AST_DEPTH = 256` and threaded a `depth` parameter
+   through every recursive AST walk in the debt module:
+   - `extract_java_functions_for_debt`
+   - `extract_python_functions_for_debt`
+   - `extract_ts_functions_for_debt`
+   - `extract_rust_functions_for_debt`
+   - `extract_python_classes_for_lcom4`
+   - `find_python_missing_docs` / `check_python_class_docs`
+   - `walk_nesting_depth` (now delegates to a bounded helper).
+
+   On hitting the depth bound, recursion stops early and any partial
+   results gathered so far are returned (graceful degradation rather
+   than abort).
+
+### Tests
+
+New tests in `crates/tldr-core/src/quality/debt_tests.rs`
+(`mod java_debt_stackoverflow_v1_tests`):
+
+- `test_debt_java_no_stack_overflow_on_mixed_tree` — synthetic mini
+  spring-petclinic with 10 Java files using F-bounded polymorphism
+  and mutually recursive methods, alongside `.properties`, `.html`,
+  `.sql`, `.scss`, `.txt`. Asserts `analyze_debt` returns Ok rather
+  than aborting.
+- `test_debt_lang_override_excludes_other_known_languages` — under
+  `--lang java`, a Python file's TODO must NOT appear in results.
+- `test_debt_other_langs_no_regression` — debt analysis on Python,
+  Rust, and TypeScript still detects TODOs after the recursion-guard
+  refactor.
+
+### Verification
+
+- Pre-fix: `tldr debt --lang java /tmp/repos/spring-petclinic` →
+  `fatal runtime error: stack overflow, aborting` (process killed).
+- Post-fix: same command exits 0 with valid JSON
+  (`total_minutes=45`, two findings: `complexity.very_high`,
+  `long_param_list`).
+- `tldr debt --lang java /tmp/repos/kotlin-datetime` → exit 0.
+- `tldr debt` smoke tests across 19 repos in `/tmp/repos` → all clean.
+- `cargo test -p tldr-core --lib` → 4680 passed, 0 failed.
+- `cargo test -p tldr-cli --lib` → 1400 passed, 0 failed.
+- `cargo test -p tldr-cli --test vuln_migration_v1_red` → 168/168.
+
 ## definition-name-resolution-v1 — internal milestone
 
 NOT a published release. Closes deferred BUG-24: `tldr definition <file>

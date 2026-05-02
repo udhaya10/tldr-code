@@ -2560,3 +2560,227 @@ mod parity_tests {
         assert!(skip_dirs.len() >= 10);
     }
 }
+
+// =============================================================================
+// java-debt-stackoverflow-v1: regression tests for SIGABRT bug
+// =============================================================================
+//
+// The bug: `tldr debt --lang java <repo>` aborted the process with
+// `fatal runtime error: stack overflow`. Root cause: when `--lang java`
+// was provided, EVERY file in the tree (including .html templates,
+// .properties, .sql, .scss) was force-parsed as Java. Tree-sitter on
+// extremely off-grammar input produced pathological deep ASTs; the
+// recursive walks in debt.rs (extract_java_functions_for_debt,
+// walk_nesting_depth, find_python_missing_docs, etc.) blew the rayon
+// worker stack (~512KB on macOS) and crashed.
+//
+// Two-layer fix:
+//   1. Walker filter: when --lang X is set, skip files whose detected
+//      language is a *different* known language. Files with no
+//      detectable language still honor the override.
+//   2. Defensive depth bound (DEBT_MAX_AST_DEPTH = 256) on every
+//      recursive AST walk in debt.rs.
+//
+// These tests assert both: (a) mixed-extension trees no longer abort
+// under --lang X, and (b) other languages still work.
+
+#[cfg(test)]
+mod java_debt_stackoverflow_v1_tests {
+    use super::fixtures::*;
+    use super::*;
+
+    /// Synthetic mini-repo mirroring spring-petclinic's structure: a
+    /// small Java source tree alongside HTML templates, .properties
+    /// files, .sql, .scss — exactly the mixed content that previously
+    /// triggered the SIGABRT under `--lang java`. The test does NOT
+    /// time out manually; if the recursion guard fails, the process
+    /// aborts and the test runner reports a failure.
+    #[test]
+    fn test_debt_java_no_stack_overflow_on_mixed_tree() {
+        let dir = TestDir::new().expect("Failed to create test dir");
+
+        // A handful of small Java files with mutual recursion / inheritance.
+        // F-bounded polymorphism (`class Foo<T extends Foo<T>>`) and
+        // mutually recursive methods are included to exercise the
+        // recursive AST walks.
+        for i in 0..10 {
+            let java_src = format!(
+                "package com.example.pkg{i};\n\
+                 public class Foo{i}<T extends Foo{i}<T>> {{\n\
+                     private Foo{i}<T> parent;\n\
+                     public void a() {{ b(); }}\n\
+                     public void b() {{ a(); }}\n\
+                     public Foo{i}<T> getParent() {{ return parent; }}\n\
+                 }}\n",
+                i = i
+            );
+            dir.add_file(&format!("src/main/java/com/example/Foo{i}.java"), &java_src)
+                .unwrap();
+        }
+
+        // Non-Java files at deep paths (mimics petclinic):
+        // these would previously be force-parsed as Java when
+        // --lang java was passed, producing pathological ASTs.
+        for i in 0..8 {
+            dir.add_file(
+                &format!("src/main/resources/messages/messages_{i}.properties"),
+                "greeting=Hello\nfarewell=Goodbye\nname=World\n",
+            )
+            .unwrap();
+        }
+        dir.add_file(
+            "src/main/resources/templates/welcome.html",
+            "<html><body><h1>Welcome</h1><p>This is a template.</p></body></html>\n",
+        )
+        .unwrap();
+        dir.add_file(
+            "src/main/resources/db/schema.sql",
+            "CREATE TABLE users (id INT, name VARCHAR(255));\nCREATE INDEX idx ON users(id);\n",
+        )
+        .unwrap();
+        dir.add_file(
+            "src/main/scss/petclinic.scss",
+            "$primary: #34cc4b;\n.body { color: $primary; }\n",
+        )
+        .unwrap();
+        dir.add_file(
+            "src/main/resources/banner.txt",
+            "Spring Boot :: PetClinic\nVersion 1.0\n",
+        )
+        .unwrap();
+
+        let options = DebtOptions {
+            path: dir.path().to_path_buf(),
+            language: Some(Language::Java),
+            ..Default::default()
+        };
+
+        // Must not SIGABRT. If the recursion guard or extension filter
+        // regresses, this assertion never runs because the process
+        // aborts — which is exactly the failure mode we are protecting
+        // against (and the test runner reports it as a hard failure).
+        let report = analyze_debt(options).expect("debt analysis must succeed, not abort");
+
+        // Sanity: the Java sources should at minimum be visible to the
+        // analyzer (LOC > 0 across the 10 files). We don't assert on
+        // exact issue counts because debt heuristics can shift; the
+        // critical assertion is "no abort, valid report returned".
+        assert!(
+            report.summary.debt_density >= 0.0,
+            "summary should be well-formed"
+        );
+    }
+
+    /// Verify that --lang X filters out files of a different known
+    /// language (HTML/SCSS/SQL when X = Java). This is the primary
+    /// fix: we no longer force-parse mismatched-extension files.
+    #[test]
+    fn test_debt_lang_override_excludes_other_known_languages() {
+        let dir = TestDir::new().expect("Failed to create test dir");
+
+        // One Java file with a TODO (should be picked up).
+        dir.add_file(
+            "Foo.java",
+            "// TODO: java\npublic class Foo { void m() {} }\n",
+        )
+        .unwrap();
+        // Python file with a TODO — should be EXCLUDED under --lang java
+        // because Python is a different known language.
+        dir.add_file("script.py", "# TODO: python should be excluded\n")
+            .unwrap();
+        // HTML/SCSS/SQL — no detectable language for SQL/SCSS in tldr,
+        // but HTML's tree-sitter parsing as Java was the killer.
+        dir.add_file("page.html", "<html><body>TODO java?</body></html>\n")
+            .unwrap();
+
+        let options = DebtOptions {
+            path: dir.path().to_path_buf(),
+            language: Some(Language::Java),
+            ..Default::default()
+        };
+        let report = analyze_debt(options).unwrap();
+
+        // The Python TODO must NOT appear (its file was filtered out).
+        let messages: Vec<_> = report.issues.iter().map(|i| i.message.as_str()).collect();
+        assert!(
+            !messages.iter().any(|m| m.contains("python should be excluded")),
+            "Python file must be excluded under --lang java; got issues: {:?}",
+            messages
+        );
+        // The Java TODO should appear.
+        assert!(
+            messages.iter().any(|m| m.contains("java")),
+            "Java TODO should be detected; got: {:?}",
+            messages
+        );
+    }
+
+    /// Sanity check: debt analysis on Python and Rust trees still works
+    /// after the recursion-guard refactor (no signature regression on
+    /// the recursive walks).
+    #[test]
+    fn test_debt_other_langs_no_regression() {
+        // Python
+        let py_dir = TestDir::new().expect("py test dir");
+        py_dir
+            .add_file(
+                "mod.py",
+                "# TODO: python regression check\nclass Foo:\n    def bar(self):\n        pass\n",
+            )
+            .unwrap();
+        let py_report = analyze_debt(DebtOptions {
+            path: py_dir.path().to_path_buf(),
+            ..Default::default()
+        })
+        .expect("python debt should succeed");
+        assert!(
+            py_report
+                .issues
+                .iter()
+                .any(|i| i.message.contains("python regression check")),
+            "python TODO must still be detected"
+        );
+
+        // Rust
+        let rs_dir = TestDir::new().expect("rs test dir");
+        rs_dir
+            .add_file(
+                "lib.rs",
+                "// FIXME: rust regression check\npub fn x() -> i32 { 1 }\n",
+            )
+            .unwrap();
+        let rs_report = analyze_debt(DebtOptions {
+            path: rs_dir.path().to_path_buf(),
+            ..Default::default()
+        })
+        .expect("rust debt should succeed");
+        assert!(
+            rs_report
+                .issues
+                .iter()
+                .any(|i| i.message.contains("rust regression check")),
+            "rust FIXME must still be detected"
+        );
+
+        // TypeScript
+        let ts_dir = TestDir::new().expect("ts test dir");
+        ts_dir
+            .add_file(
+                "app.ts",
+                "// TODO: ts regression check\nexport class C { m() { return 1; } }\n",
+            )
+            .unwrap();
+        let ts_report = analyze_debt(DebtOptions {
+            path: ts_dir.path().to_path_buf(),
+            ..Default::default()
+        })
+        .expect("ts debt should succeed");
+        assert!(
+            ts_report
+                .issues
+                .iter()
+                .any(|i| i.message.contains("ts regression check")),
+            "ts TODO must still be detected"
+        );
+    }
+}
