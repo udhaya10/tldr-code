@@ -1,5 +1,102 @@
 # Changelog
 
+## definition-name-resolution-v1 — internal milestone
+
+NOT a published release. Closes deferred BUG-24: `tldr definition <file>
+<line> <col>` was stubbed for usage sites — it only resolved when the
+cursor sat ON a function/class declaration. Cursors on USAGE sites
+returned an opaque `<unknown at FILE:LINE:COL>` payload.
+
+### Bug fixed
+
+- **BUG-24 — `definition` failed to resolve usage sites.** Example on
+  flask:
+  - `tldr definition /tmp/repos/flask/src/flask/cli.py 41 4` →
+    resolved to `find_best_app` decl line 41 (DECL site, worked).
+  - `tldr definition /tmp/repos/flask/src/flask/cli.py 274 4` →
+    `<unknown at .../cli.py:274:4>` (USAGE site — line 274 is
+    `click.echo(...)`, cursor on `click`). The expected behaviour is
+    to resolve `click` to `import click` (line 17 in the current
+    flask source).
+  Same bug shape applied to local parameter usages, local
+  `let`/`var` bindings, and aliased imports across all languages.
+
+### Fix
+
+Replace the stub with a three-pass resolver in
+`crates/tldr-cli/src/commands/remaining/definition.rs`:
+
+1. **Local scope** (new): walk up tree-sitter ancestors from the
+   cursor; for each function/method/closure/block ancestor, scan
+   parameters and `let`/`const`/`var`/`assignment` bindings. The
+   first matching binding wins (innermost wins). Stops at nested
+   scope boundaries so an outer name can't shadow an inner binding
+   in the wrong direction.
+2. **File scope** (existing): the legacy
+   [`find_symbol_in_file`] handler — covers top-level functions,
+   classes, and Python module-level assignments.
+3. **Import scope** (new): scans `import X` / `import X as Y` /
+   `from M import Y as Z` (Python), `import X from "..."` /
+   `import { Y as Z } from "..."` / `import * as X from "..."`
+   (JS/TS), and `use ::path::X;` / `use ::path::X as Alias;`
+   (Rust). On match, returns the import line.
+
+If all three passes miss, the result is now a clear
+`<unresolved at FILE:LINE:COL — symbol 'X' not found in scope>`
+payload instead of the legacy opaque `<unknown ...>`.
+
+### Coverage by language
+
+| Language    | Pass 1 (Local) | Pass 2 (File) | Pass 3 (Import) |
+|-------------|----------------|---------------|-----------------|
+| Python      | params, `=` assignments, `for` targets | full       | `import` / `from ... import`     |
+| JavaScript  | params, `let`/`const`/`var`            | full       | `import { } from`, default, `* as` |
+| TypeScript  | params, `let`/`const`/`var`            | full       | `import { } from`, default, `* as` |
+| Rust        | params, `let` bindings                 | full       | `use ::path::Name;` (non-grouped) |
+| Go          | params, `:=` short-var-decl            | full       | (carry-forward — no Go-specific import scope) |
+| Java/C/C++/Ruby/Kotlin/Swift/Scala/PHP/Lua/Luau/Elixir/OCaml/C# | (carry-forward — local-scope unimplemented) | full | (carry-forward) |
+
+### Tests
+
+Six new unit tests in
+`crates/tldr-cli/src/commands/remaining/definition.rs`:
+
+- `test_definition_resolves_local_param` — Python parameter usage
+- `test_definition_resolves_file_scope_function` — Python file-scope function
+- `test_definition_resolves_import_alias` — Python import alias (BUG-24 repro shape)
+- `test_definition_unresolved_message` — checks the new `unresolved at` message
+- `test_definition_resolves_js_import_alias` — JS `import express from "express"`
+- `test_definition_resolves_rust_let_binding` — Rust `let counter = 42` usage
+
+### Binary verification
+
+| Case                                                  | Before                                       | After                                |
+|-------------------------------------------------------|----------------------------------------------|--------------------------------------|
+| flask cli.py:274:4 (cursor on `click`)                | `<unknown at .../cli.py:274:4>`              | `import click` line 17 (Module)      |
+| flask cli.py:262:19 (usage of `find_best_app`)        | `<unknown ...>`                              | decl line 41 (Function)              |
+| flask cli.py:41:4 (decl of `find_best_app`)           | decl line 41                                 | decl line 41 (regression OK)         |
+| express application.js:471:0 (`methods` var binding)  | `<unknown ...>`                              | `var methods = ...` line 20 (Variable) |
+| /tmp/test_unresolved.py:2:11 (nonexistent name)       | `<unknown at ...>`                           | `<...unresolved at ... — symbol 'notthere' not found in scope>` |
+
+### Carry-forwards (NOT in this milestone)
+
+- Workspace-wide cross-file resolution from a position site (the
+  CLI's existing `find_definition_by_name` already supports it via
+  `--project`, but the position-mode resolver only reuses it
+  inside Pass 2; for true cross-file go-to-definition with
+  module-aware import following, see the daemon `ModuleIndex`).
+- Local-scope resolution for the remaining 13 languages (Java,
+  C, C++, Ruby, Kotlin, Swift, Scala, PHP, Lua, Luau, Elixir,
+  OCaml, C#). They fall through cleanly to file/import passes,
+  but param/local-binding usages still return `<unresolved at ...>`.
+- Grouped Rust `use a::{b, c};` imports (we skip lines containing
+  `{`).
+- Multi-line JS/TS `import { a,\n b\n } from ...` (line-based
+  scanner).
+- Go-specific import-scope resolution (Go uses `import "path"`
+  and dotted-path access; bound names are package roots, which
+  vary by tooling).
+
 ## canonical-function-enumerator-v1 — internal milestone
 
 NOT a published release. Closes deferred BUG-01: `health`, `structure`,

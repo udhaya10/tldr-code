@@ -250,11 +250,23 @@ impl DefinitionArgs {
                 &lang_hint,
             ) {
                 Ok(result) => result,
-                Err(_) => {
-                    // Return a graceful "not found" result instead of failing
+                Err(e) => {
+                    // Return a graceful "not found" result instead of failing.
+                    // The new resolver (definition-name-resolution-v1) emits
+                    // an `unresolved at FILE:LINE:COL — symbol 'X' not found
+                    // in scope` message via `RemainingError::InvalidArgument`
+                    // — surface it verbatim in `symbol.name` so callers see
+                    // a useful message, not the legacy opaque
+                    // `<unknown at ...>` payload.
+                    let msg = e.to_string();
+                    let display_name = if msg.contains("unresolved at") {
+                        format!("<{}>", msg)
+                    } else {
+                        format!("<unknown at {}:{}:{}>", file.display(), line, column)
+                    };
                     DefinitionResult {
                         symbol: SymbolInfo {
-                            name: format!("<unknown at {}:{}:{}>", file.display(), line, column),
+                            name: display_name,
                             kind: SymbolKind::Variable,
                             location: Some(Location::with_column(
                                 file.display().to_string(),
@@ -356,6 +368,24 @@ pub fn find_definition_by_name(
 }
 
 /// Find definition by position (line, column)
+///
+/// Implements a three-pass resolver (`definition-name-resolution-v1`) so
+/// that cursors on USAGE sites resolve, not just on declaration sites:
+///
+/// 1. **Local scope**: walk up tree-sitter ancestors from the cursor and
+///    look at parameter lists / let-bindings / var declarations of each
+///    enclosing function/method/block. If a binding name matches the
+///    symbol text, return that binding's location.
+/// 2. **File scope**: scan the file for top-level definitions
+///    (functions, classes, Python module-level assignments). Reuses the
+///    existing [`find_symbol_in_file`] helper.
+/// 3. **Import scope**: if the symbol matches an `import` / `use`
+///    alias, return the import line (so `click` in `click.echo(...)`
+///    resolves to `import click`).
+///
+/// If none match the result is a clear `<unresolved at FILE:LINE:COL —
+/// symbol 'X' not found in scope>` payload, not the legacy
+/// `<unknown ...>` opaque.
 pub fn find_definition_by_position(
     file: &Path,
     line: u32,
@@ -377,8 +407,795 @@ pub fn find_definition_by_position(
     // Find symbol at position
     let symbol_name = find_symbol_at_position(&source, line, column, language, file)?;
 
-    // Now find definition of that symbol
-    find_definition_by_name(&symbol_name, file, project, lang_hint)
+    // Pass 1: try local-scope resolution from the cursor position.
+    // This catches usages of parameters and locally-declared variables
+    // before we fall through to the file/import scopes.
+    if let Some(result) =
+        resolve_local_scope(&source, line, column, &symbol_name, language, file)?
+    {
+        return Ok(result);
+    }
+
+    // Pass 2 (+ optional cross-file): existing name-based search. This
+    // covers top-level functions, classes, and Python module-level
+    // assignments.
+    match find_definition_by_name(&symbol_name, file, project, lang_hint) {
+        Ok(result) => Ok(result),
+        Err(RemainingError::SymbolNotFound { .. }) => {
+            // Pass 3: import-scope resolution. If the cursor sits on an
+            // imported alias (`click` in `click.echo(...)`), resolve to
+            // the `import` line.
+            if let Some(result) = resolve_import_scope(&source, &symbol_name, language, file)? {
+                return Ok(result);
+            }
+            // Total miss — surface a clearer message than the legacy
+            // `<unknown>` shape.
+            Err(RemainingError::invalid_argument(format!(
+                "unresolved at {}:{}:{} — symbol '{}' not found in scope",
+                file.display(),
+                line,
+                column,
+                symbol_name
+            )))
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Pass 1: local-scope resolution.
+///
+/// Walks up tree-sitter ancestors from the cursor node. For each
+/// function/method/closure/block ancestor, scans its parameters and
+/// variable bindings. The first matching binding wins (innermost
+/// scope).
+///
+/// Currently covers Python (parameters, simple `=` assignments), the
+/// JS/TS family (parameters, `let`/`const`/`var`), and Rust
+/// (parameters, `let` bindings). Other languages fall through to the
+/// next pass without resolving locally — this is the documented
+/// carry-forward.
+fn resolve_local_scope(
+    source: &str,
+    line: u32,
+    column: u32,
+    symbol: &str,
+    language: Language,
+    file: &Path,
+) -> RemainingResult<Option<DefinitionResult>> {
+    // Only the languages with implemented binding scrapers participate.
+    // Other languages return None, falling through to file/import passes.
+    if !matches!(
+        language,
+        Language::Python
+            | Language::JavaScript
+            | Language::TypeScript
+            | Language::Rust
+            | Language::Go
+    ) {
+        return Ok(None);
+    }
+
+    let tree = PARSER_POOL
+        .parse_with_path(source, language, Some(file))
+        .map_err(|e| RemainingError::parse_error(file.to_path_buf(), e.to_string()))?;
+    let root = tree.root_node();
+    let target_line = line.saturating_sub(1) as usize;
+    let target_col = column as usize;
+    let point = tree_sitter::Point::new(target_line, target_col);
+    let Some(start_node) = root.descendant_for_point_range(point, point) else {
+        return Ok(None);
+    };
+
+    // Walk up ancestors, scanning each scope-introducing ancestor for
+    // bindings.
+    let mut current = Some(start_node);
+    while let Some(node) = current {
+        if is_scope_node(node.kind(), language) {
+            if let Some(loc) = scan_scope_for_binding(node, source, symbol, language, file) {
+                return Ok(Some(DefinitionResult {
+                    symbol: SymbolInfo {
+                        name: symbol.to_string(),
+                        kind: loc.0,
+                        location: Some(loc.1.clone()),
+                        type_annotation: None,
+                        docstring: None,
+                        is_builtin: false,
+                        module: None,
+                    },
+                    definition: Some(loc.1),
+                    type_definition: None,
+                }));
+            }
+        }
+        current = node.parent();
+    }
+
+    Ok(None)
+}
+
+/// Returns true for tree-sitter node kinds that introduce a new
+/// lexical scope in the given language. Used by
+/// [`resolve_local_scope`] to bound the per-scope binding scan.
+fn is_scope_node(kind: &str, language: Language) -> bool {
+    match language {
+        Language::Python => matches!(
+            kind,
+            "function_definition" | "lambda" | "module"
+        ),
+        Language::JavaScript | Language::TypeScript => matches!(
+            kind,
+            "function_declaration"
+                | "function"
+                | "function_expression"
+                | "arrow_function"
+                | "method_definition"
+                | "method_signature"
+                | "statement_block"
+                | "program"
+        ),
+        Language::Rust => matches!(
+            kind,
+            "function_item"
+                | "closure_expression"
+                | "block"
+                | "source_file"
+        ),
+        Language::Go => matches!(
+            kind,
+            "function_declaration" | "method_declaration" | "block" | "source_file"
+        ),
+        _ => false,
+    }
+}
+
+/// Scan the given scope `node` for a binding with name `symbol`.
+/// Returns the kind + location of the first match found (intra-scope
+/// order, recursive into bindings only).
+fn scan_scope_for_binding(
+    node: Node,
+    source: &str,
+    symbol: &str,
+    language: Language,
+    file: &Path,
+) -> Option<(SymbolKind, Location)> {
+    // Search only the scope's immediate body, but recurse into binding
+    // forms. We delegate to a language-specific recursive helper.
+    let bytes = source.as_bytes();
+    match language {
+        Language::Python => scan_python_scope(node, bytes, symbol, file),
+        Language::JavaScript | Language::TypeScript => scan_jslike_scope(node, bytes, symbol, file),
+        Language::Rust => scan_rust_scope(node, bytes, symbol, file),
+        Language::Go => scan_go_scope(node, bytes, symbol, file),
+        _ => None,
+    }
+}
+
+/// Python-specific scope binding scanner.
+///
+/// Looks at the scope node's parameter list (when it is a function or
+/// lambda) and recursively at `assignment` and `for` statements within
+/// the body. Stops at nested function/class/lambda boundaries to
+/// preserve lexical scoping.
+fn scan_python_scope(
+    node: Node,
+    src: &[u8],
+    symbol: &str,
+    file: &Path,
+) -> Option<(SymbolKind, Location)> {
+    // Parameters first (only meaningful on function_definition / lambda).
+    if matches!(node.kind(), "function_definition" | "lambda") {
+        if let Some(params) = node.child_by_field_name("parameters") {
+            if let Some(loc) = python_scan_params(params, src, symbol, file) {
+                return Some(loc);
+            }
+        }
+    }
+    // Walk body looking for assignments / for-targets, but don't descend
+    // into nested function/class/lambda scopes.
+    let body = node
+        .child_by_field_name("body")
+        .or_else(|| Some(node));
+    if let Some(body) = body {
+        let mut cursor = body.walk();
+        for child in body.children(&mut cursor) {
+            if let Some(loc) = python_walk_for_binding(child, src, symbol, file) {
+                return Some(loc);
+            }
+        }
+    }
+    None
+}
+
+fn python_scan_params(
+    params: Node,
+    src: &[u8],
+    symbol: &str,
+    file: &Path,
+) -> Option<(SymbolKind, Location)> {
+    let mut cursor = params.walk();
+    for child in params.children(&mut cursor) {
+        match child.kind() {
+            "identifier" => {
+                if child.utf8_text(src).ok()? == symbol {
+                    return Some(make_param_location(child, file));
+                }
+            }
+            // Default-argument and typed-parameter shapes wrap the name.
+            "default_parameter"
+            | "typed_parameter"
+            | "typed_default_parameter"
+            | "list_splat_pattern"
+            | "dictionary_splat_pattern" => {
+                let name_node = match child.child_by_field_name("name") {
+                    Some(n) => Some(n),
+                    None => {
+                        // Fallback: first identifier child.
+                        let mut c = child.walk();
+                        let found = child
+                            .children(&mut c)
+                            .find(|n| n.kind() == "identifier");
+                        found
+                    }
+                };
+                if let Some(name) = name_node {
+                    if name.utf8_text(src).ok()? == symbol {
+                        return Some(make_param_location(name, file));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn python_walk_for_binding(
+    node: Node,
+    src: &[u8],
+    symbol: &str,
+    file: &Path,
+) -> Option<(SymbolKind, Location)> {
+    match node.kind() {
+        // Don't descend into nested scopes — they have their own bindings.
+        "function_definition" | "class_definition" | "lambda" => None,
+        "assignment" => {
+            if let Some(left) = node.child_by_field_name("left") {
+                if let Some(loc) = python_match_target(left, src, symbol, file) {
+                    return Some(loc);
+                }
+            }
+            None
+        }
+        "for_statement" => {
+            if let Some(left) = node.child_by_field_name("left") {
+                if let Some(loc) = python_match_target(left, src, symbol, file) {
+                    return Some(loc);
+                }
+            }
+            // Continue into body.
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                if let Some(loc) = python_walk_for_binding(child, src, symbol, file) {
+                    return Some(loc);
+                }
+            }
+            None
+        }
+        _ => {
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                if let Some(loc) = python_walk_for_binding(child, src, symbol, file) {
+                    return Some(loc);
+                }
+            }
+            None
+        }
+    }
+}
+
+fn python_match_target(
+    target: Node,
+    src: &[u8],
+    symbol: &str,
+    file: &Path,
+) -> Option<(SymbolKind, Location)> {
+    match target.kind() {
+        "identifier" => {
+            if target.utf8_text(src).ok()? == symbol {
+                Some((
+                    SymbolKind::Variable,
+                    Location::with_column(
+                        file.display().to_string(),
+                        target.start_position().row as u32 + 1,
+                        target.start_position().column as u32,
+                    ),
+                ))
+            } else {
+                None
+            }
+        }
+        // Tuple / list patterns: `a, b = ...`
+        "pattern_list" | "tuple_pattern" | "list_pattern" => {
+            let mut cursor = target.walk();
+            for child in target.children(&mut cursor) {
+                if let Some(loc) = python_match_target(child, src, symbol, file) {
+                    return Some(loc);
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+fn make_param_location(name: Node, file: &Path) -> (SymbolKind, Location) {
+    (
+        SymbolKind::Parameter,
+        Location::with_column(
+            file.display().to_string(),
+            name.start_position().row as u32 + 1,
+            name.start_position().column as u32,
+        ),
+    )
+}
+
+/// JS/TS scope binding scanner. Handles formal parameters and
+/// `let`/`const`/`var` declarations.
+fn scan_jslike_scope(
+    node: Node,
+    src: &[u8],
+    symbol: &str,
+    file: &Path,
+) -> Option<(SymbolKind, Location)> {
+    if let Some(params) = node.child_by_field_name("parameters") {
+        if let Some(loc) = jslike_scan_params(params, src, symbol, file) {
+            return Some(loc);
+        }
+    }
+    // Walk body for variable_declarations.
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if let Some(loc) = jslike_walk_for_binding(child, src, symbol, file) {
+            return Some(loc);
+        }
+    }
+    None
+}
+
+fn jslike_scan_params(
+    params: Node,
+    src: &[u8],
+    symbol: &str,
+    file: &Path,
+) -> Option<(SymbolKind, Location)> {
+    let mut cursor = params.walk();
+    for child in params.children(&mut cursor) {
+        match child.kind() {
+            "identifier" | "shorthand_property_identifier_pattern" => {
+                if child.utf8_text(src).ok()? == symbol {
+                    return Some(make_param_location(child, file));
+                }
+            }
+            "required_parameter" | "optional_parameter" | "rest_pattern"
+            | "assignment_pattern" => {
+                let pat_node = match child.child_by_field_name("pattern") {
+                    Some(n) => Some(n),
+                    None => {
+                        let mut c = child.walk();
+                        let found = child
+                            .children(&mut c)
+                            .find(|n| n.kind() == "identifier");
+                        found
+                    }
+                };
+                if let Some(pat) = pat_node {
+                    if pat.kind() == "identifier" && pat.utf8_text(src).ok()? == symbol {
+                        return Some(make_param_location(pat, file));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn jslike_walk_for_binding(
+    node: Node,
+    src: &[u8],
+    symbol: &str,
+    file: &Path,
+) -> Option<(SymbolKind, Location)> {
+    match node.kind() {
+        // Don't descend into nested scopes.
+        "function_declaration" | "function" | "function_expression" | "arrow_function"
+        | "method_definition" | "method_signature" | "class_declaration" => None,
+        "lexical_declaration" | "variable_declaration" => {
+            // children are variable_declarators
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                if child.kind() == "variable_declarator" {
+                    if let Some(name) = child.child_by_field_name("name") {
+                        if name.kind() == "identifier"
+                            && name.utf8_text(src).ok()? == symbol
+                        {
+                            return Some((
+                                SymbolKind::Variable,
+                                Location::with_column(
+                                    file.display().to_string(),
+                                    name.start_position().row as u32 + 1,
+                                    name.start_position().column as u32,
+                                ),
+                            ));
+                        }
+                    }
+                }
+            }
+            None
+        }
+        _ => {
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                if let Some(loc) = jslike_walk_for_binding(child, src, symbol, file) {
+                    return Some(loc);
+                }
+            }
+            None
+        }
+    }
+}
+
+/// Rust scope binding scanner. Handles function parameters and
+/// `let` bindings.
+fn scan_rust_scope(
+    node: Node,
+    src: &[u8],
+    symbol: &str,
+    file: &Path,
+) -> Option<(SymbolKind, Location)> {
+    if matches!(node.kind(), "function_item" | "closure_expression") {
+        if let Some(params) = node.child_by_field_name("parameters") {
+            if let Some(loc) = rust_scan_params(params, src, symbol, file) {
+                return Some(loc);
+            }
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if let Some(loc) = rust_walk_for_binding(child, src, symbol, file) {
+            return Some(loc);
+        }
+    }
+    None
+}
+
+fn rust_scan_params(
+    params: Node,
+    src: &[u8],
+    symbol: &str,
+    file: &Path,
+) -> Option<(SymbolKind, Location)> {
+    let mut cursor = params.walk();
+    for child in params.children(&mut cursor) {
+        if child.kind() == "parameter" {
+            if let Some(pat) = child.child_by_field_name("pattern") {
+                if pat.kind() == "identifier" && pat.utf8_text(src).ok()? == symbol {
+                    return Some(make_param_location(pat, file));
+                }
+            }
+        }
+    }
+    None
+}
+
+fn rust_walk_for_binding(
+    node: Node,
+    src: &[u8],
+    symbol: &str,
+    file: &Path,
+) -> Option<(SymbolKind, Location)> {
+    match node.kind() {
+        // Don't descend into nested scopes.
+        "function_item" | "closure_expression" | "impl_item" => None,
+        "let_declaration" => {
+            if let Some(pat) = node.child_by_field_name("pattern") {
+                if pat.kind() == "identifier" && pat.utf8_text(src).ok()? == symbol {
+                    return Some((
+                        SymbolKind::Variable,
+                        Location::with_column(
+                            file.display().to_string(),
+                            pat.start_position().row as u32 + 1,
+                            pat.start_position().column as u32,
+                        ),
+                    ));
+                }
+            }
+            None
+        }
+        _ => {
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                if let Some(loc) = rust_walk_for_binding(child, src, symbol, file) {
+                    return Some(loc);
+                }
+            }
+            None
+        }
+    }
+}
+
+/// Go scope binding scanner. Handles function parameters and
+/// short variable declarations (`x := ...`).
+fn scan_go_scope(
+    node: Node,
+    src: &[u8],
+    symbol: &str,
+    file: &Path,
+) -> Option<(SymbolKind, Location)> {
+    if matches!(node.kind(), "function_declaration" | "method_declaration") {
+        if let Some(params) = node.child_by_field_name("parameters") {
+            let mut cursor = params.walk();
+            for child in params.children(&mut cursor) {
+                if child.kind() == "parameter_declaration" {
+                    let mut c = child.walk();
+                    for n in child.children(&mut c) {
+                        if n.kind() == "identifier" && n.utf8_text(src).ok()? == symbol {
+                            return Some(make_param_location(n, file));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if let Some(loc) = go_walk_for_binding(child, src, symbol, file) {
+            return Some(loc);
+        }
+    }
+    None
+}
+
+fn go_walk_for_binding(
+    node: Node,
+    src: &[u8],
+    symbol: &str,
+    file: &Path,
+) -> Option<(SymbolKind, Location)> {
+    match node.kind() {
+        "function_declaration" | "method_declaration" | "func_literal" => None,
+        "short_var_declaration" | "var_declaration" => {
+            if let Some(left) = node.child_by_field_name("left") {
+                let mut c = left.walk();
+                for n in left.children(&mut c) {
+                    if n.kind() == "identifier" && n.utf8_text(src).ok()? == symbol {
+                        return Some((
+                            SymbolKind::Variable,
+                            Location::with_column(
+                                file.display().to_string(),
+                                n.start_position().row as u32 + 1,
+                                n.start_position().column as u32,
+                            ),
+                        ));
+                    }
+                }
+            }
+            None
+        }
+        _ => {
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                if let Some(loc) = go_walk_for_binding(child, src, symbol, file) {
+                    return Some(loc);
+                }
+            }
+            None
+        }
+    }
+}
+
+/// Pass 3: import-scope resolution.
+///
+/// Scans the source for `import` / `from ... import` (Python),
+/// `import { ... } from ...` / `import X from ...` (JS/TS), and
+/// `use ::path::X;` (Rust) statements, returning the line of the
+/// matching alias. This handles the canonical case from the bug
+/// report (`click` in `click.echo(...)` resolves to `import click`
+/// on line 1).
+fn resolve_import_scope(
+    source: &str,
+    symbol: &str,
+    language: Language,
+    file: &Path,
+) -> RemainingResult<Option<DefinitionResult>> {
+    let line_idx = match language {
+        Language::Python => python_import_line(source, symbol),
+        Language::JavaScript | Language::TypeScript => jslike_import_line(source, symbol),
+        Language::Rust => rust_use_line(source, symbol),
+        _ => None,
+    };
+
+    let Some((line_no, col)) = line_idx else {
+        return Ok(None);
+    };
+
+    let location = Location::with_column(file.display().to_string(), line_no, col);
+    Ok(Some(DefinitionResult {
+        symbol: SymbolInfo {
+            name: symbol.to_string(),
+            kind: SymbolKind::Module,
+            location: Some(location.clone()),
+            type_annotation: None,
+            docstring: None,
+            is_builtin: false,
+            module: None,
+        },
+        definition: Some(location),
+        type_definition: None,
+    }))
+}
+
+/// Find the (1-indexed line, column) of a Python import that exposes
+/// `symbol`. Supports `import X`, `import X as Y`, `import a.b.c`,
+/// `from M import X, Y`, `from M import X as Z`.
+fn python_import_line(source: &str, symbol: &str) -> Option<(u32, u32)> {
+    for (idx, raw) in source.lines().enumerate() {
+        let line = raw.trim_start();
+        let leading = raw.len() - line.len();
+        if let Some(rest) = line.strip_prefix("import ") {
+            for piece in rest.split(',') {
+                let piece = piece.trim();
+                if piece.is_empty() {
+                    continue;
+                }
+                // `X as Y` — alias is what's bound.
+                let bound = if let Some((_, alias)) = piece.split_once(" as ") {
+                    alias.trim()
+                } else {
+                    // `a.b.c` binds top-level `a`.
+                    piece.split('.').next().unwrap_or(piece).trim()
+                };
+                if bound == symbol {
+                    return Some((idx as u32 + 1, leading as u32));
+                }
+            }
+        } else if line.starts_with("from ") {
+            if let Some(import_idx) = line.find(" import ") {
+                let names_str = &line[import_idx + 8..];
+                for piece in names_str.split(',') {
+                    let piece = piece.trim().trim_start_matches('(').trim_end_matches(')');
+                    if piece.is_empty() || piece == "*" {
+                        continue;
+                    }
+                    let bound = if let Some((_, alias)) = piece.split_once(" as ") {
+                        alias.trim()
+                    } else {
+                        piece.trim()
+                    };
+                    if bound == symbol {
+                        return Some((idx as u32 + 1, leading as u32));
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Find the (1-indexed line, column) of a JS/TS `import` that
+/// exposes `symbol`. Handles default, namespace, and named imports
+/// (with `as` aliases). Best-effort, line-based — does not handle
+/// multi-line `import { ... }` blocks.
+fn jslike_import_line(source: &str, symbol: &str) -> Option<(u32, u32)> {
+    for (idx, raw) in source.lines().enumerate() {
+        let line = raw.trim_start();
+        let leading = raw.len() - line.len();
+        let body = match line.strip_prefix("import ") {
+            Some(b) => b,
+            None => continue,
+        };
+        // Strip trailing `from "..."` clause (and quoted source).
+        let body = body
+            .split(" from ")
+            .next()
+            .unwrap_or(body)
+            .trim()
+            .trim_end_matches(';')
+            .trim();
+
+        // Cases:
+        //   X                    — default import
+        //   X, { a, b as c }     — default + named
+        //   { a, b as c }        — named
+        //   * as X               — namespace
+        //   "side-effect"        — no bindings
+        if body.starts_with('"') || body.starts_with('\'') {
+            continue;
+        }
+
+        // Split off namespace `* as X`.
+        if let Some(rest) = body.strip_prefix("* as ") {
+            let bound = rest.trim().trim_end_matches(',').trim();
+            if bound == symbol {
+                return Some((idx as u32 + 1, leading as u32));
+            }
+            continue;
+        }
+
+        // Default import: first token before `,` or `{`.
+        let mut remainder = body;
+        let mut pieces: Vec<&str> = Vec::new();
+        if !remainder.starts_with('{') {
+            // there's a default before `,` or `{`
+            if let Some(idx_brace) = remainder.find('{') {
+                let (default_part, rest) = remainder.split_at(idx_brace);
+                let default_name = default_part.trim().trim_end_matches(',').trim();
+                if !default_name.is_empty() {
+                    pieces.push(default_name);
+                }
+                remainder = rest;
+            } else {
+                let default_name = remainder.trim();
+                if !default_name.is_empty() {
+                    pieces.push(default_name);
+                }
+                remainder = "";
+            }
+        }
+        // Named import block.
+        if remainder.starts_with('{') {
+            let inside = remainder
+                .trim_start_matches('{')
+                .trim_end_matches('}')
+                .trim();
+            for p in inside.split(',') {
+                let p = p.trim();
+                if !p.is_empty() {
+                    pieces.push(p);
+                }
+            }
+        }
+        for piece in pieces {
+            let bound = if let Some((_, alias)) = piece.split_once(" as ") {
+                alias.trim()
+            } else {
+                piece.trim()
+            };
+            if bound == symbol {
+                return Some((idx as u32 + 1, leading as u32));
+            }
+        }
+    }
+    None
+}
+
+/// Find the (1-indexed line, column) of a Rust `use` that exposes
+/// `symbol`. Best-effort: handles `use a::b::Symbol;` and
+/// `use a::b::Symbol as Alias;` but not nested grouped (`use a::{b, c}`)
+/// — those are documented as carry-forwards.
+fn rust_use_line(source: &str, symbol: &str) -> Option<(u32, u32)> {
+    for (idx, raw) in source.lines().enumerate() {
+        let line = raw.trim_start();
+        let leading = raw.len() - line.len();
+        let Some(rest) = line.strip_prefix("use ") else {
+            continue;
+        };
+        let rest = rest.trim_end_matches(';').trim();
+        // Skip grouped imports (e.g. `use a::{b, c}`).
+        if rest.contains('{') {
+            continue;
+        }
+        // Last segment is the bound name (modulo `as`).
+        let bound = if let Some((_, alias)) = rest.split_once(" as ") {
+            alias.trim()
+        } else {
+            rest.rsplit("::").next().unwrap_or(rest).trim()
+        };
+        if bound == symbol {
+            return Some((idx as u32 + 1, leading as u32));
+        }
+    }
+    None
 }
 
 /// Find symbol name at a given position.
@@ -1409,5 +2226,180 @@ from . import types
                 .unwrap_or_else(|e| panic!("detect_language failed for {}: {:?}", path, e));
             assert_eq!(got, *expected, "wrong language for {}", path);
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // definition-name-resolution-v1 — three-pass resolver tests
+    //
+    // Before this milestone, `tldr definition <file> <line> <col>` only
+    // resolved when the cursor sat ON a function/class declaration. Cursors
+    // on USAGE sites returned `<unknown at FILE:LINE:COL>`. The three-pass
+    // resolver fixes that:
+    //   Pass 1 — local scope (params, let/var bindings)
+    //   Pass 2 — file scope (existing handler)
+    //   Pass 3 — import scope (`import X` aliases)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_definition_resolves_local_param() {
+        // Cursor on the usage of a parameter `x` in `def foo(x): return x + 1`
+        // should resolve to the parameter, not return <unknown>.
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("local.py");
+        // Line 1: def foo(x):
+        // Line 2:     return x + 1
+        fs::write(&file, "def foo(x):\n    return x + 1\n").unwrap();
+
+        // Cursor on `x` in `return x + 1` — column 11 of line 2.
+        let result = find_definition_by_position(&file, 2, 11, None, "python")
+            .expect("local-scope resolution should succeed");
+        assert_eq!(result.symbol.name, "x");
+        assert_eq!(
+            result.symbol.kind,
+            SymbolKind::Parameter,
+            "should resolve local `x` as Parameter, got {:?}",
+            result.symbol.kind
+        );
+        let def = result.definition.expect("definition location must be Some");
+        assert_eq!(def.line, 1, "param `x` is declared on line 1, got {}", def.line);
+    }
+
+    #[test]
+    fn test_definition_resolves_file_scope_function() {
+        // Cursor on a usage of `helper` should resolve to its top-level
+        // declaration line.
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("filescope.py");
+        // Line 1: def helper():
+        // Line 2:     return 1
+        // Line 3:
+        // Line 4: def main():
+        // Line 5:     return helper()
+        fs::write(
+            &file,
+            "def helper():\n    return 1\n\ndef main():\n    return helper()\n",
+        )
+        .unwrap();
+
+        // Cursor on `helper` in `return helper()` — column 11 of line 5.
+        let result = find_definition_by_position(&file, 5, 11, None, "python")
+            .expect("file-scope resolution should succeed");
+        assert_eq!(result.symbol.name, "helper");
+        assert_eq!(result.symbol.kind, SymbolKind::Function);
+        let def = result.definition.expect("definition location must be Some");
+        assert_eq!(
+            def.line, 1,
+            "helper is declared on line 1, got {}",
+            def.line
+        );
+    }
+
+    #[test]
+    fn test_definition_resolves_import_alias() {
+        // Cursor on `click` in `click.echo(...)` should resolve to the
+        // `import click` line — this is the canonical BUG-24 repro.
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("imports.py");
+        // Line 1: import click
+        // Line 2:
+        // Line 3: def main():
+        // Line 4:     click.echo("hi")
+        fs::write(
+            &file,
+            "import click\n\ndef main():\n    click.echo(\"hi\")\n",
+        )
+        .unwrap();
+
+        // Cursor on `click` at column 4 of line 4.
+        let result = find_definition_by_position(&file, 4, 4, None, "python")
+            .expect("import-scope resolution should succeed");
+        assert_eq!(result.symbol.name, "click");
+        let def = result
+            .definition
+            .expect("import-scope resolution must produce a definition location");
+        assert_eq!(
+            def.line, 1,
+            "import click is on line 1, got {}",
+            def.line
+        );
+    }
+
+    #[test]
+    fn test_definition_unresolved_message() {
+        // Cursor on a name that doesn't exist in any scope should produce a
+        // payload whose symbol.name contains `unresolved at`.
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("unresolved.py");
+        // Line 1: x = 1
+        // Line 2: print(nonexistent_name)
+        fs::write(&file, "x = 1\nprint(nonexistent_name)\n").unwrap();
+
+        // Cursor on `nonexistent_name` — column 6 of line 2.
+        let err = find_definition_by_position(&file, 2, 6, None, "python")
+            .expect_err("unresolved name must produce an error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unresolved at"),
+            "error should mention 'unresolved at', got: {}",
+            msg
+        );
+        assert!(
+            msg.contains("nonexistent_name"),
+            "error should mention the symbol, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_definition_resolves_js_import_alias() {
+        // JS namespace import: `import express from "express"` and a usage
+        // `express()` — cursor on `express` should resolve to the import.
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("app.js");
+        // Line 1: const express = require("express");
+        // ... we use ES-module style for the parser:
+        // Line 1: import express from "express";
+        // Line 2: const app = express();
+        fs::write(
+            &file,
+            "import express from \"express\";\nconst app = express();\n",
+        )
+        .unwrap();
+
+        // Cursor on `express` in `express()` — column 12 of line 2.
+        let result = find_definition_by_position(&file, 2, 12, None, "javascript")
+            .expect("JS import resolution should succeed");
+        assert_eq!(result.symbol.name, "express");
+        let def = result.definition.expect("definition location must be Some");
+        assert_eq!(def.line, 1, "import is on line 1, got {}", def.line);
+    }
+
+    #[test]
+    fn test_definition_resolves_rust_let_binding() {
+        // Cursor on a usage of a `let`-bound local should resolve to the
+        // let-binding.
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("lib.rs");
+        // Line 1: fn main() {
+        // Line 2:     let counter = 42;
+        // Line 3:     println!("{}", counter);
+        // Line 4: }
+        fs::write(
+            &file,
+            "fn main() {\n    let counter = 42;\n    println!(\"{}\", counter);\n}\n",
+        )
+        .unwrap();
+
+        // Cursor on `counter` in `println!` — column 19 of line 3.
+        let result = find_definition_by_position(&file, 3, 19, None, "rust")
+            .expect("Rust let-binding resolution should succeed");
+        assert_eq!(result.symbol.name, "counter");
+        assert_eq!(result.symbol.kind, SymbolKind::Variable);
+        let def = result.definition.expect("definition location must be Some");
+        assert_eq!(
+            def.line, 2,
+            "let counter is on line 2, got {}",
+            def.line
+        );
     }
 }
