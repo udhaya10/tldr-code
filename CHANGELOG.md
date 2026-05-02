@@ -1,5 +1,87 @@
 # Changelog
 
+## js-extract-function-expressions-v1 — internal milestone
+
+NOT a published release. Fixes a HIGH-severity gap in the JS/TS
+function extractor: function-expression assignments — a major coding
+pattern in many JS codebases (express, koa, jQuery, …) — were silently
+dropped by `tldr extract` and every downstream command that looks up
+functions by name (`complexity`, `explain`, `taint`, `slice`).
+
+### Bug fixed
+
+- **HIGH — `tldr extract` missed JS/TS function-expression
+  assignments.** On `/tmp/repos/express/lib/application.js`,
+  `tldr extract … | jq '.functions | length'` returned **2** (only the
+  two top-level `function`-declaration helpers) even though the file
+  defines 17 public methods on the `app` object via
+  `app.use = function use() {}`, `app.engine = function() {}`,
+  `Foo.prototype.bar = function() {}`, etc. Cascade impact: every
+  call-site lookup (`tldr complexity <file> use`,
+  `tldr explain <file> use`, `tldr taint`, `tldr slice`) failed with
+  `Function not found` for any function declared via the
+  function-expression-assignment pattern.
+
+### Patterns now recognized
+
+- `name = function() {}` / `name = () => {}` (simple identifier LHS)
+- `obj.method = function() {}` (member-expression LHS — uses trailing
+  property as the function name)
+- `Foo.prototype.bar = function() {}` (prototype assignment — uses the
+  trailing property)
+- `{ foo: function() {} }` and `{ foo: () => {} }` (object literal
+  pair with function-like value)
+- `{ foo() {} }` (object literal method-shorthand — emitted as a
+  top-level function so name lookup works)
+
+The same patterns are recognized in TypeScript via the shared
+JS/TS code paths.
+
+### Files changed
+
+- `crates/tldr-core/src/ast/extract.rs` — extend
+  `extract_ts_functions_detailed` with `assignment_expression` and
+  `pair` arms; allow `method_definition` outside class bodies (object
+  shorthand). Adds two helpers
+  (`extract_ts_assignment_function`, `extract_ts_pair_function`).
+- `crates/tldr-core/src/ast/function_finder.rs` — extend
+  `find_function_node` for JS/TS so cascade commands (`complexity`,
+  `slice`, `taint`, …) can locate `app.use = function() {}` style
+  functions by name.
+- `crates/tldr-cli/src/commands/remaining/explain.rs` — extend the
+  explain-local `find_function_recursive` with the same
+  `assignment_expression` / `pair` patterns.
+
+### Validation
+
+- `tldr extract /tmp/repos/express/lib/application.js | jq
+  '.functions | length'` → **19** (was 2). The 19 names include
+  `use`, `engine`, `param`, `set`, `init`, `enable`, `disable`,
+  `defaultConfiguration`, `render`, `listen`, `route`, `get`, `all`,
+  `path`, `handle`, `enabled`, `disabled`, `logerror`, `tryRender`.
+- `tldr complexity /tmp/repos/express/lib/application.js use` →
+  succeeds (cyclomatic=12, cognitive=10). Was: `Function not found`.
+- `tldr explain /tmp/repos/express/lib/application.js use` →
+  succeeds. Was: `symbol 'use' not found`.
+- `tldr taint /tmp/repos/express/lib/application.js use` and
+  `tldr slice /tmp/repos/express/lib/application.js engine 100` →
+  both succeed.
+- 5 new unit tests in `extract.rs` covering: function-expression
+  assignment, arrow-function assignment, prototype methods, object
+  method shorthand, and TypeScript variants of all of the above.
+- `vuln_migration_v1_red`: 168/168 GREEN.
+- `tldr-core` lib tests: 4662/4662 GREEN. `tldr-cli` lib tests:
+  1392/1392 GREEN.
+
+### Carry-forwards (intentionally not covered in v1)
+
+- **Dynamic property names**: `app[fnName] = function() {}` —
+  cannot be statically resolved without symbol propagation; skipped.
+- **Computed property keys** in object literals (`{ [k]: () => {} }`)
+  — same reason; skipped.
+- **Class fields with arrow values** (`class C { foo = () => {} }`) —
+  not in scope for this milestone; tracked separately.
+
 ## autodetect-correctness-v1 — internal milestone
 
 NOT a published release. Closes the "language autodetect anti-product

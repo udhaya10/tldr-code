@@ -333,6 +333,66 @@ fn find_function_recursive<'a>(
         }
     }
 
+    // (js-extract-function-expressions-v1) JS/TS function-expression assignments:
+    //   app.use = function() {}
+    //   Foo.prototype.bar = function() {}
+    //   handler = () => {}
+    if node.kind() == "assignment_expression" {
+        if let (Some(left), Some(right)) = (
+            node.child_by_field_name("left"),
+            node.child_by_field_name("right"),
+        ) {
+            let target_name = match left.kind() {
+                "identifier" => Some(node_text(left, source).to_string()),
+                "member_expression" => left
+                    .child_by_field_name("property")
+                    .map(|p| node_text(p, source).to_string()),
+                _ => None,
+            };
+            if let Some(name) = target_name {
+                if name == function_name
+                    && matches!(
+                        right.kind(),
+                        "arrow_function"
+                            | "function"
+                            | "function_expression"
+                            | "generator_function"
+                    )
+                {
+                    return Some(right);
+                }
+            }
+        }
+    }
+
+    // (js-extract-function-expressions-v1) Object literal pair:
+    //   { foo: function() {} }  /  { foo: () => {} }
+    if node.kind() == "pair" {
+        if let (Some(key), Some(value)) = (
+            node.child_by_field_name("key"),
+            node.child_by_field_name("value"),
+        ) {
+            let key_name = match key.kind() {
+                "property_identifier" | "identifier" => node_text(key, source).to_string(),
+                "string" => node_text(key, source)
+                    .trim_matches(|c| c == '"' || c == '\'' || c == '`')
+                    .to_string(),
+                _ => String::new(),
+            };
+            if key_name == function_name
+                && matches!(
+                    value.kind(),
+                    "arrow_function"
+                        | "function"
+                        | "function_expression"
+                        | "generator_function"
+                )
+            {
+                return Some(value);
+            }
+        }
+    }
+
     // Elixir: def/defp are `call` nodes where the first child identifier is "def"/"defp"
     // and the function name is in the arguments
     if node.kind() == "call" && func_kinds.contains(&"call") {

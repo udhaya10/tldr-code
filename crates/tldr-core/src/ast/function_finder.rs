@@ -92,6 +92,86 @@ pub fn find_function_node<'a>(
             }
         }
 
+        // (js-extract-function-expressions-v1) JS/TS assignment-based functions:
+        //   app.use = function() {}
+        //   Foo.prototype.bar = function() {}
+        //   handler = () => {}
+        //   { foo: function() {} } / { foo: () => {} } / { foo() {} }
+        if matches!(language, Language::TypeScript | Language::JavaScript) {
+            // Pattern A: assignment_expression — handle directly here. Look at
+            // the LHS to extract the target name and the RHS to find the
+            // function-like value.
+            if node.kind() == "assignment_expression" {
+                let left = node.child_by_field_name("left");
+                let right = node.child_by_field_name("right");
+                if let (Some(left), Some(right)) = (left, right) {
+                    let matches_name = match left.kind() {
+                        "identifier" => {
+                            left.utf8_text(source.as_bytes()).unwrap_or("") == function_name
+                        }
+                        "member_expression" => {
+                            // app.use → match "use"; Foo.prototype.bar → match "bar"
+                            match left.child_by_field_name("property") {
+                                Some(p) => {
+                                    p.utf8_text(source.as_bytes()).unwrap_or("") == function_name
+                                }
+                                None => false,
+                            }
+                        }
+                        _ => false,
+                    };
+                    if matches_name
+                        && matches!(
+                            right.kind(),
+                            "arrow_function"
+                                | "function_expression"
+                                | "function"
+                                | "generator_function"
+                        )
+                    {
+                        return Some(right);
+                    }
+                }
+            }
+
+            // Pattern B: object literal pair — `{ foo: function() {} }`
+            if node.kind() == "pair" {
+                if let (Some(key), Some(value)) = (
+                    node.child_by_field_name("key"),
+                    node.child_by_field_name("value"),
+                ) {
+                    let key_name = match key.kind() {
+                        "property_identifier" | "identifier" => {
+                            key.utf8_text(source.as_bytes()).unwrap_or("").to_string()
+                        }
+                        "string" => key
+                            .utf8_text(source.as_bytes())
+                            .unwrap_or("")
+                            .trim_matches(|c| c == '"' || c == '\'' || c == '`')
+                            .to_string(),
+                        _ => String::new(),
+                    };
+                    if key_name == function_name
+                        && matches!(
+                            value.kind(),
+                            "arrow_function"
+                                | "function_expression"
+                                | "function"
+                                | "generator_function"
+                        )
+                    {
+                        return Some(value);
+                    }
+                }
+            }
+
+            // Pattern C: object literal method shorthand — `{ foo() {} }`.
+            // tree-sitter emits `method_definition` even outside class bodies;
+            // it's handled by the generic kind-match above only when
+            // method_definition is in `func_kinds`. JS/TS already includes it,
+            // so the existing match covers this case.
+        }
+
         // Check for Lua/Luau assignment-based functions: M.request = function() end
         if matches!(language, Language::Lua | Language::Luau)
             && matches!(node.kind(), "assignment_statement" | "variable_assignment")

@@ -1721,6 +1721,14 @@ fn extract_ts_functions_detailed(
                 if is_method {
                     let info = extract_ts_function_info(&child, source, true);
                     functions.push(info);
+                } else if let Some(parent) = child.parent() {
+                    // Object literal method shorthand: { foo() {} } — emit as
+                    // a top-level function so consumers can find it via name.
+                    // (js-extract-function-expressions-v1)
+                    if parent.kind() == "object" {
+                        let info = extract_ts_function_info(&child, source, false);
+                        functions.push(info);
+                    }
                 }
             }
             "class_declaration" | "class" => {
@@ -1742,11 +1750,164 @@ fn extract_ts_functions_detailed(
                 // Handle: export const foo = () => {} and export function foo() {}
                 extract_ts_functions_detailed(&child, source, functions, is_method);
             }
+            "assignment_expression" => {
+                // js-extract-function-expressions-v1: handle
+                //   app.use = function() {}
+                //   Foo.prototype.bar = function() {}
+                //   handler = () => {}
+                // and recurse for any nested function definitions in the RHS.
+                if !is_method {
+                    extract_ts_assignment_function(&child, source, functions);
+                }
+                extract_ts_functions_detailed(&child, source, functions, is_method);
+            }
+            "pair" => {
+                // js-extract-function-expressions-v1: object literal pairs like
+                //   { foo: function() {} }  or  { bar: () => {} }
+                if !is_method {
+                    extract_ts_pair_function(&child, source, functions);
+                }
+                extract_ts_functions_detailed(&child, source, functions, is_method);
+            }
             _ => {
                 extract_ts_functions_detailed(&child, source, functions, is_method);
             }
         }
     }
+}
+
+/// (js-extract-function-expressions-v1) Extract a function from an
+/// `assignment_expression` whose right-hand side is a function-like node.
+///
+/// Supports:
+/// - `name = function() {}` / `name = () => {}` (simple identifier LHS)
+/// - `app.use = function use() {}` (member expression — uses last property)
+/// - `Foo.prototype.bar = function() {}` (prototype assignment — uses last property)
+///
+/// Skips non-function RHS values silently and ignores subscript/computed LHS
+/// (e.g., `app[name] = function() {}`) since the name is dynamic.
+fn extract_ts_assignment_function(
+    assignment: &Node,
+    source: &str,
+    functions: &mut Vec<FunctionInfo>,
+) {
+    let Some(left) = assignment.child_by_field_name("left") else {
+        return;
+    };
+    let Some(right) = assignment.child_by_field_name("right") else {
+        return;
+    };
+
+    if !matches!(
+        right.kind(),
+        "arrow_function" | "function_expression" | "function"
+    ) {
+        return;
+    }
+
+    // Resolve the symbol name from the LHS.
+    let name = match left.kind() {
+        "identifier" => get_node_text(&left, source),
+        "member_expression" => {
+            // For `app.use` use property "use"; for `Foo.prototype.bar`
+            // also resolves to "bar" (the trailing property).
+            match left.child_by_field_name("property") {
+                Some(p) if p.kind() == "property_identifier" || p.kind() == "identifier" => {
+                    get_node_text(&p, source)
+                }
+                _ => return,
+            }
+        }
+        // subscript_expression (`app[name] = ...`) and other dynamic LHS
+        // are skipped — the name is not statically resolvable.
+        _ => return,
+    };
+
+    if name.is_empty() {
+        return;
+    }
+
+    let params = extract_ts_arrow_params(&right, source);
+    let return_type = right.child_by_field_name("return_type").map(|n| {
+        get_node_text(&n, source)
+            .trim_start_matches(':')
+            .trim()
+            .to_string()
+    });
+    let is_async = get_node_text(&right, source).starts_with("async");
+    let line_number = assignment.start_position().row as u32 + 1;
+
+    // Walk up through expression_statement / parenthesized_expression to
+    // find a leading JSDoc comment.
+    let docstring_anchor = assignment
+        .parent()
+        .filter(|p| p.kind() == "expression_statement")
+        .unwrap_or(*assignment);
+    let docstring = extract_jsdoc_docstring(&docstring_anchor, source);
+
+    functions.push(FunctionInfo {
+        name,
+        params,
+        return_type,
+        docstring,
+        is_method: false,
+        is_async,
+        decorators: Vec::new(),
+        line_number,
+    });
+}
+
+/// (js-extract-function-expressions-v1) Extract a function from an object
+/// literal `pair` whose value is a function-like node:
+///   `{ foo: function() {} }` / `{ foo: () => {} }`
+fn extract_ts_pair_function(pair: &Node, source: &str, functions: &mut Vec<FunctionInfo>) {
+    let Some(value) = pair.child_by_field_name("value") else {
+        return;
+    };
+    if !matches!(
+        value.kind(),
+        "arrow_function" | "function_expression" | "function"
+    ) {
+        return;
+    }
+    let Some(key) = pair.child_by_field_name("key") else {
+        return;
+    };
+    let name = match key.kind() {
+        "property_identifier" | "identifier" => get_node_text(&key, source),
+        "string" => {
+            // "foo": function() {} — strip surrounding quotes if present.
+            let raw = get_node_text(&key, source);
+            raw.trim_matches(|c| c == '"' || c == '\'' || c == '`')
+                .to_string()
+        }
+        // computed_property_name has dynamic key — skip.
+        _ => return,
+    };
+    if name.is_empty() {
+        return;
+    }
+
+    let params = extract_ts_arrow_params(&value, source);
+    let return_type = value.child_by_field_name("return_type").map(|n| {
+        get_node_text(&n, source)
+            .trim_start_matches(':')
+            .trim()
+            .to_string()
+    });
+    let is_async = get_node_text(&value, source).starts_with("async");
+    let line_number = pair.start_position().row as u32 + 1;
+
+    functions.push(FunctionInfo {
+        name,
+        params,
+        return_type,
+        docstring: extract_jsdoc_docstring(pair, source),
+        is_method: false,
+        is_async,
+        decorators: Vec::new(),
+        line_number,
+    });
 }
 
 /// Extract functions from variable declarations with arrow function or function expression values.
@@ -7486,5 +7647,180 @@ var mutableVar = 42
         for c in &constants {
             assert!(!c.is_constant, "var entries should have is_constant=false");
         }
+    }
+
+    // =====================================================================
+    // js-extract-function-expressions-v1
+    //
+    // Coverage for function-expression assignment patterns that were
+    // previously missed by `tldr extract` on JS/TS files (e.g.,
+    // express's `app.use = function use() {}` exports).
+    // =====================================================================
+
+    #[test]
+    fn test_extract_js_function_expression_assignment() {
+        let mut file = NamedTempFile::with_suffix(".js").unwrap();
+        write!(
+            file,
+            r#"
+var app = exports = module.exports = {{}};
+
+app.use = function use(fn) {{ return fn; }};
+app.engine = function engine(ext, fn) {{ return ext; }};
+app.set = function set(setting, val) {{ return val; }};
+"#
+        )
+        .unwrap();
+
+        let info = extract_file(file.path(), None).unwrap();
+        let names: Vec<&str> = info.functions.iter().map(|f| f.name.as_str()).collect();
+
+        assert!(
+            info.functions.len() >= 3,
+            "Expected >=3 functions for app.X = function X() {{}} pattern, got {}: {:?}",
+            info.functions.len(),
+            names
+        );
+        assert!(names.contains(&"use"), "Missing 'use' in {:?}", names);
+        assert!(names.contains(&"engine"), "Missing 'engine' in {:?}", names);
+        assert!(names.contains(&"set"), "Missing 'set' in {:?}", names);
+
+        // Param extraction must work for the assigned function expression.
+        let use_fn = info.functions.iter().find(|f| f.name == "use").unwrap();
+        assert_eq!(use_fn.params, vec!["fn".to_string()]);
+    }
+
+    #[test]
+    fn test_extract_js_arrow_function_assignment() {
+        let mut file = NamedTempFile::with_suffix(".js").unwrap();
+        write!(
+            file,
+            r#"
+const handler = (req, res) => {{ res.end(); }};
+let asyncHandler = async (x) => x + 1;
+"#
+        )
+        .unwrap();
+
+        let info = extract_file(file.path(), None).unwrap();
+        let names: Vec<&str> = info.functions.iter().map(|f| f.name.as_str()).collect();
+        assert!(
+            names.contains(&"handler"),
+            "Missing 'handler' in {:?}",
+            names
+        );
+        assert!(
+            names.contains(&"asyncHandler"),
+            "Missing 'asyncHandler' in {:?}",
+            names
+        );
+        let async_fn = info
+            .functions
+            .iter()
+            .find(|f| f.name == "asyncHandler")
+            .unwrap();
+        assert!(async_fn.is_async, "asyncHandler should be async");
+    }
+
+    #[test]
+    fn test_extract_js_prototype_method_pattern() {
+        let mut file = NamedTempFile::with_suffix(".js").unwrap();
+        write!(
+            file,
+            r#"
+function Foo() {{}}
+
+Foo.prototype.bar = function bar(x) {{ return x; }};
+Foo.prototype.baz = function (y) {{ return y; }};
+Foo.prototype.qux = (z) => z;
+"#
+        )
+        .unwrap();
+
+        let info = extract_file(file.path(), None).unwrap();
+        let names: Vec<&str> = info.functions.iter().map(|f| f.name.as_str()).collect();
+        assert!(names.contains(&"bar"), "Missing 'bar' in {:?}", names);
+        assert!(names.contains(&"baz"), "Missing 'baz' in {:?}", names);
+        assert!(names.contains(&"qux"), "Missing 'qux' in {:?}", names);
+    }
+
+    #[test]
+    fn test_extract_js_object_method_shorthand() {
+        let mut file = NamedTempFile::with_suffix(".js").unwrap();
+        write!(
+            file,
+            r#"
+module.exports = {{
+  foo() {{ return 1; }},
+  bar: function bar(x) {{ return x; }},
+  baz: (y) => y,
+}};
+"#
+        )
+        .unwrap();
+
+        let info = extract_file(file.path(), None).unwrap();
+        let names: Vec<&str> = info.functions.iter().map(|f| f.name.as_str()).collect();
+        assert!(
+            names.contains(&"foo"),
+            "Missing 'foo' (method shorthand) in {:?}",
+            names
+        );
+        assert!(
+            names.contains(&"bar"),
+            "Missing 'bar' (pair: function) in {:?}",
+            names
+        );
+        assert!(
+            names.contains(&"baz"),
+            "Missing 'baz' (pair: arrow) in {:?}",
+            names
+        );
+    }
+
+    #[test]
+    fn test_extract_ts_same_patterns() {
+        let mut file = NamedTempFile::with_suffix(".ts").unwrap();
+        write!(
+            file,
+            r#"
+const app: any = {{}};
+
+app.use = function use(fn: Function): any {{ return fn; }};
+app.engine = (ext: string, fn: Function): any => ext;
+
+const handler = (x: number): number => x + 1;
+
+const obj = {{
+  foo(n: number): number {{ return n; }},
+  bar: function (s: string) {{ return s; }},
+}};
+
+function Klass() {{}}
+Klass.prototype.method = function method(arg: number) {{ return arg; }};
+"#
+        )
+        .unwrap();
+
+        let info = extract_file(file.path(), None).unwrap();
+        let names: Vec<&str> = info.functions.iter().map(|f| f.name.as_str()).collect();
+        assert!(names.contains(&"use"), "TS: missing 'use' in {:?}", names);
+        assert!(
+            names.contains(&"engine"),
+            "TS: missing 'engine' in {:?}",
+            names
+        );
+        assert!(
+            names.contains(&"handler"),
+            "TS: missing 'handler' in {:?}",
+            names
+        );
+        assert!(names.contains(&"foo"), "TS: missing 'foo' in {:?}", names);
+        assert!(names.contains(&"bar"), "TS: missing 'bar' in {:?}", names);
+        assert!(
+            names.contains(&"method"),
+            "TS: missing 'method' (prototype) in {:?}",
+            names
+        );
     }
 }
