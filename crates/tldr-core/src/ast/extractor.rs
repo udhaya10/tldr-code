@@ -8,7 +8,7 @@ use std::path::Path;
 use tree_sitter::{Node, Tree};
 
 use crate::fs::tree::{collect_files, get_file_tree};
-use crate::types::{CodeStructure, DefinitionInfo, FileStructure, IgnoreSpec, Language};
+use crate::types::{CodeStructure, DefinitionInfo, FileStructure, IgnoreSpec, Language, MethodInfo};
 use crate::TldrResult;
 
 use super::extract::is_upper_case_name;
@@ -106,11 +106,28 @@ fn extract_file_structure(
     let imports = extract_imports_from_tree(&tree, &source, language)?;
     let definitions = extract_definitions(&tree, &source, language);
 
+    // schema-unification-v1 BUG-21: derive `method_infos` from `definitions`
+    // (which already carry line + signature for kind="method" entries) so
+    // overloaded methods with the same name remain distinguishable to JSON
+    // consumers. Order is preserved from `definitions` (source order); we do
+    // NOT attempt to align indices with the legacy `methods: Vec<String>`
+    // field — they are independent views.
+    let method_infos: Vec<MethodInfo> = definitions
+        .iter()
+        .filter(|d| d.kind == "method")
+        .map(|d| MethodInfo {
+            name: d.name.clone(),
+            signature: d.signature.clone(),
+            line: d.line_start,
+        })
+        .collect();
+
     Ok(FileStructure {
         path: relative_path,
         functions,
         classes,
         methods,
+        method_infos,
         imports,
         definitions,
     })

@@ -142,7 +142,9 @@ mod imports_command {
             .stdout(predicate::str::contains("file"));
     }
 
-    /// Contract 1.3: imports returns array of ImportInfo
+    /// Contract 1.3: imports returns ImportInfo entries (canonical envelope
+    /// shape since schema-unification-v1; legacy bare-array still available
+    /// via `--legacy-array`).
     #[test]
     fn test_imports_returns_array() {
         let temp = TempDir::new().unwrap();
@@ -158,15 +160,26 @@ from collections import OrderedDict as OD
         )
         .unwrap();
 
+        // Canonical: envelope object {file, language, imports: [...]}.
         let mut cmd = tldr_cmd();
         cmd.args(["imports", test_file.to_str().unwrap(), "-q"]);
         cmd.assert()
             .success()
-            .stdout(predicate::str::starts_with("["))
+            .stdout(predicate::str::starts_with("{"))
+            .stdout(predicate::str::contains("\"imports\""))
             .stdout(predicate::str::contains("\"module\""))
             .stdout(predicate::str::contains("\"names\""))
             .stdout(predicate::str::contains("os"))
             .stdout(predicate::str::contains("sys"));
+
+        // Legacy: --legacy-array preserves the historical bare-array shape.
+        let mut cmd_legacy = tldr_cmd();
+        cmd_legacy.args(["imports", test_file.to_str().unwrap(), "--legacy-array", "-q"]);
+        cmd_legacy
+            .assert()
+            .success()
+            .stdout(predicate::str::starts_with("["))
+            .stdout(predicate::str::contains("\"module\""));
     }
 
     /// Contract 1.3: imports with explicit --lang flag

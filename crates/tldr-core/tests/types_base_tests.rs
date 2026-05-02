@@ -415,6 +415,7 @@ fn test_file_structure_creation() {
         functions: vec!["func1".to_string(), "func2".to_string()],
         classes: vec!["Class1".to_string()],
         methods: vec!["method1".to_string()],
+        method_infos: vec![],
         imports: vec![],
         definitions: vec![],
     };

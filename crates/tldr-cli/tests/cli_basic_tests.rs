@@ -511,19 +511,37 @@ from collections import OrderedDict
         );
     }
 
-    /// Test imports command returns valid JSON array
+    /// Test imports command returns valid JSON envelope (default) or array
+    /// (legacy). Updated for schema-unification-v1 BUG-18.
     #[test]
     fn test_imports_returns_json_array() {
         let temp = TempDir::new().unwrap();
         let test_file = temp.path().join("test.py");
         fs::write(&test_file, "import os\n").unwrap();
 
+        // Default: envelope object with `imports` array.
         let mut cmd = tldr_cmd();
         cmd.args(["imports", test_file.to_str().unwrap(), "-q"]);
         let output = cmd.output().unwrap();
-
         let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-        assert!(json.is_array(), "Imports output should be a JSON array");
+        assert!(
+            json.is_object(),
+            "Imports default output should be a JSON object envelope"
+        );
+        assert!(
+            json.get("imports").map(|v| v.is_array()).unwrap_or(false),
+            "Envelope should have an .imports array"
+        );
+
+        // Legacy --legacy-array path still emits a top-level array.
+        let mut cmd_legacy = tldr_cmd();
+        cmd_legacy.args(["imports", test_file.to_str().unwrap(), "--legacy-array", "-q"]);
+        let out_legacy = cmd_legacy.output().unwrap();
+        let json_legacy: serde_json::Value = serde_json::from_slice(&out_legacy.stdout).unwrap();
+        assert!(
+            json_legacy.is_array(),
+            "--legacy-array should produce a JSON array"
+        );
     }
 
     /// Test imports command with --lang flag
@@ -584,7 +602,8 @@ use serde::{Serialize, Deserialize};
         cmd.assert().success();
     }
 
-    /// Test imports command with JSON format
+    /// Test imports command with JSON format. Updated for
+    /// schema-unification-v1 BUG-18: default JSON shape is an envelope object.
     #[test]
     fn test_imports_json_format() {
         let temp = TempDir::new().unwrap();
@@ -596,7 +615,8 @@ use serde::{Serialize, Deserialize};
         let output = cmd.output().unwrap();
 
         let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-        assert!(json.is_array());
+        assert!(json.is_object(), "default JSON shape is envelope object");
+        assert!(json.get("imports").is_some(), "envelope has .imports");
     }
 
     /// Test imports command with compact format
@@ -1423,7 +1443,8 @@ mod schema_tests {
         assert!(json.get("files").is_some(), "Should have 'files' field");
     }
 
-    /// Test imports output schema
+    /// Test imports output schema. Updated for schema-unification-v1
+    /// BUG-18: top-level is an envelope `{file, language, imports: [...]}`.
     #[test]
     fn test_imports_schema() {
         let temp = TempDir::new().unwrap();
@@ -1436,8 +1457,12 @@ mod schema_tests {
 
         let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
 
-        assert!(json.is_array(), "Imports should be an array");
-        if let Some(first) = json.as_array().and_then(|arr| arr.first()) {
+        assert!(json.is_object(), "Imports envelope should be an object");
+        let imports = json
+            .get("imports")
+            .and_then(|v| v.as_array())
+            .expect(".imports array missing from envelope");
+        if let Some(first) = imports.first() {
             assert!(
                 first.get("module").is_some(),
                 "Import should have 'module' field"

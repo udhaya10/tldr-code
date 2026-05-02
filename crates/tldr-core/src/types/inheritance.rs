@@ -140,11 +140,16 @@ pub struct InheritanceEdge {
     pub child_file: PathBuf,
     /// Line number of child class definition
     pub child_line: u32,
-    /// File containing the parent class (None if external)
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// File containing the parent class (None if external).
+    ///
+    /// schema-unification-v1 BUG-23: always emit this key — even when the
+    /// parent is external/unresolved (`None`/JSON `null`). Stable schema lets
+    /// consumers do `.parent_file // empty` without conditional `has()`.
     pub parent_file: Option<PathBuf>,
-    /// Line number of parent class definition (None if external)
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Line number of parent class definition (None if external).
+    ///
+    /// schema-unification-v1 BUG-23: always emit this key (`null` when
+    /// external) for the same reason as `parent_file`.
     pub parent_line: Option<u32>,
     /// Kind of inheritance relationship
     pub kind: InheritanceKind,

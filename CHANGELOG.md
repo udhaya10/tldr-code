@@ -1,5 +1,165 @@
 # Changelog
 
+## schema-unification-v1 — internal milestone
+
+NOT a published release. Closes the "JSON schema inconsistency
+anti-product surface" by unifying naming conventions, line-field
+aliases, top-level shapes, and missing-key emission across `tldr vuln`,
+`tldr extract`, `tldr explain`, `tldr imports`, `tldr inheritance`,
+and `tldr structure`. The five bugs ship atomically since they all
+live on the JSON-output / schema-derivation path. The strongly
+preferred shape is **additive** — every change either adds a new
+field or stabilizes an existing one; only one bug (BUG-18) is a
+true default-shape change and it carries a `--legacy-array`
+backward-compatibility flag.
+
+`vuln_migration_v1_red` remains 168/168 GREEN; all 4657 `tldr-core`
+library tests + 1391 `tldr-cli` library tests remain GREEN. Three
+imports tests in `cli_basic_tests.rs` and one in `cli_p1_tests.rs`
+were updated to expect the canonical envelope shape (BUG-18); these
+were over-fitted to the historical bare-array shape and the schema
+fix is the correct change. The 54 pre-existing
+`test_embed_*` / `test_semantic_*` / `test_similar_*` feature-gated
+failures in `exhaustive_matrix.rs` (require `--features semantic`,
+missing embedding model in env) persist unchanged — verified
+present at HEAD before this milestone.
+
+### Bugs fixed
+
+- **BUG-02** — `tldr vuln` emitted `summary.by_type` keys in
+  lowercase-no-separator form (`"commandinjection"`) while the
+  per-finding `.vuln_type` field used canonical snake_case
+  (`"command_injection"`). Pre-fix repro on flask:
+  ```
+  tldr vuln /tmp/repos/flask | jq '.findings[0].vuln_type'   → "command_injection"
+  tldr vuln /tmp/repos/flask | jq '.summary.by_type'         → {"commandinjection": 3}
+  ```
+  Two views of the same enum disagreed on naming. Root cause in
+  `crates/tldr-cli/src/commands/remaining/vuln.rs::build_summary`
+  used `format!("{:?}", finding.vuln_type).to_lowercase()` which
+  produced the collapsed form. Fixed by routing the key through
+  `serde_json::to_value(vuln_type)` which honors the existing
+  `#[serde(rename_all = "snake_case")]` on `VulnType`. `.title`
+  remains PascalCase-prose ("Command Injection") because that's
+  human-readable display, not a schema key. Post-fix on flask:
+  ```
+  tldr vuln /tmp/repos/flask | jq '.summary.by_type | keys'
+    → ["command_injection","path_traversal"]
+  ```
+- **BUG-17** — `tldr extract`, `tldr explain` used `line_number` and
+  `line_start` respectively while `tldr vuln`, `tldr dead`,
+  `tldr health` used a unified `line` field. Three different names
+  for the same semantic ("the line where this thing is"). **ADDITIVE**
+  fix: every return type now emits `line` ALONGSIDE the historical
+  field. No field renamed, no field removed. `FunctionInfo`,
+  `ClassInfo`, `FieldInfo` (in `crates/tldr-core/src/types.rs`) and
+  `ExplainReport` (in `crates/tldr-cli/src/commands/remaining/types.rs`)
+  switched from `#[derive(Serialize)]` to a manual `Serialize` impl
+  that emits both `line_number` and `line` (or `line_start` and
+  `line`). `Deserialize` remains derived (existing field names
+  continue to parse; the new `line` output field is ignored on
+  roundtrip because serde's default unknown-field policy permits it).
+  Post-fix on flask:
+  ```
+  tldr extract <file> | jq '.functions[0] | {line_number, line}'  → {"line_number":41,"line":41}
+  tldr explain <file> <fn> | jq '{line_start, line, line_end}'    → {"line_start":1061,"line":1061,"line_end":1107}
+  ```
+  Consumer migration: callers may switch to the unified `line` key
+  to write language-agnostic queries. The legacy keys remain valid
+  indefinitely.
+- **BUG-18** — `tldr imports` returned a top-level JSON array while
+  every other top-level command (`structure`, `vuln`, `dead`,
+  `inheritance`, `health`, …) returned an object. **DEFAULT-SHAPE
+  CHANGE** with explicit backward-compat opt-in:
+  ```
+  tldr imports <file>                  → {"file":"…","language":"…","imports":[…]}   (NEW DEFAULT)
+  tldr imports <file> --legacy-array   → [ImportInfo, …]                              (LEGACY)
+  ```
+  New `ImportsEnvelope { file, language, imports }` struct and
+  `--legacy-array` flag in `crates/tldr-cli/src/commands/imports.rs`.
+  Three over-fitted tests (`test_imports_returns_json_array`,
+  `test_imports_json_format`, `test_imports_schema` in
+  `cli_basic_tests.rs`, plus `test_imports_returns_array` in
+  `cli_p1_tests.rs`) updated to assert the new envelope AND
+  exercise `--legacy-array`. Consumer migration: pipelines using
+  `jq '.[]'` should switch to `jq '.imports[]'`, OR pass
+  `--legacy-array` to keep the old behavior with no other change.
+- **BUG-23** — `tldr inheritance` edges with `external: true` (stdlib
+  or unresolved bases) DROPPED the `parent_file` and `parent_line`
+  keys instead of emitting them as `null`. Consumers had to use
+  `has("parent_file")` to safely descend. Pre-fix on flask:
+  ```
+  tldr inheritance /tmp/repos/flask | jq '[.edges[] | has("parent_file")] | unique'
+    → [false, true]
+  ```
+  Removed `#[serde(skip_serializing_if = "Option::is_none")]` from
+  `InheritanceEdge::parent_file` and `parent_line` in
+  `crates/tldr-core/src/types/inheritance.rs`. Stable schema:
+  every edge now has `parent_file` and `parent_line` keys (`null`
+  when external). Post-fix on flask:
+  ```
+  tldr inheritance /tmp/repos/flask | jq '[.edges[] | has("parent_file")] | unique'
+    → [true]
+  ```
+- **BUG-21** — `tldr structure` emitted `methods: [String]` (a flat
+  list of names) which collapsed overloaded methods. Pre-fix on
+  spring-petclinic's `Owner.java` (which has three `getPet`
+  overloads):
+  ```
+  tldr structure /tmp/repos/spring-petclinic | jq '.files[] | select(.path | endswith("Owner.java")) | .methods'
+    → [..., "getPet", "getPet", "getPet", "toString", ...]   # 3 indistinguishable strings
+  ```
+  **ADDITIVE** fix: kept `methods: Vec<String>` and added a parallel
+  `method_infos: Vec<MethodInfo>` field where each entry carries
+  `(name, signature, line)`. New `MethodInfo` struct in
+  `crates/tldr-core/src/types.rs`, populated in
+  `crates/tldr-core/src/ast/extractor.rs::extract_file_structure`
+  by filtering the existing `definitions` field for `kind=="method"`.
+  Empty `method_infos` is skipped in JSON
+  (`#[serde(skip_serializing_if = "Vec::is_empty")]`) so the change
+  is invisible for files without methods. Post-fix:
+  ```
+  tldr structure /tmp/repos/spring-petclinic | jq '.files[] | select(.path | endswith("Owner.java")) | .method_infos | map(select(.name=="getPet"))'
+    → [
+        {"name":"getPet","signature":"public Pet getPet(String name) {","line":108},
+        {"name":"getPet","signature":"public Pet getPet(Integer id) {","line":117},
+        {"name":"getPet","signature":"public Pet getPet(String name, boolean ignoreNew) {","line":135}
+      ]
+  ```
+  Consumer migration: callers needing overload distinguishability
+  should consume `method_infos` (or the existing `definitions` array,
+  which already carried the same info but was less discoverable).
+  `methods` remains as the legacy flat-name view.
+
+### Carry-forwards
+
+None for this milestone — all 5 bugs implemented in this commit.
+
+### Files modified
+
+- `crates/tldr-core/src/types.rs` — manual `Serialize` for
+  `FunctionInfo` / `ClassInfo` / `FieldInfo` (line alias);
+  added `MethodInfo` struct; added `FileStructure.method_infos`.
+- `crates/tldr-core/src/types/inheritance.rs` — dropped
+  `skip_serializing_if` on `InheritanceEdge.parent_file` /
+  `parent_line`.
+- `crates/tldr-core/src/ast/extractor.rs` — populate
+  `FileStructure.method_infos` from `definitions`.
+- `crates/tldr-cli/src/commands/imports.rs` — `ImportsEnvelope`
+  + `--legacy-array` flag.
+- `crates/tldr-cli/src/commands/remaining/types.rs` — manual
+  `Serialize` for `ExplainReport` (line alias).
+- `crates/tldr-cli/src/commands/remaining/vuln.rs` — derive
+  `summary.by_type` keys via `serde_json::to_value` (snake_case).
+- `crates/tldr-cli/tests/schema_unification_v1.rs` — NEW
+  integration tests (6 tests, all 5 bugs covered).
+- `crates/tldr-cli/tests/cli_basic_tests.rs`,
+  `crates/tldr-cli/tests/cli_p1_tests.rs` — update the four
+  over-fitted imports tests for the envelope default; assert
+  `--legacy-array` preserves the historical shape.
+- `crates/tldr-core/tests/{definition_info_test,types_base_tests}.rs`
+  — add `method_infos: vec![]` to `FileStructure { … }` literals.
+
 ## wrapper-cross-consistency-v1 — internal milestone
 
 NOT a published release. Closes the "wrapper consistency anti-product

@@ -1040,9 +1040,17 @@ fn build_summary(findings: &[VulnFinding], files_with_vulns: u32) -> VulnSummary
 
     for finding in findings {
         *by_severity.entry(finding.severity.to_string()).or_insert(0) += 1;
-        *by_type
-            .entry(format!("{:?}", finding.vuln_type).to_lowercase())
-            .or_insert(0) += 1;
+        // schema-unification-v1 Bug-02 fix: derive the by_type key from
+        // VulnType's serde representation (snake_case via #[serde(rename_all)])
+        // so the key matches the `.vuln_type` field on findings — not the
+        // historical `format!("{:?}", _).to_lowercase()` which produced
+        // "commandinjection" (no separator). serde_json::to_value of a
+        // unit-variant enum returns a JSON string, so .as_str() succeeds.
+        let key = serde_json::to_value(finding.vuln_type)
+            .ok()
+            .and_then(|v| v.as_str().map(String::from))
+            .unwrap_or_else(|| format!("{:?}", finding.vuln_type).to_lowercase());
+        *by_type.entry(key).or_insert(0) += 1;
     }
 
     VulnSummary {

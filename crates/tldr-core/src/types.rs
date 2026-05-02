@@ -923,13 +923,44 @@ pub struct FileStructure {
     pub functions: Vec<String>,
     /// Names of classes or structs defined in this file
     pub classes: Vec<String>,
-    /// Names of methods (functions inside classes) in this file
+    /// Names of methods (functions inside classes) in this file.
+    ///
+    /// schema-unification-v1 BUG-21: this flat string list collapses
+    /// overloads with the same name (e.g. three `getPet(...)` overloads in
+    /// Java). Kept for backward compatibility; new code should consume
+    /// `method_infos` (or `definitions`, which already carries line ranges
+    /// + signatures).
     pub methods: Vec<String>,
+    /// Detailed method information that distinguishes overloads by line
+    /// number and signature. Parallel to `methods`; same length and order,
+    /// but each element carries `(name, signature, line)` so consumers can
+    /// disambiguate same-name methods. Only emitted in JSON when non-empty.
+    ///
+    /// schema-unification-v1 BUG-21: ADDITIVE companion to `methods`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub method_infos: Vec<MethodInfo>,
     /// Import statements found in this file
     pub imports: Vec<ImportInfo>,
     /// Detailed definition information with line ranges and signatures
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub definitions: Vec<DefinitionInfo>,
+}
+
+/// Method information that preserves overload distinguishability.
+///
+/// schema-unification-v1 BUG-21: parallels each entry of
+/// [`FileStructure::methods`] with line + signature so consumers can
+/// distinguish same-name overloads.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MethodInfo {
+    /// Method name (matches the corresponding `methods[i]` entry).
+    pub name: String,
+    /// Signature line (e.g., `public Pet getPet(Integer id, boolean ignoreNew)`),
+    /// or empty string if not extractable.
+    #[serde(default)]
+    pub signature: String,
+    /// 1-indexed line number of the method definition.
+    pub line: u32,
 }
 
 /// Import statement information (spec Section 2.1.4)
@@ -972,7 +1003,12 @@ pub struct ModuleInfo {
 }
 
 /// Function information with full details
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// schema-unification-v1 BUG-17: serializes both `line_number` (legacy
+/// canonical name) and `line` (additive alias matching `vuln`/`dead`/etc.)
+/// so consumers can use a single field name across all commands. The
+/// `Deserialize` impl accepts either name (`#[serde(alias = "line")]`).
+#[derive(Debug, Clone, Deserialize)]
 pub struct FunctionInfo {
     /// Name of the function
     pub name: String,
@@ -997,8 +1033,57 @@ pub struct FunctionInfo {
     pub line_number: u32,
 }
 
+// schema-unification-v1 BUG-17: manual Serialize impl emits both
+// `line_number` (legacy) AND `line` (alias) so consumers using either
+// field name see a value. All other fields preserve their existing
+// `skip_serializing_if` behavior.
+impl Serialize for FunctionInfo {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        // Field count: name, params, line_number, line + conditional fields.
+        // Compute exact count for serialize_struct (some serializers care).
+        let mut count = 4; // name + params + line_number + line
+        if self.return_type.is_some() {
+            count += 1;
+        }
+        if self.docstring.is_some() {
+            count += 1;
+        }
+        // is_method/is_async are bool-default-false; emitted unconditionally
+        // here to match the old derive (which had #[serde(default)] only on
+        // the deserialize side).
+        count += 2; // is_method + is_async
+        if !self.decorators.is_empty() {
+            count += 1;
+        }
+        let mut s = serializer.serialize_struct("FunctionInfo", count)?;
+        s.serialize_field("name", &self.name)?;
+        s.serialize_field("params", &self.params)?;
+        if let Some(rt) = &self.return_type {
+            s.serialize_field("return_type", rt)?;
+        }
+        if let Some(ds) = &self.docstring {
+            s.serialize_field("docstring", ds)?;
+        }
+        s.serialize_field("is_method", &self.is_method)?;
+        s.serialize_field("is_async", &self.is_async)?;
+        if !self.decorators.is_empty() {
+            s.serialize_field("decorators", &self.decorators)?;
+        }
+        s.serialize_field("line_number", &self.line_number)?;
+        s.serialize_field("line", &self.line_number)?;
+        s.end()
+    }
+}
+
 /// Class information with full details
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// schema-unification-v1 BUG-17: emits both `line_number` and `line` —
+/// see `FunctionInfo` doc for rationale.
+#[derive(Debug, Clone, Deserialize)]
 pub struct ClassInfo {
     /// Name of the class or struct
     pub name: String,
@@ -1020,13 +1105,56 @@ pub struct ClassInfo {
     pub line_number: u32,
 }
 
+impl Serialize for ClassInfo {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut count = 3; // name + methods + line_number; +1 below for line
+        if !self.bases.is_empty() {
+            count += 1;
+        }
+        if self.docstring.is_some() {
+            count += 1;
+        }
+        if !self.fields.is_empty() {
+            count += 1;
+        }
+        if !self.decorators.is_empty() {
+            count += 1;
+        }
+        count += 1; // line alias
+        let mut s = serializer.serialize_struct("ClassInfo", count)?;
+        s.serialize_field("name", &self.name)?;
+        if !self.bases.is_empty() {
+            s.serialize_field("bases", &self.bases)?;
+        }
+        if let Some(ds) = &self.docstring {
+            s.serialize_field("docstring", ds)?;
+        }
+        s.serialize_field("methods", &self.methods)?;
+        if !self.fields.is_empty() {
+            s.serialize_field("fields", &self.fields)?;
+        }
+        if !self.decorators.is_empty() {
+            s.serialize_field("decorators", &self.decorators)?;
+        }
+        s.serialize_field("line_number", &self.line_number)?;
+        s.serialize_field("line", &self.line_number)?;
+        s.end()
+    }
+}
+
 /// Field or constant information (Gap 3)
 ///
 /// Represents:
 /// - Class/struct fields (instance variables, properties)
 /// - Module-level constants
 /// - Static class variables
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// schema-unification-v1 BUG-17: emits both `line_number` and `line`.
+#[derive(Debug, Clone, Deserialize)]
 pub struct FieldInfo {
     /// Field name
     pub name: String,
@@ -1047,6 +1175,42 @@ pub struct FieldInfo {
     pub visibility: Option<String>,
     /// Line number where field is defined (1-indexed)
     pub line_number: u32,
+}
+
+impl Serialize for FieldInfo {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut count = 4; // name, is_static, is_constant, line_number
+        if self.field_type.is_some() {
+            count += 1;
+        }
+        if self.default_value.is_some() {
+            count += 1;
+        }
+        if self.visibility.is_some() {
+            count += 1;
+        }
+        count += 1; // line alias
+        let mut s = serializer.serialize_struct("FieldInfo", count)?;
+        s.serialize_field("name", &self.name)?;
+        if let Some(ft) = &self.field_type {
+            s.serialize_field("field_type", ft)?;
+        }
+        if let Some(dv) = &self.default_value {
+            s.serialize_field("default_value", dv)?;
+        }
+        s.serialize_field("is_static", &self.is_static)?;
+        s.serialize_field("is_constant", &self.is_constant)?;
+        if let Some(vis) = &self.visibility {
+            s.serialize_field("visibility", vis)?;
+        }
+        s.serialize_field("line_number", &self.line_number)?;
+        s.serialize_field("line", &self.line_number)?;
+        s.end()
+    }
 }
 
 /// Intra-file call graph

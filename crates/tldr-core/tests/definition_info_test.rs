@@ -31,6 +31,7 @@ fn test_file_structure_definitions_skip_when_empty() {
         functions: vec!["foo".to_string()],
         classes: vec![],
         methods: vec![],
+        method_infos: vec![],
         imports: vec![],
         definitions: vec![],
     };

@@ -666,7 +666,12 @@ impl CallInfo {
 }
 
 /// Full explain report for a function.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// schema-unification-v1 BUG-17: emits an additional `line` field
+/// (mapped from `line_start`) so consumers can use a unified `line`
+/// field name across `vuln`/`dead`/`extract`/`explain`/`health`.
+/// `line_start` and `line_end` remain for callers that need ranges.
+#[derive(Debug, Clone, Deserialize)]
 pub struct ExplainReport {
     /// Function name
     pub function_name: String,
@@ -691,6 +696,39 @@ pub struct ExplainReport {
     /// Functions called by this function
     #[serde(default)]
     pub callees: Vec<CallInfo>,
+}
+
+// schema-unification-v1 BUG-17: manual Serialize impl emits `line`
+// alongside the existing `line_start`/`line_end` pair.
+impl Serialize for ExplainReport {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut count = 8; // function_name, file, line_start, line_end, line, language, signature, purity
+        if self.complexity.is_some() {
+            count += 1;
+        }
+        // callers/callees always emitted (matches original derive — `default`
+        // applies only to deserialize side).
+        count += 2;
+        let mut s = serializer.serialize_struct("ExplainReport", count)?;
+        s.serialize_field("function_name", &self.function_name)?;
+        s.serialize_field("file", &self.file)?;
+        s.serialize_field("line_start", &self.line_start)?;
+        s.serialize_field("line_end", &self.line_end)?;
+        s.serialize_field("line", &self.line_start)?;
+        s.serialize_field("language", &self.language)?;
+        s.serialize_field("signature", &self.signature)?;
+        s.serialize_field("purity", &self.purity)?;
+        if let Some(c) = &self.complexity {
+            s.serialize_field("complexity", c)?;
+        }
+        s.serialize_field("callers", &self.callers)?;
+        s.serialize_field("callees", &self.callees)?;
+        s.end()
+    }
 }
 
 impl ExplainReport {
