@@ -1,5 +1,57 @@
 # Changelog
 
+## secure-fastpath-v1 — internal milestone
+
+NOT a published release. Pure performance fix: extends the M-Z4
+substring/oversize fastpath (`fastpath-extend-non-vuln-v1`) to the
+`secure` command's file iteration. Before this change `tldr secure
+--lang typescript /tmp/repos/ts-dom-gen` ran ~154 s on the TypeScript
+DOM-gen baselines tree because the 2.3 MB `dom.generated.d.ts` was
+read 6 times (once per sub-analysis: taint / resources / bounds /
+contracts / behavioral / mutability) and parsed 6 times into a
+tree-sitter AST.
+
+### Root cause
+
+M-Y3 (`typescript-large-file-perf-v1`, commit `a9f3d00`) added the
+oversize/auto-gen file-skipping policy to `parse_file_with_lang`, and
+M-Z4 (`fastpath-extend-non-vuln-v1`, commit `b80cb9a`) extended the
+substring + oversize fastpath to `patterns`, `api-check`, `debt`,
+`calls`, `dead`, and `health`. `secure` was the only remaining
+non-vuln command that bypassed both gates: its file walker collected
+candidates and then handed them straight to `partition_utf8_clean` →
+`run_security_analysis`, which read the full content into memory once
+per analysis without any size policy.
+
+### Fix
+
+`partition_utf8_clean` (which already runs ONCE up front, before the
+6 sub-analyses iterate the file set) now applies
+`tldr_core::fs::oversize::check_size` BEFORE the tolerant UTF-8 read.
+Files that exceed `MAX_FILE_SIZE_BYTES` (10 MB source-file cap) or
+`MAX_AUTOGEN_FILE_SIZE_BYTES` (512 KB cap for `.d.ts` / `.min.js` /
+`.bundle.*` auto-generated artefacts) are dropped, counted under the
+existing `files_skipped` field, and surfaced via the
+`format_oversize_warning` shape so consumers can distinguish oversize
+skips from UTF-8 skips. Mirrors `vuln.rs::analyze_file` (covered by
+M-Y3) and `api_check.rs::analyze_file` (covered by M-Z4).
+
+### Verification
+
+- `time tldr secure --lang typescript /tmp/repos/ts-dom-gen` — wall
+  time before: 153.5 s; after: well under the 30 s budget (single-file
+  stat replaces N×AST parses + N×whole-file reads).
+- New `test_secure_skips_oversize_files` unit test PINS the contract:
+  oversize `.d.ts` is dropped, `files_skipped` increments, warning
+  uses the documented `format_oversize_warning` shape.
+- `vuln_migration_v1_red`: 168/168 GREEN (unchanged).
+- M-Y2 luau secure path still works: `tldr secure --lang luau
+  /tmp/repos/luau-luau` exits 0 with `files_skipped=3` (the 3 corpus
+  files with raw 0xFF/0xFE bytes are not oversize, so the oversize
+  policy is independent of the UTF-8 policy).
+- Spot-check on flask (Python), express (JavaScript), and ripgrep
+  (Rust) — finding counts unchanged, no regression in detection.
+
 ## test-harness-feature-flag-v1 — internal milestone
 
 NOT a published release. Repairs three classes of stale test failures

@@ -314,31 +314,77 @@ fn is_rust_test_file(path: &std::path::Path) -> bool {
         || p.ends_with("tests.rs")
 }
 
-/// Partition the candidate file set into UTF-8-clean files (kept) and
-/// non-UTF-8 files (skipped + warned).
+/// Partition the candidate file set into clean (kept) and skipped files.
 ///
-/// SECURE-UTF8-TOLERANCE-V1: pre-fix, `run_security_analysis` called
-/// `fs::read_to_string(file)?` which propagates the
-/// `Err(io::Error("stream did not contain valid UTF-8"))` returned by
-/// `String::from_utf8` for files like `tests/conformance/literals.luau`
-/// in the upstream luau-luau repo. That `?` aborts the entire scan on
-/// the first such file, so `tldr secure --lang luau /tmp/repos/luau-luau`
-/// failed with `Error: IO error: stream did not contain valid UTF-8`
-/// and exited 1, even though 111/114 files were perfectly scannable.
+/// Two-stage filter:
 ///
-/// Mirrors the policy already in
-/// `crates/tldr-core/src/surface/luau.rs` (M-X5,
-/// `luau-utf8-tolerance-v1`): skip with a structured warning,
-/// continue. Genuine I/O errors (file vanished mid-scan) still drop
-/// the file but are NOT counted as a UTF-8 skip — they appear as a
-/// generic warning instead. We intentionally do NOT abort on I/O
-/// errors here: the `secure` walk is best-effort across hundreds of
-/// files and one transient failure should not lose the rest.
+/// 1. **Oversize / auto-gen pre-filter** (SECURE-FASTPATH-V1, M-Z8):
+///    defer to `tldr_core::fs::oversize::check_size` before reading the
+///    file. The 6 sub-analyses each iterate this file set and read the
+///    full content into memory; without a cap, a 2.3 MB
+///    `dom.generated.d.ts` (TypeScript DOM-gen baselines) dominates
+///    the wall clock — pre-fix `tldr secure --lang typescript
+///    /tmp/repos/ts-dom-gen` ran 154 s, dwarfing the rest of the
+///    repo's ~20 ms. Mirrors the policy applied in
+///    `vuln.rs::analyze_file` (covered by M-Y3
+///    `typescript-large-file-perf-v1`) and `api_check.rs::analyze_file`
+///    (covered by M-Z4 `fastpath-extend-non-vuln-v1`); central policy
+///    in `tldr_core::fs::oversize` enforces the 10 MB source-file cap
+///    and the 512 KB cap for `.d.ts` / `.min.js` / `.bundle.*`
+///    auto-generated artefacts.
+///
+/// 2. **UTF-8 tolerance** (SECURE-UTF8-TOLERANCE-V1, M-X5): pre-fix,
+///    `run_security_analysis` called `fs::read_to_string(file)?` which
+///    propagates the `Err(io::Error("stream did not contain valid
+///    UTF-8"))` returned by `String::from_utf8` for files like
+///    `tests/conformance/literals.luau` in the upstream luau-luau
+///    repo. That `?` aborted the entire scan on the first such file,
+///    so `tldr secure --lang luau /tmp/repos/luau-luau` failed with
+///    `Error: IO error: stream did not contain valid UTF-8` and
+///    exited 1, even though 111/114 files were perfectly scannable.
+///    Mirrors the policy already in
+///    `crates/tldr-core/src/surface/luau.rs`: skip with a structured
+///    warning, continue.
+///
+/// Both oversize and non-UTF-8 skips are counted under the returned
+/// `files_skipped` counter and surfaced via a structured warning.
+/// Genuine I/O errors (file vanished mid-scan) drop the file with a
+/// warning but are NOT counted as a skip — the `secure` walk is
+/// best-effort and one transient failure should not lose the rest.
 fn partition_utf8_clean(candidates: &[PathBuf]) -> (Vec<PathBuf>, Vec<String>, u32) {
+    use tldr_core::fs::oversize::{check_size, format_oversize_warning, SizeCheck};
+
     let mut clean: Vec<PathBuf> = Vec::with_capacity(candidates.len());
     let mut warnings: Vec<String> = Vec::new();
     let mut skipped: u32 = 0;
     for file in candidates {
+        // SECURE-FASTPATH-V1 (M-Z8): apply oversize cap BEFORE the read.
+        // `read_to_string_tolerant` reads the full file into memory, so
+        // a 2.3 MB `dom.generated.d.ts` would otherwise be loaded six
+        // times (once per sub-analysis read) and parsed once into a
+        // tree-sitter AST per analysis. The check_size stat call is
+        // O(1) and returns SizeCheck::Unknown for missing files
+        // (which then falls through to the existing read path and is
+        // handled there).
+        match check_size(file) {
+            SizeCheck::Oversize {
+                size_bytes,
+                max_bytes,
+                is_autogen,
+            } => {
+                skipped += 1;
+                warnings.push(format_oversize_warning(
+                    file,
+                    size_bytes,
+                    max_bytes,
+                    is_autogen,
+                ));
+                continue;
+            }
+            // WithinLimit | Unknown: proceed to the UTF-8 read below.
+            _ => {}
+        }
+
         match read_to_string_tolerant(file) {
             Ok(ReadOutcome::Ok(_)) => clean.push(file.clone()),
             Ok(ReadOutcome::NonUtf8 { byte_offset }) => {
@@ -353,7 +399,8 @@ fn partition_utf8_clean(candidates: &[PathBuf]) -> (Vec<PathBuf>, Vec<String>, u
                 // Genuine I/O failure (permissions, vanished, etc.).
                 // Drop the file with a warning rather than aborting the
                 // whole scan. This is NOT counted under `files_skipped`,
-                // which is reserved for the UTF-8-tolerance policy.
+                // which is reserved for the UTF-8-tolerance policy and
+                // the oversize policy.
                 warnings.push(format!(
                     "Skipped {}: I/O error: {}",
                     file.display(),
@@ -1250,6 +1297,98 @@ fn risky(user: &str) {
         assert!(
             bounds_findings.iter().any(|f| f.category == "todo_marker"),
             "Should count todo markers"
+        );
+    }
+
+    /// SECURE-FASTPATH-V1 (M-Z8): the file partition step must drop
+    /// oversize / auto-generated files BEFORE the per-analysis
+    /// `read_to_string_tolerant` loop, mirroring the policy applied
+    /// by `vuln.rs::analyze_file` (M-Y3) and `api_check.rs::analyze_file`
+    /// (M-Z4). Pre-fix, `tldr secure --lang typescript /tmp/repos/ts-dom-gen`
+    /// ran 154 s because the 2.3 MB `dom.generated.d.ts` was read 6
+    /// times (once per sub-analysis) and parsed 6 times into a
+    /// tree-sitter AST. The fastpath skips it on the FIRST stat call.
+    ///
+    /// Test fixture: a synthetic `.d.ts` file padded over the 512 KB
+    /// auto-gen cap (`MAX_AUTOGEN_FILE_SIZE_BYTES`). Asserts:
+    /// 1. The file is dropped from the kept set.
+    /// 2. `files_skipped` is incremented.
+    /// 3. The warning carries the documented oversize shape so
+    ///    consumers can distinguish oversize from UTF-8 skips.
+    #[test]
+    fn test_secure_skips_oversize_files() {
+        use tldr_core::fs::oversize::MAX_AUTOGEN_FILE_SIZE_BYTES;
+
+        let temp = TempDir::new().unwrap();
+
+        // Padded content that exceeds the auto-gen cap. Use a `.d.ts`
+        // suffix so the auto-gen 512 KB cap applies (rather than the
+        // 10 MB source-file cap, which would force a many-MB fixture).
+        let mut padded = String::with_capacity(MAX_AUTOGEN_FILE_SIZE_BYTES as usize + 1024);
+        padded.push_str("export type Generated = {\n");
+        // A line that is harmless but heavy enough to cross the cap.
+        let line = "  member_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx: string;\n";
+        while (padded.len() as u64) < MAX_AUTOGEN_FILE_SIZE_BYTES + 1024 {
+            padded.push_str(line);
+        }
+        padded.push_str("};\n");
+        let big = create_test_file(&temp, "dom.generated.d.ts", &padded);
+
+        // Sanity: confirm we actually exceeded the cap (otherwise the
+        // test would be a no-op false-positive).
+        let size = std::fs::metadata(&big).unwrap().len();
+        assert!(
+            size > MAX_AUTOGEN_FILE_SIZE_BYTES,
+            "fixture must exceed auto-gen cap (size={}, cap={})",
+            size,
+            MAX_AUTOGEN_FILE_SIZE_BYTES
+        );
+
+        // Also include a small, in-policy `.ts` file so we can verify
+        // the partition continues past the oversize skip rather than
+        // short-circuiting.
+        let small = create_test_file(
+            &temp,
+            "ok.ts",
+            "export function f(x: string): string { return x; }\n",
+        );
+
+        let (kept, warnings, files_skipped) =
+            partition_utf8_clean(&[big.clone(), small.clone()]);
+
+        // 1. Oversize file is dropped from the kept set.
+        assert!(
+            !kept.iter().any(|p| p == &big),
+            "oversize .d.ts must be dropped from kept set: kept={:?}",
+            kept
+        );
+        // The small in-policy file is preserved.
+        assert!(
+            kept.iter().any(|p| p == &small),
+            "small in-policy .ts must be preserved: kept={:?}",
+            kept
+        );
+
+        // 2. files_skipped reflects the oversize drop.
+        assert_eq!(
+            files_skipped, 1,
+            "files_skipped must count the oversize drop (got {})",
+            files_skipped
+        );
+
+        // 3. Warning carries the documented oversize shape, distinct
+        //    from the UTF-8 "invalid UTF-8 at byte" shape.
+        let oversize_warning = warnings
+            .iter()
+            .find(|w| w.contains("dom.generated.d.ts"))
+            .expect("must emit a warning for the oversize file");
+        assert!(
+            oversize_warning.contains("exceeds")
+                && oversize_warning.contains("cap for")
+                && oversize_warning.contains("auto-generated/minified files"),
+            "oversize warning must use the format_oversize_warning shape \
+             (got: {})",
+            oversize_warning
         );
     }
 }
