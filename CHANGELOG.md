@@ -1,5 +1,113 @@
 # Changelog
 
+## references-canonical-def-v1 — internal milestone
+
+NOT a published release. UX bug-fix milestone for `tldr references`.
+
+### Bug — canonical definition hidden behind test subclass
+
+```bash
+$ tldr references Flask /tmp/repos/flask | jq '.definition'
+{
+  "file": "/tmp/repos/flask/tests/test_config.py",
+  "line": 202,
+  "column": 11,
+  "kind": "class",
+  "signature": "class Flask(flask.Flask):"
+}
+```
+
+The picker returned the FIRST AST match from `walk_project`'s walker
+order. On `flask` that walker happened to hit `tests/test_config.py`
+before `src/flask/app.py`, so the canonical
+`class Flask` at `src/flask/app.py:109` was hidden behind a
+fixture subclass `class Flask(flask.Flask)` defined inside a
+test file. The definition shown to the user is **not** the
+definition they want — it's a test stub.
+
+The same shape shows up across other repos: `Router` in `express`
+defined twice (real `lib/...` declaration + test-fixture rebind),
+`Foo` in any Rust crate with a `tests/foo_test.rs` shadow type.
+
+In addition, `total_references` was set to the **post-truncation**
+length of the references Vec, so the default `--limit 20` made
+every popular symbol look like it had exactly 20 references on the
+planet. Flask actually has 337 references in its own repo; the
+report claimed 20.
+
+### Fix
+
+`crates/tldr-core/src/analysis/references.rs::find_definition`
+now collects **all** AST-level matches across the workspace and
+ranks them into three tiers:
+
+| Tier | Predicate | Example |
+| ---- | --------- | ------- |
+| 1 (best)  | non-test AND under `src/` / `lib/` / `main/` | `src/flask/app.py:109` |
+| 2         | non-test, anywhere else                     | `examples/demo.py`     |
+| 3 (worst) | test file                                   | `tests/test_config.py` |
+
+Within a tier, ties broken by lexicographic file path then line
+number — fully deterministic.
+
+Tier 3 is only picked when **every** match is in a test file
+(symbol is genuinely test-only, e.g. a `pytest` helper). This
+preserves correctness for genuine test-only fixtures.
+
+The test-file predicate `is_test_file_path` is implemented as a
+fresh public helper in `references.rs` rather than reusing
+`vuln::is_js_test_file` / `vuln::is_rust_test_file` directly: the
+vuln helpers are extension-gated to JS/Rust respectively, but
+the canonical-def picker needs a generic predicate covering
+Python (`tests/`, `test_*.py`, `*_test.py`, `conftest.py`),
+Java/Kotlin/Scala (`src/test/`), Ruby (`spec/`, `*_spec.rb`,
+`*_test.rb`), Go (`*_test.go`), and the existing Rust/JS rules.
+
+`total_references` and `stats.verified_references` now both
+reflect the **pre-truncation** count — `--limit 20` truncates
+the `references` Vec but leaves the count honest, so users see
+"20 of 337" implicitly.
+
+### Investigation note: "why 20 references?"
+
+The "ref count = 20" was not a search-scope bug. The CLI's
+`--limit` defaults to 20 (`crates/tldr-cli/src/commands/references.rs`,
+`ReferencesArgs::limit = 20`), and `find_references` truncates
+the Vec to that limit. The pathology was that
+`total_references` echoed the truncated length instead of the
+real verified count — which is now fixed in this milestone.
+
+### Verification (binary)
+
+```bash
+$ tldr references Flask /tmp/repos/flask | jq '.definition'
+{ "file": ".../src/flask/app.py", "line": 109, "kind": "class", ... }
+
+$ tldr references Flask /tmp/repos/flask | jq '.total_references'
+337   # was: 20
+```
+
+### Tests
+
+- 5 unit tests for `is_test_file_path` (Python, JS/TS, Rust,
+  Java/Kotlin/Scala, Ruby/Go).
+- 1 unit test for `canonical_def_tier` ranking.
+- 4 end-to-end fixture tests
+  (`test_references_skips_test_subclass_picks_canonical_{python,js,rust,go}`)
+  covering the flask/express bug shape per language.
+- 1 fallback test
+  (`test_references_canonical_def_test_only_fallback`) — when
+  the symbol is genuinely test-only, the picker still returns
+  the test-file definition rather than `None`.
+- 1 regression test
+  (`test_total_references_reflects_pre_truncation_count`) for
+  the truncation-count fix.
+
+12 new unit tests, all passing. `vuln_migration_v1_red` 168/168
+GREEN. Full `tldr-core` lib suite: 4754 passed.
+
+---
+
 ## search-symbol-name-boost-v1 — internal milestone
 
 NOT a published release. UX bug-fix milestone for `tldr search` (the

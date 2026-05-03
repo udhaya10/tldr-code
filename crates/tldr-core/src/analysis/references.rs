@@ -2490,13 +2490,190 @@ fn is_type_context(node: &Node) -> bool {
 // Phase 11: Definition Finding and Cross-File Tracking
 // =============================================================================
 
-/// Find the definition location for a symbol
+/// Predicate: a path looks like a test file across the language ecosystems
+/// supported by `tldr`.
 ///
-/// Searches for definition patterns in the AST across all files in the workspace:
-/// - Python: function_definition, class_definition, assignment
-/// - TypeScript: function_declaration, class_declaration, variable_declaration
-/// - Go: function_declaration, type_declaration
-/// - Rust: function_item, struct_item, enum_item
+/// Recognises (in priority order):
+///
+/// 1. **Java/Kotlin/Scala** — Maven/Gradle convention `src/test/`
+///    (e.g. `src/test/java/...`, `src/test/kotlin/...`).
+/// 2. **JS/TS** — `__tests__/`, `.test.<ext>`, `.spec.<ext>`, `.e2e.<ext>`,
+///    plus `test/`, `tests/`. Mirrors `vuln::is_js_test_file` minus the
+///    extension gate (the gate is JS-only; here we want a generic predicate).
+/// 3. **Python** — `tests/`, `test/`, `test_*.py`, `*_test.py`,
+///    `conftest.py`.
+/// 4. **Rust** — `tests/`, `_test.rs`, `tests.rs`. Mirrors
+///    `vuln::is_rust_test_file`.
+/// 5. **Ruby** — `spec/`, `_spec.rb`, `_test.rb`.
+/// 6. **Go** — `_test.go`.
+///
+/// Used by `find_definition` (the references-canonical-def-v1 milestone)
+/// to PREFER non-test files when picking a canonical definition. When a
+/// symbol like `Flask` is defined in both `src/flask/app.py` (canonical
+/// class) AND `tests/test_config.py` (test subclass `class Flask(flask.Flask)`),
+/// the canonical-def picker uses this predicate to filter out the test
+/// match and return the real source location.
+///
+/// Conservative — when in doubt, returns `false` (i.e. treats the file
+/// as non-test). This avoids false-suppressing legitimate source code.
+///
+/// # Examples
+///
+/// ```
+/// use std::path::Path;
+/// use tldr_core::analysis::references::is_test_file_path;
+///
+/// // Test files
+/// assert!(is_test_file_path(Path::new("tests/test_config.py")));
+/// assert!(is_test_file_path(Path::new("src/test/java/com/Foo.java")));
+/// assert!(is_test_file_path(Path::new("foo/__tests__/bar.js")));
+/// assert!(is_test_file_path(Path::new("foo_test.go")));
+/// assert!(is_test_file_path(Path::new("spec/foo_spec.rb")));
+/// assert!(is_test_file_path(Path::new("crates/x/tests/it.rs")));
+/// assert!(is_test_file_path(Path::new("foo.spec.ts")));
+///
+/// // Source files
+/// assert!(!is_test_file_path(Path::new("src/flask/app.py")));
+/// assert!(!is_test_file_path(Path::new("lib/router/index.js")));
+/// assert!(!is_test_file_path(Path::new("src/main.rs")));
+/// ```
+pub fn is_test_file_path(path: &Path) -> bool {
+    let path_str = path.to_string_lossy();
+
+    // Normalise Windows path separators to forward slashes for matching.
+    let normalised: String = path_str.replace('\\', "/");
+    let n = normalised.as_str();
+
+    // 1. Java/Kotlin/Scala Maven/Gradle convention.
+    //    Match the SEGMENT `src/test/` — a `srcXtest` substring would not.
+    if n.contains("/src/test/") || n.starts_with("src/test/") {
+        return true;
+    }
+
+    // 2. Generic test-directory components (matches at any depth, including
+    //    leading position for relative paths).
+    //    Note: we deliberately match `test/` AND `tests/` — both are common.
+    let has_test_dir = n.contains("/tests/")
+        || n.contains("/test/")
+        || n.contains("/__tests__/")
+        || n.contains("/spec/")
+        || n.contains("/specs/")
+        || n.starts_with("tests/")
+        || n.starts_with("test/")
+        || n.starts_with("__tests__/")
+        || n.starts_with("spec/")
+        || n.starts_with("specs/");
+    if has_test_dir {
+        return true;
+    }
+
+    // 3. Filename-suffix patterns by extension.
+    let filename = match path.file_name().and_then(|f| f.to_str()) {
+        Some(f) => f,
+        None => return false,
+    };
+
+    // Python: test_*.py / *_test.py / conftest.py
+    if filename.ends_with(".py")
+        && (filename.starts_with("test_")
+            || filename.ends_with("_test.py")
+            || filename == "conftest.py")
+    {
+        return true;
+    }
+
+    // Rust: *_test.rs / tests.rs
+    if filename.ends_with("_test.rs") || filename == "tests.rs" {
+        return true;
+    }
+
+    // Go: *_test.go
+    if filename.ends_with("_test.go") {
+        return true;
+    }
+
+    // Ruby: *_spec.rb / *_test.rb
+    if filename.ends_with("_spec.rb") || filename.ends_with("_test.rb") {
+        return true;
+    }
+
+    // JS/TS: foo.test.ext / foo.spec.ext / foo.e2e.ext
+    let js_exts = [
+        ".js", ".jsx", ".ts", ".tsx", ".cjs", ".mjs", ".cts", ".mts",
+    ];
+    for ext in &js_exts {
+        if filename.ends_with(ext) {
+            let stem = &filename[..filename.len() - ext.len()];
+            if stem.ends_with(".test")
+                || stem.ends_with(".spec")
+                || stem.ends_with(".e2e")
+            {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+/// Predicate: a path lives under a "real source" directory (`src/`,
+/// `lib/`, `main/`).
+///
+/// Used as a SECONDARY ranking signal in `find_definition` — among
+/// non-test definition candidates, prefer one that lives in `src/` /
+/// `lib/` / `main/` over one in (say) `examples/` or `scripts/`.
+fn is_src_path(path: &Path) -> bool {
+    let path_str = path.to_string_lossy();
+    let n: String = path_str.replace('\\', "/");
+
+    // Order matters: check `src/main/` BEFORE `src/test/` would have been
+    // checked (`is_test_file_path` already excluded it earlier).
+    n.contains("/src/main/")
+        || n.contains("/src/")
+        || n.starts_with("src/")
+        || n.contains("/lib/")
+        || n.starts_with("lib/")
+        || n.contains("/main/")
+        || n.starts_with("main/")
+}
+
+/// Find the canonical definition location for a symbol.
+///
+/// Scans all source files in the workspace, collects every AST node
+/// whose name matches `symbol`, and ranks the candidates so the
+/// **canonical** (non-test, source-tree) definition wins:
+///
+/// 1. **Tier 1 (preferred):** non-test file that lives under `src/` /
+///    `lib/` / `main/`.
+/// 2. **Tier 2:** non-test file anywhere else.
+/// 3. **Tier 3 (last resort):** test file (only picked if every match
+///    is in a test file — e.g. when the symbol is genuinely test-only).
+///
+/// Within a tier, candidates are ordered by file path lexicographically
+/// (stable, deterministic) and the lowest line number wins on tie.
+///
+/// # Why
+///
+/// Pre-`references-canonical-def-v1` this function returned the FIRST
+/// match emitted by `walk_project`, which on real codebases (`flask`,
+/// `express`) was a test subclass like
+/// `class Flask(flask.Flask)` at `tests/test_config.py:202` — a
+/// confusing UX failure that hid the canonical
+/// `class Flask` at `src/flask/app.py:109`.
+///
+/// # Supported languages for AST-level definition matching
+///
+/// - Python: `function_definition`, `class_definition`, module-level
+///   `assignment`
+/// - TypeScript / JavaScript: `function_declaration`, `class_declaration`,
+///   `variable_declaration`
+/// - Go: `function_declaration`, `type_declaration`
+/// - Rust: `function_item`, `struct_item`, `enum_item`, `const_item`,
+///   `static_item`, `type_item`
+///
+/// Languages not in this list yield `Ok(None)` — the references
+/// command still works (text-search + AST verification of references),
+/// just without a `definition` field in the report.
 ///
 /// # Arguments
 ///
@@ -2506,24 +2683,59 @@ fn is_type_context(node: &Node) -> bool {
 ///
 /// # Returns
 ///
-/// `Some(Definition)` if found, `None` otherwise.
+/// `Some(Definition)` for the highest-tier match, or `None` if no
+/// AST-level match was found in any file.
 pub fn find_definition(
     symbol: &str,
     root: &Path,
     language: Option<&str>,
 ) -> TldrResult<Option<Definition>> {
-    // Walk all source files
+    // Collect ALL definitions across ALL files instead of returning the
+    // first match — this is the core change for references-canonical-def-v1.
+    let mut candidates: Vec<Definition> = Vec::new();
+
     for entry in walk_project(root)
         .filter(|e| e.file_type().map(|ft| ft.is_file()).unwrap_or(false))
         .filter(|e| is_source_file(e.path(), language))
     {
-        // Try to find definition in this file
         if let Ok(Some(def)) = find_definition_in_file(symbol, entry.path(), language) {
-            return Ok(Some(def));
+            candidates.push(def);
         }
     }
 
-    Ok(None)
+    if candidates.is_empty() {
+        return Ok(None);
+    }
+
+    // Rank: tier 1 (non-test + src) > tier 2 (non-test) > tier 3 (test).
+    // Sort key: (tier, path_str, line). Lower tier = higher priority.
+    candidates.sort_by(|a, b| {
+        let tier_a = canonical_def_tier(&a.file);
+        let tier_b = canonical_def_tier(&b.file);
+        tier_a
+            .cmp(&tier_b)
+            .then_with(|| a.file.cmp(&b.file))
+            .then_with(|| a.line.cmp(&b.line))
+    });
+
+    Ok(candidates.into_iter().next())
+}
+
+/// Compute the canonical-def ranking tier for a path.
+///
+/// Lower number = higher priority. See [`find_definition`] docs for the
+/// full ranking rationale.
+fn canonical_def_tier(path: &Path) -> u8 {
+    if is_test_file_path(path) {
+        // Tier 3: test file. Only picked when every match is in a test file.
+        3
+    } else if is_src_path(path) {
+        // Tier 1: non-test file in a real source directory.
+        1
+    } else {
+        // Tier 2: non-test file outside src/lib/main (examples/, scripts/, etc.)
+        2
+    }
 }
 
 /// Find definition of a symbol in a specific file
@@ -3015,18 +3227,25 @@ pub fn find_references(
         references.retain(|r| kinds.contains(&r.kind));
     }
 
+    // Capture the full verified count BEFORE truncation so callers/UI can
+    // report "showing 20 of 337" honestly. Pre-`references-canonical-def-v1`
+    // `total_references` was set to the truncated length, which made the
+    // default `--limit 20` look like the symbol only had 20 references on
+    // the planet. (See changelog: investigation step "why is ref count
+    // 20 (low)?".)
+    let total_verified = references.len();
+
     // Apply limit if specified
     if let Some(limit) = options.limit {
         references.truncate(limit);
     }
 
     let files_searched = count_source_files(root, language);
-    let verified_references = references.len();
 
     let stats = ReferenceStats {
         files_searched,
         candidates_found,
-        verified_references,
+        verified_references: total_verified,
         search_time_ms: start.elapsed().as_millis() as u64,
     };
 
@@ -3034,7 +3253,7 @@ pub fn find_references(
         symbol: symbol.to_string(),
         definition,
         references,
-        total_references: verified_references,
+        total_references: total_verified,
         search_scope: effective_scope, // Use the effective scope (auto-detected or explicit)
         stats,
     })
@@ -3893,5 +4112,327 @@ let _ = print_string (greet "Alice")
 "#;
         let results = collect_reference_kinds_for(src, Language::Ocaml, "greet", &["value_name"]);
         assert_def_and_calls(&results, "OCaml");
+    }
+
+    // =========================================================================
+    // references-canonical-def-v1 tests
+    //
+    // Pre-milestone behaviour: `find_definition` returned the FIRST AST match
+    // from `walk_project`'s walker order, which on `flask` returned a test
+    // subclass at `tests/test_config.py:202`, hiding the canonical
+    // `class Flask` at `src/flask/app.py:109`.
+    //
+    // Post-milestone: non-test files in `src/` / `lib/` / `main/` win,
+    // falling back to non-test files anywhere, falling back to test files
+    // only when every match is in a test file.
+    // =========================================================================
+
+    #[test]
+    fn test_is_test_file_path_python() {
+        // Positive: Python test conventions
+        assert!(is_test_file_path(Path::new("tests/test_config.py")));
+        assert!(is_test_file_path(Path::new("tests/test_app.py")));
+        assert!(is_test_file_path(Path::new("foo/tests/x.py")));
+        assert!(is_test_file_path(Path::new("test_module.py")));
+        assert!(is_test_file_path(Path::new("module_test.py")));
+        assert!(is_test_file_path(Path::new("conftest.py")));
+        assert!(is_test_file_path(Path::new("foo/conftest.py")));
+
+        // Negative: Python source
+        assert!(!is_test_file_path(Path::new("src/flask/app.py")));
+        assert!(!is_test_file_path(Path::new("flask/app.py")));
+        assert!(!is_test_file_path(Path::new("module.py")));
+        assert!(!is_test_file_path(Path::new("testify.py"))); // not test_ prefix
+    }
+
+    #[test]
+    fn test_is_test_file_path_js_ts() {
+        // Positive: JS/TS test conventions
+        assert!(is_test_file_path(Path::new("test/foo.js")));
+        assert!(is_test_file_path(Path::new("tests/foo.ts")));
+        assert!(is_test_file_path(Path::new("foo/__tests__/bar.tsx")));
+        assert!(is_test_file_path(Path::new("foo.test.js")));
+        assert!(is_test_file_path(Path::new("foo.test.tsx")));
+        assert!(is_test_file_path(Path::new("foo.spec.ts")));
+        assert!(is_test_file_path(Path::new("foo.e2e.js")));
+
+        // Negative: JS/TS source
+        assert!(!is_test_file_path(Path::new("lib/router/index.js")));
+        assert!(!is_test_file_path(Path::new("src/index.ts")));
+        assert!(!is_test_file_path(Path::new("dist/foo.js")));
+    }
+
+    #[test]
+    fn test_is_test_file_path_rust() {
+        // Positive: Rust test conventions
+        assert!(is_test_file_path(Path::new("crates/x/tests/it.rs")));
+        assert!(is_test_file_path(Path::new("tests/integration.rs")));
+        assert!(is_test_file_path(Path::new("crates/x/src/foo_test.rs")));
+        assert!(is_test_file_path(Path::new("crates/x/src/tests.rs")));
+
+        // Negative: Rust source
+        assert!(!is_test_file_path(Path::new("crates/x/src/main.rs")));
+        assert!(!is_test_file_path(Path::new("src/lib.rs")));
+        assert!(!is_test_file_path(Path::new("crates/x/src/tester.rs")));
+    }
+
+    #[test]
+    fn test_is_test_file_path_java() {
+        // Positive: Maven/Gradle src/test/ convention
+        assert!(is_test_file_path(Path::new("src/test/java/com/Foo.java")));
+        assert!(is_test_file_path(Path::new("foo/src/test/kotlin/Bar.kt")));
+        assert!(is_test_file_path(Path::new(
+            "module/src/test/scala/Spec.scala"
+        )));
+
+        // Negative: src/main/ is source
+        assert!(!is_test_file_path(Path::new(
+            "src/main/java/com/Foo.java"
+        )));
+        assert!(!is_test_file_path(Path::new(
+            "module/src/main/kotlin/Bar.kt"
+        )));
+    }
+
+    #[test]
+    fn test_is_test_file_path_ruby_go() {
+        // Ruby
+        assert!(is_test_file_path(Path::new("spec/foo_spec.rb")));
+        assert!(is_test_file_path(Path::new("test/foo_test.rb")));
+        // Go
+        assert!(is_test_file_path(Path::new("foo_test.go")));
+        assert!(is_test_file_path(Path::new("pkg/x/handler_test.go")));
+        // Negative
+        assert!(!is_test_file_path(Path::new("lib/foo.rb")));
+        assert!(!is_test_file_path(Path::new("pkg/x/handler.go")));
+    }
+
+    #[test]
+    fn test_canonical_def_tier_ranking() {
+        // Tier 1: non-test in src/lib/main
+        assert_eq!(canonical_def_tier(Path::new("src/flask/app.py")), 1);
+        assert_eq!(canonical_def_tier(Path::new("lib/router/index.js")), 1);
+        assert_eq!(
+            canonical_def_tier(Path::new("module/src/main/java/com/Foo.java")),
+            1
+        );
+
+        // Tier 2: non-test outside src/lib/main
+        assert_eq!(canonical_def_tier(Path::new("examples/demo.py")), 2);
+        assert_eq!(canonical_def_tier(Path::new("scripts/build.py")), 2);
+
+        // Tier 3: test files
+        assert_eq!(
+            canonical_def_tier(Path::new("tests/test_config.py")),
+            3
+        );
+        assert_eq!(
+            canonical_def_tier(Path::new("src/test/java/com/Foo.java")),
+            3
+        );
+        assert_eq!(canonical_def_tier(Path::new("foo.test.js")), 3);
+    }
+
+    /// Python: `src/foo.py::Foo` + `tests/test_foo.py::Foo` subclass
+    /// → canonical = src.
+    ///
+    /// Mirrors the real-world flask case (`src/flask/app.py:109` vs
+    /// `tests/test_config.py:202`).
+    #[test]
+    fn test_references_skips_test_subclass_picks_canonical_python() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        let src_dir = root.join("src");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        std::fs::write(
+            src_dir.join("foo.py"),
+            "class Foo:\n    def __init__(self):\n        pass\n",
+        )
+        .unwrap();
+
+        let tests_dir = root.join("tests");
+        std::fs::create_dir_all(&tests_dir).unwrap();
+        std::fs::write(
+            tests_dir.join("test_foo.py"),
+            "from src.foo import Foo as _Foo\n\nclass Foo(_Foo):\n    pass\n",
+        )
+        .unwrap();
+
+        let def = find_definition("Foo", root, Some("python"))
+            .unwrap()
+            .expect("definition should be found");
+        assert!(
+            def.file.to_string_lossy().contains("src/foo.py"),
+            "expected src/foo.py, got {}",
+            def.file.display()
+        );
+        assert!(
+            !def.file.to_string_lossy().contains("tests/"),
+            "should NOT pick tests/ file"
+        );
+    }
+
+    /// JS: `lib/router.js::Router` + `test/router.test.js::Router`
+    /// → canonical = lib.
+    #[test]
+    fn test_references_skips_test_subclass_picks_canonical_js() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        let lib_dir = root.join("lib");
+        std::fs::create_dir_all(&lib_dir).unwrap();
+        std::fs::write(
+            lib_dir.join("router.js"),
+            "function Router() { return {}; }\nmodule.exports = Router;\n",
+        )
+        .unwrap();
+
+        let test_dir = root.join("test");
+        std::fs::create_dir_all(&test_dir).unwrap();
+        std::fs::write(
+            test_dir.join("router.test.js"),
+            "function Router() { return 'test-stub'; }\n",
+        )
+        .unwrap();
+
+        let def = find_definition("Router", root, Some("javascript"))
+            .unwrap()
+            .expect("definition should be found");
+        let file_str = def.file.to_string_lossy().to_string();
+        assert!(
+            file_str.contains("lib/router.js"),
+            "expected lib/router.js, got {file_str}"
+        );
+        assert!(!file_str.contains("test/"), "should NOT pick test/ file");
+    }
+
+    /// Rust: `src/foo.rs::Foo` (struct) + `tests/foo_test.rs::Foo`
+    /// → canonical = src.
+    #[test]
+    fn test_references_skips_test_subclass_picks_canonical_rust() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        let src_dir = root.join("src");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        std::fs::write(src_dir.join("foo.rs"), "pub struct Foo { x: u32 }\n").unwrap();
+
+        let tests_dir = root.join("tests");
+        std::fs::create_dir_all(&tests_dir).unwrap();
+        std::fs::write(
+            tests_dir.join("foo_test.rs"),
+            "struct Foo { dummy: () }\n#[test]\nfn t() { let _ = Foo { dummy: () }; }\n",
+        )
+        .unwrap();
+
+        let def = find_definition("Foo", root, Some("rust"))
+            .unwrap()
+            .expect("definition should be found");
+        let file_str = def.file.to_string_lossy().to_string();
+        assert!(
+            file_str.contains("src/foo.rs"),
+            "expected src/foo.rs, got {file_str}"
+        );
+        assert!(!file_str.contains("tests/"), "should NOT pick tests/ file");
+    }
+
+    /// Go: `pkg/foo.go::Foo` + `pkg/foo_test.go::Foo`
+    /// → canonical = pkg/foo.go.
+    ///
+    /// Note: Go uses `_test.go` filename suffix, no `src/` convention.
+    /// `pkg/foo.go` is tier 2 (non-test, non-src) and `pkg/foo_test.go`
+    /// is tier 3 (test) — tier 2 wins.
+    #[test]
+    fn test_references_skips_test_subclass_picks_canonical_go() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        let pkg = root.join("pkg");
+        std::fs::create_dir_all(&pkg).unwrap();
+        std::fs::write(
+            pkg.join("foo.go"),
+            "package pkg\n\ntype Foo struct { X int }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            pkg.join("foo_test.go"),
+            "package pkg\n\ntype Foo struct { Dummy bool }\n",
+        )
+        .unwrap();
+
+        let def = find_definition("Foo", root, Some("go"))
+            .unwrap()
+            .expect("definition should be found");
+        let file_str = def.file.to_string_lossy().to_string();
+        assert!(
+            file_str.ends_with("pkg/foo.go") || file_str.ends_with("pkg\\foo.go"),
+            "expected pkg/foo.go, got {file_str}"
+        );
+        assert!(
+            !file_str.contains("_test.go"),
+            "should NOT pick _test.go file"
+        );
+    }
+
+    /// Edge case: when EVERY match is in a test file, fall back to the
+    /// earliest test match rather than returning None — the symbol is
+    /// genuinely test-only.
+    #[test]
+    fn test_references_canonical_def_test_only_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        let tests_dir = root.join("tests");
+        std::fs::create_dir_all(&tests_dir).unwrap();
+        std::fs::write(
+            tests_dir.join("test_helpers.py"),
+            "def test_only_helper():\n    pass\n",
+        )
+        .unwrap();
+
+        let def = find_definition("test_only_helper", root, Some("python"))
+            .unwrap()
+            .expect("definition should be found in test file as fallback");
+        assert!(def.file.to_string_lossy().contains("tests/"));
+    }
+
+    /// Verify `total_references` reflects the FULL pre-truncation count,
+    /// not the truncated `references` Vec length. Pre-fix, default
+    /// `--limit 20` made `total_references` always = 20 for popular
+    /// symbols, hiding the true scale (337 for Flask).
+    #[test]
+    fn test_total_references_reflects_pre_truncation_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        let src_dir = root.join("src");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        // Definition + 5 calls
+        std::fs::write(
+            src_dir.join("foo.py"),
+            "def my_func():\n    pass\n\nmy_func()\nmy_func()\nmy_func()\nmy_func()\nmy_func()\n",
+        )
+        .unwrap();
+
+        let opts = ReferencesOptions {
+            limit: Some(2),
+            language: Some("python".to_string()),
+            ..Default::default()
+        };
+        let report = find_references("my_func", root, &opts).unwrap();
+
+        // The Vec is truncated to 2...
+        assert!(report.references.len() <= 2);
+        // ...but total_references reflects the real count (>2).
+        assert!(
+            report.total_references > 2,
+            "expected total_references > 2, got {}",
+            report.total_references
+        );
+        assert_eq!(
+            report.total_references, report.stats.verified_references,
+            "stats.verified_references should mirror total_references"
+        );
     }
 }
