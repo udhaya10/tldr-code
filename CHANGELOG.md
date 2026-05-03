@@ -1,5 +1,92 @@
 # Changelog
 
+## vuln-secure-autodetect-parity-v1 — internal milestone
+
+NOT a published release. Bug-fix milestone restoring `tldr vuln` ↔
+`tldr secure` parity on the language-autodetect path.
+
+### Bug — secure's autodetect path silently produced 0 taint findings
+
+```bash
+$ tldr vuln /tmp/repos/express   | jq '.findings | length'   # 1
+$ tldr secure /tmp/repos/express | jq '.summary.taint_count' # 0  ← divergence
+```
+
+`/tmp/repos/express` is a JavaScript-only tree (manifest:
+`package.json`). With an explicit `--lang javascript` both commands
+agreed (M-Z10 `secure-test-file-suppression-v1` closed the explicit-lang
+divergence). On the autodetect path (no `--lang`), secure still
+diverged because its `collect_files` did NOT autodetect the dominant
+language: with `lang = None`, `is_supported_secure_file` matched only
+`.py` and `.rs` files, so a JS-only tree silently produced an empty
+file set and the canonical taint pipeline never ran.
+
+### Why this matters
+
+`tldr secure` is the security dashboard the user lands on by default;
+`tldr vuln` is the deeper view. The autodetect-path divergence meant
+the dashboard under-reported on every JS / TS tree the user ran it on
+without an explicit `--lang` flag — silently. Critical security
+findings were hidden.
+
+### Fix
+
+`secure.rs::run` now mirrors `vuln.rs::VulnArgs::run`'s
+language-resolution prelude:
+
+1. If `--lang L` is provided, honor it as-is.
+2. Else, autodetect via `Language::from_directory` (made strict by
+   M-AA1 `autodetect-dominant-language-v1`: extension-majority +
+   manifest-priority, skipping vendored trees).
+3. If the autodetected language lies outside the natively-analyzed
+   set (Python, Rust, TypeScript, JavaScript per
+   `vuln::is_natively_analyzed`, promoted to `pub(super)` for reuse),
+   error with `RemainingError::AutodetectUnsupported` (exit 2) — same
+   contract and message shape as vuln.
+
+The resolved language is then passed to `collect_files`, which uses
+the existing per-language extension filter. The `--include-tests`
+suppression mask (M-Z10) already runs post-analysis, so once the
+files are collected the rest of the pipeline already agreed with
+vuln.
+
+### Validation
+
+Binary verification (no `--lang`):
+
+| Repo                  | `vuln.findings.length` (taint subset) | `secure.summary.taint_count` |
+|-----------------------|---------------------------------------|------------------------------|
+| `/tmp/repos/express`  | 1                                     | 1 ✓ (was 0)                  |
+| `/tmp/repos/flask`    | 4                                     | 4 ✓                          |
+| `/tmp/repos/ripgrep`  | 22                                    | 22 ✓                         |
+
+(For ripgrep, `vuln.findings.length` is 28 raw; the taint subset
+excluding Rust smell-class findings — UnsafeCode, MemorySafety —
+agrees with `secure.summary.taint_count`. Smells flow into
+`summary.unsafe_blocks` etc. on the secure side, not `taint_count`.)
+
+Test:
+
+- `crates/tldr-cli/tests/vuln_secure_autodetect_parity_v1.rs`:
+  `test_vuln_secure_autodetect_parity_express` builds a synthetic
+  JS-only directory (with a `package.json` manifest and an
+  Express-style `req.params → res.redirect` PathTraversal flow), runs
+  both `tldr vuln <dir>` and `tldr secure <dir>` with NO `--lang`,
+  and asserts `vuln.findings.length == secure.summary.taint_count`.
+- `vuln_migration_v1_red`: 168/168 GREEN.
+- `tldr-cli` lib unit tests (vuln + secure scopes): 45/45 GREEN.
+
+### Files changed
+
+- `crates/tldr-cli/src/commands/remaining/vuln.rs` — promoted
+  `is_natively_analyzed` to `pub(super)` so secure can reuse the
+  canonical gate.
+- `crates/tldr-cli/src/commands/remaining/secure.rs` — added the
+  autodetect language-resolution prelude in `run` mirroring vuln's
+  contract; passes the resolved `Option<Language>` to `collect_files`.
+- `crates/tldr-cli/tests/vuln_secure_autodetect_parity_v1.rs` — new
+  RED→GREEN guard for the synthetic-dir parity invariant.
+
 ## format-flag-strictness-v1 — internal milestone
 
 NOT a published release. UX bug-fix milestone for the global `--format` flag.

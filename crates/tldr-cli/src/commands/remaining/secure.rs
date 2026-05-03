@@ -178,8 +178,62 @@ pub fn run(args: SecureArgs, format: OutputFormat) -> anyhow::Result<()> {
         FULL_ANALYSES
     };
 
-    // Collect files to analyze (auto-detect Python files)
-    let candidate_files = collect_files(&args.path, args.lang, args.no_default_ignore)?;
+    // VULN-SECURE-AUTODETECT-PARITY-V1 (M-AA5): mirror `tldr vuln`'s
+    // language-resolution path so secure agrees with vuln on autodetect.
+    //
+    // Pre-fix: `tldr secure /tmp/repos/express` (no `--lang`) reported
+    // `summary.taint_count: 0` while `tldr vuln /tmp/repos/express`
+    // reported `findings: 1`. The discrepancy traced to secure's
+    // `collect_files` lacking the autodetect step: with `lang = None`,
+    // `is_supported_secure_file` matches only `py | rs`, so a JS-only
+    // tree (express) silently produced an empty file set.
+    //
+    // M-Z10 (`secure-test-file-suppression-v1`) made vuln+secure agree
+    // when `--lang` is EXPLICIT by mirroring the test-file suppression
+    // mask. M-AA5 closes the symmetric gap on the autodetect path:
+    //
+    //   1. If `--lang L` provided, honor it as-is.
+    //   2. Else, autodetect via `Language::from_directory` (M-AA1
+    //      `autodetect-dominant-language-v1` made this strict
+    //      extension-majority + manifest-priority).
+    //   3. If the detected language lies outside the natively-analyzed
+    //      set, error with `AutodetectUnsupported` (exit 2) — same
+    //      contract as vuln. This points the user at an explicit
+    //      `--lang` flag.
+    //
+    // The natively-analyzed set is canonical-pipeline-driven and lives
+    // in `vuln::is_natively_analyzed` (Python, Rust, TypeScript,
+    // JavaScript per M-Y3). Reusing it here keeps secure↔vuln gate
+    // semantics in lock-step: if vuln autodetect-rejects a tree, secure
+    // does too, with the same message.
+    let effective_lang: Option<Language> = match args.lang {
+        Some(l) => Some(l),
+        None => {
+            let detected = if args.path.is_dir() {
+                Language::from_directory(&args.path)
+            } else {
+                Language::from_path(&args.path)
+            };
+            if let Some(l) = detected {
+                if !super::vuln::is_natively_analyzed(l) {
+                    return Err(RemainingError::autodetect_unsupported(format!(
+                        "secure: taint analysis for {lang} is not yet supported by autodetect; \
+                         pass --lang {lang} explicitly to scan this file (the canonical taint \
+                         pipeline supports it). Autodetect-by-extension currently routes only \
+                         --lang python, --lang rust, --lang typescript, and --lang javascript; \
+                         other languages require an explicit --lang flag.",
+                        lang = l.as_str()
+                    ))
+                    .into());
+                }
+            }
+            detected
+        }
+    };
+
+    // Collect files to analyze (autodetected language drives the
+    // extension filter when --lang is omitted).
+    let candidate_files = collect_files(&args.path, effective_lang, args.no_default_ignore)?;
 
     // SECURE-UTF8-TOLERANCE-V1: pre-filter for UTF-8 validity ONCE up front.
     // The 6 sub-analyses (taint, resources, bounds, contracts, behavioral,

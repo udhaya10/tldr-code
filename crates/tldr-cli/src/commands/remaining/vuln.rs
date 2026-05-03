@@ -388,7 +388,7 @@ fn collect_files(
 ///
 /// An explicit `--lang <L>` bypasses this — the user has signalled
 /// they understand which backend will run.
-fn is_natively_analyzed(lang: Language) -> bool {
+pub(super) fn is_natively_analyzed(lang: Language) -> bool {
     // VAL-011 (M12, v0.2.2-hotfix-bundle): TypeScript and JavaScript
     // promoted into the autodetect-supported set. The taint engine at
     // `crates/tldr-core/src/security/taint.rs:909` already routes both
