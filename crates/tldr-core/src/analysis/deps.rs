@@ -70,6 +70,21 @@ pub struct DepsReport {
 
     /// Analysis statistics
     pub stats: DepStats,
+
+    /// Number of files skipped during analysis (oversize/auto-generated files
+    /// that exceed the size policy in `tldr_core::fs::oversize`).
+    ///
+    /// Soft-skipped files do NOT abort the analysis; they are reported here
+    /// alongside a structured warning in [`DepsReport::warnings`].
+    #[serde(default)]
+    pub files_skipped: usize,
+
+    /// Human-readable warnings collected during analysis.
+    ///
+    /// Each entry names a file that was skipped and why (e.g. oversize cap
+    /// exceeded). Empty for clean scans. (M-Z11: deps-and-surface-graceful-degrade-v1.)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 impl Default for DepsReport {
@@ -81,6 +96,8 @@ impl Default for DepsReport {
             external_dependencies: BTreeMap::new(),
             circular_dependencies: Vec::new(),
             stats: DepStats::default(),
+            files_skipped: 0,
+            warnings: Vec::new(),
         }
     }
 }
@@ -426,7 +443,18 @@ pub fn analyze_dependencies(path: &Path, options: &DepsOptions) -> TldrResult<De
 
     // Get file tree and collect files
     let tree = get_file_tree(&root, Some(&extensions), true, Some(&IgnoreSpec::default()))?;
-    let files = collect_files(&tree, &root);
+    let candidate_files = collect_files(&tree, &root);
+
+    // M-Z11 (deps-and-surface-graceful-degrade-v1): apply the central
+    // oversize policy BEFORE attempting to parse imports. Without this
+    // gate, a single auto-generated `.d.ts` file (e.g.
+    // `dom.generated.d.ts` at 2.3 MB) would surface a hard
+    // `TldrError::FileTooLarge` from `get_imports` and abort the entire
+    // dependency scan with exit code 6, even though the rest of the
+    // repo is healthy. Soft-skip oversize files instead, surfacing them
+    // as structured warnings and counting them in `files_skipped` so
+    // consumers can distinguish a graceful skip from a clean run.
+    let (files, mut warnings, files_skipped) = partition_files_by_size(&candidate_files);
 
     // Handle empty directory case
     if files.is_empty() {
@@ -437,6 +465,8 @@ pub fn analyze_dependencies(path: &Path, options: &DepsOptions) -> TldrResult<De
             external_dependencies: BTreeMap::new(),
             circular_dependencies: Vec::new(),
             stats: DepStats::default(),
+            files_skipped: files_skipped as usize,
+            warnings,
         });
     }
 
@@ -457,6 +487,16 @@ pub fn analyze_dependencies(path: &Path, options: &DepsOptions) -> TldrResult<De
             Err(e) => {
                 // Skip files with parse errors (recoverable)
                 if is_recoverable_error(&e) {
+                    internal_dependencies.insert(relative_path, Vec::new());
+                    continue;
+                }
+                // M-Z11: defensively soft-skip oversize files that slip
+                // past the up-front `partition_files_by_size` gate (for
+                // example, a file that grew between the stat call and
+                // the read). Treat as a recoverable skip with a
+                // structured warning rather than aborting the scan.
+                if let crate::error::TldrError::FileTooLarge { .. } = &e {
+                    warnings.push(format!("Skipped {}: {}", file_path.display(), e));
                     internal_dependencies.insert(relative_path, Vec::new());
                     continue;
                 }
@@ -610,7 +650,52 @@ pub fn analyze_dependencies(path: &Path, options: &DepsOptions) -> TldrResult<De
         external_dependencies,
         circular_dependencies,
         stats,
+        files_skipped: files_skipped as usize,
+        warnings,
     })
+}
+
+/// Partition candidate files under the central oversize policy, soft-skipping
+/// files that exceed the configured size cap (M-Z11).
+///
+/// Returns `(kept, warnings, skipped_count)`. The kept set is the subset of
+/// `candidates` that passed the size policy and should be processed normally.
+/// `warnings` holds one structured message per skipped file (formatted by
+/// [`tldr_core::fs::oversize::format_oversize_warning`]). `skipped_count`
+/// counts how many files were dropped under the oversize policy and is
+/// surfaced through [`DepsReport::files_skipped`].
+///
+/// This mirrors the pattern used by `tldr secure` (M-Z8) so behaviour is
+/// uniform across commands that walk the file tree.
+fn partition_files_by_size(candidates: &[PathBuf]) -> (Vec<PathBuf>, Vec<String>, u32) {
+    use crate::fs::oversize::{check_size, format_oversize_warning, SizeCheck};
+
+    let mut kept: Vec<PathBuf> = Vec::with_capacity(candidates.len());
+    let mut warnings: Vec<String> = Vec::new();
+    let mut skipped: u32 = 0;
+    for file in candidates {
+        match check_size(file) {
+            SizeCheck::Oversize {
+                size_bytes,
+                max_bytes,
+                is_autogen,
+            } => {
+                skipped += 1;
+                warnings.push(format_oversize_warning(
+                    file,
+                    size_bytes,
+                    max_bytes,
+                    is_autogen,
+                ));
+            }
+            // WithinLimit | Unknown: keep the file. Unknown means the stat
+            // failed (e.g. file vanished); we let the existing read-error
+            // path handle that case rather than treating "unknown size" as
+            // oversize.
+            _ => kept.push(file.clone()),
+        }
+    }
+    (kept, warnings, skipped)
 }
 
 // =============================================================================

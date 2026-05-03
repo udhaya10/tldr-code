@@ -80,8 +80,36 @@ pub fn extract_api_surface(
     limit: Option<usize>,
     lookup: Option<&str>,
 ) -> TldrResult<ApiSurface> {
-    // Resolve the target to a package directory
-    let resolved = resolve::resolve_target(target, lang)?;
+    // Resolve the target to a package directory.
+    //
+    // M-Z11 (deps-and-surface-graceful-degrade-v1): when the resolver
+    // cannot find a static entrypoint (e.g. a TypeScript/JavaScript
+    // directory whose `package.json` only ships `scripts` and no
+    // `main`/`module`/`exports`), we soft-fail with an empty surface
+    // and a structured warning rather than aborting with exit code 10.
+    // This matches the graceful-degrade pattern other commands use for
+    // oversize files and lets `tldr surface` always emit valid JSON.
+    let resolved = match resolve::resolve_target(target, lang) {
+        Ok(r) => r,
+        Err(e) if is_missing_entrypoint_error(&e) => {
+            let detected = lang.or_else(|| detect_lang_from_path(target));
+            let effective_lang = detected.unwrap_or("python");
+            let package_name = std::path::Path::new(target)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(target)
+                .to_string();
+            return Ok(ApiSurface {
+                package: package_name,
+                language: effective_lang.to_string(),
+                total: 0,
+                apis: Vec::new(),
+                files_skipped: 0,
+                warnings: vec![format!("Skipped {}: {}", target, e)],
+            });
+        }
+        Err(e) => return Err(e),
+    };
 
     // Determine language and dispatch
     let detected = lang.or_else(|| detect_lang_from_path(target));
@@ -128,6 +156,23 @@ pub fn extract_api_surface(
     }
 
     Ok(surface)
+}
+
+/// Recognise the "no static entrypoint found" parse error from
+/// [`resolve::resolve_target`] so [`extract_api_surface`] can soft-fail with
+/// an empty surface + warning rather than aborting the command.
+///
+/// The resolver currently emits this error from
+/// `resolve_node_package_from_dir_inner` for TypeScript/JavaScript directories
+/// whose `package.json` lacks a `main`/`module`/`exports`/`bin` entrypoint and
+/// where no standard entrypoint file is present. We match on the message
+/// suffix so future translations of the user-facing string remain compatible
+/// (M-Z11: deps-and-surface-graceful-degrade-v1).
+fn is_missing_entrypoint_error(err: &crate::error::TldrError) -> bool {
+    if let crate::error::TldrError::ParseError { message, .. } = err {
+        return message.contains("no supported static entrypoint was found");
+    }
+    false
 }
 
 pub(crate) fn sort_apis_by_static_preference(apis: &mut [ApiEntry], language: &str) {

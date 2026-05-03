@@ -1,5 +1,83 @@
 # Changelog
 
+## deps-and-surface-graceful-degrade-v1 — internal milestone
+
+NOT a published release. Bug-fix milestone aligning `tldr deps` and
+`tldr surface` with the soft-skip semantics already used by `vuln`,
+`secure`, and `structure`.
+
+### Bug 1 — `tldr deps` aborted on oversize files
+
+```bash
+$ tldr deps --lang typescript /tmp/repos/ts-dom-gen
+Error: File too large: dom.generated.d.ts is 3MB (max 1MB)   # exit 6
+```
+
+The dependency walker called `get_imports(path)` on every collected
+file and propagated the resulting `TldrError::FileTooLarge` to the
+caller, even though every other directory-scanning command (`vuln`,
+`secure`, `structure`) soft-skips oversize files via
+`tldr_core::fs::oversize::check_size`. The whole deps run was killed
+by a single 2.3 MB `dom.generated.d.ts` artefact in an otherwise
+healthy repo.
+
+### Bug 2 — `tldr surface` aborted with no static entrypoint
+
+```bash
+$ tldr surface --lang typescript /tmp/repos/ts-dom-gen
+Error: Parse error in /tmp/repos/ts-dom-gen: typescript package
+  'ts-dom-gen' found at /tmp/repos/ts-dom-gen but no supported
+  static entrypoint was found. ...                            # exit 10
+```
+
+`extract_api_surface` propagated the resolver's "no entrypoint"
+parse-error to the caller, so a TypeScript build-tooling repo whose
+`package.json` exposes only `scripts` (no `main`/`module`/`exports`)
+could not be analysed at all — the user just got an opaque exit-10
+abort instead of an empty-but-valid surface document.
+
+### Fix
+
+- `tldr deps` (`crates/tldr-core/src/analysis/deps.rs`): add a
+  `partition_files_by_size` pre-pass that mirrors the
+  `partition_utf8_clean` pattern from `secure` (M-Z8). Oversize files
+  are dropped from the analysed set, counted in `DepsReport.files_skipped`,
+  and surfaced as structured warnings in `DepsReport.warnings`. The
+  existing parse-error recovery path is also extended to soft-skip any
+  oversize file that slips past the up-front gate (e.g. files that
+  grow between stat and read).
+- `tldr surface` (`crates/tldr-core/src/surface/mod.rs`): when
+  `resolve::resolve_target` returns the recognisable
+  `"no supported static entrypoint was found"` parse-error,
+  `extract_api_surface` now returns an empty `ApiSurface` populated
+  with a structured warning instead of propagating exit 10. The
+  language and package name are still derived from the input so the
+  output remains usable by downstream tooling.
+
+### Behaviour change
+
+- `DepsReport` JSON now exposes two new fields: `files_skipped`
+  (default 0) and `warnings` (omitted when empty). Both fields default
+  via serde so older consumers continue to deserialize cleanly.
+- `tldr surface` now exits 0 on entrypoint-less directories and emits
+  `{ "apis": [], "warnings": [...] }` instead of exit 10.
+
+### Validation
+
+- `tldr deps --lang typescript /tmp/repos/ts-dom-gen` → exit 0,
+  valid JSON, `files_skipped = 16`, every oversize `.d.ts` baseline
+  named in `warnings`.
+- `tldr surface --lang typescript /tmp/repos/ts-dom-gen` → exit 0,
+  valid JSON, `apis = []`, single structured warning naming the
+  missing entrypoint.
+- `tldr deps /tmp/repos/flask` and `tldr surface --lang python
+  /tmp/repos/flask/src/flask` regress unchanged: 83 files / 130 APIs,
+  zero warnings, zero skipped.
+- New tests in
+  `crates/tldr-cli/tests/deps_and_surface_graceful_degrade_v1.rs`
+  pin both behaviours.
+- `vuln_migration_v1_red`: 168/168 GREEN.
+
 ## secure-test-file-suppression-v1 — internal milestone
 
 NOT a published release. Bug-fix milestone restoring `tldr secure` ↔

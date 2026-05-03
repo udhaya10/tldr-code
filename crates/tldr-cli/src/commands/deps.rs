@@ -193,6 +193,8 @@ mod tests {
                 leaf_files: 1,
                 root_files: 1,
             },
+            files_skipped: 0,
+            warnings: Vec::new(),
         }
     }
 
