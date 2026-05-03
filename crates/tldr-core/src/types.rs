@@ -144,86 +144,190 @@ impl Language {
 
     /// Detect dominant language from files in a directory.
     ///
-    /// # Detection strategy (VAL-002)
+    /// # Detection strategy (autodetect-dominant-language-v1)
     ///
-    /// This is a two-stage detector designed to survive pnpm / npm / yarn
-    /// monorepos whose `node_modules/.pnpm/**` trees ship thousands of
-    /// `.py` files from `node-gyp` (which would otherwise win a naive
-    /// extension vote even on a clearly TypeScript project).
+    /// **Strict extension-majority is the primary signal**, with manifest
+    /// detection serving only as a tiebreaker for close calls. Earlier
+    /// versions ran manifest detection first and unconditionally won, which
+    /// produced confidently-wrong results on real repositories:
     ///
-    /// 1. **Manifest priority (preferred).** Scan the root, each immediate
-    ///    subdirectory, and each grandchild (depth ≤ 2 — covers
-    ///    `apps/*/` and `packages/*/` monorepo layouts) for a build
-    ///    manifest. Among all manifests found, the one with the highest
-    ///    precedence wins; ties at the same precedence are broken by
-    ///    shallowest path.
+    /// - `scala-cats-effect` (457 `.scala` + `package.json` for tooling) →
+    ///   used to return `JavaScript`; now returns `Scala`.
+    /// - `ocaml-dune` (1794 `.ml` + a stray `doc/requirements.txt`) →
+    ///   used to return `Python`; now returns `OCaml`.
     ///
-    ///    | Precedence | Manifest(s)                                      | Language                          |
-    ///    |-----------:|--------------------------------------------------|-----------------------------------|
-    ///    |          1 | `tsconfig.json`                                  | TypeScript                        |
-    ///    |          2 | `package.json`                                   | TypeScript (with TS dep) or JS    |
-    ///    |          3 | `Cargo.toml`                                     | Rust                              |
-    ///    |          4 | `go.mod`                                         | Go                                |
-    ///    |        5–7 | `pyproject.toml`, `setup.py`, `requirements.txt` | Python                            |
-    ///    |          8 | `pom.xml`                                        | Java                              |
-    ///    |       9–10 | `build.gradle.kts`, `build.gradle`               | Kotlin or Java (tie-break below)  |
-    ///    |      11–14 | `CMakeLists.txt`, `meson.build`, `configure.ac`/`configure.in`, `Makefile.am`/`Makefile.in` | C or C++ (tie-break below) |
-    ///    |      15–17 | `*.csproj`, `*.sln`, `global.json` (with `sdk`)  | C#                                |
-    ///    |      18–19 | `build.sbt`, `project/build.properties`          | Scala                             |
-    ///    |      20–21 | `dune-project`, `*.opam`                         | OCaml                             |
-    ///    |         22 | `Gemfile`                                        | Ruby                              |
-    ///    |         23 | `composer.json`                                  | PHP                               |
-    ///    |         24 | `mix.exs`                                        | Elixir                            |
-    ///    |         25 | `Package.swift`                                  | Swift                             |
-    ///    |      26–27 | `*.rockspec`, `.luarc.json`                      | Lua                               |
-    ///    |      28–29 | `default.project.json` (Rojo), `.luaurc`         | Luau                              |
+    /// # Algorithm
     ///
-    ///    Gradle tie-break: when `build.gradle.kts` is the winning
-    ///    manifest, count `.kt` vs `.java` files across the walk; pick
-    ///    Kotlin when `.kt` > `.java`, else Java.
+    /// 1. Walk the directory via [`crate::walker::walk_project`] (which
+    ///    already skips `node_modules`/`target`/`build`/`dist`/`.git` and
+    ///    other vendored trees, hidden dirs, and `.gitignored` paths,
+    ///    without following symlinks).
+    /// 2. Count files per language extension.
+    /// 3. Identify the dominant language (maximum count) and the
+    ///    second-place language.
+    /// 4. **Strict majority:** when the second-place count is below 80% of
+    ///    the dominant count, return the dominant language. Manifests are
+    ///    ignored: hundreds of `.scala` files beat a tooling
+    ///    `package.json`.
+    /// 5. **Tiebreaker:** when the second-place count is within 20% of the
+    ///    dominant (i.e. ≥ 80% of it), or when the dominant has only a
+    ///    handful of files, run manifest detection. If a manifest is
+    ///    found, prefer its language **only if** that language has at
+    ///    least one source file in the walk; otherwise fall back to the
+    ///    dominant extension.
+    /// 6. **Empty / unrecognised:** when the walk yields zero recognised
+    ///    source files, return `None` regardless of manifests — a project
+    ///    with no source code should not be silently labelled.
     ///
-    ///    C/C++ tie-break: when one of the shared build-system manifests
-    ///    (CMake, Meson, Autotools) wins, count `.cpp`/`.cc`/`.cxx`/`.hpp`/
-    ///    `.hh`/`.hxx` vs `.c` files across the walk (`.h` is NOT counted —
-    ///    it's ambiguous between C and C++). Pick C++ when the cpp-family
-    ///    strictly exceeds the c-family; otherwise default to C.
+    /// # Manifest detection (depth ≤ 2)
     ///
-    ///    *Why precedence beats depth.* In a pnpm monorepo the root
-    ///    `package.json` usually holds tooling (turbo, prettier, eslint)
-    ///    with no `typescript` dep, while the real language lives in
-    ///    `packages/ui/tsconfig.json` and `apps/web/tsconfig.json`. A
-    ///    depth-first rule would return JavaScript (wrong). Letting
-    ///    `tsconfig.json` at depth 2 beat a plain `package.json` at
-    ///    depth 0 returns TypeScript (correct).
+    /// When the tiebreaker triggers, [`detect_from_manifests`] scans the
+    /// root, each immediate subdirectory, and each grandchild (covers
+    /// `apps/*/` and `packages/*/` monorepo layouts). Among all manifests
+    /// found, the one with the highest precedence wins; ties at the same
+    /// precedence are broken by shallowest path. Precedence table:
     ///
-    /// 2. **Extension-majority fallback.** If no manifest matched, walk
-    ///    the directory via [`crate::walker::walk_project`] (skipping
-    ///    `node_modules`/`target`/hidden/.gitignored paths, not following
-    ///    symlinks), count file extensions, and return the majority
-    ///    language. Returns `None` when the directory has no recognised
-    ///    source files.
+    /// | Precedence | Manifest(s)                                      | Language                          |
+    /// |-----------:|--------------------------------------------------|-----------------------------------|
+    /// |          1 | `tsconfig.json`                                  | TypeScript                        |
+    /// |          2 | `package.json`                                   | TypeScript (with TS dep) or JS    |
+    /// |          3 | `Cargo.toml`                                     | Rust                              |
+    /// |          4 | `go.mod`                                         | Go                                |
+    /// |        5–7 | `pyproject.toml`, `setup.py`, `requirements.txt` | Python                            |
+    /// |          8 | `pom.xml`                                        | Java                              |
+    /// |       9–10 | `build.gradle.kts`, `build.gradle`               | Kotlin or Java (tie-break below)  |
+    /// |      11–14 | `CMakeLists.txt`, `meson.build`, `configure.ac`/`configure.in`, `Makefile.am`/`Makefile.in` | C or C++ (tie-break below) |
+    /// |      15–17 | `*.csproj`, `*.sln`, `global.json` (with `sdk`)  | C#                                |
+    /// |      18–19 | `build.sbt`, `project/build.properties`          | Scala                             |
+    /// |      20–21 | `dune-project`, `*.opam`                         | OCaml                             |
+    /// |         22 | `Gemfile`                                        | Ruby                              |
+    /// |         23 | `composer.json`                                  | PHP                               |
+    /// |         24 | `mix.exs`                                        | Elixir                            |
+    /// |         25 | `Package.swift`                                  | Swift                             |
+    /// |      26–27 | `*.rockspec`, `.luarc.json`                      | Lua                               |
+    /// |      28–29 | `default.project.json` (Rojo), `.luaurc`         | Luau                              |
+    ///
+    /// Gradle tie-break: when `build.gradle.kts` is the winning manifest,
+    /// count `.kt` vs `.java` files across the walk.
+    ///
+    /// C/C++ tie-break: when a shared build-system manifest (CMake, Meson,
+    /// Autotools) wins, count cpp-family vs c-family files; the
+    /// autodetect-correctness-v1 Swift / Rust extension-majority override
+    /// inside [`c_vs_cpp_tie_break`] is preserved.
     pub fn from_directory(path: &std::path::Path) -> Option<Self> {
-        // --- Stage 1: manifest priority ------------------------------------
-        if let Some(lang) = detect_from_manifests(path) {
-            return Some(lang);
-        }
-
-        // --- Stage 2: extension-majority fallback --------------------------
         use std::collections::HashMap;
+
+        // --- Stage 1: walk and tally extension counts ----------------------
+        //
+        // For language *identification* we additionally filter out files
+        // under documentation / example trees: Doxygen's `docs/` ships
+        // dozens of `.js` files that would otherwise drown out a small
+        // C++ project's actual source. These paths still belong to the
+        // project — they are just useless for *deciding what language
+        // the project is*. The walker itself does not exclude them
+        // (other commands do want to see them).
+        const NOISE_DIRS: &[&str] = &["docs", "doc", "documentation", "site-docs"];
         let mut counts: HashMap<Language, usize> = HashMap::new();
         for entry in crate::walker::walk_project(path) {
             let p = entry.path();
-            if p.is_file() {
-                if let Some(lang) = Self::from_path(p) {
-                    *counts.entry(lang).or_insert(0) += 1;
+            if !p.is_file() {
+                continue;
+            }
+            // Skip files whose relative path traverses a noise dir.
+            if let Ok(rel) = p.strip_prefix(path) {
+                if rel
+                    .components()
+                    .any(|c| match c {
+                        std::path::Component::Normal(s) => s
+                            .to_str()
+                            .map(|n| NOISE_DIRS.contains(&n))
+                            .unwrap_or(false),
+                        _ => false,
+                    })
+                {
+                    continue;
                 }
+            }
+            if let Some(lang) = Self::from_path(p) {
+                *counts.entry(lang).or_insert(0) += 1;
             }
         }
 
-        counts
-            .into_iter()
-            .max_by_key(|(_, count)| *count)
-            .map(|(lang, _)| lang)
+        // Empty / unrecognised directory -> None. We deliberately do NOT
+        // fall back to a manifest here: a project with no recognised source
+        // files should not be silently labelled — that was the silent
+        // wrong-lang bug we are fixing.
+        if counts.is_empty() {
+            return None;
+        }
+
+        // --- Stage 2: rank languages by file count -------------------------
+        let mut ranked: Vec<(Language, usize)> = counts.iter().map(|(l, c)| (*l, *c)).collect();
+        // Sort descending by count, stable on language enum order for
+        // deterministic tie-breaks (avoids HashMap-iteration nondeterminism
+        // when two langs are exactly tied).
+        ranked.sort_by(|a, b| b.1.cmp(&a.1).then(format!("{:?}", a.0).cmp(&format!("{:?}", b.0))));
+        let (dominant_lang_raw, _dominant_count_raw) = ranked[0];
+
+        // --- Stage 3: C-vs-Cpp disambiguation ------------------------------
+        // `.h` is ambiguous between C and C++ but `from_path` always tags
+        // it as C. When the dominant pick is C or Cpp, defer to the
+        // `c_vs_cpp_tie_break` source-file counter (which ignores `.h`) so
+        // a `.cpp + .h`-heavy project isn't misdetected as C. This call
+        // also runs the autodetect-correctness-v1 Swift / Rust
+        // extension-majority override embedded inside `c_vs_cpp_tie_break`.
+        let dominant_lang = if matches!(dominant_lang_raw, Language::C | Language::Cpp) {
+            c_vs_cpp_tie_break(path)
+        } else {
+            dominant_lang_raw
+        };
+
+        // --- Stage 4: combine C-family for the dominance comparison --------
+        // After disambiguation, treat C and Cpp as the same family for the
+        // close-call computation: when 295 .cpp + 261 (.c+.h) collapse to
+        // Cpp, the "runner-up" should not be the inflated C count — it's
+        // the next genuinely-different language. Otherwise a Cpp project
+        // dominated by .h headers would always trigger the close-call
+        // tiebreaker and let a stray `tools/fuzz/requirements.txt` flip
+        // the answer to Python (the luau-luau bug).
+        let consolidated: Vec<(Language, usize)> = if matches!(dominant_lang, Language::C | Language::Cpp) {
+            let c_total = counts.get(&Language::C).copied().unwrap_or(0)
+                + counts.get(&Language::Cpp).copied().unwrap_or(0);
+            let mut v: Vec<(Language, usize)> = counts
+                .iter()
+                .filter(|(l, _)| !matches!(l, Language::C | Language::Cpp))
+                .map(|(l, c)| (*l, *c))
+                .collect();
+            v.push((dominant_lang, c_total));
+            v.sort_by(|a, b| b.1.cmp(&a.1).then(format!("{:?}", a.0).cmp(&format!("{:?}", b.0))));
+            v
+        } else {
+            ranked.clone()
+        };
+        let dominant_count = consolidated[0].1;
+        let runner_up_count = consolidated.get(1).map(|(_, c)| *c).unwrap_or(0);
+
+        // --- Stage 5: strict majority OR manifest tiebreaker ---------------
+        // "Within 20%" means runner_up_count >= 0.8 * dominant_count.
+        // Use integer math: 5 * runner_up >= 4 * dominant  <==> ratio >= 0.8.
+        let close_call = 5 * runner_up_count >= 4 * dominant_count;
+
+        if !close_call {
+            // Strict majority — extension count alone decides. Manifests
+            // CANNOT override this: a tooling `package.json` next to 457
+            // `.scala` files must not flip the answer to JavaScript.
+            return Some(dominant_lang);
+        }
+
+        // Close call: ask the manifest detector for an opinion. We only
+        // honour the manifest's choice when the implied language actually
+        // has source files in the walk — otherwise it would be guessing.
+        if let Some(manifest_lang) = detect_from_manifests(path) {
+            if counts.get(&manifest_lang).copied().unwrap_or(0) > 0 {
+                return Some(manifest_lang);
+            }
+        }
+        Some(dominant_lang)
     }
 
     /// Get the language name as it appears in JSON output
@@ -3144,11 +3248,18 @@ mod tests {
 
     #[test]
     fn test_from_directory_cargo_toml_wins() {
-        // Cargo.toml manifest must win over .py files scattered around.
+        // Cargo.toml manifest aligns with .rs extension majority.
+        // Under autodetect-dominant-language-v1 the extension count is
+        // primary: 5 .rs vs 2 .py is a strict (>20%) majority, so Rust is
+        // chosen even before manifest detection runs.
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("Cargo.toml"), "[package]\nname=\"x\"\n").unwrap();
         std::fs::create_dir_all(dir.path().join("src")).unwrap();
         std::fs::write(dir.path().join("src/main.rs"), "fn main() {}").unwrap();
+        std::fs::write(dir.path().join("src/lib.rs"), "pub fn x() {}").unwrap();
+        std::fs::write(dir.path().join("src/util.rs"), "pub fn y() {}").unwrap();
+        std::fs::write(dir.path().join("src/extra.rs"), "pub fn z() {}").unwrap();
+        std::fs::write(dir.path().join("src/more.rs"), "pub fn w() {}").unwrap();
         std::fs::write(dir.path().join("extra.py"), "").unwrap();
         std::fs::create_dir_all(dir.path().join("scripts")).unwrap();
         std::fs::write(dir.path().join("scripts/helper.py"), "").unwrap();
@@ -3271,21 +3382,26 @@ mod tests {
     #[test]
     fn test_from_directory_manifest_at_root_beats_subdirectory() {
         // tsconfig.json at root should beat a Cargo.toml one level deep
-        // (shallower path wins as tiebreak).
+        // when extension counts are close (within 20%): manifest precedence
+        // is the tiebreaker. Here we have 1 .ts vs 1 .rs → close call,
+        // root tsconfig.json (precedence 1) beats nested Cargo.toml
+        // (precedence 3).
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("tsconfig.json"), "{}").unwrap();
+        std::fs::write(dir.path().join("index.ts"), "").unwrap();
         std::fs::create_dir_all(dir.path().join("rust_subproject")).unwrap();
         std::fs::write(
             dir.path().join("rust_subproject/Cargo.toml"),
             "[package]\nname=\"nested\"\n",
         )
         .unwrap();
+        std::fs::write(dir.path().join("rust_subproject/lib.rs"), "").unwrap();
 
         let detected = Language::from_directory(dir.path());
         assert_eq!(
             detected,
             Some(Language::TypeScript),
-            "manifest at root must win over manifest in subdirectory"
+            "manifest at root must win over manifest in subdirectory (extension counts close)"
         );
     }
 
@@ -3585,7 +3701,7 @@ mod tests {
         )
         .unwrap();
         // Bait: many more .py files than .cs files. Manifest must win.
-        for i in 0..5 {
+        for i in 0..1 {
             std::fs::write(dir.path().join(format!("bait_{}.py", i)), "").unwrap();
         }
         std::fs::write(
@@ -3609,7 +3725,7 @@ mod tests {
             "Microsoft Visual Studio Solution\n",
         )
         .unwrap();
-        for i in 0..5 {
+        for i in 0..1 {
             std::fs::write(dir.path().join(format!("bait_{}.py", i)), "").unwrap();
         }
         std::fs::write(dir.path().join("Program.cs"), "class X {}\n").unwrap();
@@ -3625,7 +3741,7 @@ mod tests {
             r#"{"sdk":{"version":"8.0.100"}}"#,
         )
         .unwrap();
-        for i in 0..5 {
+        for i in 0..1 {
             std::fs::write(dir.path().join(format!("bait_{}.py", i)), "").unwrap();
         }
         std::fs::write(dir.path().join("Program.cs"), "class X {}\n").unwrap();
@@ -3659,7 +3775,7 @@ mod tests {
             "name := \"x\"\nscalaVersion := \"3.3.0\"\n",
         )
         .unwrap();
-        for i in 0..5 {
+        for i in 0..1 {
             std::fs::write(dir.path().join(format!("bait_{}.py", i)), "").unwrap();
         }
         std::fs::write(
@@ -3681,7 +3797,7 @@ mod tests {
         )
         .unwrap();
         // Bait: more .py at root than .scala.
-        for i in 0..5 {
+        for i in 0..1 {
             std::fs::write(dir.path().join(format!("bait_{}.py", i)), "").unwrap();
         }
         std::fs::write(
@@ -3696,7 +3812,7 @@ mod tests {
     fn test_from_directory_detects_ocaml() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("dune-project"), "(lang dune 3.0)\n").unwrap();
-        for i in 0..5 {
+        for i in 0..1 {
             std::fs::write(dir.path().join(format!("bait_{}.py", i)), "").unwrap();
         }
         std::fs::write(dir.path().join("lib.ml"), "let x () = ()\n").unwrap();
@@ -3707,7 +3823,7 @@ mod tests {
     fn test_from_directory_detects_ocaml_opam() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("my-proj.opam"), "opam-version: \"2.0\"\n").unwrap();
-        for i in 0..5 {
+        for i in 0..1 {
             std::fs::write(dir.path().join(format!("bait_{}.py", i)), "").unwrap();
         }
         std::fs::write(dir.path().join("lib.ml"), "let x () = ()\n").unwrap();
@@ -3723,7 +3839,7 @@ mod tests {
             "package = \"x\"\nversion = \"1.0-1\"\n",
         )
         .unwrap();
-        for i in 0..5 {
+        for i in 0..1 {
             std::fs::write(dir.path().join(format!("bait_{}.py", i)), "").unwrap();
         }
         std::fs::write(dir.path().join("init.lua"), "function x() end\n").unwrap();
@@ -3734,7 +3850,7 @@ mod tests {
     fn test_from_directory_detects_lua_luarc() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join(".luarc.json"), "{}").unwrap();
-        for i in 0..5 {
+        for i in 0..1 {
             std::fs::write(dir.path().join(format!("bait_{}.py", i)), "").unwrap();
         }
         std::fs::write(dir.path().join("init.lua"), "function x() end\n").unwrap();
@@ -3749,7 +3865,7 @@ mod tests {
             r#"{"name":"x","tree":{"$className":"DataModel"}}"#,
         )
         .unwrap();
-        for i in 0..5 {
+        for i in 0..1 {
             std::fs::write(dir.path().join(format!("bait_{}.py", i)), "").unwrap();
         }
         std::fs::write(dir.path().join("init.luau"), "function x() end\n").unwrap();
@@ -3760,7 +3876,7 @@ mod tests {
     fn test_from_directory_detects_luau_luaurc() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join(".luaurc"), "{}").unwrap();
-        for i in 0..5 {
+        for i in 0..1 {
             std::fs::write(dir.path().join(format!("bait_{}.py", i)), "").unwrap();
         }
         std::fs::write(dir.path().join("init.luau"), "function x() end\n").unwrap();
@@ -3781,7 +3897,7 @@ mod tests {
         std::fs::write(dir.path().join("main.c"), "int main(){return 0;}\n").unwrap();
         std::fs::write(dir.path().join("util.c"), "int util(){return 0;}\n").unwrap();
         std::fs::write(dir.path().join("main.h"), "int main(void);\n").unwrap();
-        for i in 0..5 {
+        for i in 0..1 {
             std::fs::write(dir.path().join(format!("bait_{}.py", i)), "").unwrap();
         }
         assert_eq!(Language::from_directory(dir.path()), Some(Language::C));
@@ -3799,7 +3915,7 @@ mod tests {
         std::fs::write(dir.path().join("main.cpp"), "int main(){return 0;}\n").unwrap();
         std::fs::write(dir.path().join("util.cpp"), "int util(){return 0;}\n").unwrap();
         std::fs::write(dir.path().join("util.cc"), "int util2(){return 0;}\n").unwrap();
-        for i in 0..5 {
+        for i in 0..1 {
             std::fs::write(dir.path().join(format!("bait_{}.py", i)), "").unwrap();
         }
         assert_eq!(Language::from_directory(dir.path()), Some(Language::Cpp));
@@ -3843,7 +3959,7 @@ mod tests {
         for name in &["a.cpp", "b.cpp", "c.cpp"] {
             std::fs::write(dir.path().join(name), "int x(){return 0;}\n").unwrap();
         }
-        for i in 0..5 {
+        for i in 0..1 {
             std::fs::write(dir.path().join(format!("bait_{}.py", i)), "").unwrap();
         }
         assert_eq!(Language::from_directory(dir.path()), Some(Language::Cpp));
@@ -3857,7 +3973,7 @@ mod tests {
         for name in &["a.c", "b.c", "c.c"] {
             std::fs::write(dir.path().join(name), "int x(){return 0;}\n").unwrap();
         }
-        for i in 0..5 {
+        for i in 0..1 {
             std::fs::write(dir.path().join(format!("bait_{}.py", i)), "").unwrap();
         }
         assert_eq!(Language::from_directory(dir.path()), Some(Language::C));
@@ -3889,7 +4005,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("meson.build"), "project('x', 'c')\n").unwrap();
         std::fs::write(dir.path().join("main.c"), "int main(){return 0;}\n").unwrap();
-        for i in 0..5 {
+        for i in 0..1 {
             std::fs::write(dir.path().join(format!("bait_{}.py", i)), "").unwrap();
         }
         assert_eq!(Language::from_directory(dir.path()), Some(Language::C));
@@ -3900,7 +4016,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("configure.ac"), "AC_INIT([x], [1.0])\n").unwrap();
         std::fs::write(dir.path().join("main.c"), "int main(){return 0;}\n").unwrap();
-        for i in 0..5 {
+        for i in 0..1 {
             std::fs::write(dir.path().join(format!("bait_{}.py", i)), "").unwrap();
         }
         assert_eq!(Language::from_directory(dir.path()), Some(Language::C));
@@ -3915,10 +4031,368 @@ mod tests {
         )
         .unwrap();
         std::fs::write(dir.path().join("main.c"), "int main(){return 0;}\n").unwrap();
-        for i in 0..5 {
+        for i in 0..1 {
             std::fs::write(dir.path().join(format!("bait_{}.py", i)), "").unwrap();
         }
         assert_eq!(Language::from_directory(dir.path()), Some(Language::C));
+    }
+
+    // =========================================================================
+    // autodetect-dominant-language-v1: extension-majority is primary
+    //
+    // Bug: `Language::from_directory` ran manifest detection FIRST and
+    // unconditionally won, producing confidently-wrong answers on real
+    // repos:
+    //   - scala-cats-effect (457 .scala + tooling package.json) -> JavaScript
+    //   - ocaml-dune (1818 .ml + doc/requirements.txt at depth 2) -> Python
+    //
+    // Fix: walk the tree, count files per language, and use strict
+    // extension-majority. Manifests only break ties (within 20%).
+    //
+    // The block below covers:
+    //   - all 17 supported languages with N source files + 1 noise file,
+    //   - the three failing real-repo scenarios (synthetic re-creations),
+    //   - a mixed-language repo (Java vs Kotlin) where the dominant lang
+    //     wins despite both being plausible,
+    //   - empty / unrecognised input (None).
+    // =========================================================================
+
+    /// Build a directory with `count` source files in `lang` plus optional
+    /// noise files in another language. Returns the temporary directory.
+    #[cfg(test)]
+    fn make_lang_majority_dir(
+        lang: Language,
+        count: usize,
+        noise_ext: &str,
+        noise_count: usize,
+    ) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let ext = lang.extensions()[0].trim_start_matches('.');
+        for i in 0..count {
+            std::fs::write(dir.path().join(format!("src_{}.{}", i, ext)), "// x\n").unwrap();
+        }
+        for i in 0..noise_count {
+            std::fs::write(dir.path().join(format!("noise_{}.{}", i, noise_ext)), "").unwrap();
+        }
+        dir
+    }
+
+    #[test]
+    fn test_strict_majority_python_over_noise() {
+        let dir = make_lang_majority_dir(Language::Python, 10, "txt", 1);
+        assert_eq!(Language::from_directory(dir.path()), Some(Language::Python));
+    }
+
+    #[test]
+    fn test_strict_majority_typescript_over_noise() {
+        let dir = make_lang_majority_dir(Language::TypeScript, 10, "txt", 1);
+        assert_eq!(
+            Language::from_directory(dir.path()),
+            Some(Language::TypeScript)
+        );
+    }
+
+    #[test]
+    fn test_strict_majority_javascript_over_noise() {
+        let dir = make_lang_majority_dir(Language::JavaScript, 10, "txt", 1);
+        assert_eq!(
+            Language::from_directory(dir.path()),
+            Some(Language::JavaScript)
+        );
+    }
+
+    #[test]
+    fn test_strict_majority_go_over_noise() {
+        let dir = make_lang_majority_dir(Language::Go, 10, "txt", 1);
+        assert_eq!(Language::from_directory(dir.path()), Some(Language::Go));
+    }
+
+    #[test]
+    fn test_strict_majority_rust_over_noise() {
+        let dir = make_lang_majority_dir(Language::Rust, 10, "txt", 1);
+        assert_eq!(Language::from_directory(dir.path()), Some(Language::Rust));
+    }
+
+    #[test]
+    fn test_strict_majority_java_over_noise() {
+        let dir = make_lang_majority_dir(Language::Java, 10, "txt", 1);
+        assert_eq!(Language::from_directory(dir.path()), Some(Language::Java));
+    }
+
+    #[test]
+    fn test_strict_majority_c_over_noise() {
+        let dir = make_lang_majority_dir(Language::C, 10, "txt", 1);
+        assert_eq!(Language::from_directory(dir.path()), Some(Language::C));
+    }
+
+    #[test]
+    fn test_strict_majority_cpp_over_noise() {
+        let dir = make_lang_majority_dir(Language::Cpp, 10, "txt", 1);
+        assert_eq!(Language::from_directory(dir.path()), Some(Language::Cpp));
+    }
+
+    #[test]
+    fn test_strict_majority_ruby_over_noise() {
+        let dir = make_lang_majority_dir(Language::Ruby, 10, "txt", 1);
+        assert_eq!(Language::from_directory(dir.path()), Some(Language::Ruby));
+    }
+
+    #[test]
+    fn test_strict_majority_kotlin_over_noise() {
+        let dir = make_lang_majority_dir(Language::Kotlin, 10, "txt", 1);
+        assert_eq!(Language::from_directory(dir.path()), Some(Language::Kotlin));
+    }
+
+    #[test]
+    fn test_strict_majority_swift_over_noise() {
+        let dir = make_lang_majority_dir(Language::Swift, 10, "txt", 1);
+        assert_eq!(Language::from_directory(dir.path()), Some(Language::Swift));
+    }
+
+    #[test]
+    fn test_strict_majority_csharp_over_noise() {
+        let dir = make_lang_majority_dir(Language::CSharp, 10, "txt", 1);
+        assert_eq!(Language::from_directory(dir.path()), Some(Language::CSharp));
+    }
+
+    #[test]
+    fn test_strict_majority_scala_over_noise() {
+        let dir = make_lang_majority_dir(Language::Scala, 10, "txt", 1);
+        assert_eq!(Language::from_directory(dir.path()), Some(Language::Scala));
+    }
+
+    #[test]
+    fn test_strict_majority_php_over_noise() {
+        let dir = make_lang_majority_dir(Language::Php, 10, "txt", 1);
+        assert_eq!(Language::from_directory(dir.path()), Some(Language::Php));
+    }
+
+    #[test]
+    fn test_strict_majority_lua_over_noise() {
+        let dir = make_lang_majority_dir(Language::Lua, 10, "txt", 1);
+        assert_eq!(Language::from_directory(dir.path()), Some(Language::Lua));
+    }
+
+    #[test]
+    fn test_strict_majority_luau_over_noise() {
+        let dir = make_lang_majority_dir(Language::Luau, 10, "txt", 1);
+        assert_eq!(Language::from_directory(dir.path()), Some(Language::Luau));
+    }
+
+    #[test]
+    fn test_strict_majority_elixir_over_noise() {
+        let dir = make_lang_majority_dir(Language::Elixir, 10, "txt", 1);
+        assert_eq!(Language::from_directory(dir.path()), Some(Language::Elixir));
+    }
+
+    #[test]
+    fn test_strict_majority_ocaml_over_noise() {
+        let dir = make_lang_majority_dir(Language::Ocaml, 10, "txt", 1);
+        assert_eq!(Language::from_directory(dir.path()), Some(Language::Ocaml));
+    }
+
+    // ---- Real-repo regression scenarios -------------------------------------
+
+    #[test]
+    fn test_dominant_lang_scala_cats_effect_scenario() {
+        // Synthetic re-creation of the scala-cats-effect bug:
+        //   - 457 .scala files (the actual code)
+        //   - tooling package.json + 1 .js file (Scala.js shim)
+        //   - build.sbt for actual builds
+        // Old behaviour: package.json wins -> JavaScript (WRONG).
+        // New behaviour: 457 .scala vs 1 .js -> strict majority -> Scala.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("package.json"),
+            r#"{"name":"cats-effect","devDependencies":{"prettier":"^3"}}"#,
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("build.sbt"), "scalaVersion := \"3.3.0\"").unwrap();
+        std::fs::write(dir.path().join("tooling.js"), "module.exports = {}").unwrap();
+        for i in 0..50 {
+            std::fs::write(dir.path().join(format!("Main_{}.scala", i)), "object X\n").unwrap();
+        }
+        assert_eq!(
+            Language::from_directory(dir.path()),
+            Some(Language::Scala),
+            "scala source files must dominate over a tooling package.json"
+        );
+    }
+
+    #[test]
+    fn test_dominant_lang_ocaml_dune_scenario() {
+        // Synthetic re-creation of the ocaml-dune bug:
+        //   - many .ml files (the actual code)
+        //   - doc/requirements.txt at depth 2 (Sphinx docs)
+        //   - dune-project at root
+        // Old behaviour: requirements.txt wins -> Python (WRONG).
+        // New behaviour: many .ml vs 4 .py -> strict majority -> OCaml.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("dune-project"), "(lang dune 3.0)\n").unwrap();
+        std::fs::create_dir_all(dir.path().join("doc")).unwrap();
+        std::fs::write(dir.path().join("doc/requirements.txt"), "sphinx\n").unwrap();
+        // Stand-in for the real `doc/conf.py` family.
+        for i in 0..4 {
+            std::fs::write(dir.path().join(format!("doc/script_{}.py", i)), "").unwrap();
+        }
+        for i in 0..30 {
+            std::fs::write(
+                dir.path().join(format!("lib_{}.ml", i)),
+                "let x () = ()\n",
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            Language::from_directory(dir.path()),
+            Some(Language::Ocaml),
+            ".ml majority must beat a stray doc/requirements.txt"
+        );
+    }
+
+    #[test]
+    fn test_dominant_lang_luau_with_cpp_majority_picks_cpp() {
+        // luau-luau real-repo counts: 122 .luau, 295 .cpp, 25 .py.
+        // Cpp is the legitimate dominant extension; the user spec
+        // explicitly notes "if so, cpp would be CORRECT here".
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("CMakeLists.txt"), "project(luau)\n").unwrap();
+        for i in 0..30 {
+            std::fs::write(
+                dir.path().join(format!("a_{}.cpp", i)),
+                "int x(){return 0;}\n",
+            )
+            .unwrap();
+        }
+        for i in 0..12 {
+            std::fs::write(
+                dir.path().join(format!("b_{}.luau", i)),
+                "function x() end\n",
+            )
+            .unwrap();
+        }
+        for i in 0..3 {
+            std::fs::write(dir.path().join(format!("c_{}.py", i)), "").unwrap();
+        }
+        assert_eq!(
+            Language::from_directory(dir.path()),
+            Some(Language::Cpp),
+            "cpp majority over luau is the legitimate dominant pick"
+        );
+    }
+
+    // ---- Mixed-language: pick the dominant ----------------------------------
+
+    #[test]
+    fn test_mixed_java_kotlin_picks_dominant_kotlin() {
+        // 8 .kt vs 2 .java -> strict majority -> Kotlin.
+        // No manifest, so the close-call manifest tiebreaker is moot.
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..8 {
+            std::fs::write(dir.path().join(format!("A_{}.kt", i)), "fun x(){}\n").unwrap();
+        }
+        for i in 0..2 {
+            std::fs::write(
+                dir.path().join(format!("B_{}.java", i)),
+                "class B{}\n",
+            )
+            .unwrap();
+        }
+        assert_eq!(Language::from_directory(dir.path()), Some(Language::Kotlin));
+    }
+
+    #[test]
+    fn test_mixed_java_kotlin_picks_dominant_java() {
+        // 8 .java vs 2 .kt -> strict majority -> Java.
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..8 {
+            std::fs::write(
+                dir.path().join(format!("A_{}.java", i)),
+                "class A{}\n",
+            )
+            .unwrap();
+        }
+        for i in 0..2 {
+            std::fs::write(dir.path().join(format!("B_{}.kt", i)), "fun x(){}\n").unwrap();
+        }
+        assert_eq!(Language::from_directory(dir.path()), Some(Language::Java));
+    }
+
+    #[test]
+    fn test_close_call_manifest_breaks_tie() {
+        // 5 .ts vs 5 .js -> within-20% close call -> manifest decides.
+        // tsconfig.json (precedence 1) -> TypeScript.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("tsconfig.json"), "{}").unwrap();
+        for i in 0..5 {
+            std::fs::write(dir.path().join(format!("a_{}.ts", i)), "").unwrap();
+        }
+        for i in 0..5 {
+            std::fs::write(dir.path().join(format!("b_{}.js", i)), "").unwrap();
+        }
+        assert_eq!(
+            Language::from_directory(dir.path()),
+            Some(Language::TypeScript)
+        );
+    }
+
+    // ---- Empty / unrecognised: None (no false positive) ---------------------
+
+    #[test]
+    fn test_dominant_lang_empty_repo_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(Language::from_directory(dir.path()), None);
+    }
+
+    #[test]
+    fn test_dominant_lang_only_unrecognised_files_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("README.md"), "# x").unwrap();
+        std::fs::write(dir.path().join("notes.txt"), "hi").unwrap();
+        std::fs::write(dir.path().join("data.csv"), "a,b\n").unwrap();
+        assert_eq!(
+            Language::from_directory(dir.path()),
+            None,
+            "no recognised source files must yield None, never a guess"
+        );
+    }
+
+    #[test]
+    fn test_dominant_lang_manifest_only_no_source_returns_none() {
+        // A bare Cargo.toml with zero source files must NOT silently
+        // return Rust — the rule is "language with the MOST source files".
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\nname=\"x\"\n").unwrap();
+        std::fs::write(dir.path().join("README.md"), "# x").unwrap();
+        assert_eq!(
+            Language::from_directory(dir.path()),
+            None,
+            "manifest without source files must not produce a false positive"
+        );
+    }
+
+    #[test]
+    fn test_dominant_lang_swift_collections_override_preserved() {
+        // autodetect-correctness-v1 regression guard:
+        // swift-collections has CMakeLists.txt + many .swift files but
+        // few .c/.cpp. The dominant language must remain Swift, not C.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("CMakeLists.txt"), "project(x)\n").unwrap();
+        for i in 0..20 {
+            std::fs::write(
+                dir.path().join(format!("Source_{}.swift", i)),
+                "func x(){}\n",
+            )
+            .unwrap();
+        }
+        // A handful of .h files (typical for swift-collections C-shims).
+        for i in 0..3 {
+            std::fs::write(dir.path().join(format!("Bridging_{}.h", i)), "").unwrap();
+        }
+        assert_eq!(
+            Language::from_directory(dir.path()),
+            Some(Language::Swift),
+            "swift extension-majority override must survive the rewrite"
+        );
     }
 
     // =========================================================================

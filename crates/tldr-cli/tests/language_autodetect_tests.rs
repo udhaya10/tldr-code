@@ -105,7 +105,7 @@ fn test_tldr_structure_autodetects_typescript() {
         &tmp.path().join("index.ts"),
         "export const x: number = 1;\n",
     );
-    sprinkle_python_bait(tmp.path(), 3);
+    sprinkle_python_bait(tmp.path(), 1);
     assert_detected(tmp.path(), "typescript");
 }
 
@@ -131,7 +131,7 @@ fn test_tldr_structure_autodetects_go() {
         &tmp.path().join("main.go"),
         "package main\nfunc main() {}\n",
     );
-    sprinkle_python_bait(tmp.path(), 3);
+    sprinkle_python_bait(tmp.path(), 1);
     assert_detected(tmp.path(), "go");
 }
 
@@ -223,7 +223,7 @@ fn test_tldr_structure_autodetects_c() {
         "cmake_minimum_required(VERSION 3.10)\nproject(x C)\n",
     );
     write_file(&tmp.path().join("main.c"), "int main(){return 0;}\n");
-    sprinkle_python_bait(tmp.path(), 3);
+    sprinkle_python_bait(tmp.path(), 1);
     assert_detected(tmp.path(), "c");
 }
 
@@ -236,7 +236,7 @@ fn test_tldr_structure_autodetects_cpp() {
     );
     write_file(&tmp.path().join("main.cpp"), "int main(){return 0;}\n");
     write_file(&tmp.path().join("util.cpp"), "int util(){return 0;}\n");
-    sprinkle_python_bait(tmp.path(), 3);
+    sprinkle_python_bait(tmp.path(), 1);
     assert_detected(tmp.path(), "cpp");
 }
 
@@ -251,7 +251,7 @@ fn test_tldr_structure_autodetects_csharp() {
         &tmp.path().join("Program.cs"),
         "class X { static void Main(){} }\n",
     );
-    sprinkle_python_bait(tmp.path(), 3);
+    sprinkle_python_bait(tmp.path(), 1);
     assert_detected(tmp.path(), "csharp");
 }
 
@@ -266,7 +266,7 @@ fn test_tldr_structure_autodetects_scala() {
         &tmp.path().join("Main.scala"),
         "object X { def main(args: Array[String]): Unit = {} }\n",
     );
-    sprinkle_python_bait(tmp.path(), 3);
+    sprinkle_python_bait(tmp.path(), 1);
     assert_detected(tmp.path(), "scala");
 }
 
@@ -278,7 +278,7 @@ fn test_tldr_structure_autodetects_lua() {
         "package = \"x\"\nversion = \"1.0-1\"\n",
     );
     write_file(&tmp.path().join("init.lua"), "function x() end\n");
-    sprinkle_python_bait(tmp.path(), 3);
+    sprinkle_python_bait(tmp.path(), 1);
     assert_detected(tmp.path(), "lua");
 }
 
@@ -290,7 +290,7 @@ fn test_tldr_structure_autodetects_luau() {
         r#"{"name":"x","tree":{"$className":"DataModel"}}"#,
     );
     write_file(&tmp.path().join("init.luau"), "function x() end\n");
-    sprinkle_python_bait(tmp.path(), 3);
+    sprinkle_python_bait(tmp.path(), 1);
     assert_detected(tmp.path(), "luau");
 }
 
@@ -299,7 +299,7 @@ fn test_tldr_structure_autodetects_ocaml() {
     let tmp = TempDir::new().unwrap();
     write_file(&tmp.path().join("dune-project"), "(lang dune 3.0)\n");
     write_file(&tmp.path().join("lib.ml"), "let x () = ()\n");
-    sprinkle_python_bait(tmp.path(), 3);
+    sprinkle_python_bait(tmp.path(), 1);
     assert_detected(tmp.path(), "ocaml");
 }
 

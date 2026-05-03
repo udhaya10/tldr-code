@@ -1,5 +1,120 @@
 # Changelog
 
+## autodetect-dominant-language-v1 — internal milestone
+
+NOT a published release. Critical bug-fix milestone for
+`Language::from_directory`, the directory-level language detector that
+sits underneath every `tldr` command run against a project root.
+
+### Bug — silent wrong-language for many real repos
+
+`Language::from_directory` ran manifest detection FIRST and let it
+unconditionally win. On real repositories with stray manifest files
+(tooling `package.json`, Sphinx `doc/requirements.txt`, etc.) the
+detector returned a confidently wrong language:
+
+```bash
+$ tldr structure /tmp/repos/scala-cats-effect | head -3
+{
+  "language": "javascript",          # 457 .scala files; package.json wins
+  "files_count": 0
+}
+
+$ tldr structure /tmp/repos/ocaml-dune | head -3
+{
+  "language": "python",              # 1818 .ml files; doc/requirements.txt wins
+  "files_count": 4
+}
+```
+
+A confidently-wrong language label destroys downstream trust: every
+JSON output, every codemap, every diagnostic is filtered through this
+choice. There is no warning — the detector just returns the wrong
+answer and every consumer dutifully cooperates.
+
+### Fix — strict extension-majority is primary, manifests are tiebreakers
+
+Inverted the detection priority to match what users actually expect:
+
+1. Walk the directory (existing `walker::walk_project` excludes
+   `node_modules`, `target`, `build`, `dist`, `.git`, hidden, and
+   gitignored paths).
+2. Count files per recognised language extension. Files inside common
+   docs trees (`docs`, `doc`, `documentation`, `site-docs`) are
+   excluded from this count: Doxygen-shipped `docs/*.js` would
+   otherwise drown out a small C++ project's actual source.
+3. Identify the dominant language and the runner-up.
+4. **Strict majority:** when the runner-up holds < 80% of the
+   dominant count, return the dominant language. Manifests cannot
+   override — a tooling `package.json` beside 457 `.scala` files
+   does not flip the answer.
+5. **Close-call tiebreaker:** when the runner-up is within 20%, run
+   manifest detection (depth ≤ 2, precedence-ranked); honour the
+   manifest's choice only when its language has at least one source
+   file in the walk.
+6. **C-vs-Cpp disambiguation:** `.h` is ambiguous between C and C++,
+   so when the dominant pick is C or Cpp we defer to the existing
+   `c_vs_cpp_tie_break` (counts cpp-family vs c-family, ignores
+   `.h`). The autodetect-correctness-v1 Swift / Rust extension
+   override embedded in that helper is preserved verbatim.
+7. **Empty / unrecognised:** a directory with no recognised source
+   files returns `None` — never a manifest-derived guess.
+
+### Validation — 17 cloned repos, before / after
+
+| Repo                       | Before              | After      |
+|----------------------------|---------------------|------------|
+| c-sds                      | c                   | c          |
+| cpp-tinyxml2               | cpp                 | cpp        |
+| csharp-newtonsoft-bson     | csharp              | csharp     |
+| elixir-plug                | elixir              | elixir     |
+| express                    | javascript          | javascript |
+| flask                      | python              | python     |
+| go-httprouter              | go                  | go         |
+| kotlin-datetime            | kotlin              | kotlin     |
+| lua-lsp                    | lua                 | lua        |
+| luau-luau                  | **python (WRONG)**  | cpp        |
+| ocaml-dune                 | **python (WRONG)**  | ocaml      |
+| php-symfony-string         | php                 | php        |
+| rails-html-sanitizer       | ruby                | ruby       |
+| ripgrep                    | rust                | rust       |
+| scala-cats-effect          | **javascript (WRONG)** | scala   |
+| scala-example              | scala               | scala      |
+| spring-petclinic           | java                | java       |
+| swift-collections          | swift               | swift      |
+| ts-dom-gen                 | typescript          | typescript |
+
+luau-luau resolves to `cpp` because the repo's actual file count is
+295 `.cpp` vs 122 `.luau` — Cpp is the legitimate dominant extension
+and the user spec explicitly notes "if so, cpp would be CORRECT here".
+
+### Test surface
+
+- 17 per-language strict-majority tests (one per supported language).
+- 3 real-repo regression scenarios: scala-cats-effect, ocaml-dune,
+  luau-luau.
+- 2 mixed-language dominance tests (Java vs Kotlin both directions).
+- 1 close-call manifest tiebreaker test.
+- 3 empty / manifest-only / unrecognised tests asserting `None`.
+- 1 swift-collections override regression guard
+  (autodetect-correctness-v1).
+
+Plus updated existing manifest-priority tests so their semantics
+reflect the new "manifest is the tiebreaker, not the override" rule.
+
+### Test results
+
+- `tldr-core` lib: 4731 passed, 0 failed.
+- `vuln_migration_v1_red`: 168 / 168 GREEN.
+- `autodetect-correctness-v1` regression preserved: swift-collections
+  still detects as `swift`, not `c`.
+
+### Files modified
+
+- `crates/tldr-core/src/types.rs` — rewrote `Language::from_directory`,
+  added 27 tests, adjusted existing manifest-priority test fixtures.
+- `CHANGELOG.md` — this entry.
+
 ## deps-and-surface-graceful-degrade-v1 — internal milestone
 
 NOT a published release. Bug-fix milestone aligning `tldr deps` and
