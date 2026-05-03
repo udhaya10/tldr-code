@@ -1,5 +1,80 @@
 # Changelog
 
+## secure-test-file-suppression-v1 — internal milestone
+
+NOT a published release. Bug-fix milestone restoring `tldr secure` ↔
+`tldr vuln` parity on test-file suppression.
+
+### Bug
+
+`tldr secure` did not apply the test-file suppression filter that
+`tldr vuln` applies (per M-X3 `js-test-file-suppression-v1`), so on
+repos carrying JS/TS test files with taint flow the two commands
+disagreed:
+
+```bash
+tldr vuln --lang javascript /tmp/repos/express | jq '.findings | length'
+# 1   (index.js:21 — test/app.engine.js:9 suppressed by M-X3)
+
+tldr secure --lang javascript /tmp/repos/express | jq '[.findings[]|select(.category=="taint")] | length'
+# 2   (index.js:21 + test/app.engine.js:9 — test NOT suppressed)
+```
+
+Root cause: `secure::run` aggregated taint findings via the canonical
+`scan_vulnerabilities` pipeline (post `secure-taint-aggregator-v1` and
+`rust-secure-taint-aggregator-v2`) but never ran the `--include-tests`
+mask that `vuln::run` applies post-analysis. The `is_rust_test_file`
+check inside `analyze_rust_bounds` covered Rust unwrap-style smell
+findings only; nothing covered the JS/TS taint-class path.
+
+### Fix
+
+`crates/tldr-cli/src/commands/remaining/secure.rs`:
+
+1. Added `SecureArgs::include_tests: bool` (CLI flag `--include-tests`,
+   default `false`), mirroring the `--include-smells` precedent — opt-in
+   for noisy categories.
+2. Added `apply_test_file_suppression(&mut Vec<SecureFinding>)` helper
+   that runs after `all_findings` is collected and BEFORE
+   `compute_summary_from_findings` (so the summary reflects the
+   suppressed view, preserving the `WRAPPER-CROSS-CONSISTENCY-V1`
+   invariant). The helper reuses `super::vuln::is_js_test_file` and
+   `super::vuln::is_rust_test_file` (both promoted to `pub(super)` in
+   `vuln.rs` for sibling-module visibility), with a universal
+   `/fixtures/` exemption so any future Rust-fixture suite remains
+   unsuppressed.
+3. Removed the local `is_rust_test_file` definition (replaced with a
+   pointer comment); the lone in-file caller in `analyze_rust_bounds`
+   now delegates to `super::vuln::is_rust_test_file`. Behavior is
+   byte-identical (path component `/tests/` or filename suffix
+   `_test.rs` / `tests.rs`).
+
+### Validation
+
+* New unit tests in `secure::tests`:
+  * `test_secure_default_suppresses_js_test_files` — fixture with one
+    source file (`src/index.js`) and one test file
+    (`test/app.test.js`), each carrying a `req.query -> res.send`
+    reflected-XSS flow. Asserts default scan returns findings from the
+    source file only (test file fully suppressed).
+  * `test_secure_include_tests_emits_test_findings` — same fixture
+    with `--include-tests=true`. Asserts findings surface from BOTH
+    source and test files.
+  * `test_apply_test_file_suppression_filters_js_and_rust_test_paths`
+    — predicate-application unit test covering JS test paths
+    (`test/`, `tests/`, `__tests__/`), JS test suffixes (`.test.{js,ts,jsx,tsx}`,
+    `.spec.*`, `.e2e.*`), Rust test paths (`/tests/`, `_test.rs`,
+    `tests.rs`), and the `/fixtures/` exemption.
+* Binary verification on `/tmp/repos/express`:
+  * Pre-fix: `vuln=1`, `secure.taint=2` (mismatch).
+  * Post-fix: `vuln=1`, `secure default=1`, `secure --include-tests=2`,
+    `secure.taint=1` — parity restored.
+* `vuln_migration_v1_red`: 168/168 GREEN (M-X3 fixture exemption
+  preserved by the universal `/fixtures/` gate in
+  `apply_test_file_suppression`).
+* M-X3 vuln behavior unchanged (vuln unit tests 18/18 GREEN; only
+  visibility of helpers promoted, no semantic change).
+
 ## structure-json-escape-v1 — internal milestone
 
 NOT a published release. Regression-pin milestone: adds a comprehensive

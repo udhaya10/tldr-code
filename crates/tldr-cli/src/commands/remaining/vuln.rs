@@ -920,7 +920,13 @@ fn extract_first_format_string_literal(line: &str) -> Option<String> {
     None
 }
 
-fn is_rust_test_file(path: &Path) -> bool {
+/// Predicate: a Rust path is a test-file path.
+///
+/// Visibility: `pub(super)` so sibling modules in `commands::remaining`
+/// (notably `secure.rs`, per `secure-test-file-suppression-v1`) can reuse
+/// the same recognition logic and keep the vuln/secure suppression policies
+/// in lock-step. Originally private to `vuln.rs`; promoted in M-Z10.
+pub(super) fn is_rust_test_file(path: &Path) -> bool {
     let path_str = path.to_string_lossy();
     path_str.contains("/tests/")
         || path_str.contains("\\tests\\")
@@ -958,7 +964,7 @@ fn is_rust_test_file(path: &Path) -> bool {
 ///     filename does not match.
 ///   * `crates/tldr-cli/tests/fixtures/vuln_migration_v1/javascript/...js` —
 ///     fixtures exemption kicks in.
-fn is_js_test_file(path: &Path) -> bool {
+pub(super) fn is_js_test_file(path: &Path) -> bool {
     let path_str = path.to_string_lossy();
 
     // Extension gate: only JS/TS family files trigger this predicate.

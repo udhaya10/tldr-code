@@ -130,6 +130,19 @@ pub struct SecureArgs {
     /// Walk vendored/build dirs (node_modules, target, dist, etc.) that would normally be skipped.
     #[arg(long)]
     pub no_default_ignore: bool,
+
+    /// Include findings on test files. Mirrors `tldr vuln --include-tests`
+    /// (M-X3 `js-test-file-suppression-v1`). Default: `false` — findings
+    /// emitted from JS/TS test files (paths under `test/`, `tests/`,
+    /// `__tests__/`, or filenames ending in `.test.{js,ts,jsx,tsx}`,
+    /// `.spec.{js,ts,jsx,tsx}`, or `.e2e.{js,ts}`) and Rust test files
+    /// (paths under `/tests/` or filenames ending in `_test.rs` /
+    /// `tests.rs`) are suppressed because they exercise sink behavior on
+    /// synthetic inputs and pollute production-codebase scans. Pass
+    /// `--include-tests` to restore them. Mirrors the `--include-smells`
+    /// precedent (opt-in for noisy categories).
+    #[arg(long)]
+    pub include_tests: bool,
 }
 
 impl SecureArgs {
@@ -193,6 +206,13 @@ pub fn run(args: SecureArgs, format: OutputFormat) -> anyhow::Result<()> {
         if args.detail.as_deref() == Some(analysis.name()) {
             sub_results.insert(analysis.name().to_string(), raw_result);
         }
+    }
+
+    // SECURE-TEST-FILE-SUPPRESSION-V1 (M-Z10): mirror the test-file
+    // suppression policy from `tldr vuln` (M-X3
+    // `js-test-file-suppression-v1`). See `apply_test_file_suppression`.
+    if !args.include_tests {
+        apply_test_file_suppression(&mut all_findings);
     }
 
     // Sort findings by severity (critical first)
@@ -306,13 +326,12 @@ fn is_rust_file(path: &std::path::Path) -> bool {
     matches!(path.extension().and_then(|e| e.to_str()), Some("rs"))
 }
 
-fn is_rust_test_file(path: &std::path::Path) -> bool {
-    let p = path.to_string_lossy();
-    p.contains("/tests/")
-        || p.contains("\\tests\\")
-        || p.ends_with("_test.rs")
-        || p.ends_with("tests.rs")
-}
+// `is_rust_test_file` was originally defined locally here; M-Z10
+// (`secure-test-file-suppression-v1`) consolidated it with vuln.rs by
+// promoting `vuln::is_rust_test_file` to `pub(super)` and reusing it
+// here. See `super::vuln::is_rust_test_file`. The behavior is identical
+// to the previous local impl (path component `/tests/` or filename
+// suffix `_test.rs` / `tests.rs`).
 
 /// Partition the candidate file set into clean (kept) and skipped files.
 ///
@@ -454,6 +473,52 @@ fn run_security_analysis(
     let raw_result = serde_json::to_value(&findings).unwrap_or(Value::Array(vec![]));
 
     Ok((findings, raw_result))
+}
+
+/// SECURE-TEST-FILE-SUPPRESSION-V1 (M-Z10): in-place suppression of
+/// findings emitted from test files. Mirrors the post-analysis filter
+/// applied in `vuln.rs::VulnArgs::run` for `--include-tests`, restoring
+/// vuln↔secure parity (`tldr secure`'s taint findings count must match
+/// `tldr vuln`'s finding count on the same path).
+///
+/// Pre-fix on `/tmp/repos/express`:
+/// * `tldr vuln --lang javascript .` → 1 finding (index.js:21; the
+///   `test/app.engine.js:9` finding masked by M-X3 `is_js_test_file`).
+/// * `tldr secure --lang javascript . | jq '[.findings[]|select(.category=="taint")]'`
+///   → 2 findings (index.js + test/app.engine.js — secure ran the
+///   canonical taint pipeline but never applied the M-X3 mask, so the
+///   `test/app.engine.js` finding leaked through).
+///
+/// Reuses `super::vuln::is_js_test_file` (M-X3 helper: JS/TS path
+/// components + test-style filename suffixes, with a `/fixtures/`
+/// exemption that keeps `vuln_migration_v1` GREEN) and
+/// `super::vuln::is_rust_test_file` (Rust `/tests/` + `_test.rs` /
+/// `tests.rs` suffix). The Rust mask was already applied INSIDE
+/// `analyze_rust_bounds` for unwrap-style smell findings; this filter
+/// adds the symmetric mask for taint-class findings.
+///
+/// Runs BEFORE `compute_summary_from_findings` so the summary reflects
+/// the suppressed view (matches the WRAPPER-CROSS-CONSISTENCY-V1
+/// invariant: summary derives from the final findings array).
+fn apply_test_file_suppression(findings: &mut Vec<SecureFinding>) {
+    findings.retain(|f| {
+        let p = std::path::Path::new(&f.file);
+        // Fixture exemption: paths under a `fixtures/` directory must
+        // NOT be suppressed even when their ancestors include `tests/`
+        // (e.g. `crates/tldr-cli/tests/fixtures/vuln_migration_v1/...`).
+        // `is_js_test_file` already bakes this exemption in; we apply
+        // the same gate to the Rust predicate (which doesn't, since on
+        // the vuln side Rust file collection happens before the
+        // post-analysis filter and the fixture suite is JS/TS-only).
+        // Without this gate, finding-level Rust suppression would drop
+        // legitimate fixture findings on hypothetical Rust fixtures.
+        let in_fixtures =
+            f.file.contains("/fixtures/") || f.file.contains("\\fixtures\\");
+        if in_fixtures {
+            return true;
+        }
+        !super::vuln::is_js_test_file(p) && !super::vuln::is_rust_test_file(p)
+    });
 }
 
 /// Compute the summary by category group-by over the FINAL findings array.
@@ -884,7 +949,7 @@ fn analyze_rust_raw_pointers(source: &str, file: &Path) -> Vec<SecureFinding> {
 
 fn analyze_rust_bounds(source: &str, file: &Path) -> Vec<SecureFinding> {
     let mut findings = Vec::new();
-    let skip_test_only = is_rust_test_file(file);
+    let skip_test_only = super::vuln::is_rust_test_file(file);
 
     for (idx, line) in source.lines().enumerate() {
         let trimmed = line.trim();
@@ -1035,8 +1100,10 @@ mod tests {
             quick: false,
             output: None,
             no_default_ignore: false,
+            include_tests: false,
         };
         assert!(!args.quick);
+        assert!(!args.include_tests);
     }
 
     #[test]
@@ -1390,5 +1457,227 @@ fn risky(user: &str) {
              (got: {})",
             oversize_warning
         );
+    }
+
+    // =========================================================================
+    // SECURE-TEST-FILE-SUPPRESSION-V1 (M-Z10) — vuln/secure parity tests
+    // =========================================================================
+
+    /// Build a SecureReport JSON file by running `secure::run` against a
+    /// temp directory containing the supplied files. Returns the parsed
+    /// JSON value for assertion.
+    fn run_secure_to_json(
+        path: &Path,
+        lang: Language,
+        include_tests: bool,
+    ) -> serde_json::Value {
+        let temp_out = TempDir::new().unwrap();
+        let out_path = temp_out.path().join("report.json");
+        let args = SecureArgs {
+            path: path.to_path_buf(),
+            lang: Some(lang),
+            detail: None,
+            // Quick mode: only run taint/resources/bounds, sufficient for
+            // the suppression assertion and faster.
+            quick: true,
+            output: Some(out_path.clone()),
+            no_default_ignore: false,
+            include_tests,
+        };
+        run(args, OutputFormat::Json).expect("secure::run should succeed");
+        let raw = fs::read_to_string(&out_path).expect("report file must exist");
+        serde_json::from_str(&raw).expect("report must be valid JSON")
+    }
+
+    /// SECURE-TEST-FILE-SUPPRESSION-V1: default scan must suppress
+    /// findings emitted from JS/TS test files, mirroring `tldr vuln`'s
+    /// M-X3 mask. Without this, vuln/secure parity breaks: vuln=1
+    /// finding (source-only), secure.taint=2 findings (source + test).
+    #[test]
+    fn test_secure_default_suppresses_js_test_files() {
+        let temp = TempDir::new().unwrap();
+
+        // Source file with a real source-to-sink reflected-XSS flow
+        // (req.query -> res.send). Same shape as the
+        // `vuln_migration_v1/javascript/xss_positive.js` fixture, which
+        // the canonical taint engine is known to report on.
+        let source_js = r#"export function handler(req, res, db) {
+    const name = req.query.name;
+    res.send("<h1>" + name + "</h1>");
+}
+"#;
+        // Test file with the SAME flow shape, placed under `test/` so
+        // it matches `is_js_test_file`. The canonical taint engine
+        // emits a finding here too; without the suppression filter
+        // this would inflate `secure.taint` past `vuln.findings`.
+        let test_js = r#"export function handler(req, res, db) {
+    const input = req.query.q;
+    res.send("<p>" + input + "</p>");
+}
+"#;
+
+        // Layout:
+        //   <temp>/src/index.js   (source — must produce a finding)
+        //   <temp>/test/app.test.js  (test — must be suppressed)
+        let src_dir = temp.path().join("src");
+        let test_dir = temp.path().join("test");
+        fs::create_dir_all(&src_dir).unwrap();
+        fs::create_dir_all(&test_dir).unwrap();
+        let src_path = src_dir.join("index.js");
+        let test_path = test_dir.join("app.test.js");
+        fs::write(&src_path, source_js).unwrap();
+        fs::write(&test_path, test_js).unwrap();
+
+        let report = run_secure_to_json(temp.path(), Language::JavaScript, false);
+
+        // Pull out taint findings — the suppression target.
+        let findings = report["findings"]
+            .as_array()
+            .expect("findings must be an array")
+            .iter()
+            .filter(|f| f["category"].as_str() == Some("taint"))
+            .collect::<Vec<_>>();
+
+        // Pre-fix: at least one finding from the test file leaked
+        // through. Post-fix: every taint finding's `file` MUST be the
+        // source file (test/app.test.js suppressed entirely). Assert
+        // by looking at unique file paths to be tolerant of canonical
+        // engine emitting multiple findings per flow.
+        assert!(
+            !findings.is_empty(),
+            "fixture must produce at least one taint finding (got 0 — fixture is wrong)"
+        );
+        let unique_files: std::collections::HashSet<&str> = findings
+            .iter()
+            .filter_map(|f| f["file"].as_str())
+            .collect();
+        assert_eq!(
+            unique_files.len(),
+            1,
+            "default scan must suppress test-file findings — expected exactly 1 \
+             unique file (the source), got {:?}",
+            unique_files
+        );
+        let kept_file = unique_files.iter().next().unwrap();
+        assert!(
+            kept_file.ends_with("index.js"),
+            "kept finding must come from the source file, got {:?}",
+            kept_file
+        );
+        assert!(
+            !kept_file.contains("/test/"),
+            "kept finding must not come from a test path, got {:?}",
+            kept_file
+        );
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f["file"].as_str().unwrap_or("").contains("/test/")),
+            "no finding may originate from a test/ path; got: {:?}",
+            findings.iter().map(|f| f["file"].clone()).collect::<Vec<_>>()
+        );
+    }
+
+    /// SECURE-TEST-FILE-SUPPRESSION-V1: `--include-tests` must restore
+    /// the legacy emission set, surfacing findings from BOTH source and
+    /// test files. Mirrors `tldr vuln --include-tests` semantics.
+    #[test]
+    fn test_secure_include_tests_emits_test_findings() {
+        let temp = TempDir::new().unwrap();
+
+        let source_js = r#"export function handler(req, res, db) {
+    const name = req.query.name;
+    res.send("<h1>" + name + "</h1>");
+}
+"#;
+        let test_js = r#"export function handler(req, res, db) {
+    const input = req.query.q;
+    res.send("<p>" + input + "</p>");
+}
+"#;
+
+        let src_dir = temp.path().join("src");
+        let test_dir = temp.path().join("test");
+        fs::create_dir_all(&src_dir).unwrap();
+        fs::create_dir_all(&test_dir).unwrap();
+        fs::write(src_dir.join("index.js"), source_js).unwrap();
+        fs::write(test_dir.join("app.test.js"), test_js).unwrap();
+
+        let report = run_secure_to_json(temp.path(), Language::JavaScript, true);
+
+        let findings = report["findings"]
+            .as_array()
+            .expect("findings must be an array")
+            .iter()
+            .filter(|f| f["category"].as_str() == Some("taint"))
+            .collect::<Vec<_>>();
+
+        // With --include-tests BOTH source and test findings surface.
+        // Use unique-file-set semantics for tolerance to canonical-
+        // engine multi-emission per flow.
+        let unique_files: std::collections::HashSet<&str> = findings
+            .iter()
+            .filter_map(|f| f["file"].as_str())
+            .collect();
+        assert_eq!(
+            unique_files.len(),
+            2,
+            "--include-tests must restore test-file emissions — expected 2 \
+             unique files (source + test), got {:?}",
+            unique_files
+        );
+        assert!(
+            unique_files.iter().any(|f| f.ends_with("index.js")),
+            "must include source-file finding: {:?}",
+            unique_files
+        );
+        assert!(
+            unique_files.iter().any(|f| f.contains("/test/") && f.ends_with(".test.js")),
+            "must include test-file finding when --include-tests: {:?}",
+            unique_files
+        );
+    }
+
+    /// Direct unit test for the in-place helper. Independent of the
+    /// `run()` pipeline so a regression in suppression semantics is
+    /// caught at the predicate-application boundary.
+    #[test]
+    fn test_apply_test_file_suppression_filters_js_and_rust_test_paths() {
+        let mk = |file: &str| SecureFinding::new("taint", "high", "x").with_location(file, 1);
+
+        let mut findings = vec![
+            mk("/abs/src/index.js"),                   // keep
+            mk("/abs/test/app.test.js"),               // drop (js test path)
+            mk("/abs/lib/foo.spec.ts"),                // drop (js spec suffix)
+            mk("/abs/__tests__/x.tsx"),                // drop (js __tests__)
+            mk("/abs/crates/foo/tests/it.rs"),         // drop (rust /tests/)
+            mk("/abs/crates/foo/src/lib.rs"),          // keep
+            mk("/abs/crates/foo/src/foo_test.rs"),     // drop (rust _test.rs)
+            // Fixture exemption — must NOT be dropped (vuln_migration_v1
+            // suite depends on this exemption being preserved).
+            mk("/abs/crates/tldr-cli/tests/fixtures/vuln_migration_v1/javascript/x.js"),
+        ];
+
+        apply_test_file_suppression(&mut findings);
+
+        let kept: Vec<_> = findings.iter().map(|f| f.file.clone()).collect();
+        // Expected kept: 2 source files (index.js, lib.rs) + 1 fixture =
+        // 3. The 5 dropped: app.test.js, foo.spec.ts, x.tsx, it.rs,
+        // foo_test.rs.
+        assert_eq!(
+            kept.len(),
+            3,
+            "expected 3 kept (2 source + 1 fixture), got {:?}",
+            kept
+        );
+        assert!(kept.iter().any(|f| f.ends_with("/src/index.js")));
+        assert!(kept.iter().any(|f| f.ends_with("/src/lib.rs")));
+        assert!(kept.iter().any(|f| f.contains("/fixtures/")));
+        // Negative assertions — none of the dropped paths should remain.
+        assert!(!kept.iter().any(|f| f.ends_with("/app.test.js")));
+        assert!(!kept.iter().any(|f| f.ends_with("/foo.spec.ts")));
+        assert!(!kept.iter().any(|f| f.ends_with("/__tests__/x.tsx")));
+        assert!(!kept.iter().any(|f| f.ends_with("/tests/it.rs")));
+        assert!(!kept.iter().any(|f| f.ends_with("/foo_test.rs")));
     }
 }
