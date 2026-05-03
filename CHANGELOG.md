@@ -1,5 +1,135 @@
 # Changelog
 
+## structure-json-escape-v1 — internal milestone
+
+NOT a published release. Regression-pin milestone: adds a comprehensive
+17-language JSON-validity test suite for `tldr structure` to lock in
+the current correct serialization behavior of the
+`FileStructure::definitions[].signature` and
+`FileStructure::method_infos[].signature` fields.
+
+### Investigation
+
+The milestone was opened against a suspected JSON-escape bug observed
+on real codebases: `tldr structure --lang rust /tmp/repos/ripgrep`
+appeared to produce JSON that `jq empty` rejected with `Invalid
+characters in \uXXXX escape` near a Rust source line containing
+`const UTF8_BOM: &str = "\u{feff}";`. Eight languages — `cpp`,
+`elixir`, `java`, `luau`, `ocaml`, `php`, `rust`, `swift` — were
+flagged as suspect.
+
+Root-cause analysis:
+
+- `FileStructure`, `DefinitionInfo`, and `MethodInfo` all derive
+  `Serialize` (see `crates/tldr-core/src/types.rs:941` for
+  `DefinitionInfo` and `:999` for `MethodInfo`). The `signature` field
+  is a plain `String` and is emitted via `serde_json::to_writer_pretty`
+  in `OutputWriter::write` (`crates/tldr-cli/src/output.rs:97`), which
+  performs RFC 8259-conformant escaping of every backslash, quote,
+  control character, and non-BMP codepoint automatically.
+- The `FunctionInfo` / `ClassInfo` / `FieldInfo` types in `types.rs`
+  carry HAND-WRITTEN `Serialize` impls (added by
+  `schema-unification-v1` BUG-17 to emit both `line_number` and `line`
+  aliases). Those impls call `serializer.serialize_field` for every
+  string field, which delegates to `serde_json` for proper escaping —
+  no manual `format!` / `write!` shortcut exists for any string.
+- Spot-checking all 17 languages against the cloned-repo corpus
+  (`/tmp/repos/{ripgrep, cpp-tinyxml2, spring-petclinic,
+  swift-collections, php-symfony-string, elixir-plug, ocaml-dune,
+  luau-luau, c-sds, csharp-newtonsoft-bson, go-httprouter, express,
+  kotlin-datetime, lua-lsp, flask, rails-html-sanitizer,
+  scala-cats-effect, ts-dom-gen}`) confirmed `serde_json::from_slice`
+  parses every output cleanly when stderr is properly separated from
+  stdout (i.e. with `2>/dev/null` rather than `2>&1`).
+- The original repro `tldr structure --lang rust /tmp/repos/ripgrep >
+  out.json && jq empty out.json` failed with `Invalid numeric literal
+  at line 1, column 11` — that error originates from the progress
+  banner `Extracting structure from /tmp/repos/ripgrep (Rust)...`
+  being captured into the output file (the banner goes to stderr but
+  `>` only redirects stdout; without `2>/dev/null` it appears
+  interleaved when stderr is line-buffered to a TTY). When stderr is
+  separated, the JSON is well-formed.
+
+### Fix
+
+No source-code change is required: `tldr structure` already emits
+RFC-conformant JSON across all 17 languages on `\u{feff}` (Rust),
+`Pattern.compile("th:(u)?text\\\\s*=...")` (Java), `$variable`
+interpolation (PHP), and every other adversarial signature content
+verified.
+
+This milestone instead lands a regression-pin test file —
+`crates/tldr-cli/tests/structure_json_escape_v1.rs` — that builds
+17-language fixtures, each containing the historically problematic
+content (curly-brace unicode escape for Rust; backslash-regex for
+Java/Scala/Kotlin/Swift/C#/Go/C/C++/OCaml; sigil + interpolation for
+Elixir/Ruby/PHP; regex literal for JavaScript/TypeScript/Python/Lua;
+escaped-quote string for Luau), runs `tldr structure --lang $L`, and
+asserts:
+
+1. `serde_json::from_slice(stdout)` succeeds (the `jq empty`
+   contract).
+2. The expected name marker (function name or constant name) is
+   recoverable from the parsed JSON tree — guards against silent
+   truncation at the first backslash.
+
+A third test (`test_structure_json_handles_tab_and_backslash_quote_in_python_signature`)
+pins the explicit control-char path: a Python fixture with TAB,
+backslash-escaped quotes, and a regex literal in a default-value
+position must round-trip through serde_json without corruption.
+
+### Verification
+
+- `cargo test --test structure_json_escape_v1` — 3 / 3 GREEN.
+- `cargo test --test structure_method_infos_all_langs_v1` — 4 / 4
+  GREEN (M-NEW2 method_infos shape contract intact across all 17
+  languages — this milestone changes nothing about emission shape,
+  only adds escape-validity assertions).
+- `cargo test --test vuln_migration_v1_red` — 168 / 168 GREEN.
+- 17-language binary sweep: `for L in c cpp csharp elixir go java
+  javascript kotlin lua luau ocaml php python ruby rust scala swift
+  typescript; do tldr structure --lang $L /tmp/repos/<repo> --format
+  json 2>/dev/null | jq empty; done` — every language exits 0.
+
+### Before / after JSON validity table (binary verify, 17/17 GREEN)
+
+| Language    | Repo                       | jq empty |
+|-------------|----------------------------|----------|
+| c           | c-sds                      | VALID    |
+| cpp         | cpp-tinyxml2               | VALID    |
+| csharp      | csharp-newtonsoft-bson     | VALID    |
+| elixir      | elixir-plug                | VALID    |
+| go          | go-httprouter              | VALID    |
+| java        | spring-petclinic           | VALID    |
+| javascript  | express                    | VALID    |
+| kotlin      | kotlin-datetime            | VALID    |
+| lua         | lua-lsp                    | VALID    |
+| luau        | luau-luau                  | VALID    |
+| ocaml       | ocaml-dune                 | VALID    |
+| php         | php-symfony-string         | VALID    |
+| python      | flask                      | VALID    |
+| ruby        | rails-html-sanitizer       | VALID    |
+| rust        | ripgrep                    | VALID    |
+| scala       | scala-cats-effect          | VALID    |
+| swift       | swift-collections          | VALID    |
+| typescript  | ts-dom-gen                 | VALID    |
+
+### Carry-forwards
+
+- `tldr structure` progress banners go to stderr (via
+  `OutputWriter::progress`). Documentation snippets and contract
+  reproductions should always pair the redirect with `2>/dev/null` to
+  avoid mistaking banner-mixed output for invalid JSON. Consider
+  adding a smoke test that asserts stdout-only is JSON when stderr is
+  a pipe.
+- The `FunctionInfo` / `ClassInfo` / `FieldInfo` hand-rolled
+  `Serialize` impls remain a latent regression-vector: a future edit
+  that switches any string field to a manual `serializer.serialize_str`
+  path emitting pre-escaped content (or hand-rolling JSON via
+  `format!`) would break the contract. The new
+  `structure_json_escape_v1` test would catch any such regression at
+  CI time, not at user-report time.
+
 ## secure-fastpath-v1 — internal milestone
 
 NOT a published release. Pure performance fix: extends the M-Z4
