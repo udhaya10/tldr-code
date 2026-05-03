@@ -81,6 +81,77 @@ pub enum OutputFormat {
     Dot,
 }
 
+impl OutputFormat {
+    /// Human-readable name for diagnostic messages.
+    pub fn name(&self) -> &'static str {
+        match self {
+            OutputFormat::Json => "json",
+            OutputFormat::Text => "text",
+            OutputFormat::Compact => "compact",
+            OutputFormat::Sarif => "sarif",
+            OutputFormat::Dot => "dot",
+        }
+    }
+}
+
+/// Validate that a `--format` is supported by a given subcommand.
+///
+/// Implements **format-flag-strictness-v1**: many commands previously silently
+/// fell back to plain JSON when given `--format sarif` or `--format dot`,
+/// creating a security false-trust hazard for CI integrators wiring up SARIF
+/// (e.g. GitHub code-scanning) — they would believe SARIF was being emitted
+/// when it was not.
+///
+/// Universal formats (json, text, compact) are always allowed. SARIF is
+/// allowed only on commands that emit a real SARIF document; DOT is allowed
+/// only on commands that emit a real Graphviz document. Anything else returns
+/// an error pointing the user at a supported format.
+///
+/// Returns `Err(message)` for the (cmd, format) pairs that should be rejected;
+/// the caller (typically `run_command` in `main.rs`) is expected to surface
+/// the message to the user and exit with a non-zero status.
+pub fn validate_format_for_command(cmd: &str, format: OutputFormat) -> Result<(), String> {
+    // Universal formats: always supported.
+    match format {
+        OutputFormat::Json | OutputFormat::Text | OutputFormat::Compact => return Ok(()),
+        OutputFormat::Sarif | OutputFormat::Dot => {}
+    }
+
+    // Commands that emit a true SARIF document. Keep this list aligned with
+    // the actual `OutputFormat::Sarif` arms in each command module — adding a
+    // command here without a real SARIF emitter reintroduces the silent-JSON
+    // bug.
+    const SARIF_SUPPORTED: &[&str] = &["vuln", "clones"];
+    // Commands that emit a true DOT/Graphviz document.
+    const DOT_SUPPORTED: &[&str] = &["clones", "deps"];
+
+    match format {
+        OutputFormat::Sarif => {
+            if SARIF_SUPPORTED.contains(&cmd) {
+                Ok(())
+            } else {
+                Err(format!(
+                    "--format sarif not supported by {cmd}. Use --format json. \
+                     SARIF is only emitted by: {}.",
+                    SARIF_SUPPORTED.join(", ")
+                ))
+            }
+        }
+        OutputFormat::Dot => {
+            if DOT_SUPPORTED.contains(&cmd) {
+                Ok(())
+            } else {
+                Err(format!(
+                    "--format dot not supported by {cmd}. Use --format json. \
+                     DOT is only emitted by: {}.",
+                    DOT_SUPPORTED.join(", ")
+                ))
+            }
+        }
+        _ => Ok(()),
+    }
+}
+
 /// Output writer that handles different formats
 pub struct OutputWriter {
     format: OutputFormat,

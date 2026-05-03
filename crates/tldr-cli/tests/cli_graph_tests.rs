@@ -119,7 +119,10 @@ fn test_calls_compact_format() {
 }
 
 #[test]
-fn test_calls_dot_format() {
+fn test_calls_dot_format_rejected() {
+    // format-flag-strictness-v1: `calls` does not emit a real DOT/Graphviz
+    // document, so `--format dot` previously silently fell back to JSON
+    // (a UX false-trust hazard). It must now error out instead.
     let temp_dir = create_test_project();
     let output = tldr_cmd()
         .args([
@@ -132,13 +135,14 @@ fn test_calls_dot_format() {
         .output()
         .expect("Failed to execute tldr calls");
 
-    assert!(output.status.success(), "calls command should succeed");
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    // DOT format is currently output as JSON (same as default)
-    // This is a known limitation - documented in bugs_cli_graph.md
     assert!(
-        stdout.contains("edge_count"),
-        "DOT output should contain data"
+        !output.status.success(),
+        "calls --format dot must error (DOT not supported by calls)"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("not supported"),
+        "stderr should explain DOT is unsupported; got: {stderr}"
     );
 }
 

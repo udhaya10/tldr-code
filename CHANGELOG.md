@@ -1,5 +1,98 @@
 # Changelog
 
+## format-flag-strictness-v1 — internal milestone
+
+NOT a published release. UX bug-fix milestone for the global `--format` flag.
+
+### Bug — `--format sarif` silently emitted plain JSON
+
+```bash
+$ tldr smells --format sarif /tmp/repos/flask | jq '"$schema" // "MISSING"'
+"MISSING"
+```
+
+The audit identified that many subcommands silently fell back to plain JSON
+when invoked with `--format sarif` or `--format dot`, instead of producing
+the requested format. Affected commands per the audit:
+
+- `--format sarif` returned plain JSON: smells, dead, health, api-check,
+  secure, debt, structure, tree, halstead, complexity, extract.
+- `--format sarif` returned EMPTY: complexity, extract.
+- `--format dot` returned plain JSON: calls.
+- `taint` and `reaching-defs` had explicit `OutputFormat::Sarif` /
+  `OutputFormat::Dot` arms that fell back to JSON with a comment
+  "not supported, fall back to JSON".
+
+Currently emitting real SARIF: `vuln`, `clones`. Currently emitting real
+DOT: `clones`, `deps`.
+
+### Why this matters (security false-trust)
+
+Users wiring up CI pipelines (GitHub code-scanning, VS Code SARIF extension)
+saw a successful exit and a JSON document, and reasonably assumed SARIF was
+being produced. It was not. The integration silently failed open: zero
+findings ingested, no error surfaced to operators.
+
+### Fix — Option B (error on unsupported)
+
+Centralized validation in `crates/tldr-cli/src/output.rs`:
+
+```rust
+pub fn validate_format_for_command(cmd: &str, format: OutputFormat) -> Result<(), String>
+```
+
+Universal formats (`json`, `text`, `compact`) are always allowed. SARIF and
+DOT are gated by an explicit allowlist:
+
+| Format | Supported by                  |
+| ------ | ----------------------------- |
+| sarif  | `vuln`, `clones`              |
+| dot    | `clones`, `deps`              |
+
+Any other `(cmd, format)` pair now returns an error before any analysis
+runs. The validator is invoked from `run_command` in `main.rs` against a
+stable `command_name(&Command)` mapping, so adding a new subcommand cannot
+silently bypass the check.
+
+Example:
+
+```text
+$ tldr smells --format sarif .
+Error: --format sarif not supported by smells. Use --format json.
+SARIF is only emitted by: vuln, clones.
+$ echo $?
+1
+```
+
+### Files
+
+- `crates/tldr-cli/src/output.rs` — added `OutputFormat::name()` and
+  `validate_format_for_command()` (allowlist-based).
+- `crates/tldr-cli/src/main.rs` — added `command_name(&Command)` and
+  pre-dispatch validation in `run_command`.
+- `crates/tldr-cli/tests/format_flag_strictness_v1.rs` — 10 new tests
+  covering: SARIF rejection on 10 unsupported commands, DOT rejection on
+  `calls`/`smells`, regression guards for `vuln --format sarif`,
+  `clones --format sarif`, `deps --format dot`, universal `--format json`,
+  plus three unit tests on the validator allowlist.
+- `crates/tldr-cli/tests/cli_graph_tests.rs` — `test_calls_dot_format`
+  renamed to `test_calls_dot_format_rejected` and inverted to assert the
+  new error behavior. The previous assertion baked in the buggy
+  silent-JSON fallback (a comment in the test even said "DOT format is
+  currently output as JSON ... known limitation").
+
+### Verification
+
+`vuln_migration_v1_red`: 168/168 GREEN. New `format_flag_strictness_v1`:
+10/10 GREEN. Binary check on installed `tldr 0.3.0`:
+
+```bash
+$ tldr smells --format sarif /tmp/repos/flask 2>&1 | head -1
+Error: --format sarif not supported by smells. Use --format json. ...
+$ tldr vuln --format sarif /tmp/repos/flask | jq '.["$schema"]'
+"https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json"
+```
+
 ## references-canonical-def-v1 — internal milestone
 
 NOT a published release. UX bug-fix milestone for `tldr references`.

@@ -54,7 +54,7 @@ use tldr_cli::commands::patterns::{
 };
 #[cfg(feature = "semantic")]
 use tldr_cli::commands::{EmbedArgs, SemanticArgs, SimilarArgs};
-use tldr_cli::output::OutputFormat;
+use tldr_cli::output::{validate_format_for_command, OutputFormat};
 
 /// TLDR - Token-efficient code analysis for LLMs
 #[derive(Debug, Parser)]
@@ -462,7 +462,103 @@ fn main() -> ExitCode {
     }
 }
 
+/// Stable, user-facing name for a `Command` variant.
+///
+/// Used by `validate_format_for_command` (format-flag-strictness-v1) so that
+/// error messages name the actual subcommand (`smells`, `vuln`, ...) rather
+/// than the Rust enum variant. Names match what users type on the CLI.
+fn command_name(cmd: &Command) -> &'static str {
+    match cmd {
+        Command::Tree(_) => "tree",
+        Command::Structure(_) => "structure",
+        Command::Calls(_) => "calls",
+        Command::Impact(_) => "impact",
+        Command::Dead(_) => "dead",
+        Command::ReachingDefs(_) => "reaching-defs",
+        Command::Taint(_) => "taint",
+        Command::Available(_) => "available",
+        Command::Slice(_) => "slice",
+        Command::SmartSearch(_) => "search",
+        Command::Context(_) => "context",
+        Command::Smells(_) => "smells",
+        Command::Extract(_) => "extract",
+        Command::Imports(_) => "imports",
+        Command::Importers(_) => "importers",
+        Command::Complexity(_) => "complexity",
+        Command::Churn(_) => "churn",
+        Command::Debt(_) => "debt",
+        Command::Health(_) => "health",
+        Command::Hubs(_) => "hubs",
+        Command::Whatbreaks(_) => "whatbreaks",
+        Command::Patterns(_) => "patterns",
+        Command::Inheritance(_) => "inheritance",
+        Command::ChangeImpact(_) => "change-impact",
+        Command::Deps(_) => "deps",
+        Command::Diagnostics(_) => "diagnostics",
+        Command::Doctor(_) => "doctor",
+        Command::References(_) => "references",
+        Command::Clones(_) => "clones",
+        Command::Dice(_) => "dice",
+        Command::Loc(_) => "loc",
+        Command::Cognitive(_) => "cognitive",
+        Command::Halstead(_) => "halstead",
+        Command::Coverage(_) => "coverage",
+        Command::Hotspots(_) => "hotspots",
+        #[cfg(feature = "semantic")]
+        Command::Embed(_) => "embed",
+        #[cfg(feature = "semantic")]
+        Command::Semantic(_) => "semantic",
+        #[cfg(feature = "semantic")]
+        Command::Similar(_) => "similar",
+        Command::Daemon(sub) => match sub {
+            DaemonCommand::Start(_) => "daemon start",
+            DaemonCommand::Stop(_) => "daemon stop",
+            DaemonCommand::Status(_) => "daemon status",
+            DaemonCommand::Query(_) => "daemon query",
+            DaemonCommand::Notify(_) => "daemon notify",
+            DaemonCommand::List(_) => "daemon list",
+        },
+        Command::Cache(sub) => match sub {
+            CacheCommand::Stats(_) => "cache stats",
+            CacheCommand::Clear(_) => "cache clear",
+        },
+        Command::Warm(_) => "warm",
+        Command::Stats(_) => "stats",
+        Command::Surface(_) => "surface",
+        Command::Contracts(_) => "contracts",
+        Command::DeadStores(_) => "dead-stores",
+        Command::Chop(_) => "chop",
+        Command::Specs(_) => "specs",
+        Command::Invariants(_) => "invariants",
+        Command::Verify(_) => "verify",
+        Command::Cohesion(_) => "cohesion",
+        Command::Temporal(_) => "temporal",
+        Command::Resources(_) => "resources",
+        Command::Coupling(_) => "coupling",
+        Command::Interface(_) => "interface",
+        Command::Explain(_) => "explain",
+        Command::Todo(_) => "todo",
+        Command::Secure(_) => "secure",
+        Command::Definition(_) => "definition",
+        Command::Diff(_) => "diff",
+        Command::ApiCheck(_) => "api-check",
+        Command::Vuln(_) => "vuln",
+        Command::Fix(_) => "fix",
+        Command::Bugbot(sub) => match sub {
+            BugbotCommand::Check(_) => "bugbot check",
+        },
+    }
+}
+
 fn run_command(cli: &Cli) -> Result<()> {
+    // format-flag-strictness-v1: reject (cmd, format) pairs where the command
+    // does not actually emit the requested format. Without this, callers
+    // (especially CI wiring up SARIF for code-scanning) silently received
+    // plain JSON and believed SARIF was being produced.
+    if let Err(msg) = validate_format_for_command(command_name(&cli.command), cli.format) {
+        anyhow::bail!(msg);
+    }
+
     match &cli.command {
         Command::Tree(args) => args.run(cli.format, cli.quiet),
         Command::Structure(args) => args.run(cli.format, cli.quiet),
