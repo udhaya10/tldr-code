@@ -2391,6 +2391,88 @@ def safe_file_handling():
         }
     }
 
+    /// schema-naming-and-units-v1: every key in `summary.by_category` must
+    /// match the snake_case form emitted on `findings[].rule.category`.
+    /// Previously the summary used `format!("{:?}", cat).to_lowercase()` which
+    /// collapsed PascalCase variants to single-word keys (e.g. `errorhandling`)
+    /// while findings used serde's snake_case (e.g. `error_handling`),
+    /// forcing consumers to normalize when joining the two.
+    #[test]
+    fn test_api_check_category_naming_consistent() {
+        let temp = TempDir::new().unwrap();
+        let file_path = create_test_file(&temp, "sample.py", PYTHON_API_MISUSE);
+
+        let output = tldr_cmd()
+            .args(["api-check", file_path.to_str().unwrap()])
+            .output()
+            .unwrap();
+
+        assert!(output.status.success(), "Command should succeed");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let value: serde_json::Value =
+            serde_json::from_str(&stdout).expect("Should be valid JSON");
+
+        // Collect detail-side category strings (one per finding).
+        let findings = value
+            .get("findings")
+            .and_then(|v| v.as_array())
+            .expect("findings array missing");
+        assert!(
+            !findings.is_empty(),
+            "fixture is expected to produce findings"
+        );
+
+        let mut detail_cats: std::collections::BTreeSet<String> =
+            std::collections::BTreeSet::new();
+        for f in findings {
+            let cat = f
+                .get("rule")
+                .and_then(|r| r.get("category"))
+                .and_then(|c| c.as_str())
+                .expect("each finding must have rule.category");
+            detail_cats.insert(cat.to_string());
+        }
+
+        // Collect summary-side category keys.
+        let summary_cats: std::collections::BTreeSet<String> = value
+            .get("summary")
+            .and_then(|s| s.get("by_category"))
+            .and_then(|v| v.as_object())
+            .expect("summary.by_category missing or not an object")
+            .keys()
+            .cloned()
+            .collect();
+
+        // Every summary key must appear in detail (no orphan keys),
+        // and every detail category must be present in the summary.
+        assert_eq!(
+            detail_cats, summary_cats,
+            "summary.by_category keys must match findings[].rule.category exactly\n\
+             detail: {detail_cats:?}\n\
+             summary: {summary_cats:?}"
+        );
+
+        // Defensive: keys must be valid snake_case identifiers (no PascalCase
+        // residue, no missing underscores between camelCase boundaries).
+        for k in summary_cats.iter().chain(detail_cats.iter()) {
+            assert!(
+                k.chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'),
+                "category key {k:?} is not snake_case"
+            );
+            // The PascalCase->lowercase collapse bug emitted `errorhandling`,
+            // `callorder` etc. — guard against the regression by name.
+            assert_ne!(
+                k, "errorhandling",
+                "regression: category collapsed to PascalCase-lowercased form"
+            );
+            assert_ne!(
+                k, "callorder",
+                "regression: category collapsed to PascalCase-lowercased form"
+            );
+        }
+    }
+
     #[test]
     fn test_api_check_rust_rules() {
         let temp = TempDir::new().unwrap();

@@ -231,7 +231,11 @@ pub struct DebtSummary {
     /// Debt by rule (rule_name -> minutes)
     /// Uses BTreeMap for deterministic JSON key ordering (PM-6 mitigation)
     pub by_rule: BTreeMap<String, u32>,
-    /// Debt by severity (severity_name -> finding_count)
+    /// Debt by severity (severity_name -> minutes)
+    ///
+    /// schema-naming-and-units-v1: emits **minutes** (not finding counts) so
+    /// it shares units with `by_category` and `by_rule`. The sum of values
+    /// across all severity buckets equals `total_minutes`.
     ///
     /// Severity is derived from `debt_minutes` per issue:
     /// - low: < 15 minutes (cheap fixes, e.g. TodoComment, MissingDocs at 10m)
@@ -241,6 +245,15 @@ pub struct DebtSummary {
     ///
     /// Uses BTreeMap for deterministic JSON key ordering.
     pub by_severity: BTreeMap<String, u32>,
+    /// Debt by severity (severity_name -> finding_count)
+    ///
+    /// schema-naming-and-units-v1: explicit per-severity finding counts. The
+    /// sum of values across all severity buckets equals `findings.len()`
+    /// (i.e., `report.issues.len()`). Emitted as a sibling to `by_severity`
+    /// so consumers can read either dimension without disambiguation.
+    ///
+    /// Uses BTreeMap for deterministic JSON key ordering.
+    pub by_severity_count: BTreeMap<String, u32>,
 }
 
 /// Complete debt analysis report
@@ -2630,12 +2643,17 @@ pub fn analyze_debt(options: DebtOptions) -> TldrResult<DebtReport> {
         *by_rule.entry(issue.rule.clone()).or_default() += issue.debt_minutes;
     }
 
-    // Group by severity (derived from debt_minutes per issue, counts findings)
+    // Group by severity (schema-naming-and-units-v1):
+    //   `by_severity`        -> minutes  (sums to `total_minutes`, matches by_category / by_rule units)
+    //   `by_severity_count`  -> count    (sums to `all_issues.len()`, explicit per-severity finding count)
+    // Previously `by_severity` carried finding counts, mixing units with sibling maps
+    // and forcing consumers to special-case it.
     let mut by_severity: BTreeMap<String, u32> = BTreeMap::new();
+    let mut by_severity_count: BTreeMap<String, u32> = BTreeMap::new();
     for issue in &all_issues {
-        *by_severity
-            .entry(severity_for_minutes(issue.debt_minutes).to_string())
-            .or_default() += 1;
+        let bucket = severity_for_minutes(issue.debt_minutes).to_string();
+        *by_severity.entry(bucket.clone()).or_default() += issue.debt_minutes;
+        *by_severity_count.entry(bucket).or_default() += 1;
     }
 
     // Sort issues by debt_minutes descending
@@ -2658,6 +2676,7 @@ pub fn analyze_debt(options: DebtOptions) -> TldrResult<DebtReport> {
             by_category,
             by_rule,
             by_severity,
+            by_severity_count,
         },
     })
 }

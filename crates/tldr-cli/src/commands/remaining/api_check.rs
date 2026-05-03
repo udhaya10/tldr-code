@@ -2444,6 +2444,33 @@ fn filter_findings(
 // Summary Building
 // =============================================================================
 
+/// Render a `MisuseCategory` using the same snake_case form as serde
+/// serialization (schema-naming-and-units-v1). Keeping summary keys in sync
+/// with `findings[].rule.category` lets consumers join the two without
+/// ad-hoc normalization.
+fn serialize_misuse_category(cat: &MisuseCategory) -> String {
+    match cat {
+        MisuseCategory::CallOrder => "call_order".to_string(),
+        MisuseCategory::ErrorHandling => "error_handling".to_string(),
+        MisuseCategory::Parameters => "parameters".to_string(),
+        MisuseCategory::Resources => "resources".to_string(),
+        MisuseCategory::Crypto => "crypto".to_string(),
+        MisuseCategory::Concurrency => "concurrency".to_string(),
+        MisuseCategory::Security => "security".to_string(),
+    }
+}
+
+/// Render a `MisuseSeverity` using the same snake_case form as serde
+/// serialization (schema-naming-and-units-v1).
+fn serialize_misuse_severity(sev: &MisuseSeverity) -> String {
+    match sev {
+        MisuseSeverity::Info => "info".to_string(),
+        MisuseSeverity::Low => "low".to_string(),
+        MisuseSeverity::Medium => "medium".to_string(),
+        MisuseSeverity::High => "high".to_string(),
+    }
+}
+
 /// Build summary from findings
 fn build_summary(findings: &[MisuseFinding], files_scanned: u32) -> APICheckSummary {
     let mut by_category: HashMap<String, u32> = HashMap::new();
@@ -2451,12 +2478,16 @@ fn build_summary(findings: &[MisuseFinding], files_scanned: u32) -> APICheckSumm
     let mut apis_checked: Vec<String> = Vec::new();
 
     for finding in findings {
-        // Count by category
-        let cat_str = format!("{:?}", finding.rule.category).to_lowercase();
+        // Count by category — use snake_case serde representation so the
+        // summary key matches what is emitted on `findings[].rule.category`
+        // (schema-naming-and-units-v1). Previously `format!("{:?}", ...).to_lowercase()`
+        // produced collapsed-case keys like `errorhandling` while the per-finding
+        // detail used `error_handling`, forcing consumers to normalize.
+        let cat_str = serialize_misuse_category(&finding.rule.category);
         *by_category.entry(cat_str).or_insert(0) += 1;
 
-        // Count by severity
-        let sev_str = format!("{:?}", finding.rule.severity).to_lowercase();
+        // Count by severity — use snake_case serde representation for the same reason.
+        let sev_str = serialize_misuse_severity(&finding.rule.severity);
         *by_severity.entry(sev_str).or_insert(0) += 1;
 
         // Track APIs

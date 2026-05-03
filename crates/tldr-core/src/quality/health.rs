@@ -1329,6 +1329,118 @@ mod tests {
         );
     }
 
+    /// schema-naming-and-units-v1: text and JSON outputs must agree on
+    /// `tight_coupling_pairs` for a given report instance. Both formats
+    /// must read from the same source of truth (`HealthSummary`), not
+    /// from divergent helper paths. A regression where text reads
+    /// `findings_count` while JSON reads the summary field would produce
+    /// off-by-one disagreements between formats.
+    #[test]
+    fn test_health_format_consistency() {
+        let summary = HealthSummary::new()
+            .with_complexity(Some(5.5), 3)
+            .with_cohesion(Some(1.5), 2, 10)
+            .with_dead_code(5, 100)
+            .with_martin(Some(0.25), 1)
+            .with_coupling(7) // <-- the value under test
+            .with_similarity(4);
+
+        let report = HealthReport::new(PathBuf::from("test/"), None, false)
+            .with_summary(summary)
+            .with_elapsed(123.0);
+
+        // JSON view: `summary.tight_coupling_pairs` is the canonical field.
+        let json = report.to_dict();
+        let json_pairs = json
+            .get("summary")
+            .and_then(|s| s.get("tight_coupling_pairs"))
+            .and_then(|v| v.as_u64())
+            .expect("summary.tight_coupling_pairs missing in JSON");
+        assert_eq!(json_pairs, 7, "JSON must reflect the configured count");
+
+        // Text view: must extract the same number, formatted as the
+        // user-visible "N tightly coupled pairs" line.
+        let text = report.to_text();
+        let line = text
+            .lines()
+            .find(|l| l.contains("tightly coupled pairs"))
+            .expect(
+                "text output must include a 'tightly coupled pairs' line when count > 0",
+            );
+
+        // Parse the leading integer out of "Coupling:    N tightly coupled pairs".
+        let text_pairs: u64 = line
+            .split_whitespace()
+            .find_map(|tok| tok.parse::<u64>().ok())
+            .expect("text line must contain an integer count");
+
+        assert_eq!(
+            text_pairs, json_pairs,
+            "text format and JSON must agree on tight_coupling_pairs (same source of truth)\n\
+             text line: {line:?}\n\
+             json:      {json_pairs}"
+        );
+    }
+
+    /// schema-naming-and-units-v1: text and JSON must agree on every
+    /// `HealthSummary` numeric the text formatter prints. This generalises
+    /// `test_health_format_consistency` beyond the coupling pair count to
+    /// guard against future bugs where text reads from a different field.
+    #[test]
+    fn test_health_format_consistency_all_summary_fields() {
+        let summary = HealthSummary::new()
+            .with_complexity(Some(7.25), 4)
+            .with_cohesion(Some(2.0), 3, 12)
+            .with_dead_code(6, 100)
+            .with_martin(Some(0.40), 2)
+            .with_coupling(11)
+            .with_similarity(5);
+
+        let report = HealthReport::new(PathBuf::from("proj/"), None, false)
+            .with_summary(summary.clone())
+            .with_elapsed(99.0);
+
+        let text = report.to_text();
+        let json = report.to_dict();
+        let json_summary = json.get("summary").expect("summary present");
+
+        // Coupling
+        let json_coupling = json_summary
+            .get("tight_coupling_pairs")
+            .and_then(|v| v.as_u64())
+            .unwrap();
+        let text_coupling: u64 = text
+            .lines()
+            .find(|l| l.contains("tightly coupled pairs"))
+            .and_then(|l| l.split_whitespace().find_map(|t| t.parse::<u64>().ok()))
+            .expect("coupling line missing");
+        assert_eq!(text_coupling, json_coupling);
+
+        // Similarity (clone pairs)
+        let json_similar = json_summary
+            .get("similar_pairs")
+            .and_then(|v| v.as_u64())
+            .unwrap();
+        let text_similar: u64 = text
+            .lines()
+            .find(|l| l.contains("clone pairs detected"))
+            .and_then(|l| l.split_whitespace().find_map(|t| t.parse::<u64>().ok()))
+            .expect("duplication line missing");
+        assert_eq!(text_similar, json_similar);
+
+        // Dead code
+        let json_dead = json_summary
+            .get("dead_count")
+            .and_then(|v| v.as_u64())
+            .unwrap();
+        let text_dead: u64 = text
+            .lines()
+            .find(|l| l.contains("unreachable functions"))
+            .and_then(|l| l.split_whitespace().find_map(|t| t.parse::<u64>().ok()))
+            .expect("dead code line missing");
+        assert_eq!(text_dead, json_dead);
+    }
+
     #[test]
     fn test_indexmap_preserves_order() {
         let mut report = HealthReport::new(PathBuf::from("test/"), None, false);

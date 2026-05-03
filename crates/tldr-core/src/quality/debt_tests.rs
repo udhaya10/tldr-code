@@ -532,6 +532,7 @@ mod unit_tests {
             by_category,
             by_rule,
             by_severity: BTreeMap::new(),
+            by_severity_count: BTreeMap::new(),
         };
 
         let json = serde_json::to_value(&summary).unwrap();
@@ -554,6 +555,7 @@ mod unit_tests {
             by_category: BTreeMap::new(),
             by_rule: BTreeMap::new(),
             by_severity: BTreeMap::new(),
+            by_severity_count: BTreeMap::new(),
         };
 
         let json = serde_json::to_value(&summary).unwrap();
@@ -615,6 +617,7 @@ mod unit_tests {
                 by_category: BTreeMap::new(),
                 by_rule: BTreeMap::new(),
                 by_severity: BTreeMap::new(),
+                by_severity_count: BTreeMap::new(),
             },
         };
 
@@ -2088,16 +2091,15 @@ mod summary_tests {
 
     #[test]
     fn test_debt_summary_by_severity_populated() {
-        // schema-completeness-v1: regression test for `summary.by_severity` being null.
+        // schema-completeness-v1 + schema-naming-and-units-v1:
+        //   - by_severity        carries MINUTES (sums to total_minutes).
+        //   - by_severity_count  carries COUNTS  (sums to findings.len()).
         //
         // Build a fixture that yields debt findings spanning multiple severity buckets:
         //   - TODO comments    (10 min) -> low
         //   - long_param_list  (15 min) -> medium
         //   - long_method      (30 min) -> high
         //   - god_class        (60 min) -> critical
-        //
-        // We rely on existing rule fixtures; the assertion is structural — the field
-        // must be a populated map and the sum of finding-counts must equal `findings.len()`.
         let dir = TestDir::new().expect("Failed to create test dir");
 
         // PYTHON_WITH_TODO produces 10-minute (low) findings.
@@ -2111,27 +2113,97 @@ mod summary_tests {
         };
         let report = analyze_debt(options).unwrap();
 
-        // Field must be populated (not empty) given the fixture has findings.
+        // Both maps must be populated (not empty) given the fixture has findings.
         assert!(
             !report.summary.by_severity.is_empty(),
             "summary.by_severity must be populated when findings exist; got empty map"
         );
+        assert!(
+            !report.summary.by_severity_count.is_empty(),
+            "summary.by_severity_count must be populated when findings exist; got empty map"
+        );
 
-        // Sum of severity-bucket counts must equal the number of findings.
-        let total_count: u32 = report.summary.by_severity.values().sum();
+        // by_severity_count sums to total finding count.
+        let total_count: u32 = report.summary.by_severity_count.values().sum();
         assert_eq!(
             total_count as usize,
             report.issues.len(),
-            "by_severity bucket counts must sum to findings.len()"
+            "by_severity_count bucket counts must sum to findings.len()"
         );
 
-        // Every key must be a valid severity label.
+        // by_severity sums to total minutes (units match by_category / by_rule).
+        let total_minutes: u32 = report.summary.by_severity.values().sum();
+        assert_eq!(
+            total_minutes, report.summary.total_minutes,
+            "by_severity bucket minutes must sum to total_minutes"
+        );
+
+        // Every key in both maps must be a valid severity label.
         for key in report.summary.by_severity.keys() {
             assert!(
                 matches!(key.as_str(), "low" | "medium" | "high" | "critical"),
-                "unexpected severity key: {key}"
+                "unexpected severity key in by_severity: {key}"
             );
         }
+        for key in report.summary.by_severity_count.keys() {
+            assert!(
+                matches!(key.as_str(), "low" | "medium" | "high" | "critical"),
+                "unexpected severity key in by_severity_count: {key}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_debt_summary_units_consistent() {
+        // schema-naming-and-units-v1: regression test for sibling unit mismatch.
+        //
+        // Prior to this milestone, `by_severity` carried finding-counts while
+        // `by_category` and `by_rule` carried minutes — sibling fields with
+        // different units caused user confusion. After the fix, all three
+        // share the SAME unit (minutes), and a separate `by_severity_count`
+        // exposes per-severity finding counts explicitly.
+        let dir = TestDir::new().expect("Failed to create test dir");
+        let source = format!("{}\n{}", PYTHON_WITH_TODO, PYTHON_LONG_PARAMS);
+        dir.add_file("mixed.py", &source).unwrap();
+
+        let options = DebtOptions {
+            path: dir.path().to_path_buf(),
+            ..Default::default()
+        };
+        let report = analyze_debt(options).unwrap();
+        let s = &report.summary;
+
+        // Unit invariant: by_category, by_rule, by_severity all sum to total_minutes.
+        let cat_sum: u32 = s.by_category.values().sum();
+        let rule_sum: u32 = s.by_rule.values().sum();
+        let sev_sum: u32 = s.by_severity.values().sum();
+        assert_eq!(
+            cat_sum, s.total_minutes,
+            "by_category sum (minutes) must equal total_minutes"
+        );
+        assert_eq!(
+            rule_sum, s.total_minutes,
+            "by_rule sum (minutes) must equal total_minutes"
+        );
+        assert_eq!(
+            sev_sum, s.total_minutes,
+            "by_severity sum (minutes) must equal total_minutes — units must match siblings"
+        );
+
+        // Count invariant: by_severity_count sums to findings.len().
+        let count_sum: u32 = s.by_severity_count.values().sum();
+        assert_eq!(
+            count_sum as usize,
+            report.issues.len(),
+            "by_severity_count sum must equal findings.len()"
+        );
+
+        // The two severity maps must agree on key set (both keyed by severity name).
+        assert_eq!(
+            s.by_severity.keys().collect::<Vec<_>>(),
+            s.by_severity_count.keys().collect::<Vec<_>>(),
+            "by_severity and by_severity_count must have identical key sets"
+        );
     }
 
     #[test]
@@ -2248,6 +2320,7 @@ mod output_tests {
                 by_category: BTreeMap::new(),
                 by_rule: BTreeMap::new(),
                 by_severity: BTreeMap::new(),
+                by_severity_count: BTreeMap::new(),
             },
         };
 
@@ -2293,6 +2366,7 @@ mod output_tests {
                 by_category: BTreeMap::new(),
                 by_rule: BTreeMap::new(),
                 by_severity: BTreeMap::new(),
+                by_severity_count: BTreeMap::new(),
             },
         };
 

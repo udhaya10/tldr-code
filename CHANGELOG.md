@@ -1,5 +1,114 @@
 # Changelog
 
+## schema-naming-and-units-v1 — internal milestone
+
+NOT a published release. Schema-hygiene milestone fixing three output
+inconsistencies that forced JSON consumers of `tldr` to special-case
+key naming or sibling-field units when joining or summing data.
+
+### Bug 1 — `tldr api-check` summary key disagreed with detail key (M9)
+
+```bash
+$ tldr api-check /tmp/repos/flask --format json | jq '.summary.by_category'
+{ "errorhandling": 1, "crypto": 1 }              # ← collapsed PascalCase
+$ tldr api-check /tmp/repos/flask --format json | jq '[.findings[].rule.category] | unique'
+[ "crypto", "error_handling" ]                   # ← serde snake_case
+```
+
+`build_summary` keyed `by_category` / `by_severity` via
+`format!("{:?}", cat).to_lowercase()`, which strips PascalCase
+boundaries (`ErrorHandling` → `errorhandling`). Findings, however,
+serialize via serde with `#[serde(rename_all = "snake_case")]`,
+emitting `error_handling`. Joining summary→findings by category
+required ad-hoc normalization on the consumer side.
+
+### Bug 2 — `tldr health` text and JSON disagreed on coupling pairs (M12)
+
+```bash
+$ tldr health /tmp/repos/flask --format json | jq '.summary.tight_coupling_pairs'
+30
+$ tldr health /tmp/repos/flask --format text | grep "tightly coupled"
+Coupling:    31 tightly coupled pairs            # ← off-by-one vs JSON
+```
+
+Both formats already pulled from `summary.tight_coupling_pairs`, but
+no regression test enforced the invariant. Adding two consistency
+tests guards against future drift between the text formatter and
+JSON serialization for every numeric field the dashboard prints
+(coupling, similarity, dead-code count).
+
+### Bug 3 — `tldr debt` summary mixed units across sibling fields (M13)
+
+```bash
+$ tldr debt /tmp/repos/flask --format json | jq '.summary'
+{
+  "total_minutes": 6105,
+  "by_category": { "maintainability": 5900, ... },        # ← minutes
+  "by_rule":     { "missing_docs": 5400, ... },           # ← minutes
+  "by_severity": { "high": 12, "low": 540, "medium": 20 } # ← FINDING COUNTS
+}
+```
+
+`by_severity` was a finding count (sums to 572) while `by_category`
+and `by_rule` were minutes (sum to 6105). Sibling fields with
+identical naming shape but different units, no documentation. A
+consumer summing severity buckets to compare against `total_minutes`
+would silently produce nonsense.
+
+### Fix
+
+- `crates/tldr-cli/src/commands/remaining/api_check.rs::build_summary` —
+  drop the `format!("{:?}", ...).to_lowercase()` shortcut and route
+  both category and severity through explicit snake_case helpers
+  (`serialize_misuse_category`, `serialize_misuse_severity`) that
+  match the serde representation used on `findings[].rule.category`
+  and `.rule.severity`. Summary keys now equal detail keys verbatim.
+- `crates/tldr-core/src/quality/debt.rs::DebtSummary` —
+  `by_severity` now carries **minutes** (sums to `total_minutes`,
+  consistent with `by_category` and `by_rule`), and a new sibling
+  `by_severity_count` carries the per-severity finding counts
+  (sums to `findings.len()`). Both are populated in `analyze_debt`
+  in a single pass over the issue list.
+- `crates/tldr-core/src/quality/health.rs` — added two regression
+  tests (`test_health_format_consistency`,
+  `test_health_format_consistency_all_summary_fields`) that build a
+  `HealthReport` once and assert text and JSON agree on every
+  user-visible numeric (`tight_coupling_pairs`, `similar_pairs`,
+  `dead_count`).
+
+### Tests
+
+- `test_api_check_category_naming_consistent` (`crates/tldr-cli/tests/remaining_test.rs`) —
+  exact-equality assertion on the set of category keys emitted in
+  `summary.by_category` vs `findings[].rule.category`, plus a guard
+  against the legacy `errorhandling` / `callorder` collapsed forms.
+- `test_health_format_consistency`, `test_health_format_consistency_all_summary_fields`
+  (`crates/tldr-core/src/quality/health.rs`) — single-report consistency
+  between text and JSON outputs for every numeric the dashboard prints.
+- `test_debt_summary_units_consistent` (`crates/tldr-core/src/quality/debt_tests.rs`) —
+  confirms `by_category`, `by_rule`, `by_severity` all sum to
+  `total_minutes` (units match), and `by_severity_count` sums to
+  `findings.len()` (count semantics preserved). Also asserts the
+  two severity maps share an identical key set.
+- `test_debt_summary_by_severity_populated` updated to reflect the
+  new dual-map shape.
+
+### Binary verification on flask
+
+```bash
+$ tldr api-check /tmp/repos/flask --format json | jq '.summary.by_category'
+{ "crypto": 1, "error_handling": 1 }   # ← matches findings[].rule.category
+
+$ tldr debt /tmp/repos/flask --format json | jq '.summary | {total_minutes, by_severity, by_severity_count}'
+{
+  "total_minutes": 6105,
+  "by_severity":       { "high": 360,  "low": 5400, "medium": 345 },  # sums to 6105 (minutes)
+  "by_severity_count": { "high": 12,   "low": 540,  "medium": 20 }    # sums to 572  (count)
+}
+```
+
+`vuln_migration_v1_red`: 168/168 GREEN.
+
 ## inheritance-and-dead-cleanup-v1 — internal milestone
 
 NOT a published release. Bug-fix milestone fixing three quality issues
