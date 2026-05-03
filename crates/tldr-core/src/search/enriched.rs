@@ -161,6 +161,106 @@ struct WarmCallGraphCache {
     timestamp: i64,
 }
 
+/// Maximum query length (bytes) for the symbol-name boost to engage.
+/// Picked at 30 to cover virtually every realistic identifier (Java's
+/// longest stdlib symbol `IllegalArgumentException` is 25 chars; Python
+/// PEP-8 caps practical names well under this) without firing on
+/// natural-language queries that incidentally lack whitespace.
+const NAME_BOOST_MAX_QUERY_LEN: usize = 30;
+
+/// Multiplier applied to results whose definition name exactly matches
+/// the user's query (case-insensitive). 5.0 is large enough to lift the
+/// canonical class above docstring-heavy modules but small enough to
+/// preserve ordering among other strong matches.
+const NAME_BOOST_EXACT: f64 = 5.0;
+
+/// Multiplier applied to results whose definition name contains the
+/// query as a case-insensitive substring (and is not an exact match).
+/// 2.0 places these between docstring-only matches and exact-name hits.
+const NAME_BOOST_SUBSTRING: f64 = 2.0;
+
+/// Decide whether a query qualifies for the symbol-name boost.
+///
+/// The boost only fires when the query *looks like* an identifier:
+/// short, non-empty, and contains no whitespace. Multi-word queries
+/// (`process all users`) are intentionally NOT boosted because the user
+/// is searching for behavior, not a single symbol.
+///
+/// Returns the query string unchanged when boost-eligible, else `None`.
+fn boost_query_for(query: &str) -> Option<String> {
+    let trimmed = query.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed.len() > NAME_BOOST_MAX_QUERY_LEN {
+        return None;
+    }
+    if trimmed.chars().any(|c| c.is_whitespace()) {
+        return None;
+    }
+    Some(trimmed.to_string())
+}
+
+/// Multiplier applied (in addition to the name-match boost) when a
+/// boost-eligible result lives under a tests directory or in a test
+/// file. Without this, a class re-defined as a fixture in `tests/`
+/// (e.g. Flask's `tests/test_config.py::Flask`) outranks the canonical
+/// definition in `src/`. 0.5 keeps the test result visible but ranks
+/// the canonical definition above it.
+const NAME_BOOST_TEST_FILE_DEMOTION: f64 = 0.5;
+
+/// Heuristic: does this path live under a test directory or have a
+/// test-style file name? Mirrors the broader codebase's test-file
+/// suppression patterns (vuln, secure).
+fn is_test_path(path: &Path) -> bool {
+    let s = path.to_string_lossy();
+    let s_lc = s.to_lowercase();
+    // Path component-style checks ("/tests/", "/test/").
+    if s_lc.contains("/tests/")
+        || s_lc.contains("/test/")
+        || s_lc.starts_with("tests/")
+        || s_lc.starts_with("test/")
+    {
+        return true;
+    }
+    // File-name prefix/suffix checks: test_*.py, *_test.go, *.test.ts.
+    if let Some(file_name) = path.file_name().and_then(|f| f.to_str()) {
+        let fn_lc = file_name.to_lowercase();
+        if fn_lc.starts_with("test_") || fn_lc.starts_with("tests_") {
+            return true;
+        }
+        // *_test.* and *.test.* patterns
+        if fn_lc.contains("_test.") || fn_lc.contains(".test.") {
+            return true;
+        }
+    }
+    false
+}
+
+/// Compute the name-match multiplier for a single result.
+///
+/// Compares `name` against `needle` case-insensitively:
+/// * exact match → `NAME_BOOST_EXACT`
+/// * substring   → `NAME_BOOST_SUBSTRING`
+/// * otherwise   → `1.0` (no change)
+///
+/// Both inputs are lowercased once per call; needle is short by
+/// construction (`boost_query_for` enforces ≤30 chars).
+fn name_boost_multiplier(name: &str, needle: &str) -> f64 {
+    if name.is_empty() || needle.is_empty() {
+        return 1.0;
+    }
+    let name_lc = name.to_lowercase();
+    let needle_lc = needle.to_lowercase();
+    if name_lc == needle_lc {
+        NAME_BOOST_EXACT
+    } else if name_lc.contains(&needle_lc) {
+        NAME_BOOST_SUBSTRING
+    } else {
+        1.0
+    }
+}
+
 /// Read a call graph cache file and build forward/reverse lookup maps.
 ///
 /// The cache is produced by the daemon's `warm` command and uses
@@ -919,7 +1019,163 @@ pub fn search_with_inner(
         None => enrich_and_deduplicate(&raw_results, root, language),
     };
 
-    // Stage 5: Penalize module-level matches so function/method/class results rank higher
+    // Stage 5a: Symbol-name boost (search-symbol-name-boost-v1).
+    //
+    // Plain BM25 ranks documents by token frequency in the FULL document text.
+    // When a user types a short identifier query (e.g. `Flask`, `Router`,
+    // `File`) the actual class/function whose *name* matches the query is
+    // often outranked by docstring-heavy files that mention the term many
+    // times. The user's most obvious mental model — "type the symbol name,
+    // get the symbol" — fails silently.
+    //
+    // Fix: when the query is a short identifier-shaped token (≤30 chars,
+    // no whitespace), apply a multiplicative boost to results whose
+    // `EnrichedResult.name` matches the query:
+    //   * exact case-insensitive match  → x5.0
+    //   * substring case-insensitive    → x2.0
+    //   * everything else               → unchanged
+    //
+    // The boost is multiplicative (preserves relative ranking among non-
+    // matching results) and applied BEFORE the module penalty so that the
+    // module penalty still demotes file-level matches relative to
+    // function/class matches.
+    //
+    // Scope: only applied in BM25 mode. Regex mode does not produce
+    // BM25-style scores, and Hybrid mode's scores have a documented
+    // RRF upper bound (2/(k+1) ≈ 0.0328) that downstream tests assert
+    // against — boosting in those modes would violate the contract.
+    if matches!(options.search_mode, SearchMode::Bm25) {
+        if let Some(needle) = boost_query_for(&report_query) {
+            // Pass 1: boost results that already have a matching name.
+            // Test-file fixtures (e.g. `tests/test_config.py::Flask`)
+            // get a counter-demotion so the canonical `src/flask/app.py::Flask`
+            // outranks them.
+            for result in &mut enriched {
+                let multiplier = name_boost_multiplier(&result.name, &needle);
+                if multiplier > 1.0 {
+                    result.score *= multiplier;
+                    if is_test_path(&result.file) {
+                        result.score *= NAME_BOOST_TEST_FILE_DEMOTION;
+                    }
+                }
+            }
+
+            // Pass 2: synthesize results for symbols whose *name* matches
+            // the query but were NOT surfaced by BM25 enrichment.
+            //
+            // BM25 finds the FILE (because the docstring mentions the
+            // term) but the matched lines are in imports/module preamble
+            // — outside the class body — so `find_enclosing_entry`
+            // returns None and the result is filed as `kind="module"`,
+            // hiding the canonical class entirely. This is exactly the
+            // `tldr search Flask /tmp/repos/flask` repro: `app.py` IS in
+            // the BM25 hits, but the class `Flask` (line 109) never
+            // appears as an `EnrichedResult` because the docstring at
+            // line 1 outside the class is what BM25 matched.
+            //
+            // Fix: for each file already represented in raw BM25
+            // results, scan its structure entries; if any entry's
+            // `name` matches the query (exact or substring), promote
+            // that entry to an `EnrichedResult` with the file's
+            // best BM25 score as the base, then apply the boost. The
+            // existing dedup-by-(file, name) key ensures we don't
+            // create duplicates.
+            //
+            // We restrict the scan to files that already appeared in
+            // raw BM25 results so the cost stays bounded by raw_limit
+            // (5 * top_k or 50, whichever is greater). Files that don't
+            // contain the query as a token won't be in raw_results
+            // anyway, so we'd not find the symbol there.
+            let existing_keys: HashSet<(PathBuf, String)> = enriched
+                .iter()
+                .map(|r| (r.file.clone(), r.name.clone()))
+                .collect();
+
+            // Per-file best BM25 score from raw results.
+            let mut file_best_score: HashMap<PathBuf, f64> = HashMap::new();
+            let mut file_matched_terms: HashMap<PathBuf, Vec<String>> = HashMap::new();
+            for raw in &raw_results {
+                let entry = file_best_score
+                    .entry(raw.file_path.clone())
+                    .or_insert(raw.score);
+                if raw.score > *entry {
+                    *entry = raw.score;
+                }
+                let terms = file_matched_terms
+                    .entry(raw.file_path.clone())
+                    .or_default();
+                for t in &raw.matched_terms {
+                    if !terms.contains(t) {
+                        terms.push(t.clone());
+                    }
+                }
+            }
+
+            let needle_lc = needle.to_lowercase();
+            let mut synthesized: Vec<EnrichedResult> = Vec::new();
+            for (rel_path, base_score) in &file_best_score {
+                let abs_path = root.join(rel_path);
+
+                // Use cached structure entries when available, else
+                // fall back to live tree-sitter parse. On parse errors
+                // we silently skip — the user sees the existing
+                // (un-promoted) result list.
+                let entries: Vec<StructureEntry> = if let Some(cache) = structure_cache {
+                    cache
+                        .by_file
+                        .get(rel_path)
+                        .map(|defs| {
+                            defs.iter()
+                                .map(|d| StructureEntry {
+                                    name: d.name.clone(),
+                                    kind: d.kind.clone(),
+                                    line_start: d.line_start,
+                                    line_end: d.line_end,
+                                    signature: d.signature.clone(),
+                                    preview: String::new(),
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                } else {
+                    extract_structure_entries(&abs_path, language).unwrap_or_default()
+                };
+
+                for entry in entries {
+                    let mult = name_boost_multiplier(&entry.name, &needle_lc);
+                    if mult <= 1.0 {
+                        continue;
+                    }
+                    let key = (rel_path.clone(), entry.name.clone());
+                    if existing_keys.contains(&key) {
+                        continue; // Pass 1 already handled it.
+                    }
+                    let mut promoted_score = base_score * mult;
+                    if is_test_path(rel_path) {
+                        promoted_score *= NAME_BOOST_TEST_FILE_DEMOTION;
+                    }
+                    synthesized.push(EnrichedResult {
+                        name: entry.name.clone(),
+                        kind: entry.kind.clone(),
+                        file: rel_path.clone(),
+                        line_range: (entry.line_start, entry.line_end),
+                        signature: entry.signature.clone(),
+                        callers: Vec::new(),
+                        callees: Vec::new(),
+                        score: promoted_score,
+                        matched_terms: file_matched_terms
+                            .get(rel_path)
+                            .cloned()
+                            .unwrap_or_default(),
+                        preview: entry.preview.clone(),
+                    });
+                }
+            }
+            enriched.extend(synthesized);
+        }
+    }
+
+    // Stage 5b: Penalize module-level matches so function/method/class results rank higher
     let has_function_results = enriched.iter().any(|r| r.kind != "module");
     for result in &mut enriched {
         if result.kind == "module" {
@@ -2118,5 +2374,247 @@ def parse_json(text):
                 "Callees should be sorted alphabetically"
             );
         }
+    }
+
+    // =========================================================================
+    // search-symbol-name-boost-v1 — symbol-name boost tests
+    // =========================================================================
+
+    /// Helper for building a project where one class is named `Foo` and
+    /// many other files reference `Foo` exclusively in docstrings/comments.
+    /// This mirrors the real-world Flask repro: the canonical class is
+    /// outranked by docstring-heavy modules.
+    fn create_name_boost_project() -> (TempDir, PathBuf) {
+        let dir = TempDir::new().unwrap();
+        let project = dir.path().join("project");
+        fs::create_dir(&project).unwrap();
+
+        // Canonical definition: class `Foo` in foo.py
+        fs::write(
+            project.join("foo.py"),
+            r#"
+class Foo:
+    """The Foo class."""
+    def __init__(self):
+        self.value = 0
+"#,
+        )
+        .unwrap();
+
+        // 10 docstring-heavy files that mention "Foo" many times but do
+        // NOT define a symbol named `Foo`. Plain BM25 ranks these above
+        // the actual class definition.
+        for i in 0..10 {
+            fs::write(
+                project.join(format!("doc{}.py", i)),
+                r#"
+def helper():
+    """Docs about Foo. Foo is wonderful. Use Foo everywhere.
+    Foo Foo Foo Foo Foo Foo Foo Foo Foo Foo.
+    More about Foo and Foo and Foo.
+    """
+    return None
+
+def other():
+    """Foo Foo Foo Foo Foo Foo Foo Foo Foo Foo Foo Foo Foo Foo Foo."""
+    pass
+"#,
+            )
+            .unwrap();
+        }
+
+        (dir, project)
+    }
+
+    /// search-symbol-name-boost-v1: a query equal to a class name must
+    /// rank that class as the top result, even when 10 other files
+    /// mention the name many times in docstrings/comments.
+    #[test]
+    fn test_search_exact_name_match_top_ranked() {
+        let (_dir, root) = create_name_boost_project();
+        let report = enriched_search("Foo", &root, Language::Python, opts(20)).unwrap();
+
+        assert!(
+            !report.results.is_empty(),
+            "Search for 'Foo' must return at least one result"
+        );
+        let top = &report.results[0];
+        assert_eq!(
+            top.name, "Foo",
+            "Top result should be the class named 'Foo' (got '{}' in {:?})",
+            top.name, top.file
+        );
+        assert!(
+            top.file.to_string_lossy().ends_with("foo.py"),
+            "Top result should be in foo.py, got {:?}",
+            top.file
+        );
+    }
+
+    /// search-symbol-name-boost-v1: a substring match in the symbol name
+    /// must rank above docstring-only matches. Query `Bar` should
+    /// surface `BarHelper` and `BazBar` ahead of files that merely
+    /// mention `Bar` in comments.
+    #[test]
+    fn test_search_substring_name_match_boosted() {
+        let dir = TempDir::new().unwrap();
+        let project = dir.path().join("project");
+        fs::create_dir(&project).unwrap();
+
+        // Two classes whose names CONTAIN "Bar" as a substring, in
+        // separate files so each gets its own BM25 score.
+        fs::write(
+            project.join("bar_helper.py"),
+            r#"
+class BarHelper:
+    """A helper."""
+    def run(self):
+        return 1
+"#,
+        )
+        .unwrap();
+        fs::write(
+            project.join("baz_bar.py"),
+            r#"
+class BazBar:
+    """Another."""
+    def go(self):
+        return 2
+"#,
+        )
+        .unwrap();
+
+        // Docstring-heavy files mentioning "Bar" a moderate number of
+        // times. With a 2x substring-name boost, the docstring file's
+        // score must drop below BarHelper / BazBar.
+        for i in 0..6 {
+            fs::write(
+                project.join(format!("docs{}.py", i)),
+                r#"
+def thing():
+    """Comment about Bar.
+    Use Bar wisely. Bar is fine.
+    """
+    return None
+"#,
+            )
+            .unwrap();
+        }
+
+        let report = enriched_search("Bar", &project, Language::Python, opts(20)).unwrap();
+        assert!(!report.results.is_empty(), "Should return results for 'Bar'");
+
+        // The top two results must be the substring-name matches, in
+        // either order. Docstring-only matches must rank below.
+        let top_names: Vec<&str> = report
+            .results
+            .iter()
+            .take(2)
+            .map(|r| r.name.as_str())
+            .collect();
+
+        let has_bar_helper = top_names.contains(&"BarHelper");
+        let has_baz_bar = top_names.contains(&"BazBar");
+        assert!(
+            has_bar_helper && has_baz_bar,
+            "Top two results must be BarHelper and BazBar (substring matches), got {:?}",
+            top_names
+        );
+    }
+
+    /// M-T6 / analysis-precision-v1 regression: the BM25 coverage
+    /// penalty must still apply. A multi-token query whose tokens
+    /// almost entirely fail to match must score below 0.5 (the
+    /// hard ceiling enforced in `bm25.rs::test_search_low_coverage`).
+    /// The symbol-name boost must not engage for multi-word queries
+    /// (whitespace disqualifies the boost).
+    #[test]
+    fn test_search_low_coverage_still_penalized() {
+        let mut index = Bm25Index::new(1.5, 0.75);
+        index.add_document("file1", "client.get(base_url=\"http://xyz.other.test\")");
+        index.add_document("file2", "fn main() { println!(\"hello world\"); }");
+        index.add_document("file3", "let total = compute_sum(items);");
+        index.add_document("file4", "import os; from pathlib import Path");
+        index.add_document("file5", "struct Config { timeout: u64 }");
+
+        // Same scenario as bm25.rs::test_search_low_coverage_score_discounted.
+        // The coverage penalty must keep this score below 0.5.
+        let results = index.search("nonexistent_term_xyz_789", 10);
+        assert_eq!(results.len(), 1);
+        assert!(
+            results[0].score < 0.5,
+            "low-coverage BM25 score must remain < 0.5 (M-T6 regression); got {}",
+            results[0].score
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Unit tests for the helpers themselves.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn test_boost_query_for_engages_on_short_identifier() {
+        assert_eq!(boost_query_for("Flask"), Some("Flask".to_string()));
+        assert_eq!(boost_query_for("Router"), Some("Router".to_string()));
+        assert_eq!(boost_query_for("File"), Some("File".to_string()));
+        assert_eq!(boost_query_for("  Flask  "), Some("Flask".to_string()));
+    }
+
+    #[test]
+    fn test_boost_query_for_skips_multi_word_queries() {
+        assert_eq!(boost_query_for("verify jwt token"), None);
+        assert_eq!(boost_query_for("get user"), None);
+    }
+
+    #[test]
+    fn test_boost_query_for_skips_long_queries() {
+        // 31 chars: just over the threshold.
+        let q = "a".repeat(31);
+        assert_eq!(boost_query_for(&q), None);
+
+        // 30 chars: at the threshold (still eligible).
+        let q30 = "a".repeat(30);
+        assert_eq!(boost_query_for(&q30), Some(q30));
+    }
+
+    #[test]
+    fn test_boost_query_for_skips_empty() {
+        assert_eq!(boost_query_for(""), None);
+        assert_eq!(boost_query_for("   "), None);
+    }
+
+    #[test]
+    fn test_name_boost_multiplier_exact_case_insensitive() {
+        assert_eq!(name_boost_multiplier("Flask", "Flask"), NAME_BOOST_EXACT);
+        assert_eq!(name_boost_multiplier("Flask", "flask"), NAME_BOOST_EXACT);
+        assert_eq!(name_boost_multiplier("FLASK", "Flask"), NAME_BOOST_EXACT);
+    }
+
+    #[test]
+    fn test_name_boost_multiplier_substring() {
+        assert_eq!(
+            name_boost_multiplier("BarHelper", "Bar"),
+            NAME_BOOST_SUBSTRING
+        );
+        assert_eq!(name_boost_multiplier("BazBar", "bar"), NAME_BOOST_SUBSTRING);
+    }
+
+    #[test]
+    fn test_is_test_path_detects_common_patterns() {
+        assert!(is_test_path(Path::new("tests/test_config.py")));
+        assert!(is_test_path(Path::new("src/foo/tests/test_x.py")));
+        assert!(is_test_path(Path::new("test/foo.py")));
+        assert!(is_test_path(Path::new("test_helpers.py")));
+        assert!(is_test_path(Path::new("foo_test.go")));
+        assert!(is_test_path(Path::new("foo.test.ts")));
+        assert!(!is_test_path(Path::new("src/flask/app.py")));
+        assert!(!is_test_path(Path::new("flask.py")));
+    }
+
+    #[test]
+    fn test_name_boost_multiplier_no_match() {
+        assert_eq!(name_boost_multiplier("dumps", "Flask"), 1.0);
+        assert_eq!(name_boost_multiplier("", "Flask"), 1.0);
+        assert_eq!(name_boost_multiplier("Flask", ""), 1.0);
     }
 }

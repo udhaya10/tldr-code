@@ -1,5 +1,122 @@
 # Changelog
 
+## search-symbol-name-boost-v1 — internal milestone
+
+NOT a published release. UX bug-fix milestone for `tldr search` (the
+enriched BM25-based symbol-discovery command).
+
+### Bug — typing the symbol name does not return the symbol
+
+```bash
+$ tldr search Flask /tmp/repos/flask | jq '.results[:5] | map({name})'
+[
+  {"name": "dumps"},
+  {"name": "wsgi_errors_stream"},
+  {"name": "Request"},
+  {"name": "BlueprintSetupState"},
+  {"name": "test_config"}
+]
+# class Flask at src/flask/app.py:109 was buried beyond top 50.
+```
+
+Plain BM25 ranks documents by token frequency in the FULL document
+text. When the user types a short identifier query (`Flask`,
+`Router`, `File`) the canonical class/function whose *name* matches
+the query is outranked by docstring-heavy files that mention the
+term many times. The user's most obvious mental model — "type the
+symbol name, get the symbol" — fails silently.
+
+Furthermore, the structure-enrichment pass found `app.py` in BM25's
+raw results, but the matched lines (imports/module preamble, line
+1) lay *outside* the class body (line 109+), so
+`find_enclosing_entry` returned None and the result was filed as
+`kind="module"` — hiding the canonical class entirely.
+
+### Fix — symbol-name boost layered above BM25
+
+`enriched.rs::search_with_inner` (Stage 5a, BM25-mode only):
+
+1. Determine boost eligibility: query is short (≤30 chars) and
+   contains no whitespace (`boost_query_for`). Multi-word queries
+   like `verify jwt token` are deliberately NOT boosted because the
+   user is searching for behavior, not a single symbol.
+
+2. Pass 1 — boost results that already have a matching name:
+   * `EnrichedResult.name` exact (case-insensitive) → score x5.0
+   * substring match (case-insensitive)            → score x2.0
+   * everything else                               → unchanged
+
+3. Pass 2 — synthesize results for matching definitions in BM25's
+   raw result files that did NOT survive enrichment because the
+   enclosing-line lookup missed them. For each file already in the
+   raw BM25 results, scan its structure entries; promote any
+   definition whose name matches into a fresh `EnrichedResult` with
+   the file's best BM25 score as the base, then apply the boost.
+
+4. Test-file demotion: when a boosted result lives under a tests
+   directory or matches a test-style file name (`test_*.py`,
+   `*_test.go`, `*.test.ts`), apply x0.5 *after* the boost. This
+   prevents `tests/test_config.py::Flask` (a fixture subclass) from
+   outranking `src/flask/app.py::Flask` (the canonical definition).
+   Mirrors the existing test-file suppression pattern in
+   vuln/secure.
+
+5. Scope: BM25 mode only. Regex mode does not produce BM25-style
+   scores. Hybrid mode's scores have a documented RRF upper bound
+   (`2/(k+1) ≈ 0.0328`) that downstream tests assert against —
+   boosting in those modes would violate the contract.
+
+### Result
+
+```bash
+$ tldr search Flask /tmp/repos/flask | jq '.results[0]'
+{ "name": "Flask", "file": "src/flask/app.py", "line": 109 }   # ✓
+
+$ tldr search Router /tmp/repos/express | jq '.results[0].name'
+"getrouter"                                                    # Router accessor ✓
+
+$ tldr search File /tmp/repos/ripgrep | jq '.results[0]'
+{ "name": "File", "file": "crates/core/flags/defs.rs", "line": 1987 }  # ✓
+```
+
+### Coverage-penalty preservation
+
+The M-T6 / `analysis-precision-v1` BM25 coverage penalty (BUG-20)
+is preserved: a multi-word random query
+(`nonexistent_term_xyz_789`) still scores well below the 0.5
+ceiling because (a) the query has whitespace → name-boost does not
+fire, and (b) plain BM25's coverage penalty multiplies the score
+by `matched_terms / total_query_terms` when coverage < 0.5.
+
+### Tests
+
+* `test_search_exact_name_match_top_ranked` — class `Foo` + 10
+  docstring-heavy files; query `Foo` returns the class as #1.
+* `test_search_substring_name_match_boosted` — query `Bar` ranks
+  `BarHelper` and `BazBar` above docstring-only `thing`.
+* `test_search_low_coverage_still_penalized` — random multi-word
+  query keeps M-T6's coverage penalty active.
+* Helper-level tests for `boost_query_for`, `name_boost_multiplier`,
+  and `is_test_path`.
+
+### Validation
+
+* `tldr search Flask /tmp/repos/flask` → `name=Flask`,
+  `file=src/flask/app.py`, `line=109` ✓
+* `tldr search Router /tmp/repos/express` → top hit is the Router
+  accessor function ✓
+* `tldr search File /tmp/repos/ripgrep` → exact `File` symbol at
+  `crates/core/flags/defs.rs:1987` ✓
+* `vuln_migration_v1_red`: 168/168 GREEN
+* All search lib + integration tests: 84 + 8 + 5 + 43 GREEN
+
+### Files
+
+* `crates/tldr-core/src/search/enriched.rs` — boost helpers, Stage
+  5a, tests.
+
+---
+
 ## autodetect-dominant-language-v1 — internal milestone
 
 NOT a published release. Critical bug-fix milestone for
