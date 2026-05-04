@@ -78,7 +78,7 @@ mod loc_tests {
 
         let languages: Vec<&str> = report
             .by_language
-            .iter()
+            .values()
             .map(|entry| entry.language.as_str())
             .collect();
 

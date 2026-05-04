@@ -91,10 +91,38 @@ pub struct StatsOutput {
 }
 
 /// Message output for empty stats.
+///
+/// low-cleanup-bundle-v1 (L2): the previous shape `{"message": "No usage
+/// recorded"}` was opaque — users had no idea what "usage" meant or how to
+/// produce it. We now include a `next_steps` hint that names the daemon and
+/// the exact command to run, plus a `requires` field listing prerequisites
+/// for programmatic consumers.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EmptyStatsOutput {
     /// Message indicating no usage
     pub message: String,
+    /// Concrete command(s) the user can run to populate stats.
+    pub next_steps: Vec<String>,
+    /// Prerequisites required for the stats command to produce data.
+    pub requires: Vec<String>,
+}
+
+impl EmptyStatsOutput {
+    /// Build the canonical empty-stats payload.
+    fn empty() -> Self {
+        Self {
+            message: "No usage recorded yet".to_string(),
+            next_steps: vec![
+                "tldr daemon start  # begin recording usage".to_string(),
+                "tldr <any-command> ...  # run a few commands while the daemon is up".to_string(),
+                "tldr stats  # rerun this command to see call counts and latencies".to_string(),
+            ],
+            requires: vec![
+                "tldr daemon (run `tldr daemon start`)".to_string(),
+                "at least one daemon-tracked invocation".to_string(),
+            ],
+        }
+    }
 }
 
 // =============================================================================
@@ -134,17 +162,27 @@ impl StatsArgs {
                         }
                     }
                 }
-                None => match output_format {
-                    OutputFormat::Json | OutputFormat::Compact => {
-                        let empty = EmptyStatsOutput {
-                            message: "No usage recorded yet".to_string(),
-                        };
-                        println!("{}", serde_json::to_string_pretty(&empty)?);
+                None => {
+                    let empty = EmptyStatsOutput::empty();
+                    match output_format {
+                        OutputFormat::Json | OutputFormat::Compact => {
+                            println!("{}", serde_json::to_string_pretty(&empty)?);
+                        }
+                        OutputFormat::Text | OutputFormat::Sarif | OutputFormat::Dot => {
+                            println!("{}", empty.message);
+                            println!();
+                            println!("Usage tracking requires the tldr daemon. To begin recording:");
+                            for step in &empty.next_steps {
+                                println!("  $ {}", step);
+                            }
+                            println!();
+                            println!(
+                                "Once the daemon has captured invocations, this command will \
+                                 display call counts, latencies, and most-used commands."
+                            );
+                        }
                     }
-                    OutputFormat::Text | OutputFormat::Sarif | OutputFormat::Dot => {
-                        println!("No usage recorded yet");
-                    }
-                },
+                }
             }
         }
 

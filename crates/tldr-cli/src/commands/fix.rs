@@ -33,7 +33,17 @@ use tldr_core::Language;
 
 use crate::output::{OutputFormat, OutputWriter};
 
-/// Diagnose and auto-fix errors from compiler/runtime output
+/// Diagnose and auto-fix errors from compiler/runtime output.
+///
+/// Accepts (auto-detected) error text from any of:
+///   - Rust:        cargo build / cargo check / rustc errors (E0xxx codes)
+///   - C/C++:       gcc / clang diagnostics (`file:line:col: error: ...`)
+///   - Python:      tracebacks (NameError, AttributeError, ImportError, ...)
+///   - JS/TS:       jest / mocha test output, tsc errors (TS2xxx codes)
+///   - Linters:     eslint --format json, ruff, pylint
+///
+/// The format is auto-detected from the error text — pass it via
+/// `--error "..."`, `--error-file path`, or `--stdin`.
 #[derive(Debug, Args)]
 pub struct FixArgs {
     /// Fix subcommand

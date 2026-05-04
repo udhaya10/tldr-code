@@ -139,12 +139,17 @@ fn format_loc_text(report: &LocReport) -> String {
         summary.blank_lines, summary.blank_percent
     ));
 
-    // By language (plain text table)
+    // By language (plain text table). low-cleanup-bundle-v1 (L6): the
+    // underlying type is now a BTreeMap (JSON object); iterate values
+    // sorted by total_lines descending so the table reads naturally.
     if !report.by_language.is_empty() {
         output.push_str("\nBy Language:\n");
 
-        let max_lang = report
-            .by_language
+        let mut entries: Vec<&tldr_core::metrics::loc::LanguageLocEntry> =
+            report.by_language.values().collect();
+        entries.sort_by(|a, b| b.total_lines.cmp(&a.total_lines));
+
+        let max_lang = entries
             .iter()
             .map(|e| e.language.len())
             .max()
@@ -161,7 +166,7 @@ fn format_loc_text(report: &LocReport) -> String {
             width = max_lang,
         ));
 
-        for entry in &report.by_language {
+        for entry in &entries {
             output.push_str(&format!(
                 "  {:<width$}  {:>5}  {:>6}  {:>6}  {:>5}  {:>6}\n",
                 entry.language,

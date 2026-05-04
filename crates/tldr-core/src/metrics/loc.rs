@@ -26,7 +26,7 @@
 //! - Spec: session15/spec.md Section 1 (LOC Command)
 //! - Phased Plan: session15/phased-plan.yaml Phase 2
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -48,8 +48,15 @@ use crate::TldrError;
 pub struct LocReport {
     /// Summary totals across all files
     pub summary: LocSummary,
-    /// Breakdown by language
-    pub by_language: Vec<LanguageLocEntry>,
+    /// Breakdown by language, keyed by language name (e.g. `"python"`,
+    /// `"scala"`).
+    ///
+    /// low-cleanup-bundle-v1 (L6): emitted as a JSON OBJECT — not a JSON
+    /// array — even on single-language repos so callers can rely on
+    /// `report.by_language.<lang>` shape across N=1 and N>1 cases. We use
+    /// a `BTreeMap` to keep key order stable (alphabetical) regardless of
+    /// the order files were walked.
+    pub by_language: BTreeMap<String, LanguageLocEntry>,
     /// Per-file breakdown (optional, populated with --by-file)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub by_file: Option<Vec<FileLocEntry>>,
@@ -688,27 +695,28 @@ pub fn analyze_directory(path: &Path, options: &LocOptions) -> Result<LocReport,
         }
     }
 
-    // Build language breakdown
-    let mut by_language_vec: Vec<LanguageLocEntry> = by_language
-        .into_iter()
-        .map(|(lang, (count, info))| LanguageLocEntry {
-            language: lang.as_str().to_string(),
-            files: count,
-            code_lines: info.code_lines,
-            comment_lines: info.comment_lines,
-            blank_lines: info.blank_lines,
-            total_lines: info.total_lines,
-        })
-        .collect();
-
-    // Sort by total lines descending
-    by_language_vec.sort_by(|a, b| b.total_lines.cmp(&a.total_lines));
+    // Build language breakdown — keyed by language name.
+    let mut by_language_map: BTreeMap<String, LanguageLocEntry> = BTreeMap::new();
+    for (lang, (count, info)) in by_language.into_iter() {
+        let key = lang.as_str().to_string();
+        by_language_map.insert(
+            key.clone(),
+            LanguageLocEntry {
+                language: key,
+                files: count,
+                code_lines: info.code_lines,
+                comment_lines: info.comment_lines,
+                blank_lines: info.blank_lines,
+                total_lines: info.total_lines,
+            },
+        );
+    }
 
     // Calculate summary
-    let total_code: usize = by_language_vec.iter().map(|e| e.code_lines).sum();
-    let total_comment: usize = by_language_vec.iter().map(|e| e.comment_lines).sum();
-    let total_blank: usize = by_language_vec.iter().map(|e| e.blank_lines).sum();
-    let total_files: usize = by_language_vec.iter().map(|e| e.files).sum();
+    let total_code: usize = by_language_map.values().map(|e| e.code_lines).sum();
+    let total_comment: usize = by_language_map.values().map(|e| e.comment_lines).sum();
+    let total_blank: usize = by_language_map.values().map(|e| e.blank_lines).sum();
+    let total_files: usize = by_language_map.values().map(|e| e.files).sum();
 
     let summary = LocSummary::from_totals(total_files, total_code, total_comment, total_blank);
 
@@ -732,7 +740,7 @@ pub fn analyze_directory(path: &Path, options: &LocOptions) -> Result<LocReport,
 
     Ok(LocReport {
         summary,
-        by_language: by_language_vec,
+        by_language: by_language_map,
         by_file: if options.by_file { Some(by_file) } else { None },
         by_directory: by_directory_vec,
         warnings,
@@ -750,14 +758,19 @@ pub fn analyze_loc(path: &Path, options: &LocOptions) -> Result<LocReport, TldrE
         let summary =
             LocSummary::from_totals(1, info.code_lines, info.comment_lines, info.blank_lines);
 
-        let by_language = vec![LanguageLocEntry {
-            language: lang.as_str().to_string(),
-            files: 1,
-            code_lines: info.code_lines,
-            comment_lines: info.comment_lines,
-            blank_lines: info.blank_lines,
-            total_lines: info.total_lines,
-        }];
+        let mut by_language: BTreeMap<String, LanguageLocEntry> = BTreeMap::new();
+        let lang_key = lang.as_str().to_string();
+        by_language.insert(
+            lang_key.clone(),
+            LanguageLocEntry {
+                language: lang_key,
+                files: 1,
+                code_lines: info.code_lines,
+                comment_lines: info.comment_lines,
+                blank_lines: info.blank_lines,
+                total_lines: info.total_lines,
+            },
+        );
 
         let by_file = if options.by_file {
             Some(vec![FileLocEntry {

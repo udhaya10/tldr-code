@@ -279,8 +279,24 @@ pub fn parse_coverage(
         message: format!("Failed to read file: {}", e),
     })?;
 
+    // low-cleanup-bundle-v1 (L4): when no format was explicitly requested,
+    // refuse to silently treat an empty/non-coverage file (e.g. /dev/null)
+    // as a 0/0 success. We only emit this error in the auto-detect path —
+    // explicit `--report-format <fmt>` still falls through so the parser
+    // surfaces its own format-specific error.
+    if format.is_none() && content.trim().is_empty() {
+        return Err(TldrError::ParseError {
+            file: resolved_path.clone(),
+            line: None,
+            message: "Coverage report is empty. Provide a non-empty Cobertura XML, LCOV, or \
+                      coverage.py JSON file, or pass `--report-format <fmt>` explicitly."
+                .to_string(),
+        });
+    }
+
     // Auto-detect format if not specified
     let detected_format = format.unwrap_or_else(|| detect_format(&content));
+    let format_was_explicit = format.is_some();
 
     // Parse based on format
     let mut report = match detected_format {
@@ -288,6 +304,27 @@ pub fn parse_coverage(
         CoverageFormat::Lcov => parse_lcov(&content)?,
         CoverageFormat::CoveragePy => parse_coverage_py_json(&content)?,
     };
+
+    // low-cleanup-bundle-v1 (L4): if auto-detect picked a format but the
+    // parser found nothing parseable (zero files AND zero lines), the file
+    // is almost certainly not a coverage report at all. Error rather than
+    // returning a fake 0/0 success report.
+    if !format_was_explicit
+        && report.files.is_empty()
+        && report.summary.total_lines == 0
+        && report.summary.covered_lines == 0
+    {
+        return Err(TldrError::ParseError {
+            file: resolved_path.clone(),
+            line: None,
+            message: format!(
+                "Coverage report is empty or unrecognized (auto-detected as {}). No files, \
+                 no lines parsed. Pass `--report-format <fmt>` to override detection if you \
+                 intended to read this file.",
+                detected_format
+            ),
+        });
+    }
 
     // Apply options
     report.summary.threshold_met = report.summary.line_coverage >= options.threshold;

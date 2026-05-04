@@ -110,12 +110,21 @@ impl Embedder {
         // Convert our model enum to fastembed's
         let fast_model = Self::to_fastembed_model(model);
 
-        // P0 Mitigation 1.3: Progress message before download
-        eprintln!(
-            "Loading embedding model ({})... First run may download ~{}MB model.",
-            model.model_name(),
-            Self::model_size_mb(model)
-        );
+        // P0 Mitigation 1.3: Progress message before download.
+        //
+        // low-cleanup-bundle-v1 (L8): respect `TLDR_QUIET=1` so the CLI
+        // commands `semantic`/`embed`/`similar`, when invoked with the
+        // global `--quiet`/`-q` flag, silence the model-load banner. This
+        // is the missing piece — `BuildOptions::show_progress` already
+        // suppresses chunk/index progress, but the embedder's own banner
+        // sat outside that path and printed unconditionally.
+        if std::env::var_os("TLDR_QUIET").is_none() {
+            eprintln!(
+                "Loading embedding model ({})... First run may download ~{}MB model.",
+                model.model_name(),
+                Self::model_size_mb(model)
+            );
+        }
 
         // Initialize the model
         // P0 Mitigation 1.1: fastembed will fail here if ONNX runtime is unavailable

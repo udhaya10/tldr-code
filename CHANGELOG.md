@@ -1,5 +1,183 @@
 # Changelog
 
+## low-cleanup-bundle-v1 — internal milestone
+
+NOT a published release. UX-hygiene milestone fixing 8 LOW-priority CLI
+bugs surfaced by the post-MED-bundle real-repo audit. Each bug was
+binary-verified against `/tmp/repos/{flask, express, scala-cats-effect}`
+and gated by a regression test in
+`crates/tldr-cli/tests/low_cleanup_bundle_v1.rs` (8 tests added).
+`vuln_migration_v1_red`: 168/168 GREEN.
+
+### Bug 1 — `tldr structure --format text` was too reduced (L1)
+
+The text view emitted only top-level filenames + bare function/class
+names. On flask: 21 KB text vs 523 KB JSON — no methods, no class-method
+nesting, no signatures. Effectively useless for navigation.
+
+**Fix.** Expand `format_structure_text` to consume `definitions[]` (when
+present) for full function signatures with line numbers, and
+`method_infos[]` to nest each class's methods under it. Roughly 2.8×
+richer (flask: 21 KB → 59 KB).
+
+- `crates/tldr-cli/src/output.rs::format_structure_text` — pull
+  `(line, signature)` from `definitions[]` keyed by name; emit
+  `method_infos[]` indented under their owning class for single-class
+  files; flat `Methods:` block when multi-class.
+
+### Bug 2 — `tldr stats` empty payload was opaque (L2)
+
+```bash
+$ tldr stats
+{"message": "No usage recorded"}
+```
+
+The user had no idea what "usage" meant or how to record it.
+
+**Fix.** Extend `EmptyStatsOutput` with `next_steps: Vec<String>` and
+`requires: Vec<String>` so the JSON payload self-documents the daemon
+prerequisite. The text branch now prints a short walk-through instead
+of just one line.
+
+- `crates/tldr-cli/src/commands/daemon/stats.rs::EmptyStatsOutput` —
+  add `next_steps`, `requires` fields; new `EmptyStatsOutput::empty()`
+  constructor; text branch prints `tldr daemon start` walk-through.
+
+### Bug 3 — `tldr fix --help` did not enumerate inputs (L3)
+
+```bash
+$ tldr fix --help
+Diagnose and auto-fix errors from compiler/runtime output
+```
+
+"Compiler/runtime output" is too vague — users could not tell which
+toolchains were supported.
+
+**Fix.** Replace the one-line about with an enumerated list (cargo /
+rustc, gcc / clang, Python tracebacks, jest / mocha / tsc, eslint /
+ruff / pylint) on the `Command::Fix` variant — clap surfaces the
+variant doc comment as the subcommand's `about`/`long_about`.
+
+- `crates/tldr-cli/src/main.rs::Command::Fix` — multi-line doc comment
+  enumerating accepted error formats.
+- `crates/tldr-cli/src/commands/fix.rs::FixArgs` — mirror the
+  enumeration for `tldr fix <subcmd> --help` parity.
+
+### Bug 4 — `tldr coverage /dev/null` reported success (L4)
+
+```bash
+$ tldr coverage /dev/null
+{ "summary": { "line_coverage": 0.0, "total_lines": 0, ... } }
+$ echo $?
+0
+```
+
+An empty / non-coverage file silently produced a 0/0 success report.
+Downstream "0% coverage met threshold" guards thus passed on garbage.
+
+**Fix.** When `--report-format` was NOT explicitly specified (the
+auto-detect path), validate that:
+1. file content is not empty; and
+2. the parsed report contains at least one parseable record (files or
+   lines).
+
+If either check fails, return a `TldrError::ParseError` pointing at
+the file and naming the auto-detected format. Explicit
+`--report-format <fmt>` still falls through so the parser surfaces
+its own format-specific error.
+
+- `crates/tldr-core/src/quality/coverage.rs::parse_coverage` — two
+  guard clauses gated on `format_was_explicit == false`.
+
+### Bug 5 — `tldr dead` JSON had three redundant counters (L5)
+
+```bash
+$ tldr dead . --format json | jq '{total_dead, total_count, shown_count}'
+{ "total_dead": 41, "total_count": 41, "shown_count": 41 }
+```
+
+`shown_count == total_count == total_dead` always (except on the rare
+`--max-items` truncation path). Three fields, one fact.
+
+**Fix.** Drop both `total_count` (duplicate of canonical `total_dead`
+already in `DeadCodeReport`) and `shown_count` (always equal to
+`dead_functions.len()` post-truncation). Keep only the boolean
+`truncated` flag for the rare clipped case.
+
+- `crates/tldr-cli/src/commands/dead.rs::DeadCodeOutput` — remove the
+  two redundant `usize` fields; keep `truncated: bool`. Text branch
+  still uses the in-scope counters for its truncation banner.
+
+### Bug 6 — `tldr loc by_language` shape inconsistency (L6)
+
+`by_language` was a JSON ARRAY (`Vec<LanguageLocEntry>`), forcing
+consumers to write `report.by_language[0].language` even on
+single-language repos. Audit asked for a stable OBJECT shape keyed by
+language name across N=1 and N>1 cases.
+
+**Fix.** Switch the underlying type to
+`BTreeMap<String, LanguageLocEntry>` so JSON serialization always
+produces `{"<lang>": {...}, ...}`. CLI text formatter sorts values by
+total_lines descending for a natural reading order.
+
+- `crates/tldr-core/src/metrics/loc.rs::LocReport::by_language` —
+  `Vec<...>` -> `BTreeMap<String, ...>`. Both `analyze_directory` and
+  the single-file path build the map. Sort logic moved to the CLI's
+  text formatter (`crates/tldr-cli/src/commands/loc.rs::format_loc_text`).
+- `crates/tldr-core/tests/session15_metrics_tests.rs` — update
+  `.by_language.iter()` -> `.values()` for the new shape.
+
+Verified on `/tmp/repos/scala-cats-effect`:
+
+```bash
+$ tldr loc /tmp/repos/scala-cats-effect | jq '.by_language | keys'
+["c", "java", "scala"]
+```
+
+### Bug 7 — `tldr clones` could emit `Type-2` with similarity `1.0` (L7)
+
+By definition: similarity 1.0 = identical tokens = Type-1, not Type-2.
+The Type-2 detection branch could report `(CloneType::Type2, 1.0)` when
+normalized similarity hit 1.0 while raw similarity was below 0.9 — the
+`raw_similarity.max(norm_sim)` arm.
+
+**Fix.** Route every reported similarity through `classify_clone_type`
+in the Type-2 detection branch so the type label always agrees with the
+score (Type-1 iff `sim ~ 1.0`, Type-2 iff `sim in [0.9, 1.0)`). The
+Type-3 branch already used the same classifier.
+
+- `crates/tldr-core/src/analysis/clones/detect.rs::detect_type2` —
+  drop the manual `(Type1, _) | (Type2, _)` tuple, compute similarity
+  first then delegate to `classify_clone_type(similarity)`.
+
+Verified on `/tmp/repos/express`: 22 clone pairs, 0 type/similarity
+violations.
+
+### Bug 8 — long-running commands lacked `--quiet` plumbing (L8)
+
+`tldr semantic "..."` (and the related `embed`/`similar`) printed 7+
+lines to stderr on first run — model download progress, indexing
+banner. The global `--quiet` flag silenced the chunk/index progress
+(via `BuildOptions::show_progress`) but did NOT silence
+`Embedder::new`'s model-load banner, which sat outside that path.
+
+**Fix.** Have the CLI propagate the global `--quiet` flag through a
+`TLDR_QUIET=1` environment variable that `Embedder::new` checks before
+emitting its banner. No new flag needed — the existing global
+`--quiet` (`-q`) now does the right thing end-to-end.
+
+- `crates/tldr-cli/src/main.rs::run_command` — set `TLDR_QUIET=1` at
+  CLI entry when `cli.quiet` is true.
+- `crates/tldr-core/src/semantic/embedder.rs::Embedder::new` — gate
+  the model-load `eprintln!` on `TLDR_QUIET` being absent.
+
+Verified on flask:
+
+```bash
+$ tldr structure /tmp/repos/flask --format text 2>/dev/null    # default: 55 B stderr
+$ tldr --quiet structure /tmp/repos/flask --format text 2>/dev/null   # quiet: 0 B stderr
+```
+
 ## med-cleanup-bundle-v1 — internal milestone
 
 NOT a published release. UX-hygiene milestone fixing 8 MED-priority CLI

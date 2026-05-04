@@ -130,25 +130,30 @@ pub fn detect_type1_type2(
                 let raw_similarity =
                     compute_dice_similarity(&frag_a.raw_tokens, &frag_b.raw_tokens);
 
-                // If raw sim >= 0.99, it's Type-1 (would have been caught above unless hash collision)
-                let (clone_type, similarity) = if raw_similarity >= 0.99 {
-                    (CloneType::Type1, raw_similarity)
-                } else if raw_similarity >= 0.9 {
-                    // Raw tokens are similar enough for Type-2
-                    (CloneType::Type2, raw_similarity)
+                // Determine the similarity to report and classify by it.
+                //
+                // low-cleanup-bundle-v1 (L7): the previous logic could report
+                // `(CloneType::Type2, similarity = 1.0)` when normalized
+                // similarity hit 1.0 while raw similarity was < 0.9 (the
+                // `raw_similarity.max(norm_sim)` arm). similarity == 1.0
+                // means tokens are identical -> Type-1 by definition. We
+                // now route every reported similarity through
+                // `classify_clone_type` so the type label always agrees with
+                // the score (Type-1 iff sim ~ 1.0, Type-2 iff sim in
+                // [0.9, 1.0)).
+                let similarity = if raw_similarity >= 0.9 {
+                    raw_similarity
                 } else {
-                    // Check normalized similarity for Type-2
                     let norm_sim = compute_dice_similarity(
                         &frag_a.normalized_tokens,
                         &frag_b.normalized_tokens,
                     );
-                    if norm_sim >= 0.9 {
-                        // REQ-7: report raw similarity but classify based on normalized
-                        (CloneType::Type2, raw_similarity.max(norm_sim))
-                    } else {
+                    if norm_sim < 0.9 {
                         continue; // Not similar enough
                     }
+                    raw_similarity.max(norm_sim)
                 };
+                let clone_type = classify_clone_type(similarity);
 
                 // Apply type filter
                 if let Some(filter) = options.type_filter {

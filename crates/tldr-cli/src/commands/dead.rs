@@ -100,11 +100,10 @@ impl DeadArgs {
                 writer.write_text(&text)?;
                 return Ok(());
             } else {
+                let _ = (total_count, shown_count); // text path only
                 let output = DeadCodeOutput {
                     report: truncated_report,
                     truncated,
-                    total_count,
-                    shown_count,
                 };
                 writer.write(&output)?;
                 return Ok(());
@@ -168,11 +167,10 @@ impl DeadArgs {
             );
             writer.write_text(&text)?;
         } else {
+            let _ = (total_count, shown_count); // text path only
             let output = DeadCodeOutput {
                 report: truncated_report,
                 truncated,
-                total_count,
-                shown_count,
             };
             writer.write(&output)?;
         }
@@ -416,14 +414,19 @@ pub(crate) fn collect_module_infos_with_refcounts(
 }
 
 /// Wrapper struct for JSON output with truncation metadata.
+///
+/// low-cleanup-bundle-v1 (L5): the previous shape redundantly carried three
+/// near-identical counters (`total_dead == total_count == shown_count` on
+/// the un-truncated case). We dropped `total_count` (duplicate of the
+/// canonical `total_dead` in `DeadCodeReport`) and `shown_count` (always
+/// derivable from `dead_functions.len()`), keeping only the boolean
+/// `truncated` flag for the rare case the list was clipped by --max-items.
 #[derive(Serialize)]
 struct DeadCodeOutput {
     #[serde(flatten)]
     report: DeadCodeReport,
     #[serde(skip_serializing_if = "is_false", default)]
     truncated: bool,
-    total_count: usize,
-    shown_count: usize,
 }
 
 fn is_false(b: &bool) -> bool {

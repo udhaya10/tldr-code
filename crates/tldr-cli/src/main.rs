@@ -366,7 +366,16 @@ pub enum Command {
     // -------------------------------------------------------------------------
     // Fix: error diagnosis and auto-fix system
     // -------------------------------------------------------------------------
-    /// Diagnose and auto-fix errors from compiler/runtime output
+    /// Diagnose and auto-fix errors from compiler/runtime output.
+    ///
+    /// Auto-detects and parses error text from any of:
+    ///   - Rust:      cargo build / cargo check / rustc errors (E0xxx)
+    ///   - C/C++:     gcc / clang diagnostics (file:line:col: error: ...)
+    ///   - Python:    tracebacks (NameError, AttributeError, ImportError)
+    ///   - JS/TS:     jest / mocha test output, tsc errors (TS2xxx)
+    ///   - Linters:   eslint --format json, ruff, pylint
+    ///
+    /// Pass error text via --error "...", --error-file path, or --stdin.
     #[command(visible_alias = "fx")]
     Fix(FixArgs),
 
@@ -557,6 +566,15 @@ fn run_command(cli: &Cli) -> Result<()> {
     // plain JSON and believed SARIF was being produced.
     if let Err(msg) = validate_format_for_command(command_name(&cli.command), cli.format) {
         anyhow::bail!(msg);
+    }
+
+    // low-cleanup-bundle-v1 (L8): propagate the global `--quiet`/`-q` flag
+    // through `TLDR_QUIET=1` so library code outside the CLI's writer path
+    // (notably `Embedder::new`'s model-load banner) can suppress its own
+    // stderr output. Without this, `tldr semantic --quiet "query"` still
+    // printed 3+ lines from the embedder bootstrap.
+    if cli.quiet {
+        std::env::set_var("TLDR_QUIET", "1");
     }
 
     match &cli.command {
