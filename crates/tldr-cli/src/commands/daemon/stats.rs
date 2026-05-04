@@ -138,40 +138,50 @@ impl StatsArgs {
         // Read and aggregate stats
         let stats = read_and_aggregate_stats(&stats_path)?;
 
-        // Output result
-        if !quiet {
-            // Use the global format from CLI
-            let output_format = format;
+        // Output result.
+        //
+        // high-bundle-progress-determinism-coverage-v1 (N1 follow-up):
+        // `quiet` is for *progress* suppression, not for total silence.
+        // For json/compact (now auto-quiet-on-json), we still need to
+        // emit the structured payload — otherwise pipelines see empty
+        // stdout. Only the human-readable text branches honor `quiet`
+        // for the verbose explanatory blurb.
+        let output_format = format;
 
-            match stats {
-                Some(stats) => {
-                    let output = StatsOutput {
-                        total_invocations: stats.total_invocations,
-                        estimated_tokens_saved: stats.estimated_tokens_saved,
-                        raw_tokens_total: stats.raw_tokens_total,
-                        tldr_tokens_total: stats.tldr_tokens_total,
-                        savings_percent: stats.savings_percent,
-                    };
+        match stats {
+            Some(stats) => {
+                let output = StatsOutput {
+                    total_invocations: stats.total_invocations,
+                    estimated_tokens_saved: stats.estimated_tokens_saved,
+                    raw_tokens_total: stats.raw_tokens_total,
+                    tldr_tokens_total: stats.tldr_tokens_total,
+                    savings_percent: stats.savings_percent,
+                };
 
-                    match output_format {
-                        OutputFormat::Json | OutputFormat::Compact => {
-                            println!("{}", serde_json::to_string_pretty(&output)?);
-                        }
-                        OutputFormat::Text | OutputFormat::Sarif | OutputFormat::Dot => {
+                match output_format {
+                    OutputFormat::Json | OutputFormat::Compact => {
+                        println!("{}", serde_json::to_string_pretty(&output)?);
+                    }
+                    OutputFormat::Text | OutputFormat::Sarif | OutputFormat::Dot => {
+                        if !quiet {
                             print_text_stats(&output);
                         }
                     }
                 }
-                None => {
-                    let empty = EmptyStatsOutput::empty();
-                    match output_format {
-                        OutputFormat::Json | OutputFormat::Compact => {
-                            println!("{}", serde_json::to_string_pretty(&empty)?);
-                        }
-                        OutputFormat::Text | OutputFormat::Sarif | OutputFormat::Dot => {
+            }
+            None => {
+                let empty = EmptyStatsOutput::empty();
+                match output_format {
+                    OutputFormat::Json | OutputFormat::Compact => {
+                        println!("{}", serde_json::to_string_pretty(&empty)?);
+                    }
+                    OutputFormat::Text | OutputFormat::Sarif | OutputFormat::Dot => {
+                        if !quiet {
                             println!("{}", empty.message);
                             println!();
-                            println!("Usage tracking requires the tldr daemon. To begin recording:");
+                            println!(
+                                "Usage tracking requires the tldr daemon. To begin recording:"
+                            );
                             for step in &empty.next_steps {
                                 println!("  $ {}", step);
                             }

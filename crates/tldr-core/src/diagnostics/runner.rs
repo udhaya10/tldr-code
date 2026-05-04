@@ -15,6 +15,7 @@ use crate::diagnostics::parsers::*;
 use crate::diagnostics::{Diagnostic, DiagnosticsReport, ToolConfig, ToolResult};
 use crate::error::TldrError;
 use crate::types::Language;
+use crate::walker::ProjectWalker;
 
 // =============================================================================
 // Tool Detection
@@ -544,12 +545,105 @@ pub fn run_tools_parallel(
     // Compute summary
     let summary = crate::diagnostics::compute_summary(&all_diagnostics);
 
+    // high-bundle-progress-determinism-coverage-v1 (N4): properly count
+    // source files in `path`. Previously this was a hard-coded `1`, so a
+    // directory of 83 Python files reported `files_analyzed: 1`, which
+    // made the field useless for downstream tooling and dashboards.
+    //
+    // Determine the language from the first tool's expected extensions —
+    // diagnostic tools are language-specific, so all `tools` here share a
+    // language. Falling back to a count of all files in the path keeps the
+    // value useful when the language list is empty.
+    let files_analyzed = count_diagnostic_files(path, tools);
+
     Ok(DiagnosticsReport {
         diagnostics: all_diagnostics,
         summary,
         tools_run: all_results,
-        files_analyzed: 1, // This would need proper counting
+        files_analyzed,
     })
+}
+
+/// Count source files at `path` that match the language(s) of the tools
+/// being run.
+///
+/// `path` may be a single file (returns 1 if it has a matching extension,
+/// 0 otherwise) or a directory (recursive walk, honoring .gitignore).
+///
+/// Diagnostic tools are language-specific, so we infer the target language
+/// from the first tool's binary name. If detection fails, we fall back to
+/// accepting any common source extension.
+fn count_diagnostic_files(path: &Path, tools: &[ToolConfig]) -> usize {
+    // Map the tool binary back to its language so we can look up the
+    // canonical extension list (mirrors the same set used by `health`'s
+    // `count_source_files`).
+    let lang = tools
+        .first()
+        .and_then(|t| language_for_tool_binary(t.binary));
+
+    let extensions: Vec<&'static str> = match lang {
+        Some(l) => l.extensions().to_vec(),
+        None => vec![
+            ".py", ".pyi", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".rs", ".go", ".java",
+            ".rb", ".php", ".cs", ".c", ".h", ".cpp", ".cc", ".hpp", ".hh", ".swift", ".kt",
+            ".scala", ".lua", ".ex", ".exs", ".ml", ".mli",
+        ],
+    };
+
+    if path.is_file() {
+        return match path.extension().and_then(|e| e.to_str()) {
+            Some(ext) => {
+                let ext_with_dot = format!(".{}", ext);
+                if extensions.contains(&ext_with_dot.as_str()) {
+                    1
+                } else {
+                    0
+                }
+            }
+            None => 0,
+        };
+    }
+
+    if !path.is_dir() {
+        return 0;
+    }
+
+    let mut count = 0usize;
+    for entry in ProjectWalker::new(path).iter() {
+        let p = entry.path();
+        if p.is_file() {
+            if let Some(ext) = p.extension().and_then(|e| e.to_str()) {
+                let ext_with_dot = format!(".{}", ext);
+                if extensions.contains(&ext_with_dot.as_str()) {
+                    count += 1;
+                }
+            }
+        }
+    }
+    count
+}
+
+/// Best-effort mapping from a diagnostic tool binary name to its
+/// associated `Language`. Used by `count_diagnostic_files` to decide
+/// which file extensions to walk for the `files_analyzed` counter.
+fn language_for_tool_binary(binary: &str) -> Option<Language> {
+    match binary {
+        "pyright" | "ruff" | "mypy" | "pylint" | "flake8" => Some(Language::Python),
+        "tsc" | "eslint" => Some(Language::TypeScript),
+        "cargo" | "clippy" | "clippy-driver" => Some(Language::Rust),
+        "go" | "golangci-lint" | "gofmt" | "govet" => Some(Language::Go),
+        "javac" | "checkstyle" => Some(Language::Java),
+        "rubocop" | "ruby" => Some(Language::Ruby),
+        "phpstan" | "psalm" | "php" => Some(Language::Php),
+        "dotnet" | "csharpier" => Some(Language::CSharp),
+        "swiftc" | "swiftlint" => Some(Language::Swift),
+        "kotlinc" | "detekt" | "detekt-cli" | "ktlint" => Some(Language::Kotlin),
+        "scalac" | "scalafmt" | "scalafix" => Some(Language::Scala),
+        "luacheck" | "selene" => Some(Language::Lua),
+        "credo" | "dialyxir" => Some(Language::Elixir),
+        "ocamlc" | "dune" => Some(Language::Ocaml),
+        _ => None,
+    }
 }
 
 /// Get install suggestions for missing tools.

@@ -197,11 +197,27 @@ impl OutputWriter {
         Ok(())
     }
 
-    /// Write progress message (only if not quiet)
+    /// Write progress message (only if not quiet, and never under
+    /// machine-readable formats).
+    ///
+    /// high-bundle-progress-determinism-coverage-v1 (N1): progress banners
+    /// are user-friendliness for human terminals. Under
+    /// `--format json|sarif|compact` they pollute the visible terminal
+    /// output and confuse anyone tailing both streams (or any tool that
+    /// merges stderr+stdout). Auto-suppress them whenever the user
+    /// selected a machine-readable format — even if `--quiet` was not
+    /// passed.
     pub fn progress(&self, message: &str) {
-        if !self.quiet {
-            eprintln!("{}", message.dimmed());
+        if self.quiet {
+            return;
         }
+        if matches!(
+            self.format,
+            OutputFormat::Json | OutputFormat::Compact | OutputFormat::Sarif
+        ) {
+            return;
+        }
+        eprintln!("{}", message.dimmed());
     }
 
     /// Check if we should use text format

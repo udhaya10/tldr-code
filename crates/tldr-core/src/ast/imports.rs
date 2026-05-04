@@ -199,6 +199,29 @@ fn extract_ts_imports_recursive(node: &Node, source: &str, imports: &mut Vec<Imp
 
     for child in node.children(&mut cursor) {
         match child.kind() {
+            // high-bundle-progress-determinism-coverage-v1 (N5): CommonJS
+            // `require('module')` calls. Many production JS files (express,
+            // most legacy npm packages) use CJS exclusively, so the previous
+            // ESM-only parser returned `imports: []` for files like
+            // `express/index.js` that contained only `module.exports =
+            // require('./lib/express');`. Detect `require(<string>)` and
+            // emit it as a from-style import with `is_from = true` so
+            // downstream consumers (call graph builder, dependency graphs)
+            // see the edge.
+            "call_expression" => {
+                if let Some(import) = parse_cjs_require(&child, source) {
+                    imports.push(import);
+                }
+                // Still recurse — `require()` may be nested inside an
+                // assignment, an array literal, etc.
+                extract_ts_imports_recursive(&child, source, imports);
+            }
+            // CommonJS shorthand exports rely on `require` as a callee at
+            // the top of an assignment. The grammar wraps the call in
+            // `variable_declarator`, `lexical_declaration`, or
+            // `assignment_expression` — the recursion below handles those,
+            // but we need an explicit case for the top-level
+            // `expression_statement` form to ensure we don't bail.
             "import_statement" => {
                 let module = child
                     .child_by_field_name("source")
@@ -1605,6 +1628,65 @@ fn get_string_content(node: &Node, source: &str) -> String {
     let text = get_node_text(node, source);
     text.trim_matches(|c| c == '"' || c == '\'' || c == '`')
         .to_string()
+}
+
+/// Parse a CommonJS `require('module')` call expression as an `ImportInfo`.
+///
+/// high-bundle-progress-determinism-coverage-v1 (N5): tree-sitter sees a
+/// CJS require as `call_expression(function: identifier "require",
+/// arguments: arguments(string))`. We accept a single string-literal
+/// argument (or template_string with no substitutions) and reject any
+/// other shape — a dynamic `require(somevar)` is unresolvable as an
+/// import edge, so emitting it would be misleading.
+///
+/// Returns `None` if the call is not a require, or if the argument is
+/// not a literal string we can extract.
+fn parse_cjs_require(node: &Node, source: &str) -> Option<ImportInfo> {
+    // Must be a call_expression whose function is the bare identifier "require".
+    let function = node.child_by_field_name("function")?;
+    if function.kind() != "identifier" {
+        return None;
+    }
+    if get_node_text(&function, source) != "require" {
+        return None;
+    }
+
+    let args = node.child_by_field_name("arguments")?;
+    if args.kind() != "arguments" {
+        return None;
+    }
+
+    // First non-punctuation child of `arguments` must be a string-like literal.
+    let mut arg_cursor = args.walk();
+    let module = args
+        .children(&mut arg_cursor)
+        .find(|c| matches!(c.kind(), "string" | "template_string"))
+        .map(|c| {
+            // Reject template strings with substitutions — those resolve
+            // dynamically and we can't emit a stable module name for them.
+            if c.kind() == "template_string" {
+                let mut tcursor = c.walk();
+                let has_substitution = c
+                    .children(&mut tcursor)
+                    .any(|cc| cc.kind() == "template_substitution");
+                if has_substitution {
+                    return None;
+                }
+            }
+            Some(get_string_content(&c, source))
+        })
+        .flatten()?;
+
+    if module.is_empty() {
+        return None;
+    }
+
+    Some(ImportInfo {
+        module,
+        names: Vec::new(),
+        is_from: true,
+        alias: None,
+    })
 }
 
 #[cfg(test)]

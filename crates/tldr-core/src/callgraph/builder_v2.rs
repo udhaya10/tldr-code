@@ -684,8 +684,22 @@ pub fn build_project_call_graph_v2(
     let mut func_index = FuncIndex::with_capacity(ir.function_count());
     let mut class_index = ClassIndex::with_capacity(ir.class_count());
 
+    // high-bundle-progress-determinism-coverage-v1 (N2): iterate `ir.files`
+    // in a stable, sorted order so that index-population collisions (same
+    // simple_module alias from multiple files) resolve to the same winner
+    // on every run. Without this, the call graph's `total_edges` count
+    // jitters across runs because different first-writers shape which
+    // calls are resolvable through the simple_module alias.
+    let sorted_files: Vec<(&PathBuf, &super::cross_file_types::FileIR)> = {
+        let mut v: Vec<_> = ir.files.iter().collect();
+        v.sort_by(|a, b| a.0.cmp(b.0));
+        v
+    };
+
     // Populate indices from IR
-    for (file_path, file_ir) in &ir.files {
+    for (file_path, file_ir) in &sorted_files {
+        let file_path: &PathBuf = *file_path;
+        let file_ir: &super::cross_file_types::FileIR = *file_ir;
         let module = path_to_module(file_path, &config.language);
 
         for func in &file_ir.funcs {
@@ -774,8 +788,13 @@ pub fn build_project_call_graph_v2(
         HashSet::new()
     };
 
-    // Merge method definitions into class index (extensions/partials)
-    for (file_path, file_ir) in &ir.files {
+    // Merge method definitions into class index (extensions/partials).
+    // high-bundle-progress-determinism-coverage-v1 (N2): same sorted order
+    // as the populate-indices loop above, for the same reason — first
+    // writer wins on the class_index, and HashMap iteration is random.
+    for (file_path, file_ir) in &sorted_files {
+        let file_path: &PathBuf = *file_path;
+        let file_ir: &super::cross_file_types::FileIR = *file_ir;
         for func in &file_ir.funcs {
             if !func.is_method {
                 continue;
@@ -858,9 +877,11 @@ pub fn build_project_call_graph_v2(
     let mut type_resolver =
         TypeAwareCallResolver::new(&module_index, &func_path_map, &class_path_map);
 
-    // Feed all FileIRs and class defs into the resolver
-    for (file_path, file_ir) in &ir.files {
-        type_resolver.add_file_ir(file_path.clone(), file_ir.clone());
+    // Feed all FileIRs and class defs into the resolver.
+    // high-bundle-progress-determinism-coverage-v1 (N2): sorted insertion
+    // so the resolver builds the same internal type tables on every run.
+    for (file_path, file_ir) in &sorted_files {
+        type_resolver.add_file_ir((*file_path).clone(), (*file_ir).clone());
     }
 
     // Step 10: For each file, resolve imports and then resolve calls
@@ -870,8 +891,19 @@ pub fn build_project_call_graph_v2(
     let mut edge_set: HashSet<super::cross_file_types::CrossFileCallEdge> =
         HashSet::with_capacity(ir.function_count() * 4);
 
-    // Collect file paths to avoid borrow issues
-    let file_paths: Vec<PathBuf> = ir.files.keys().cloned().collect();
+    // Collect file paths to avoid borrow issues.
+    //
+    // high-bundle-progress-determinism-coverage-v1 (N2): the underlying
+    // `ir.files` is a `HashMap<PathBuf, FileIR>` whose iteration order is
+    // randomized per process. Resolving calls in different orders feeds
+    // the shared `ImportResolver` LRU cache (and the `ReExportTracer`)
+    // different sequences of queries, which in turn alters which calls
+    // resolve and how many edges get added — so `tldr calls` returned a
+    // different `total_edges` count on every run (e.g. flask: 935, 910,
+    // 922 across three invocations). Sorting the paths gives every run
+    // the same resolution sequence and therefore the same edge set.
+    let mut file_paths: Vec<PathBuf> = ir.files.keys().cloned().collect();
+    file_paths.sort();
 
     for file_path in file_paths {
         // Get the FileIR (need to clone to avoid borrow issues)
@@ -939,6 +971,19 @@ pub fn build_project_call_graph_v2(
             }
         }
     }
+
+    // high-bundle-progress-determinism-coverage-v1 (N2): even with sorted
+    // file iteration above, downstream consumers and tests benefit from a
+    // canonical edge order. Sort by (src_file, src_func, dst_file,
+    // dst_func, call_type) so JSON output is byte-stable across runs.
+    ir.edges.sort_by(|a, b| {
+        a.src_file
+            .cmp(&b.src_file)
+            .then_with(|| a.src_func.cmp(&b.src_func))
+            .then_with(|| a.dst_file.cmp(&b.dst_file))
+            .then_with(|| a.dst_func.cmp(&b.dst_func))
+            .then_with(|| format!("{:?}", a.call_type).cmp(&format!("{:?}", b.call_type)))
+    });
 
     Ok(ir)
 }

@@ -385,6 +385,13 @@ pub fn scan_project_files(
         }
     }
 
+    // high-bundle-progress-determinism-coverage-v1 (N2): sort scanned files
+    // so the parallel index-build phase processes them in a stable order.
+    // `walkdir` does not guarantee directory-iteration order on macOS, and
+    // when two functions in different files share a `simple_module` alias,
+    // the first writer wins — so a different scan order produces a
+    // different func_index and therefore a different edge set.
+    files.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(files)
 }
 

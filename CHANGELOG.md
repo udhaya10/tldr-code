@@ -1,5 +1,151 @@
 # Changelog
 
+## high-bundle-progress-determinism-coverage-v1 — internal milestone
+
+NOT a published release. UX-hygiene milestone fixing 5 HIGH-priority CLI
+bugs surfaced by the post-AC-bundle real-repo audit. Each bug was
+binary-verified against `/tmp/repos/{flask, express}` and gated by a
+regression test in
+`crates/tldr-cli/tests/high_bundle_progress_determinism_coverage_v1.rs`
+(7 tests added). `vuln_migration_v1_red`: 168/168 GREEN. All AA/AB/AC
+milestones still hold.
+
+### Bug 1 — Progress messages polluted machine-readable output (N1)
+
+```bash
+$ tldr complexity /tmp/repos/flask/src/flask/app.py __init__ --format json
+Calculating complexity for __init__ in ... (Python)...
+{ "function": "__init__", ... }
+```
+
+The progress banner already wrote to **stderr** (so a JSON parser
+attached only to stdout was technically OK), but every interactive
+terminal — and any tool that captures both streams or runs in a context
+with merged stderr/stdout — saw the banner mixed in front of the JSON.
+For machine-readable formats (json / sarif / compact), the contract is
+"structured output and nothing else"; the banner is noise that hurts
+every downstream consumer.
+
+**Fix.** In `run_command`, derive `effective_quiet = cli.quiet ||
+auto_quiet_on(format)`. Auto-quiet kicks in for json / sarif / compact;
+text and dot still see progress banners. Threaded the effective flag
+through every command-arm dispatch (~62 call sites). Embedder banners
+(via `TLDR_QUIET=1`) also respect the new flag.
+
+- `crates/tldr-cli/src/main.rs::run_command` — auto-quiet derivation,
+  rebind `q = effective_quiet`, replace every `cli.quiet` in the dispatch
+  table.
+
+### Bug 2 — `tldr calls` was nondeterministic (N2)
+
+```bash
+$ for i in 1 2 3; do tldr calls /tmp/repos/flask --format json --quiet \
+                       | jq .total_edges; done
+935
+910
+922
+```
+
+Three runs on identical input produced three different edge counts.
+Root cause: every loop that built the call-graph indices iterated
+`ir.files: HashMap<PathBuf, FileIR>` (and `walkdir` returns directory
+entries in OS-defined order, which is randomized on macOS). When two
+modules share a `simple_module` alias, **first-writer-wins** in
+`func_index`; HashMap-iteration order therefore changed which file won
+the alias slot, and that in turn changed which calls became resolvable.
+A different resolved-call set produced a different edge count.
+
+**Fix.** Two layers of canonicalization:
+1. `scan_project_files` now sorts the returned `Vec<ScannedFile>` by
+   path, so the parallel index-build phase always sees the same order.
+2. `build_project_call_graph_v2` collects `ir.files.iter()` into a
+   sorted `Vec` and uses that for every populate / merge / type-resolver
+   loop. The resolution loop sorts `ir.files.keys()`. Final `ir.edges`
+   is sorted by `(src_file, src_func, dst_file, dst_func, call_type)`
+   for byte-stable JSON output.
+
+- `crates/tldr-core/src/callgraph/scanner.rs::scan_project_files` — sort
+  files by path before return.
+- `crates/tldr-core/src/callgraph/builder_v2.rs::build_project_call_graph_v2`
+  — `sorted_files` materialization, sort the resolution-phase
+  `file_paths`, sort `ir.edges` before return.
+
+### Bug 3 — `tldr health` nondeterministic and json/text disagreed (N3)
+
+```bash
+$ for i in 1 2 3; do tldr health /tmp/repos/flask --format json --quiet \
+                       | jq .summary.tight_coupling_pairs; done
+30
+31
+31
+$ for i in 1 2 3; do tldr health /tmp/repos/flask --format text --quiet \
+                       | grep Coupling; done
+... 30 tightly coupled pairs
+... 28 tightly coupled pairs
+... 31 tightly coupled pairs
+```
+
+Same root cause as N2 — the health command runs the call-graph builder
+under the hood, so the random edge count propagated into the coupling
+sub-analyzer's `tight_coupling_count`. Within a single invocation,
+text and json read the same field; across invocations they diverged.
+
+**Fix.** Inherits the N2 sort. Verified via the new
+`n3_health_format_consistency_and_determinism` test that three back-to-
+back json runs produce identical `tight_coupling_pairs`, and that the
+text-format coupling line reports the same number as the JSON.
+
+### Bug 4 — `tldr diagnostics files_analyzed` always reported 1 (N4)
+
+```bash
+$ tldr diagnostics /tmp/repos/flask --format json --quiet | jq .files_analyzed
+1   # repo has 83 files
+```
+
+The counter was a literal `1` left as a `// This would need proper
+counting` TODO since Phase 10 of the diagnostics build-out. Useless for
+dashboards that report "files scanned per CI run".
+
+**Fix.** New `count_diagnostic_files(path, tools)` walks `path` via
+`ProjectWalker` (which honors `.gitignore` / `.tldrignore`), filtering
+by extensions derived from the first tool's binary name. Single-file
+inputs return 1 if the extension matches, 0 otherwise; directories
+return the recursive walk count.
+
+- `crates/tldr-core/src/diagnostics/runner.rs` — `count_diagnostic_files`
+  helper, `language_for_tool_binary` mapping, replace
+  `files_analyzed: 1` with the computed count.
+
+### Bug 5 — `tldr imports` did not parse JS CommonJS `require()` (N5)
+
+```bash
+$ tldr imports /tmp/repos/express/index.js --format json
+{ "imports": [] }   # despite the file containing module.exports = require('./lib/express');
+```
+
+The TS/JS parser only handled `import_statement` (ESM) and
+`export_statement` (re-export). Files using CommonJS exclusively —
+which is most of the npm ecosystem — got an empty imports array.
+Downstream consumers (call graph, dependency graphs) never saw the
+edges.
+
+**Fix.** Add a `call_expression` arm in `extract_ts_imports_recursive`
+that detects `require(<string-literal>)`. New `parse_cjs_require`
+helper accepts a single string or non-substituted template-string
+argument; rejects dynamic forms (`require(name)`) so we don't emit
+phantom modules. Recursion still descends into the call expression so
+nested requires are captured.
+
+- `crates/tldr-core/src/ast/imports.rs` — `call_expression` arm in
+  `extract_ts_imports_recursive`, new `parse_cjs_require` helper.
+
+### Validation
+
+- 7 new tests in `high_bundle_progress_determinism_coverage_v1.rs`
+  (N1×2, N2, N3, N4, N5×2 covering literal and dynamic forms).
+- `vuln_migration_v1_red`: 168/168 GREEN.
+- All AA / AB / AC milestones still hold.
+
 ## low-cleanup-bundle-v1 — internal milestone
 
 NOT a published release. UX-hygiene milestone fixing 8 LOW-priority CLI

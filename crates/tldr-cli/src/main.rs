@@ -573,83 +573,100 @@ fn run_command(cli: &Cli) -> Result<()> {
     // (notably `Embedder::new`'s model-load banner) can suppress its own
     // stderr output. Without this, `tldr semantic --quiet "query"` still
     // printed 3+ lines from the embedder bootstrap.
-    if cli.quiet {
+    //
+    // high-bundle-progress-determinism-coverage-v1 (N1): also set the env
+    // flag when the user picked a machine-readable format so that any
+    // process-level banner (stderr-bound) shuts up too. Note the in-CLI
+    // `OutputWriter::progress` already auto-suppresses for json/sarif/
+    // compact (see crates/tldr-cli/src/output.rs); this env flag covers
+    // the library-side banners that don't go through the writer.
+    let auto_quiet_env = matches!(
+        cli.format,
+        OutputFormat::Json | OutputFormat::Compact | OutputFormat::Sarif
+    );
+    if cli.quiet || auto_quiet_env {
         std::env::set_var("TLDR_QUIET", "1");
     }
+    // Keep `q == cli.quiet` for the dispatch table so that commands which
+    // (legitimately or not) wrap their *actual* JSON emission in
+    // `if !quiet` keep emitting on json. The N1 progress-suppression now
+    // lives in `OutputWriter::progress` itself and triggers automatically
+    // for machine-readable formats — no need to pierce the dispatch table.
+    let q = cli.quiet;
 
     match &cli.command {
-        Command::Tree(args) => args.run(cli.format, cli.quiet),
-        Command::Structure(args) => args.run(cli.format, cli.quiet),
-        Command::Calls(args) => args.run(cli.format, cli.quiet),
-        Command::Impact(args) => args.run(cli.format, cli.quiet),
-        Command::Dead(args) => args.run(cli.format, cli.quiet),
+        Command::Tree(args) => args.run(cli.format, q),
+        Command::Structure(args) => args.run(cli.format, q),
+        Command::Calls(args) => args.run(cli.format, q),
+        Command::Impact(args) => args.run(cli.format, q),
+        Command::Dead(args) => args.run(cli.format, q),
         // Cfg, Dfg, Ssa, Dominators, LiveVars, Alias, AbstractInterp: archived
-        Command::ReachingDefs(args) => args.run(cli.format, cli.quiet),
-        Command::Taint(args) => args.run(cli.format, cli.quiet),
-        Command::Available(args) => args.run(cli.format, cli.quiet),
-        Command::Slice(args) => args.run(cli.format, cli.quiet),
-        Command::SmartSearch(args) => args.run(cli.format, cli.quiet),
-        Command::Context(args) => args.run(cli.format, cli.quiet),
-        Command::Smells(args) => args.run(cli.format, cli.quiet),
-        Command::Extract(args) => args.run(cli.format, cli.quiet),
-        Command::Imports(args) => args.run(cli.format, cli.quiet),
-        Command::Importers(args) => args.run(cli.format, cli.quiet),
-        Command::Complexity(args) => args.run(cli.format, cli.quiet),
-        Command::Churn(args) => args.run(cli.format, cli.quiet),
-        Command::Debt(args) => args.run(cli.format, cli.quiet, cli.lang),
-        Command::Health(args) => args.run(cli.format, cli.quiet, cli.lang),
-        Command::Hubs(args) => args.run(cli.format, cli.quiet),
-        Command::Whatbreaks(args) => args.run(cli.format, cli.quiet),
-        Command::Patterns(args) => args.run(cli.format, cli.quiet),
-        Command::Inheritance(args) => args.run(cli.format, cli.quiet),
-        Command::ChangeImpact(args) => args.run(cli.format, cli.quiet),
-        Command::Deps(args) => args.run(cli.format, cli.quiet),
-        Command::Diagnostics(args) => args.run(cli.format, cli.quiet),
+        Command::ReachingDefs(args) => args.run(cli.format, q),
+        Command::Taint(args) => args.run(cli.format, q),
+        Command::Available(args) => args.run(cli.format, q),
+        Command::Slice(args) => args.run(cli.format, q),
+        Command::SmartSearch(args) => args.run(cli.format, q),
+        Command::Context(args) => args.run(cli.format, q),
+        Command::Smells(args) => args.run(cli.format, q),
+        Command::Extract(args) => args.run(cli.format, q),
+        Command::Imports(args) => args.run(cli.format, q),
+        Command::Importers(args) => args.run(cli.format, q),
+        Command::Complexity(args) => args.run(cli.format, q),
+        Command::Churn(args) => args.run(cli.format, q),
+        Command::Debt(args) => args.run(cli.format, q, cli.lang),
+        Command::Health(args) => args.run(cli.format, q, cli.lang),
+        Command::Hubs(args) => args.run(cli.format, q),
+        Command::Whatbreaks(args) => args.run(cli.format, q),
+        Command::Patterns(args) => args.run(cli.format, q),
+        Command::Inheritance(args) => args.run(cli.format, q),
+        Command::ChangeImpact(args) => args.run(cli.format, q),
+        Command::Deps(args) => args.run(cli.format, q),
+        Command::Diagnostics(args) => args.run(cli.format, q),
         // Doctor respects --format like all other commands
-        Command::Doctor(args) => args.run(cli.format, cli.quiet),
-        Command::References(args) => args.run(cli.format, cli.quiet, cli.lang),
-        Command::Clones(args) => args.run(cli.format, cli.quiet),
-        Command::Dice(args) => args.run(cli.format, cli.quiet),
+        Command::Doctor(args) => args.run(cli.format, q),
+        Command::References(args) => args.run(cli.format, q, cli.lang),
+        Command::Clones(args) => args.run(cli.format, q),
+        Command::Dice(args) => args.run(cli.format, q),
         // Session 15: Metrics commands
-        Command::Loc(args) => args.run(cli.format, cli.quiet),
-        Command::Cognitive(args) => args.run(cli.format, cli.quiet),
-        Command::Halstead(args) => args.run(cli.format, cli.quiet),
-        Command::Coverage(args) => args.run(cli.format, cli.quiet),
-        Command::Hotspots(args) => args.run(cli.format, cli.quiet),
+        Command::Loc(args) => args.run(cli.format, q),
+        Command::Cognitive(args) => args.run(cli.format, q),
+        Command::Halstead(args) => args.run(cli.format, q),
+        Command::Coverage(args) => args.run(cli.format, q),
+        Command::Hotspots(args) => args.run(cli.format, q),
         // Session 16: Semantic search commands
         #[cfg(feature = "semantic")]
-        Command::Embed(args) => args.run(cli.format, cli.quiet),
+        Command::Embed(args) => args.run(cli.format, q),
         #[cfg(feature = "semantic")]
-        Command::Semantic(args) => args.run(cli.format, cli.quiet),
+        Command::Semantic(args) => args.run(cli.format, q),
         #[cfg(feature = "semantic")]
-        Command::Similar(args) => args.run(cli.format, cli.quiet),
+        Command::Similar(args) => args.run(cli.format, q),
         // Session 17: Daemon subsystem
         Command::Daemon(daemon_cmd) => match daemon_cmd {
-            DaemonCommand::Start(args) => args.run(cli.format, cli.quiet),
-            DaemonCommand::Stop(args) => args.run(cli.format, cli.quiet),
-            DaemonCommand::Status(args) => args.run(cli.format, cli.quiet),
-            DaemonCommand::Query(args) => args.run(cli.format, cli.quiet),
-            DaemonCommand::Notify(args) => args.run(cli.format, cli.quiet),
-            DaemonCommand::List(args) => args.run(cli.format, cli.quiet),
+            DaemonCommand::Start(args) => args.run(cli.format, q),
+            DaemonCommand::Stop(args) => args.run(cli.format, q),
+            DaemonCommand::Status(args) => args.run(cli.format, q),
+            DaemonCommand::Query(args) => args.run(cli.format, q),
+            DaemonCommand::Notify(args) => args.run(cli.format, q),
+            DaemonCommand::List(args) => args.run(cli.format, q),
         },
         // Cache management commands
         Command::Cache(cache_cmd) => match cache_cmd {
-            CacheCommand::Stats(args) => args.run(cli.format, cli.quiet),
-            CacheCommand::Clear(args) => args.run(cli.format, cli.quiet),
+            CacheCommand::Stats(args) => args.run(cli.format, q),
+            CacheCommand::Clear(args) => args.run(cli.format, q),
         },
         // Phase 7-8: Warm and Stats commands
-        Command::Warm(args) => args.run(cli.format, cli.quiet),
-        Command::Stats(args) => args.run(cli.format, cli.quiet),
+        Command::Warm(args) => args.run(cli.format, q),
+        Command::Stats(args) => args.run(cli.format, q),
         // Session 18: API Surface
-        Command::Surface(args) => args.run(cli.format, cli.quiet, cli.lang),
+        Command::Surface(args) => args.run(cli.format, q, cli.lang),
         // Behavioral contracts (pre/postconditions)
-        Command::Contracts(args) => args.run(cli.format, cli.quiet),
+        Command::Contracts(args) => args.run(cli.format, q),
         // Bounds: archived
-        Command::DeadStores(args) => args.run(cli.format, cli.quiet),
-        Command::Chop(args) => args.run(cli.format, cli.quiet),
-        Command::Specs(args) => args.run(cli.format, cli.quiet),
-        Command::Invariants(args) => args.run(cli.format, cli.quiet),
-        Command::Verify(args) => args.run(cli.format, cli.quiet),
+        Command::DeadStores(args) => args.run(cli.format, q),
+        Command::Chop(args) => args.run(cli.format, q),
+        Command::Specs(args) => args.run(cli.format, q),
+        Command::Invariants(args) => args.run(cli.format, q),
+        Command::Verify(args) => args.run(cli.format, q),
         // Pattern analysis commands
         Command::Cohesion(args) => args.run(cli.format),
         Command::Temporal(args) => args.run(cli.format),
@@ -662,20 +679,20 @@ fn run_command(cli: &Cli) -> Result<()> {
             tldr_cli::commands::patterns::interface::run(args.clone(), cli.format)
         }
         // Remaining commands
-        Command::Explain(args) => args.run(cli.format, cli.quiet),
-        Command::Todo(args) => args.run(cli.format, cli.quiet, cli.lang),
+        Command::Explain(args) => args.run(cli.format, q),
+        Command::Todo(args) => args.run(cli.format, q, cli.lang),
         Command::Secure(args) => args.run(cli.format),
-        Command::Definition(args) => args.run(cli.format, cli.quiet, cli.lang),
+        Command::Definition(args) => args.run(cli.format, q, cli.lang),
         Command::Diff(args) => args.run(cli.format),
         // DiffImpact: archived (superseded by change-impact)
-        Command::ApiCheck(args) => args.run(cli.format, cli.quiet),
+        Command::ApiCheck(args) => args.run(cli.format, q),
         Command::Vuln(args) => args.run(cli.format),
         // Gvn: archived
         // Fix: error diagnosis and auto-fix
-        Command::Fix(args) => args.run(cli.format, cli.quiet, cli.lang),
+        Command::Fix(args) => args.run(cli.format, q, cli.lang),
         // Bugbot
         Command::Bugbot(bugbot_cmd) => match bugbot_cmd {
-            BugbotCommand::Check(args) => args.run(cli.format, cli.quiet, cli.lang),
+            BugbotCommand::Check(args) => args.run(cli.format, q, cli.lang),
         },
     }
 }
