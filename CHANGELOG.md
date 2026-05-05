@@ -1,5 +1,123 @@
 # Changelog
 
+## cross-language-extraction-v2 — internal milestone
+
+NOT a published release. First milestone of phase 2: closes the three
+HIGH-severity cross-language extractor coverage gaps surfaced by the
+phase-2 audit. All three bugs share the surface "extractor logic that
+worked for the audit's headline languages (Python / Rust / TS) but
+silently produced empty fields on languages plumbed in later".
+
+### Fixed
+
+- **P2.BUG-1: `tldr structure.method_infos` empty for Go receiver-methods.**
+  Go method declarations have the form `func (r *T) Foo()` — the receiver
+  is part of the function declaration, not a struct-body nesting, so
+  `is_inside_class_or_impl` returned false and methods were classified
+  as `kind: "function"` (and consequently never made it into
+  `method_infos`, which is filtered by `kind == "method"`). New helper
+  `is_go_method_with_receiver` keys off the `method_declaration` node
+  kind that tree-sitter-go emits only when a receiver is present
+  (regular functions emit `function_declaration`). On
+  `/tmp/repos/go-httprouter` this restores 32 method_infos entries
+  (router.go: 20, router_test.go: 6, tree.go: 6).
+  - `crates/tldr-core/src/ast/extractor.rs` — added `is_go_method_with_receiver`
+    helper + extended the `entry_kind` classification chain in
+    `collect_definitions` to consult it.
+
+- **P2.BUG-2: `tldr imports` returned `[]` for Swift and Kotlin.** Both
+  languages were explicitly stubbed out with `Vec::new()` in the
+  `extract_imports_from_tree` match arm. We now ship full extractors for
+  both: Swift parses `import_declaration` nodes (handling submodule kind
+  keywords like `import struct Foo.Bar` and attribute prefixes like
+  `@testable import X`); Kotlin parses both the `tree-sitter-kotlin-ng`
+  `import` statement node (workspace-pinned grammar — uses
+  `qualified_identifier` children) AND the legacy `import_header` node
+  used by vanilla `tree-sitter-kotlin`. Both extractors handle wildcard
+  (`.*`) and aliased (`as`) imports.
+  - `crates/tldr-core/src/ast/imports.rs` — new
+    `extract_swift_imports` / `extract_kotlin_imports` plus their
+    `parse_*_import_text` parsers and `is_kotlin_import_statement`
+    helper for grammar-version disambiguation.
+
+- **P2.BUG-3: `tldr todo` autodetect was hardcoded to 5 languages.**
+  `detect_language` only matched `.py` / `.ts` / `.tsx` / `.js` / `.jsx`
+  / `.rs` / `.go`; for everything else it walked at most 2 directory
+  levels and silently fell through to `Language::Python`. Java, Kotlin,
+  Elixir, OCaml, Ruby, PHP, Scala, C#, and Lua trees consequently
+  reported `items: []`. The other commands (`structure`, `vuln`,
+  `secure`) had migrated to the shared `Language::from_path` /
+  `Language::from_directory` helpers in the AA1 milestone; `todo` was
+  missed. The replacement now routes through both helpers and only
+  falls back to Python when the directory contains no recognised source
+  files at all (rather than as a default for "directory contains source
+  files I don't recognise").
+  - `crates/tldr-cli/src/commands/remaining/todo.rs` — `detect_language`
+    rewritten + dropped the unused `ProjectWalker` import.
+
+### Tests
+- New: `crates/tldr-cli/tests/cross_language_extraction_v2.rs` — six
+  tests covering each fix:
+  - `js_structure_method_infos_populated` (regression guard for the JS
+    side of P2.BUG-1)
+  - `go_structure_method_infos_populated` — asserts `Handle` and
+    `Lookup` reach `method_infos` AND have `kind: "method"` in
+    `definitions`, while a free function `main` stays `kind: "function"`
+  - `swift_imports_extracted` — asserts `Foundation`,
+    `PackageDescription` (after submodule kind keyword), and `MyMod`
+    (after `@testable` attribute) all parse
+  - `kotlin_imports_extracted` — asserts simple, wildcard (with
+    `is_from: true`), and aliased (`as B`) imports all parse
+  - `todo_autodetect_works_for_java` and `todo_autodetect_works_for_kotlin`
+
+### Spot-verification (post-install)
+
+```text
+# P2.BUG-1
+$ tldr structure /tmp/repos/go-httprouter | jq '[.files[].method_infos | length] | add'
+32
+
+# P2.BUG-2 — Swift
+$ tldr imports Package@swift-6.0.swift | jq '.imports[0]'
+{ "module": "PackageDescription", "is_from": false }
+
+# P2.BUG-2 — Kotlin
+$ tldr imports additionalConfiguration.kt | jq '.imports[0]'
+{ "module": "jetbrains.buildServer.configs.kotlin.*", "is_from": true }
+
+# P2.BUG-3 — autodetect sweep
+java     auto=20  --lang=20
+kotlin   auto=3   --lang=3
+elixir   auto=2   --lang=2
+ocaml    auto=5   --lang=5
+ruby     auto=8   --lang=8
+php      auto=20  --lang=20
+scala    auto=20  --lang=20
+csharp   auto=20  --lang=20
+lua      auto=20  --lang=20
+```
+
+### Deferred
+- **OCaml `method_infos` for `class … object … end` types.** OCaml has
+  classes with methods (`object method foo = ... end`), but the existing
+  `extract_classes` arm for `Language::Ocaml` is a no-op — the language
+  has no `extract_ocaml_classes` function — so OCaml class detection is
+  out of scope for this milestone. The handoff explicitly allowed this
+  ("OCaml can stay 0 if OCaml extractor doesn't model methods"). Closing
+  this gap requires building the OCaml class extractor end-to-end and
+  is tracked separately.
+
+### Baselines (all GREEN)
+- `vuln_migration_v1_red`: 168/168
+- `determinism_and_stderr_hygiene_v1`: 5/5
+- `cross_command_consistency_v1`: 7/7
+- `detection_accuracy_v1`: 4/4
+- `schema_cleanup_v1`: 11/11
+- `surface_gaps_v1`: 6/6
+- `cli_basic_tests`: 70/70 (6 ignored — unchanged)
+- `rr_framework_integ_test`: 18/18 (in tldr-core)
+- `cross_language_extraction_v2`: 6/6 (new)
+
 ## test-fixture-realignment-v1 — internal milestone
 
 NOT a published release. Realigns 6 unit-test assertions left stale by

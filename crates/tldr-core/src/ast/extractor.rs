@@ -1788,6 +1788,14 @@ fn collect_definitions(
                 // Check if inside a class/impl => method
                 if is_inside_class_or_impl(&node, language) {
                     "method"
+                } else if is_go_method_with_receiver(&node, language) {
+                    // cross-language-extraction-v2 P2.BUG-1: Go methods are
+                    // declared with a receiver (`func (r *T) Foo()`), not
+                    // lexically inside a class/struct body. Detect via the
+                    // tree-sitter `method_declaration` node kind which is only
+                    // emitted when a receiver is present (regular functions
+                    // emit `function_declaration`).
+                    "method"
                 } else {
                     "function"
                 }
@@ -2558,6 +2566,20 @@ fn extract_name_from_declarator(node: Node, source: &str) -> Option<String> {
             None
         }
     }
+}
+
+/// Check if a node is a Go method declaration (a function with a receiver).
+///
+/// In tree-sitter-go, `method_declaration` is emitted only when a receiver is
+/// present (`func (r *Receiver) Foo()`); plain `func Foo()` emits
+/// `function_declaration`. Go methods are NOT lexically nested inside a
+/// struct body, so `is_inside_class_or_impl` returns false for them — this
+/// helper covers the gap so they are classified as `kind: "method"` and surface
+/// in `FileStructure::method_infos`.
+///
+/// Closes cross-language-extraction-v2 P2.BUG-1 (Go side).
+fn is_go_method_with_receiver(node: &Node, language: Language) -> bool {
+    matches!(language, Language::Go) && node.kind() == "method_declaration"
 }
 
 /// Check if a node is inside a class/struct body or impl block.

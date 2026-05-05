@@ -57,8 +57,8 @@ pub fn extract_imports_from_tree(
         Language::Ocaml => extract_ocaml_imports(&root, source),
         Language::Php => extract_php_imports(&root, source),
         Language::Lua | Language::Luau => extract_lua_imports(&root, source),
-        // Languages with import extraction not yet implemented -- return empty
-        Language::Kotlin | Language::Swift => Vec::new(),
+        Language::Kotlin => extract_kotlin_imports(&root, source),
+        Language::Swift => extract_swift_imports(&root, source),
     };
 
     Ok(imports)
@@ -1687,6 +1687,208 @@ fn parse_cjs_require(node: &Node, source: &str) -> Option<ImportInfo> {
         is_from: true,
         alias: None,
     })
+}
+
+// =============================================================================
+// Swift imports
+// =============================================================================
+//
+// cross-language-extraction-v2 P2.BUG-2: Swift `import_declaration` recognition.
+//
+// tree-sitter-swift emits `import_declaration` nodes for every `import` line.
+// The grammar exposes the imported module / submodule path either as child
+// `identifier` nodes or as `dot_expression` nodes (for compound paths like
+// `UIKit.UIView`). Swift also supports submodule kind specifiers such as
+// `import struct Foo.Bar`, `import class A.B`, etc.; we parse via the raw
+// text of the node which keeps us robust across grammar versions and avoids
+// brittle field-name lookups that vary between tree-sitter-swift releases.
+//
+// Examples:
+//   `import Foundation`              -> module="Foundation"
+//   `import UIKit.UIView`            -> module="UIKit.UIView"
+//   `import struct PackageDescription` -> module="PackageDescription"
+//   `@testable import MyModule`      -> module="MyModule"
+
+fn extract_swift_imports(node: &Node, source: &str) -> Vec<ImportInfo> {
+    let mut imports = Vec::new();
+    extract_swift_imports_recursive(node, source, &mut imports);
+    imports
+}
+
+fn extract_swift_imports_recursive(node: &Node, source: &str, imports: &mut Vec<ImportInfo>) {
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if child.kind() == "import_declaration" {
+            if let Some(info) = parse_swift_import_text(&get_node_text(&child, source)) {
+                imports.push(info);
+            }
+        } else {
+            extract_swift_imports_recursive(&child, source, imports);
+        }
+    }
+}
+
+/// Parse the raw text of a Swift `import_declaration` node into an
+/// `ImportInfo`. Returns `None` if the text does not contain a recognisable
+/// module path. Handles attributes (`@testable`), submodule kind specifiers
+/// (`import struct Foo.Bar`), and compound module paths (`UIKit.UIView`).
+fn parse_swift_import_text(raw: &str) -> Option<ImportInfo> {
+    // Submodule kind keywords that may follow the `import` keyword. The next
+    // token after one of these is the module path.
+    const KIND_KEYWORDS: &[&str] = &[
+        "struct", "class", "enum", "protocol", "typealias", "func", "var", "let",
+    ];
+
+    // Strip a leading attribute like `@testable`, `@_implementationOnly`, etc.
+    let trimmed = raw.trim();
+    let after_attr = if let Some(rest) = trimmed.strip_prefix('@') {
+        // Skip until whitespace.
+        rest.split_whitespace().skip(1).collect::<Vec<_>>().join(" ")
+    } else {
+        trimmed.to_string()
+    };
+
+    // Tokenise on whitespace, find the `import` keyword, then take the next
+    // non-kind token as the module path.
+    let mut tokens = after_attr.split_whitespace();
+    // Find `import`.
+    loop {
+        match tokens.next() {
+            Some("import") => break,
+            Some(_) => continue,
+            None => return None,
+        }
+    }
+    // Skip optional kind keyword.
+    let module_token = match tokens.next() {
+        Some(t) if KIND_KEYWORDS.contains(&t) => tokens.next()?,
+        Some(t) => t,
+        None => return None,
+    };
+
+    // Trim a possible trailing semicolon (rare in Swift but tolerated).
+    let module = module_token.trim_end_matches(';').trim().to_string();
+    if module.is_empty() {
+        return None;
+    }
+    Some(ImportInfo {
+        module,
+        names: Vec::new(),
+        is_from: false,
+        alias: None,
+    })
+}
+
+// =============================================================================
+// Kotlin imports
+// =============================================================================
+//
+// cross-language-extraction-v2 P2.BUG-2: Kotlin `import` recognition.
+//
+// `tree-sitter-kotlin-ng` (used since the workspace migration) emits a single
+// `import` node per `import` line — children are the literal `import` keyword,
+// a `qualified_identifier`, an optional `.` + `*` for wildcards, and an
+// optional `as <identifier>` alias suffix. (Older / vanilla `tree-sitter-kotlin`
+// grammars use `import_header` inside an `import_list` — we accept both kinds
+// to stay compatible across grammar versions.)
+//
+// Examples:
+//   `import kotlin.collections.List`            — simple
+//   `import kotlin.collections.*`                — wildcard
+//   `import kotlin.collections.List as MyList`   — aliased
+//
+// We parse via the raw text rather than walking grammar-specific child
+// fields; this is the same strategy `extract_scala_imports` uses for the
+// same reason.
+
+fn extract_kotlin_imports(node: &Node, source: &str) -> Vec<ImportInfo> {
+    let mut imports = Vec::new();
+    extract_kotlin_imports_recursive(node, source, &mut imports);
+    imports
+}
+
+fn extract_kotlin_imports_recursive(node: &Node, source: &str, imports: &mut Vec<ImportInfo>) {
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        // Accept both grammar variants:
+        //   tree-sitter-kotlin-ng: `import` (top-level statement node)
+        //   tree-sitter-kotlin (vanilla): `import_header` inside `import_list`
+        if child.kind() == "import_header" || is_kotlin_import_statement(&child) {
+            if let Some(info) = parse_kotlin_import_text(&get_node_text(&child, source)) {
+                imports.push(info);
+            }
+        } else {
+            extract_kotlin_imports_recursive(&child, source, imports);
+        }
+    }
+}
+
+/// True for an `import` statement node in tree-sitter-kotlin-ng. We must
+/// disambiguate against the `import` *keyword* token (also of kind `"import"`)
+/// that appears as the first child of the statement node itself: only the
+/// statement has children we recognise (`qualified_identifier`).
+fn is_kotlin_import_statement(node: &Node) -> bool {
+    if node.kind() != "import" {
+        return false;
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if matches!(child.kind(), "qualified_identifier" | "identifier") {
+            return true;
+        }
+    }
+    false
+}
+
+fn parse_kotlin_import_text(raw: &str) -> Option<ImportInfo> {
+    // Strip leading `import` keyword and optional trailing semicolon/newline.
+    let body = raw.trim().strip_prefix("import")?.trim();
+    if body.is_empty() {
+        return None;
+    }
+
+    // Split off optional `as <alias>` clause.
+    let (path_part, alias_part) = if let Some(idx) = find_kotlin_as_split(body) {
+        let (left, right) = body.split_at(idx);
+        // right starts with " as <alias>"
+        let alias = right.trim_start();
+        let alias = alias.strip_prefix("as").unwrap_or(alias).trim();
+        (left.trim(), Some(alias.trim_end_matches(';').to_string()))
+    } else {
+        (body.trim_end_matches(';').trim(), None)
+    };
+
+    if path_part.is_empty() {
+        return None;
+    }
+
+    Some(ImportInfo {
+        module: path_part.to_string(),
+        names: Vec::new(),
+        // Treat wildcard imports as "from"-style (matches the convention used
+        // for Java `static`/wildcard and Scala `_` selectors).
+        is_from: path_part.ends_with(".*") || path_part.ends_with("*"),
+        alias: alias_part.filter(|s| !s.is_empty()),
+    })
+}
+
+/// Locate the byte index of the standalone ` as ` token inside a Kotlin import
+/// path, returning `None` when no alias is present. Whitespace-bounded matching
+/// avoids false positives like `kotlin.assert.something`.
+fn find_kotlin_as_split(body: &str) -> Option<usize> {
+    let bytes = body.as_bytes();
+    let mut i = 0;
+    while i + 4 <= bytes.len() {
+        if bytes[i].is_ascii_whitespace()
+            && bytes[i + 1] == b'a'
+            && bytes[i + 2] == b's'
+            && (i + 3 == bytes.len() || bytes[i + 3].is_ascii_whitespace())
+        {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
 }
 
 #[cfg(test)]

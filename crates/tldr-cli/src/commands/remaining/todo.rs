@@ -23,8 +23,6 @@ use std::time::Instant;
 use anyhow::Result;
 use clap::Args;
 use serde_json::Value;
-use tldr_core::walker::ProjectWalker;
-
 use super::ast_cache::AstCache;
 use super::error::{RemainingError, RemainingResult};
 use super::types::{TodoItem, TodoReport, TodoSummary};
@@ -458,42 +456,36 @@ fn run_similar_analysis(_path: &Path) -> RemainingResult<(Vec<TodoItem>, Value)>
 // Helper Functions
 // =============================================================================
 
-/// Detect language from path (auto-detect from extension or directory contents)
+/// Detect language from path (auto-detect from extension or directory contents).
+///
+/// cross-language-extraction-v2 P2.BUG-3: previously this function only
+/// recognised 5 languages (Python / TS / JS / Rust / Go), so `tldr todo`
+/// without `--lang` would silently default to Python on Java/Kotlin/Elixir/
+/// OCaml/Ruby/PHP/Scala/C#/Lua trees and emit zero items. The other commands
+/// (`structure`, `vuln`, `secure`, …) had been migrated to
+/// `Language::from_path` / `Language::from_directory` in the AA1 milestone;
+/// `todo` was missed. We now route through the shared helpers for parity.
 fn detect_language(path: &Path) -> RemainingResult<Language> {
-    // Auto-detect from file extension or directory contents
     if path.is_file() {
+        if let Some(lang) = Language::from_path(path) {
+            return Ok(lang);
+        }
         let ext = path
             .extension()
             .and_then(|e| e.to_str())
             .unwrap_or_default();
-
-        match ext {
-            "py" => Ok(Language::Python),
-            "ts" | "tsx" => Ok(Language::TypeScript),
-            "js" | "jsx" => Ok(Language::JavaScript),
-            "rs" => Ok(Language::Rust),
-            "go" => Ok(Language::Go),
-            _ => Err(RemainingError::unsupported_language(ext)),
-        }
-    } else if path.is_dir() {
-        // Check for common files to detect language
-        for entry in ProjectWalker::new(path).max_depth(2).iter() {
-            if let Some(ext) = entry.path().extension().and_then(|e| e.to_str()) {
-                match ext {
-                    "py" => return Ok(Language::Python),
-                    "ts" | "tsx" => return Ok(Language::TypeScript),
-                    "js" | "jsx" => return Ok(Language::JavaScript),
-                    "rs" => return Ok(Language::Rust),
-                    "go" => return Ok(Language::Go),
-                    _ => continue,
-                }
-            }
-        }
-        // Default to Python if no language detected
-        Ok(Language::Python)
-    } else {
-        Err(RemainingError::file_not_found(path))
+        return Err(RemainingError::unsupported_language(ext));
     }
+    if path.is_dir() {
+        if let Some(lang) = Language::from_directory(path) {
+            return Ok(lang);
+        }
+        // Empty / unrecognised directory: keep the prior fallback to Python so
+        // existing callers that point at directories with no source files still
+        // get a deterministic answer rather than a hard error.
+        return Ok(Language::Python);
+    }
+    Err(RemainingError::file_not_found(path))
 }
 
 /// Update summary based on analysis results
