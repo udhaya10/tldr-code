@@ -2187,11 +2187,11 @@ mod explain_tests {
     fn test_explain_python() {
         let path = fixture_path("test_python.py");
         if let Some(json) = run_explain(&path, "another_func") {
-            // Should have function_name
+            // Should have function
             assert_eq!(
-                json["function_name"].as_str().unwrap_or(""),
+                json["function"].as_str().unwrap_or(""),
                 "another_func",
-                "Should report function_name"
+                "Should report function"
             );
             // Should have file path
             assert!(json["file"].is_string(), "Should have file field");
@@ -2220,7 +2220,7 @@ mod explain_tests {
     fn test_explain_javascript() {
         let path = fixture_path("test_javascript.js");
         if let Some(json) = run_explain(&path, "topLevel") {
-            assert_eq!(json["function_name"].as_str().unwrap_or(""), "topLevel");
+            assert_eq!(json["function"].as_str().unwrap_or(""), "topLevel");
             assert!(json["signature"].is_object());
             assert!(json["purity"].is_object());
         }
@@ -2231,7 +2231,7 @@ mod explain_tests {
     fn test_explain_go() {
         let path = fixture_path("test_go.go");
         if let Some(json) = run_explain(&path, "topLevel") {
-            assert_eq!(json["function_name"].as_str().unwrap_or(""), "topLevel");
+            assert_eq!(json["function"].as_str().unwrap_or(""), "topLevel");
             assert!(json["signature"].is_object());
             assert!(json["purity"].is_object());
         }
@@ -2242,7 +2242,7 @@ mod explain_tests {
     fn test_explain_rust() {
         let path = fixture_path("test_rust.rs");
         if let Some(json) = run_explain(&path, "public_func") {
-            assert_eq!(json["function_name"].as_str().unwrap_or(""), "public_func");
+            assert_eq!(json["function"].as_str().unwrap_or(""), "public_func");
             assert!(json["signature"].is_object());
         }
     }
@@ -2252,7 +2252,7 @@ mod explain_tests {
     fn test_explain_typescript() {
         let path = fixture_path("test_typescript.ts");
         if let Some(json) = run_explain(&path, "topLevel") {
-            assert_eq!(json["function_name"].as_str().unwrap_or(""), "topLevel");
+            assert_eq!(json["function"].as_str().unwrap_or(""), "topLevel");
         }
     }
 
@@ -2261,7 +2261,7 @@ mod explain_tests {
     fn test_explain_java() {
         let path = fixture_path("test_java.java");
         if let Some(json) = run_explain(&path, "speak") {
-            assert_eq!(json["function_name"].as_str().unwrap_or(""), "speak");
+            assert_eq!(json["function"].as_str().unwrap_or(""), "speak");
         }
     }
 
@@ -2271,7 +2271,7 @@ mod explain_tests {
         let path = fixture_path("test_ruby.rb");
         if let Some(json) = run_explain(&path, "top_level_func") {
             assert_eq!(
-                json["function_name"].as_str().unwrap_or(""),
+                json["function"].as_str().unwrap_or(""),
                 "top_level_func"
             );
         }
@@ -2282,7 +2282,7 @@ mod explain_tests {
     fn test_explain_c() {
         let path = fixture_path("test_c.c");
         if let Some(json) = run_explain(&path, "add") {
-            assert_eq!(json["function_name"].as_str().unwrap_or(""), "add");
+            assert_eq!(json["function"].as_str().unwrap_or(""), "add");
         }
     }
 

@@ -2416,8 +2416,14 @@ pub struct ComplexityMetrics {
     pub cyclomatic: u32,
     /// Cognitive complexity (how hard the function is to understand)
     pub cognitive: u32,
-    /// Maximum nesting depth of control structures
-    pub nesting_depth: u32,
+    /// Maximum nesting depth of control structures.
+    ///
+    /// cross-command-consistency-v1 (BUG-7): renamed from `nesting_depth` to
+    /// `max_nesting` so this value uses the same field name that
+    /// `tldr cognitive` already exposes.  The serde alias keeps deserialisation
+    /// of older JSON bodies (`{"nesting_depth": ...}`) working.
+    #[serde(alias = "nesting_depth")]
+    pub max_nesting: u32,
     /// Number of lines of code in the function
     pub lines_of_code: u32,
 }

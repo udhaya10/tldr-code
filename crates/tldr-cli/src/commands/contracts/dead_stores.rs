@@ -88,8 +88,13 @@ impl DeadStoresArgs {
     pub fn run(&self, format: OutputFormat, quiet: bool) -> Result<()> {
         let writer = OutputWriter::new(format, quiet);
 
-        // Validate inputs
-        let canonical_path = validate_file_path(&self.file)?;
+        // Validate inputs.
+        //
+        // BUG-8 (cross-command-consistency-v1): keep `validate_file_path` for
+        // existence/traversal checks but pass the user-supplied path to the
+        // analyzer so the emitted `file` field matches the input
+        // (no `/private/tmp/...` rewrite on macOS).
+        let _canonical_path = validate_file_path(&self.file)?;
         validate_function_name(&self.function)?;
 
         writer.progress(&format!(
@@ -104,7 +109,7 @@ impl DeadStoresArgs {
             .unwrap_or_else(|| Language::from_path(&self.file).unwrap_or(Language::Python));
 
         // Run SSA-based dead store detection
-        let report = run_dead_stores(&canonical_path, &self.function, language, self.compare)?;
+        let report = run_dead_stores(&self.file, &self.function, language, self.compare)?;
 
         // Output based on format
         let use_text = matches!(self.output_format, ContractsOutputFormat::Text)

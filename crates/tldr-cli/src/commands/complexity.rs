@@ -1,6 +1,6 @@
 //! Complexity command - Calculate function complexity metrics
 //!
-//! Returns ComplexityMetrics with cyclomatic, cognitive, nesting_depth, and lines_of_code.
+//! Returns ComplexityMetrics with cyclomatic, cognitive, max_nesting, and lines_of_code.
 //! Auto-routes through daemon when available for ~35x speedup.
 
 use std::path::PathBuf;

@@ -327,7 +327,13 @@ pub struct SecureSummary {
 pub struct SecureReport {
     /// Command identifier
     pub wrapper: String,
-    /// Path that was analyzed
+    /// Path that was analyzed.
+    ///
+    /// cross-command-consistency-v1 (BUG-14): renamed in JSON to `root`
+    /// so project-root field naming is identical across commands. The Rust
+    /// field is still `path` for backwards compatibility; JSON callers see
+    /// `root`. The `alias` keeps deserialisation of older bodies working.
+    #[serde(rename = "root", alias = "path")]
     pub path: String,
     /// Security findings sorted by severity
     pub findings: Vec<SecureFinding>,
@@ -700,7 +706,14 @@ impl CallInfo {
 /// `line_start` and `line_end` remain for callers that need ranges.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ExplainReport {
-    /// Function name
+    /// Function name.
+    ///
+    /// cross-command-consistency-v1 (BUG-14): emitted in JSON as
+    /// `function` so the function-name field is identical across commands
+    /// (`slice`, `dead-stores`, `resources`, `reaching-defs`, `taint`,
+    /// `explain`, ...). The custom `Serialize` impl below handles the
+    /// rename; deserialise still accepts both names via `alias`.
+    #[serde(alias = "function")]
     pub function_name: String,
     /// File path
     pub file: String,
@@ -741,7 +754,9 @@ impl Serialize for ExplainReport {
         // applies only to deserialize side).
         count += 2;
         let mut s = serializer.serialize_struct("ExplainReport", count)?;
-        s.serialize_field("function_name", &self.function_name)?;
+        // cross-command-consistency-v1 (BUG-14): emit canonical `function`
+        // (replaces the older `function_name`).
+        s.serialize_field("function", &self.function_name)?;
         s.serialize_field("file", &self.file)?;
         s.serialize_field("line_start", &self.line_start)?;
         s.serialize_field("line_end", &self.line_end)?;
@@ -1739,7 +1754,8 @@ mod unit_types_tests {
         report.purity = PurityInfo::pure();
 
         let json = serde_json::to_string(&report).unwrap();
-        assert!(json.contains(r#""function_name":"calculate_total""#));
+        // cross-command-consistency-v1 (BUG-14): canonical key is `function`.
+        assert!(json.contains(r#""function":"calculate_total""#));
         assert!(json.contains(r#""classification":"pure""#));
     }
 

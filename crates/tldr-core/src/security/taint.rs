@@ -238,7 +238,15 @@ pub struct TaintFlow {
 /// at each CFG block.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TaintInfo {
-    /// Function name
+    /// Function name.
+    ///
+    /// cross-command-consistency-v1 (BUG-14): renamed in JSON to `function`
+    /// so the function-name field is identical across commands
+    /// (`slice`, `dead-stores`, `resources`, `reaching-defs`, `taint`,
+    /// `explain`, ...). The Rust field is still `function_name` for
+    /// backwards compatibility; JSON callers see `function`. The `alias`
+    /// keeps deserialisation of older bodies working.
+    #[serde(rename = "function", alias = "function_name")]
     pub function_name: String,
     /// Tainted variables at each block: block_id -> set of tainted variable names
     pub tainted_vars: HashMap<usize, HashSet<String>>,

@@ -571,8 +571,8 @@ fn test_complexity_basic_json() {
         "JSON should contain cognitive field"
     );
     assert!(
-        stdout.contains("\"nesting_depth\""),
-        "JSON should contain nesting_depth field"
+        stdout.contains("\"max_nesting\""),
+        "JSON should contain max_nesting field (renamed from nesting_depth in cross-command-consistency-v1)"
     );
     assert!(
         stdout.contains("\"lines_of_code\""),

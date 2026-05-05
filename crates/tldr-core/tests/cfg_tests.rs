@@ -391,12 +391,12 @@ mod complexity_tests {
             calculate_complexity(file.to_str().unwrap(), "complex_function", Language::Python)
                 .unwrap();
 
-        // THEN: nesting_depth should reflect max nesting
+        // THEN: max_nesting should reflect max nesting
         // The complex_function has nested if statements
         assert!(
-            metrics.nesting_depth >= 2,
-            "Should have nesting depth >= 2, got {}",
-            metrics.nesting_depth
+            metrics.max_nesting >= 2,
+            "Should have max nesting >= 2, got {}",
+            metrics.max_nesting
         );
     }
 

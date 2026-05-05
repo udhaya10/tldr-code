@@ -406,8 +406,15 @@ where
 pub struct HealthReport {
     /// Wrapper identifier (always "health")
     pub wrapper: String,
-    /// Analyzed path
-    #[serde(serialize_with = "serialize_path")]
+    /// Analyzed path.
+    ///
+    /// cross-command-consistency-v1 (BUG-14): renamed in JSON to `root` so
+    /// project-root field naming is identical across commands
+    /// (`structure`, `deps`, `clones`, `health`, `secure`, `inheritance`,
+    /// ...).  The Rust field is still `path` for compatibility, but JSON
+    /// callers see `root`. The `alias` keeps deserialisation of older bodies
+    /// working.
+    #[serde(rename = "root", alias = "path", serialize_with = "serialize_path")]
     pub path: PathBuf,
     /// Detected or specified language
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1268,7 +1275,8 @@ mod tests {
         let json = report.to_dict();
 
         assert_eq!(json["wrapper"], "health");
-        assert_eq!(json["path"], "test/");
+        // cross-command-consistency-v1 (BUG-14): canonical key is `root`.
+        assert_eq!(json["root"], "test/");
         assert_eq!(json["quick_mode"], true);
         assert_eq!(json["summary"]["avg_cyclomatic"], 5.0);
         assert_eq!(json["summary"]["hotspot_count"], 2);

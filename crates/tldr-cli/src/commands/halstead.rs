@@ -83,18 +83,26 @@ impl HalsteadArgs {
         };
 
         let report = if self.path.is_file() {
-            // Single file: preserve exact current behavior
-            let validated_path = validate_file_path(self.path.to_str().unwrap_or_default(), None)?;
+            // Single file: preserve exact current behavior.
+            //
+            // BUG-8 (cross-command-consistency-v1): preserve the user-supplied
+            // path in the emitted JSON.  `validate_file_path` is still called
+            // for existence/traversal checks, but we discard its canonicalised
+            // value and feed `self.path` (as typed by the user) to the
+            // analyzer so the `file` field in the report matches the input
+            // (no `/private/tmp/...` rewrite on macOS).
+            let _validated_path =
+                validate_file_path(self.path.to_str().unwrap_or_default(), None)?;
             let language =
-                detect_or_parse_language(self.lang.as_ref().map(|l| l.as_str()), &validated_path)?;
+                detect_or_parse_language(self.lang.as_ref().map(|l| l.as_str()), &self.path)?;
 
             writer.progress(&format!(
                 "Calculating Halstead metrics for {} ({:?})...",
-                validated_path.display(),
+                self.path.display(),
                 language
             ));
 
-            analyze_halstead(&validated_path, Some(language), options)?
+            analyze_halstead(&self.path, Some(language), options)?
         } else if self.path.is_dir() {
             // Directory: walk -> analyze each -> merge
             let walk_options = WalkOptions {

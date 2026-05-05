@@ -1,5 +1,184 @@
 # Changelog
 
+## cross-command-consistency-v1 — internal milestone
+
+NOT a published release. Closes 4 audit-found bugs that made command
+output disagree with itself across the surface: `tldr impact` reported
+`caller_count: 0` for any function that was used only as a value
+(returned, assigned, passed as kwarg, or stashed in a class-body field)
+even though `tldr references` had no trouble finding the same use
+sites; `tldr complexity` and `tldr cognitive` returned different
+cognitive numbers for the same function because two separate
+calculators existed (the standalone `cognitive` command was the
+canonical SonarSource v1.4 implementation; `complexity` carried a
+drifted older calculation); on macOS `tldr halstead`, `tldr cognitive`,
+and `tldr dead-stores` rewrote `/tmp/...` paths to `/private/tmp/...`
+in their JSON `file` field while `tldr reaching-defs` echoed the
+input path unchanged, so two commands run on the same input emitted
+different paths; the project-root field name was `path` for `health` /
+`secure`, `project_path` for `inheritance`, and `root` for everyone
+else (`structure` / `deps` / `clones` / ...), and the function-name
+field was `function_name` for `taint` / `explain` while the rest of
+the function-scoped surface (`slice` / `dead-stores` / `resources` /
+`reaching-defs`) used `function`. Binary-verified against
+`/tmp/repos/flask` and gated by 7 regression tests in
+`crates/tldr-cli/tests/cross_command_consistency_v1.rs`.
+`vuln_migration_v1_red`: 168/168 GREEN. M1
+(`determinism_and_stderr_hygiene_v1`): 5/5 GREEN. All prior
+milestones still hold.
+
+| Bug | File:Line | Before | After |
+|-----|-----------|--------|-------|
+| BUG-5 | `crates/tldr-core/src/callgraph/var_types.rs:43-191` (rewrote `extract_python_definitions`; new `collect_python_value_refs`) | `tldr impact _make_timedelta /tmp/repos/flask` → `caller_count: 0` for both definitions | `caller_count: 1` (App class body) for `src/flask/sansio/app.py:_make_timedelta`; matches `tldr references` |
+| BUG-7 | `crates/tldr-core/src/metrics/cognitive.rs:443-491` (new `calculate_cognitive_for_function`); `crates/tldr-core/src/metrics/complexity.rs:49-95` + `:122-175` (delegate); `crates/tldr-core/src/types.rs:2410-2430` (rename + alias) | `tldr complexity flask/app.py make_response \| jq .cognitive` → 45; `tldr cognitive flask/app.py \| jq '.functions[]\|select(.name=="make_response").cognitive'` → 26 | both → 26; verified for 3 python + 3 js functions |
+| BUG-8 | `crates/tldr-cli/src/commands/halstead.rs:85-99`; `crates/tldr-cli/src/commands/cognitive.rs:85-99`; `crates/tldr-cli/src/commands/contracts/dead_stores.rs:91-107`; `crates/tldr-cli/src/commands/patterns/resources.rs:3440-3551` | `tldr halstead /tmp/repos/flask/src/flask/app.py \| jq .functions[0].file` → `/private/tmp/repos/flask/...` | echoes the user-supplied path (`/tmp/repos/flask/...`) verbatim; same for `cognitive`, `dead-stores`, `resources` |
+| BUG-14 | `crates/tldr-core/src/quality/health.rs:406-415` (`path` → `root`); `crates/tldr-cli/src/commands/remaining/types.rs:327-336` (`path` → `root`); `crates/tldr-core/src/types/inheritance.rs:280-298` (`project_path` → `root`); `crates/tldr-core/src/security/taint.rs:240-250` (`function_name` → `function`); `crates/tldr-cli/src/commands/remaining/types.rs:707-765` (`function_name` → `function` in `ExplainReport` Serialize impl); `crates/tldr-core/src/types.rs:2410-2430` (`nesting_depth` → `max_nesting`) | `tldr health … \| jq .root` → null; `tldr inheritance … \| jq .root` → null; `tldr taint … \| jq .function` → null | every project-level command (`structure`/`deps`/`clones`/`health`/`secure`/`inheritance`) emits `root`; every function-scoped command (`slice`/`dead-stores`/`resources`/`reaching-defs`/`taint`/`explain`) emits `function`. Old field names accepted on deserialise via `#[serde(alias = "...")]`. |
+
+### Changed
+
+- **BUG-5** — `crates/tldr-core/src/callgraph/var_types.rs`: extended
+  `extract_python_definitions` (the Python extractor used by the v2
+  builder — distinct from `crates/tldr-core/src/callgraph/languages/python.rs`,
+  which is exercised by direct unit tests but not by the project-wide
+  pipeline) to (a) collect a `HashSet<String>` of locally-defined
+  function/class names up-front and (b) walk function bodies AND class
+  bodies for free-identifier uses that resolve to that set, emitting
+  one `CallType::Ref` call site per (caller, target) pair. The new
+  helper `collect_python_value_refs` skips the identifier-form of a
+  call's `function` field (already handled by `parse_python_call`),
+  the function/class-definition `name` field, attribute-access
+  `attribute` fields, and parameter lists, so this change does not
+  resurrect spurious self-edges. The resolver path was already
+  correct: `crates/tldr-core/src/callgraph/resolution.rs:812-848`
+  resolves `CallType::Ref` exactly like `Direct` (local + import_map
+  + reexport tracer), so adding the call sites is sufficient. Scoped
+  to Python only — JS/TS/Rust/Java/Go scanners were not touched.
+- **BUG-7** — `crates/tldr-core/src/metrics/cognitive.rs`: exposed the
+  internal `CognitiveCalculator` via a new public `CognitiveScore`
+  struct + `calculate_cognitive_for_function(function_name, source,
+  language, func_node)` helper that runs the canonical SonarSource
+  v1.4 implementation on a single tree-sitter function node and
+  returns `(cognitive, max_nesting, nesting_penalty)`.
+  `crates/tldr-core/src/metrics/complexity.rs`:
+  `calculate_complexity` and `calculate_all_complexities_from_tree`
+  now delegate the cognitive number AND the nesting depth to that
+  helper after running the existing cyclomatic / LOC pass. The
+  drifted second cognitive implementation in `ComplexityCalculator`
+  (lines 313-367) still computes a value but it is overwritten before
+  the metrics are returned, so callers always see the canonical
+  number. `crates/tldr-core/src/types.rs`: `ComplexityMetrics`'s
+  nesting field is renamed Rust-side and JSON-side from
+  `nesting_depth` to `max_nesting` so it matches `cognitive`'s
+  field name; `#[serde(alias = "nesting_depth")]` keeps
+  deserialisation of older bodies working.
+- **BUG-8** — `crates/tldr-cli/src/commands/halstead.rs`,
+  `crates/tldr-cli/src/commands/cognitive.rs`,
+  `crates/tldr-cli/src/commands/contracts/dead_stores.rs`,
+  `crates/tldr-cli/src/commands/patterns/resources.rs`: each command
+  still calls `validate_file_path` for existence / traversal checks
+  but DISCARDS the canonicalised return value when emitting the
+  output — the `file` (or `path` / `root`) field in the JSON now
+  echoes back `self.file` / `self.path` / `args.file` exactly as the
+  caller typed it. On macOS this stops `/tmp/...` from being silently
+  rewritten to `/private/tmp/...`. The fs/IO operations themselves
+  use the user-supplied path, which `std::fs::read_to_string` resolves
+  through the same symlink chain, so behaviour is unchanged. Did NOT
+  touch `crates/tldr-core/src/validation.rs::validate_file_path`
+  itself — that function is shared between CLI and daemon handlers
+  and other call sites depend on its canonical-path return for
+  internal caching.
+- **BUG-14** — JSON field-name unification, all backwards-compatible
+  on the deserialise side via `#[serde(alias = "...")]`:
+  `crates/tldr-core/src/quality/health.rs:411` —
+  `path` renamed to `root` in JSON (Rust field still `path`).
+  `crates/tldr-cli/src/commands/remaining/types.rs:331` —
+  `SecureReport.path` renamed to `root` in JSON.
+  `crates/tldr-core/src/types/inheritance.rs:297` —
+  `InheritanceReport.project_path` renamed to `root` in JSON.
+  `crates/tldr-core/src/security/taint.rs:242` —
+  `TaintInfo.function_name` renamed to `function` in JSON.
+  `crates/tldr-cli/src/commands/remaining/types.rs:710` and `:736-765`
+  — `ExplainReport.function_name` renamed to `function` in the
+  custom Serialize impl that already emitted the unified `line`
+  field; the deserialise side accepts both via
+  `#[serde(alias = "function")]`.
+  `crates/tldr-core/src/types.rs:2425` (also part of BUG-7) —
+  `ComplexityMetrics.nesting_depth` renamed to `max_nesting`.
+  Test assertions that previously asserted on the old keys
+  (`crates/tldr-cli/tests/cli_p1_tests.rs:600-602`,
+  `crates/tldr-cli/tests/cli_search_context_tests.rs:573-576`,
+  `crates/tldr-core/tests/types_base_tests.rs:1042-1055`,
+  `crates/tldr-core/tests/cfg_tests.rs:384-401`,
+  `crates/tldr-core/tests/metrics_tests.rs:285-296` + `:1490-1497`,
+  `crates/tldr-core/tests/bench_quality_multilang.rs:2185-2287`,
+  `crates/tldr-core/src/quality/health.rs:1271-1279`) updated to
+  assert on the canonical names.
+
+### Added
+
+- `crates/tldr-cli/tests/cross_command_consistency_v1.rs` — 7
+  regression tests:
+  - `impact_finds_function_as_value_callers` — builds a Python
+    project where one helper is used direct + as a return value +
+    as a kwarg + as a positional `map` arg + inside a class body and
+    asserts `caller_count >= 4`. The `note` field is asserted NOT to
+    contain "no callers found" when callers exist.
+  - `complexity_and_cognitive_agree_on_same_function_python` — runs
+    both commands against three Python functions of increasing
+    cognitive complexity and asserts they emit the same number.
+  - `complexity_and_cognitive_agree_on_same_function_js` — same as
+    above for three JavaScript functions, satisfying the spec's
+    "at least 2 languages" requirement.
+  - `complexity_emits_max_nesting_field_renamed_from_nesting_depth`
+    — asserts that `tldr complexity --format json` exposes
+    `max_nesting` and NOT `nesting_depth`.
+  - `path_canonicalization_consistent_across_commands` — runs five
+    commands (`halstead`, `cognitive`, `reaching-defs`, `dead-stores`,
+    `resources`) against the same single file and asserts all five
+    `.file` values equal the user-supplied path string verbatim.
+  - `project_root_field_name_canonical` — runs six commands
+    (`structure`, `deps`, `clones`, `health`, `secure`, `inheritance`)
+    against a multi-file Python project and asserts all six expose a
+    top-level `root` key (and do NOT expose legacy `path` /
+    `project_path` alongside).
+  - `function_name_field_canonical` — runs six function-scoped
+    commands (`slice`, `dead-stores`, `resources`, `reaching-defs`,
+    `taint`, `explain`) and asserts all six expose `.function` (and
+    NOT `.function_name`).
+
+### Verification
+
+- `cargo test --release --features semantic -p tldr-cli --test
+  vuln_migration_v1_red`: **168/168 GREEN** (master regression suite).
+- `cargo test --release --features semantic -p tldr-cli --test
+  determinism_and_stderr_hygiene_v1`: **5/5 GREEN** (M1 regression
+  suite from previous milestone).
+- `cargo test --release --features semantic -p tldr-cli --test
+  cross_command_consistency_v1`: **7/7 GREEN** (this milestone).
+- Spot-verifications run against `/tmp/repos/flask`:
+  - BUG-5: `tldr impact _make_timedelta /tmp/repos/flask` →
+    `caller_count: 1` (from `App` class body) for the
+    `src/flask/sansio/app.py` definition.
+  - BUG-7: `tldr complexity .../flask/app.py make_response` and
+    `tldr cognitive .../flask/app.py | jq …` both emit 26.
+  - BUG-8: `tldr halstead /tmp/repos/flask/src/flask/app.py` emits
+    `/tmp/repos/flask/...` (no `/private/` prefix); same for
+    `cognitive`, `reaching-defs`, `dead-stores`, `resources`.
+  - BUG-14: every project-level command emits `root`; every
+    function-scoped command emits `function`.
+
+### Pre-existing test failure (NOT caused by this milestone)
+
+- `cargo test -p tldr-core --test rr_module_function_integ_test
+  ruby_io_popen_with_user_input_via_compute_taint` was failing on
+  HEAD (`5ba0c90`) before this milestone began work and is still
+  failing after. The test is part of the
+  `field_access_info-v1 M1: 24 RED integration tests` set
+  (commit `49ed30c`, 2026-04-29) — they were intentionally
+  introduced as RED and have not yet been turned GREEN. This
+  milestone touches Python call-graph extraction and shared serde
+  field names; it does not touch Ruby taint detection. Out of scope.
+
 ## determinism-and-stderr-hygiene-v1 — internal milestone
 
 NOT a published release. Closes 4 audit-found bugs that broke CI

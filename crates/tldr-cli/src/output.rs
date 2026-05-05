@@ -729,7 +729,7 @@ pub fn format_complexity_text(metrics: &tldr_core::types::ComplexityMetrics) -> 
     output.push_str(&format!("Complexity: {}\n", metrics.function.bold().cyan()));
     output.push_str(&format!("  Cyclomatic:    {}\n", metrics.cyclomatic));
     output.push_str(&format!("  Cognitive:     {}\n", metrics.cognitive));
-    output.push_str(&format!("  Nesting depth: {}\n", metrics.nesting_depth));
+    output.push_str(&format!("  Max nesting:   {}\n", metrics.max_nesting));
     output.push_str(&format!("  Lines of code: {}\n", metrics.lines_of_code));
 
     output

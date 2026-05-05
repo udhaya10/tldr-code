@@ -440,6 +440,46 @@ fn calculate_summary(
     }
 }
 
+/// Result of running the canonical cognitive calculator on a single
+/// function node.  Used by `tldr complexity` (cross-command-consistency-v1)
+/// so it shares one implementation with `tldr cognitive`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CognitiveScore {
+    /// SonarSource cognitive complexity score
+    pub cognitive: u32,
+    /// Maximum nesting depth observed
+    pub max_nesting: u32,
+    /// Nesting-penalty portion of the score
+    pub nesting_penalty: u32,
+}
+
+/// Run the canonical SonarSource cognitive calculator on a single function.
+///
+/// BUG-7 (cross-command-consistency-v1): both `tldr complexity` and
+/// `tldr cognitive` must report the same number for the same function.
+/// This helper runs the cognitive calculator that powers `tldr cognitive`
+/// so `tldr complexity` can delegate to it instead of carrying a second,
+/// drifting implementation.
+pub fn calculate_cognitive_for_function(
+    function_name: &str,
+    source: &str,
+    language: Language,
+    func_node: Node,
+) -> CognitiveScore {
+    let mut calc = CognitiveCalculator::new(function_name.to_string(), source, language);
+    if calc.analyze_function(func_node).is_err() {
+        return CognitiveScore::default();
+    }
+    let max_nesting = calc.max_nesting;
+    let nesting_penalty = calc.nesting_penalty;
+    let info = calc.into_info();
+    CognitiveScore {
+        cognitive: info.score,
+        max_nesting,
+        nesting_penalty,
+    }
+}
+
 /// Calculator for cognitive complexity metrics
 struct CognitiveCalculator<'a> {
     function_name: String,

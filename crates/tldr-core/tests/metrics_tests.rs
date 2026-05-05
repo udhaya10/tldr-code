@@ -289,7 +289,7 @@ def nested(a, b):
 "#;
     let metrics = calculate_complexity(source, "nested", Language::Python).unwrap();
     assert_eq!(metrics.cyclomatic, 3); // Base + 2 ifs
-    assert!(metrics.nesting_depth >= 2);
+    assert!(metrics.max_nesting >= 2);
 }
 
 #[test]
@@ -1493,7 +1493,7 @@ fn test_complexity_deeply_nested() {
     let result = calculate_complexity(&source, "deep", Language::Python);
     assert!(result.is_ok());
     let metrics = result.unwrap();
-    assert!(metrics.nesting_depth > 10);
+    assert!(metrics.max_nesting > 10);
 }
 
 #[test]

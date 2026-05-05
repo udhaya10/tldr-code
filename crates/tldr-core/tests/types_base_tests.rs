@@ -1045,13 +1045,13 @@ fn test_complexity_metrics_creation() {
         function: "process".to_string(),
         cyclomatic: 5,
         cognitive: 3,
-        nesting_depth: 2,
+        max_nesting: 2,
         lines_of_code: 50,
     };
 
     assert_eq!(metrics.cyclomatic, 5);
     assert_eq!(metrics.cognitive, 3);
-    assert_eq!(metrics.nesting_depth, 2);
+    assert_eq!(metrics.max_nesting, 2);
 }
 
 // =============================================================================

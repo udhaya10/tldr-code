@@ -293,7 +293,14 @@ pub struct InheritanceReport {
     /// Detected diamond inheritance patterns
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub diamonds: Vec<DiamondPattern>,
-    /// Project root path
+    /// Project root path.
+    ///
+    /// cross-command-consistency-v1 (BUG-14): renamed in JSON to `root` so
+    /// project-root field naming is identical across commands. The Rust
+    /// field is still `project_path` for backwards compatibility; JSON
+    /// callers see `root`. The `alias` keeps deserialisation of older
+    /// bodies (`{"project_path": ...}`) working.
+    #[serde(rename = "root", alias = "project_path")]
     pub project_path: PathBuf,
     /// Time taken for the scan in milliseconds
     pub scan_time_ms: u64,

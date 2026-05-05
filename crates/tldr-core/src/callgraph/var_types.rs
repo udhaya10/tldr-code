@@ -55,6 +55,24 @@ pub(crate) fn extract_python_definitions(source: &str, _file_path: &Path) -> Fil
     let source_bytes = source.as_bytes();
     let root = tree.root_node();
 
+    // BUG-5 (cross-command-consistency-v1): collect the set of locally-defined
+    // function and class names up-front so the call-extractor can recognise
+    // function-as-value uses (e.g. `get_converter=_make_timedelta`) and emit
+    // `CallType::Ref` edges. Without this, `tldr impact` reports
+    // "exported but no callers" for any function that is only used as a value
+    // inside the same project — yet `tldr references` finds the use trivially.
+    let mut defined_names: HashSet<String> = HashSet::new();
+    for node in walk_tree(root) {
+        match node.kind() {
+            "function_definition" | "class_definition" => {
+                if let Some(name_node) = node.child_by_field_name("name") {
+                    defined_names.insert(get_node_text(&name_node, source_bytes).to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+
     // One-pass extraction for structure and calls.
     for node in walk_tree(root) {
         match node.kind() {
@@ -106,6 +124,41 @@ pub(crate) fn extract_python_definitions(source: &str, _file_path: &Path) -> Fil
                         }
                     }
 
+                    // BUG-5: extract function-as-value Refs from class-body
+                    // field initialisers (e.g. `attr = some(callback=_helper)`).
+                    // This makes class-body field references discoverable to
+                    // `tldr impact`. The caller name is the class name itself
+                    // (matches the existing python.rs handler convention).
+                    if let Some(body) = node.child_by_field_name("body") {
+                        let mut class_calls = Vec::new();
+                        for i in 0..body.named_child_count() {
+                            if let Some(child) = body.named_child(i) {
+                                if matches!(
+                                    child.kind(),
+                                    "function_definition"
+                                        | "class_definition"
+                                        | "decorated_definition"
+                                ) {
+                                    continue;
+                                }
+                                collect_python_value_refs(
+                                    &child,
+                                    source_bytes,
+                                    &class_name,
+                                    &defined_names,
+                                    &mut class_calls,
+                                );
+                            }
+                        }
+                        if !class_calls.is_empty() {
+                            result
+                                .calls
+                                .entry(class_name.clone())
+                                .or_default()
+                                .extend(class_calls);
+                        }
+                    }
+
                     result
                         .classes
                         .push(ClassDef::new(class_name, line, end_line, methods, bases));
@@ -152,7 +205,20 @@ pub(crate) fn extract_python_definitions(source: &str, _file_path: &Path) -> Fil
                     };
 
                     // Extract calls within this function using the qualified caller name
-                    let calls = extract_python_calls(&node, source_bytes, &caller_name);
+                    let mut calls = extract_python_calls(&node, source_bytes, &caller_name);
+
+                    // BUG-5: also extract function-as-value (Ref) edges so
+                    // `tldr impact` can find higher-order use of locally
+                    // defined functions (return / assignment / kwarg /
+                    // positional argument).
+                    collect_python_value_refs(
+                        &node,
+                        source_bytes,
+                        &caller_name,
+                        &defined_names,
+                        &mut calls,
+                    );
+
                     if !calls.is_empty() {
                         result.calls.insert(caller_name, calls);
                     }
@@ -169,6 +235,85 @@ pub(crate) fn extract_python_definitions(source: &str, _file_path: &Path) -> Fil
     drop(tree);
 
     result
+}
+
+/// BUG-5: walk a node and collect identifier-as-value uses that resolve to
+/// locally-defined functions/classes as `CallType::Ref` call sites.
+///
+/// "function-as-value" means an identifier appears outside of the
+/// `function` field of a `call` node — e.g. `return _helper`, `fn = _helper`,
+/// `map(_helper, ...)`, `kw=_helper`, etc. These uses must produce edges so
+/// that `tldr impact` returns the same callers that `tldr references` finds.
+///
+/// Each defined name is added at most once per (caller, target) to keep the
+/// edge set bounded; the line is the first occurrence.
+fn collect_python_value_refs(
+    root_node: &tree_sitter::Node,
+    source: &[u8],
+    caller: &str,
+    defined_names: &HashSet<String>,
+    sink: &mut Vec<CallSite>,
+) {
+    if defined_names.is_empty() {
+        return;
+    }
+    let mut emitted: HashSet<String> = HashSet::new();
+    for node in walk_tree(*root_node) {
+        if node.kind() != "identifier" {
+            continue;
+        }
+        let name = get_node_text(&node, source);
+        if !defined_names.contains(name) {
+            continue;
+        }
+        let parent = match node.parent() {
+            Some(p) => p,
+            None => continue,
+        };
+        // Skip the identifier-form of a call's `function` field — that
+        // is the regular "Direct" / "Method" call path handled by
+        // parse_python_call.
+        if parent.kind() == "call"
+            && parent.child_by_field_name("function").as_ref() == Some(&node)
+        {
+            continue;
+        }
+        // Skip definition sites: `def name(...)` and `class name:`.
+        if matches!(parent.kind(), "function_definition" | "class_definition")
+            && parent.child_by_field_name("name").as_ref() == Some(&node)
+        {
+            continue;
+        }
+        // Skip attribute accesses where this identifier is the
+        // attribute name (`obj.name` — that's a method/attr access,
+        // not a free reference to the local function).
+        if parent.kind() == "attribute"
+            && parent.child_by_field_name("attribute").as_ref() == Some(&node)
+        {
+            continue;
+        }
+        // Skip parameter lists — `def f(x):` parameters are not Refs.
+        if matches!(
+            parent.kind(),
+            "parameters" | "default_parameter" | "typed_parameter" | "typed_default_parameter"
+        ) {
+            continue;
+        }
+        // Dedup per (caller, target) to keep the edge set bounded.
+        if !emitted.insert(name.to_string()) {
+            continue;
+        }
+        let line = node.start_position().row as u32 + 1;
+        sink.push(CallSite::new(
+            caller.to_string(),
+            name.to_string(),
+            CallType::Ref,
+            Some(line),
+            None,
+            None,
+            None,
+        ));
+    }
 }
 
 /// Extract calls from a Python function body.

@@ -1212,6 +1212,96 @@ class MyModel(Model):
                 model_calls
             );
         }
+
+        // --- BUG-5: Function-as-value (CallType::Ref) ---
+
+        #[test]
+        fn test_function_as_value_in_function_body() {
+            // BUG-5: a function used as a value (returned, assigned) should
+            // produce a CallType::Ref edge so impact analysis can find it.
+            let source = r#"
+def _helper():
+    pass
+
+def use_value():
+    return _helper
+
+def assign_value():
+    fn = _helper
+    return fn
+"#;
+            let calls = extract_calls(source);
+            let use_calls = calls
+                .get("use_value")
+                .expect("use_value should have a Ref to _helper");
+            assert!(
+                use_calls
+                    .iter()
+                    .any(|c| c.target == "_helper" && c.call_type == CallType::Ref),
+                "Expected Ref to _helper from use_value (return _helper). Got: {:?}",
+                use_calls
+            );
+            let assign_calls = calls
+                .get("assign_value")
+                .expect("assign_value should have a Ref to _helper");
+            assert!(
+                assign_calls
+                    .iter()
+                    .any(|c| c.target == "_helper" && c.call_type == CallType::Ref),
+                "Expected Ref to _helper from assign_value (fn = _helper). Got: {:?}",
+                assign_calls
+            );
+        }
+
+        #[test]
+        fn test_function_as_value_in_class_body_keyword_arg() {
+            // BUG-5 (Flask repro): _make_timedelta passed as keyword arg
+            // inside a class body must be picked up so impact() can show
+            // the use of the function (not "exported but no callers").
+            let source = r#"
+def _make_timedelta(value):
+    return value
+
+class App:
+    permanent_session_lifetime = ConfigAttribute(
+        "PERMANENT_SESSION_LIFETIME",
+        get_converter=_make_timedelta,
+    )
+"#;
+            let calls = extract_calls(source);
+            let app_calls = calls
+                .get("App")
+                .expect("App class body should have calls (ConfigAttribute, _make_timedelta)");
+            assert!(
+                app_calls.iter().any(|c| c.target == "_make_timedelta"
+                    && c.call_type == CallType::Ref),
+                "Expected Ref to _make_timedelta from App class body. Got: {:?}",
+                app_calls
+            );
+        }
+
+        #[test]
+        fn test_function_as_value_in_call_argument() {
+            // map(func, ...) — func is passed positionally as a value.
+            let source = r#"
+def transform(x):
+    return x * 2
+
+def caller():
+    return list(map(transform, [1, 2, 3]))
+"#;
+            let calls = extract_calls(source);
+            let caller_calls = calls
+                .get("caller")
+                .expect("caller should have calls");
+            assert!(
+                caller_calls
+                    .iter()
+                    .any(|c| c.target == "transform" && c.call_type == CallType::Ref),
+                "Expected Ref to transform from caller (map(transform, ...)). Got: {:?}",
+                caller_calls
+            );
+        }
     }
 
     // -------------------------------------------------------------------------

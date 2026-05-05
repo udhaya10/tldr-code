@@ -83,15 +83,22 @@ impl CognitiveArgs {
             .with_top(self.top);
 
         let report = if self.path.is_file() {
-            // Single file: preserve exact current behavior
-            let validated_path = validate_file_path(self.path.to_str().unwrap_or_default(), None)?;
+            // Single file: preserve exact current behavior.
+            //
+            // BUG-8 (cross-command-consistency-v1): keep the user-supplied
+            // path in the emitted report so the `file` field matches what the
+            // caller typed (no `/private/tmp/...` rewrite on macOS).
+            // `validate_file_path` is still called for existence / traversal
+            // checks, but its canonicalised return value is discarded.
+            let _validated_path =
+                validate_file_path(self.path.to_str().unwrap_or_default(), None)?;
 
             writer.progress(&format!(
                 "Calculating cognitive complexity for {}...",
-                validated_path.display()
+                self.path.display()
             ));
 
-            analyze_cognitive(&validated_path, &options)?
+            analyze_cognitive(&self.path, &options)?
         } else if self.path.is_dir() {
             // Directory: walk -> analyze each -> merge
             let walk_options = WalkOptions {

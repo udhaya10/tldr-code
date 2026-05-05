@@ -574,7 +574,8 @@ def simple():
             .stderr(predicate::str::contains("not found").or(predicate::str::contains("Path")));
     }
 
-    /// Contract 1.5: complexity includes nesting_depth and lines_of_code
+    /// Contract 1.5: complexity includes max_nesting and lines_of_code
+    /// (cross-command-consistency-v1: renamed from nesting_depth)
     #[test]
     fn test_complexity_all_fields() {
         let temp = TempDir::new().unwrap();
@@ -598,7 +599,7 @@ def nested(x):
             .success()
             .stdout(predicate::str::contains("\"cyclomatic\""))
             .stdout(predicate::str::contains("\"cognitive\""))
-            .stdout(predicate::str::contains("\"nesting_depth\""))
+            .stdout(predicate::str::contains("\"max_nesting\""))
             .stdout(predicate::str::contains("\"lines_of_code\""));
     }
 }

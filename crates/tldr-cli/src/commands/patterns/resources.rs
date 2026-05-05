@@ -3440,7 +3440,13 @@ fn analyze_function_with_lang(
 pub fn run(args: ResourcesArgs, global_format: GlobalOutputFormat) -> anyhow::Result<()> {
     let start_time = Instant::now();
 
-    // Validate path
+    // Validate path.
+    //
+    // BUG-8 (cross-command-consistency-v1): keep the user-supplied path for
+    // the emitted `file` field.  `validate_file_path[_in_project]` still runs
+    // for existence/traversal checks but its canonicalised return is used
+    // only for IO; the output report uses `args.file` so it matches what the
+    // caller typed (no `/private/tmp/...` rewrite on macOS).
     let path = if let Some(ref root) = args.project_root {
         validate_file_path_in_project(&args.file, root)?
     } else {
@@ -3540,9 +3546,13 @@ pub fn run(args: ResourcesArgs, global_format: GlobalOutputFormat) -> anyhow::Re
 
     let elapsed_ms = start_time.elapsed().as_millis() as u64;
 
-    // Build report
+    // Build report.
+    //
+    // BUG-8 (cross-command-consistency-v1): emit the user-supplied path
+    // (`args.file`) instead of the canonicalised `path`, so the `file`
+    // field in the JSON matches what the caller typed.
     let report = ResourceReport {
-        file: path.to_string_lossy().to_string(),
+        file: args.file.to_string_lossy().to_string(),
         language: lang.as_str().to_string(),
         function: args.function.clone(),
         resources: all_resources,

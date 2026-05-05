@@ -70,7 +70,22 @@ pub fn calculate_complexity(
             let mut calculator =
                 ComplexityCalculator::new(function_name.to_string(), &source, language);
             calculator.analyze_function(node)?;
-            Ok(calculator.into_metrics())
+            let mut metrics = calculator.into_metrics();
+            // BUG-7 (cross-command-consistency-v1): delegate the cognitive
+            // number (and `nesting_depth`, which is the same `max_nesting`)
+            // to the canonical SonarSource calculator that backs
+            // `tldr cognitive`.  This kills the per-command drift that made
+            // `tldr complexity` and `tldr cognitive` disagree on the same
+            // function.
+            let canonical = crate::metrics::cognitive::calculate_cognitive_for_function(
+                function_name,
+                &source,
+                language,
+                node,
+            );
+            metrics.cognitive = canonical.cognitive;
+            metrics.max_nesting = canonical.max_nesting;
+            Ok(metrics)
         }
         None => Err(TldrError::function_not_found(function_name)),
     }
@@ -134,7 +149,15 @@ pub fn calculate_all_complexities_from_tree(
             if let Some(name) = get_function_name(node, language, source) {
                 let mut calculator = ComplexityCalculator::new(name.clone(), source, language);
                 if calculator.analyze_function(node).is_ok() {
-                    results.insert(name, calculator.into_metrics());
+                    let mut metrics = calculator.into_metrics();
+                    // BUG-7 (cross-command-consistency-v1): batch path must
+                    // also delegate to the canonical SonarSource calculator.
+                    let canonical = crate::metrics::cognitive::calculate_cognitive_for_function(
+                        &name, source, language, node,
+                    );
+                    metrics.cognitive = canonical.cognitive;
+                    metrics.max_nesting = canonical.max_nesting;
+                    results.insert(name, metrics);
                 }
             }
         }
@@ -388,7 +411,7 @@ impl<'a> ComplexityCalculator<'a> {
             function: self.function_name,
             cyclomatic: self.cyclomatic,
             cognitive: self.cognitive,
-            nesting_depth: self.max_nesting,
+            max_nesting: self.max_nesting,
             lines_of_code: self.lines_of_code,
         }
     }
@@ -434,7 +457,7 @@ def nested(a, b):
         let metrics = calculate_complexity(source, "nested", Language::Python).unwrap();
         assert_eq!(metrics.cyclomatic, 3); // Base + 2 ifs
         assert!(metrics.cognitive >= 3); // if + (nested if with penalty)
-        assert!(metrics.nesting_depth >= 2);
+        assert!(metrics.max_nesting >= 2);
     }
 
     #[test]
@@ -538,8 +561,8 @@ def nested(a, b):
                 name
             );
             assert_eq!(
-                batch_metrics.nesting_depth, individual.nesting_depth,
-                "Nesting depth mismatch for {}",
+                batch_metrics.max_nesting, individual.max_nesting,
+                "Max nesting mismatch for {}",
                 name
             );
             assert_eq!(
