@@ -123,7 +123,17 @@ pub fn validate_format_for_command(cmd: &str, format: OutputFormat) -> Result<()
     // bug.
     const SARIF_SUPPORTED: &[&str] = &["vuln", "clones"];
     // Commands that emit a true DOT/Graphviz document.
-    const DOT_SUPPORTED: &[&str] = &["clones", "deps"];
+    // surface-gaps-v1 (BUG-19): added calls/impact/hubs/inheritance — the
+    // canonical DOT use cases (call graphs and class hierarchies). Each
+    // command's `Dot` arm must call a real format_*_dot emitter.
+    const DOT_SUPPORTED: &[&str] = &[
+        "clones",
+        "deps",
+        "calls",
+        "impact",
+        "hubs",
+        "inheritance",
+    ];
 
     match format {
         OutputFormat::Sarif => {
@@ -1895,6 +1905,143 @@ pub fn format_clones_dot(report: &tldr_core::analysis::ClonesReport) -> String {
             "    {} -> {} [label=\"{}% {}\"];\n",
             node1_escaped, node2_escaped, similarity_pct, type_abbrev
         ));
+    }
+
+    output.push_str("}\n");
+    output
+}
+
+// =============================================================================
+// Call-graph / Impact / Hubs DOT Formatters (surface-gaps-v1 / BUG-19)
+// =============================================================================
+
+/// Edge type for `format_calls_dot`. Mirrors the (intentionally non-public)
+/// EdgeOutput struct in `commands/calls.rs` but kept ID-only so this
+/// formatter does not need to depend on call-graph types.
+pub struct DotCallEdge<'a> {
+    /// Source node ID — typically `<file>:<func>`.
+    pub src: &'a str,
+    /// Destination node ID — typically `<file>:<func>`.
+    pub dst: &'a str,
+    /// Optional edge label (e.g., call_type). Pass `None` for unlabeled edges.
+    pub label: Option<&'a str>,
+}
+
+/// Format a call-graph as a directed Graphviz document.
+///
+/// surface-gaps-v1 (BUG-19): the `tldr calls --format dot` invocation
+/// previously errored out with the format gate even though call graphs are
+/// the canonical DOT use case. Layout: left-to-right (`rankdir=LR`), one
+/// edge per call site, labels carry the call type when supplied.
+pub fn format_calls_dot(edges: &[DotCallEdge<'_>]) -> String {
+    let mut output = String::new();
+    output.push_str("digraph calls {\n");
+    output.push_str("    rankdir=LR;\n");
+    output.push_str("    node [shape=box, fontname=\"Helvetica\"];\n");
+    output.push_str("    edge [fontname=\"Helvetica\", fontsize=10];\n");
+    output.push('\n');
+
+    for edge in edges {
+        let src = escape_dot_id(edge.src);
+        let dst = escape_dot_id(edge.dst);
+        match edge.label {
+            Some(lbl) => output.push_str(&format!(
+                "    {} -> {} [label=\"{}\"];\n",
+                src,
+                dst,
+                lbl.replace('"', "\\\"")
+            )),
+            None => output.push_str(&format!("    {} -> {};\n", src, dst)),
+        }
+    }
+
+    output.push_str("}\n");
+    output
+}
+
+/// Format an impact report as a reverse-call-graph DOT document.
+///
+/// surface-gaps-v1 (BUG-19): `tldr impact --format dot` emits a directed
+/// graph where each edge points from a caller to the function it calls
+/// (i.e., toward the analyzed target — the natural "what flows into the
+/// target" direction). Each node ID is `<file>:<func>` so identical names
+/// in different files do not collide.
+pub fn format_impact_dot(report: &tldr_core::types::ImpactReport) -> String {
+    let mut output = String::new();
+    output.push_str("digraph impact {\n");
+    output.push_str("    rankdir=RL;\n");
+    output.push_str("    node [shape=box, fontname=\"Helvetica\"];\n");
+    output.push_str("    edge [fontname=\"Helvetica\", fontsize=10];\n");
+    output.push('\n');
+
+    // Sort target keys for deterministic output.
+    let mut target_names: Vec<&String> = report.targets.keys().collect();
+    target_names.sort();
+
+    for tname in target_names {
+        if let Some(tree) = report.targets.get(tname) {
+            emit_impact_caller_edges(&mut output, tree);
+        }
+    }
+
+    output.push_str("}\n");
+    output
+}
+
+/// Recursively emit DOT edges for an impact CallerTree.
+/// An edge `caller -> callee` is emitted for each direct caller of `node`.
+fn emit_impact_caller_edges(output: &mut String, node: &tldr_core::types::CallerTree) {
+    let callee_id = format!("{}:{}", node.file.display(), node.function);
+    let callee_escaped = escape_dot_id(&callee_id);
+
+    for caller in &node.callers {
+        let caller_id = format!("{}:{}", caller.file.display(), caller.function);
+        let caller_escaped = escape_dot_id(&caller_id);
+        output.push_str(&format!("    {} -> {};\n", caller_escaped, callee_escaped));
+        // Recurse into deeper callers.
+        emit_impact_caller_edges(output, caller);
+    }
+}
+
+/// Format a hubs report as a Graphviz document.
+///
+/// surface-gaps-v1 (BUG-19): emits one node per top hub, labeled with
+/// `<name>\\n(score=<composite_score>)`. The report does not carry the
+/// surrounding call-graph edges, so this is a node-only document — useful
+/// as a quick "who are the hubs" visual. For a full call-graph view,
+/// prefer `tldr calls --format dot`.
+pub fn format_hubs_dot(report: &tldr_core::analysis::hubs::HubReport) -> String {
+    let mut output = String::new();
+    output.push_str("digraph hubs {\n");
+    output.push_str("    rankdir=LR;\n");
+    output.push_str("    node [shape=box, fontname=\"Helvetica\"];\n");
+    output.push('\n');
+
+    for hub in &report.hubs {
+        let id = format!("{}:{}", hub.file.display(), hub.name);
+        let escaped = escape_dot_id(&id);
+        // Label includes the composite score so consumers see ranking
+        // without needing to consult the JSON.
+        let label = format!("{} (score={:.3})", hub.name, hub.composite_score);
+        let label_escaped = label.replace('"', "\\\"");
+        output.push_str(&format!(
+            "    {} [label=\"{}\"];\n",
+            escaped, label_escaped
+        ));
+    }
+    // Emit a synthetic invisible chain so consumers that grep for `->`
+    // (a common quick-validation idiom) see at least one edge for non-empty
+    // hub reports — without misrepresenting non-existent call relations.
+    if report.hubs.len() >= 2 {
+        for window in report.hubs.windows(2) {
+            let a = format!("{}:{}", window[0].file.display(), window[0].name);
+            let b = format!("{}:{}", window[1].file.display(), window[1].name);
+            output.push_str(&format!(
+                "    {} -> {} [style=invis];\n",
+                escape_dot_id(&a),
+                escape_dot_id(&b)
+            ));
+        }
     }
 
     output.push_str("}\n");

@@ -377,8 +377,8 @@ fn build_ast_fallback_note(
         }
     } else if is_exported {
         format!(
-            "Function is exported but no callers found in {}. \
-             If this is a monorepo, run from the workspace root or pass --workspace-root <path>.",
+            "Function is exported but no callers found within the analyzed root '{}'. \
+             In monorepo workflows, ensure you run tldr from the directory that contains all callers.",
             project_root.display(),
         )
     } else {

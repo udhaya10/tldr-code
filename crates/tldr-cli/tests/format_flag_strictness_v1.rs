@@ -87,20 +87,6 @@ fn sarif_errors_on_unsupported_commands() {
 // =============================================================================
 
 #[test]
-fn dot_errors_on_calls() {
-    // The audit specifically flagged `calls --format dot` as silently
-    // returning plain JSON instead of a Graphviz document.
-    let dir = fixture();
-    let mut cmd = tldr_cmd();
-    cmd.current_dir(dir.path())
-        .args(["calls", ".", "--format", "dot"]);
-    cmd.assert()
-        .failure()
-        .stderr(predicate::str::contains("not supported"))
-        .stderr(predicate::str::contains("dot"));
-}
-
-#[test]
 fn dot_errors_on_smells() {
     let dir = fixture();
     let mut cmd = tldr_cmd();
@@ -239,9 +225,18 @@ fn validator_unit_sarif_allowlist() {
 #[test]
 fn validator_unit_dot_allowlist() {
     use tldr_cli::output::{validate_format_for_command, OutputFormat};
+    // Pre-existing DOT emitters.
     assert!(validate_format_for_command("clones", OutputFormat::Dot).is_ok());
     assert!(validate_format_for_command("deps", OutputFormat::Dot).is_ok());
-    for cmd in ["calls", "smells", "tree", "structure", "taint"] {
+    // surface-gaps-v1 (BUG-19): call-graph and class-hierarchy commands
+    // are the canonical DOT use cases and are now allowed.
+    assert!(validate_format_for_command("calls", OutputFormat::Dot).is_ok());
+    assert!(validate_format_for_command("impact", OutputFormat::Dot).is_ok());
+    assert!(validate_format_for_command("hubs", OutputFormat::Dot).is_ok());
+    assert!(validate_format_for_command("inheritance", OutputFormat::Dot).is_ok());
+    // Commands that don't emit DOT must still reject the flag instead of
+    // silently falling back to JSON (the original false-trust hazard).
+    for cmd in ["smells", "tree", "structure", "taint", "vuln", "secrets"] {
         let err = validate_format_for_command(cmd, OutputFormat::Dot)
             .expect_err(&format!("{cmd} must reject dot"));
         assert!(err.contains("not supported"));

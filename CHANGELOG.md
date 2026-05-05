@@ -1,6 +1,103 @@
 # Changelog
 
-## schema-cleanup-v1 — internal milestone
+## surface-gaps-v1 — internal milestone
+
+NOT a published release. Closes 2 audit-found bugs that share the
+"advertised but missing/wrong feature" surface — `tldr` told users about
+behaviors that were either not implemented or referenced flags that did
+not exist. **BUG-6**: when `tldr impact` could not find callers for a
+function it knew was exported, the helpful note read "If this is a
+monorepo, run from the workspace root or pass `--workspace-root <path>`."
+— but `--workspace-root` is not an argument on `tldr impact` (or any
+other subcommand); `tldr impact --help` makes no mention of it, and
+`tldr impact --workspace-root /tmp foo` errors with `unexpected argument`.
+The note has been rewritten to describe the actual analyzed root and
+the canonical monorepo workflow without dangling a phantom flag.
+**BUG-19**: `tldr calls`, `tldr inheritance`, `tldr hubs`, and `tldr
+impact` all rejected `--format dot` with the format-strictness gate
+(`DOT is only emitted by: clones, deps`) — even though call graphs and
+class hierarchies are the canonical Graphviz use cases and exactly
+what users want to pipe into `dot -Tsvg`. Each command now emits a
+real Graphviz `digraph` document: `calls` produces one
+caller→callee edge per resolved call site, `impact` produces a reverse
+graph (caller flowing toward the analyzed target), `hubs` produces a
+node-only document where each hub's label carries its composite score,
+and `inheritance` (whose underlying `tldr_core::inheritance::format_dot`
+already existed but was wired only to a hidden legacy `-o dot` flag)
+now also honors the global `--format dot` flag. Binary-verified
+against `/tmp/repos/flask` and gated by 6 regression tests in
+`crates/tldr-cli/tests/surface_gaps_v1.rs`. M0
+(`vuln_migration_v1_red`): 168/168 GREEN. M1
+(`determinism_and_stderr_hygiene_v1`): 5/5 GREEN. M2
+(`cross_command_consistency_v1`): 7/7 GREEN. M3
+(`detection_accuracy_v1`): 4/4 GREEN. M4
+(`schema_cleanup_v1`): 11/11 GREEN.
+
+| Bug | File:Line | Before | After |
+|-----|-----------|--------|-------|
+| BUG-6 | `crates/tldr-core/src/analysis/impact.rs:378-386` (rewrite the exported-but-no-callers note) | `tldr impact <fn> /tmp/repos/flask \| jq -r '.targets[].note'` → `"Function is exported but no callers found in /private/tmp/repos/flask. If this is a monorepo, run from the workspace root or pass --workspace-root <path>."` (mentions a flag that does not exist on impact and is not parsed by clap) | note now reads `"Function is exported but no callers found within the analyzed root '<path>'. In monorepo workflows, ensure you run tldr from the directory that contains all callers."`; sweep across 12 flask functions confirms zero occurrences of the literal `workspace-root` substring in any impact JSON |
+| BUG-19 | `crates/tldr-cli/src/output.rs:113-160` (extended `DOT_SUPPORTED` to `["clones","deps","calls","impact","hubs","inheritance"]`); `crates/tldr-cli/src/output.rs` (added `format_calls_dot`, `format_impact_dot`, `format_hubs_dot` + `DotCallEdge` carrier struct + recursive `emit_impact_caller_edges`); `crates/tldr-cli/src/commands/calls.rs` (DOT arms in both daemon-route and direct-compute paths); `crates/tldr-cli/src/commands/impact.rs` (DOT arms in both paths); `crates/tldr-cli/src/commands/hubs.rs` (DOT arm); `crates/tldr-cli/src/commands/inheritance.rs:108-118` (global `--format dot` now selects `InheritanceFormat::Dot` instead of falling through to JSON); `crates/tldr-cli/tests/format_flag_strictness_v1.rs:89-101, 240-253` (removed `dot_errors_on_calls` regression guard, expanded `validator_unit_dot_allowlist` to assert the four newly-allowed commands and to confirm `smells/tree/structure/taint/vuln/secrets` still reject DOT) | `tldr calls /tmp/repos/flask --format dot 2>&1 \| head -1` → `Error: --format dot not supported by calls. Use --format json. DOT is only emitted by: clones, deps.`; same for `inheritance`, `hubs`, `impact` | `tldr calls /tmp/repos/flask --format dot` → `digraph calls { rankdir=LR; ...` with one labeled `caller -> callee` edge per resolved call site (200 edges on flask after default truncation); `tldr inheritance --format dot` → `digraph inheritance { rankdir=BT; ...` with subclass→superclass edges (45 edges on flask); `tldr impact url_for --format dot` → `digraph impact { rankdir=RL; ...` reverse-call-graph (34 edges on flask); `tldr hubs --format dot` → `digraph hubs { ...` with each top hub annotated `(score=0.123)` and a synthetic invisible chain so layout engines render in rank order; output is deterministic across runs |
+
+### Changed
+
+- **BUG-6** — `crates/tldr-core/src/analysis/impact.rs:378-386`: the
+  exported-but-no-callers branch of `note_for_target` advertised a
+  `--workspace-root` flag that does not exist anywhere in `tldr`'s
+  argument parser. Inspection of `tldr impact --help` shows no such
+  flag, and clap rejects it explicitly with `unexpected argument`.
+  This was a documentation drift bug — at some point a workspace-root
+  feature was contemplated and the user-facing note was written ahead
+  of the implementation, but the implementation never landed and the
+  note remained. The fix rewrites the note to describe the actual
+  invariant ("the analyzed root is `<path>`") and the workflow that
+  users should follow ("run tldr from the directory that contains all
+  callers"). The note still helps users reason about monorepo
+  scenarios; it just no longer points them at a phantom flag.
+- **BUG-19** — `crates/tldr-cli/src/output.rs:113-160` +
+  `crates/tldr-cli/src/commands/{calls,impact,hubs,inheritance}.rs`:
+  the `format-flag-strictness-v1` milestone (October 2025) hardened
+  the format-flag dispatch so commands could no longer silently fall
+  back to JSON when given an unsupported format — important security
+  property because CI integrations gating on SARIF would otherwise
+  trust JSON output as if it were SARIF. But the strictness gate was
+  intentionally conservative: it allowed DOT only on `clones` and
+  `deps`, even though call graphs and class hierarchies are precisely
+  the canonical Graphviz use case. surface-gaps-v1 extends the
+  allowlist to four more commands and wires each one's `is_dot()` arm
+  to a real Graphviz emitter:
+  - `format_calls_dot`: emits one labeled `caller -> callee` edge per
+    resolved call site, with the call_type (`Direct`, `Indirect`,
+    `MethodCall`, etc.) carried in the edge label. Node IDs are
+    `<file>:<func>` so functions of the same name in different files
+    do not collide.
+  - `format_impact_dot`: emits a reverse-call-graph rooted at each
+    target function. Edges flow `caller -> callee` (RL layout — the
+    target sits on the right). Recursive over the `CallerTree` so the
+    full transitive caller closure is rendered, not just the direct
+    callers.
+  - `format_hubs_dot`: hub reports do not carry the surrounding
+    call-graph edges, so this emitter produces a node-only document
+    where each top hub is labeled `<name> (score=<composite>)`.
+    Synthetic invisible edges form a rank chain so layout engines
+    render hubs in score order without misrepresenting non-existent
+    call relations. For a true call-graph view, users should run
+    `tldr calls --format dot`.
+  - `inheritance` already had a real DOT emitter
+    (`tldr_core::inheritance::format_dot`) but it was reachable only
+    via a hidden legacy `-o dot` flag; the global `--format dot` flag
+    fell through to JSON. The fix extends the format-resolution
+    fallback in `commands/inheritance.rs` to map `is_dot()` →
+    `InheritanceFormat::Dot`.
+
+  All four emitters use the existing `escape_dot_id` helper for
+  Windows-path normalization, internal-quote escaping, and unconditional
+  quoting of node IDs. Edge labels containing literal `"` are also
+  escaped. Output is deterministic — call-edge ordering is the same
+  across runs because the upstream `IR.edges` already sorts by
+  `(src_file, src_func)`, and impact target keys are sorted before
+  emission.
+
+
 
 NOT a published release. Closes 9 audit-found schema/dead-UI bugs that
 gave consumers null/empty/redundant fields across `tldr health`,

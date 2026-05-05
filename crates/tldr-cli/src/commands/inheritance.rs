@@ -106,9 +106,14 @@ impl InheritanceArgs {
         let report = extract_inheritance(&self.path, self.lang, &options)?;
 
         // Determine output format
+        // surface-gaps-v1 (BUG-19): honor the global `--format dot` flag in
+        // addition to the legacy `-o dot` switch. Inheritance graphs are the
+        // canonical class-hierarchy DOT use case.
         let inh_format = self.output.unwrap_or_else(|| {
             if writer.is_text() {
                 InheritanceFormat::Text
+            } else if writer.is_dot() {
+                InheritanceFormat::Dot
             } else {
                 InheritanceFormat::Json
             }

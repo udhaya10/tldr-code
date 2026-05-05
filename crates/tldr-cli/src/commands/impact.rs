@@ -13,7 +13,7 @@ use tldr_core::types::ImpactReport;
 use tldr_core::{build_project_call_graph, impact_analysis_with_ast_fallback, Language};
 
 use crate::commands::daemon_router::{params_with_func_depth, try_daemon_route};
-use crate::output::{format_impact_text, OutputFormat, OutputWriter};
+use crate::output::{format_impact_dot, format_impact_text, OutputFormat, OutputWriter};
 
 /// Analyze impact of changing a function
 #[derive(Debug, Args)]
@@ -71,6 +71,11 @@ impl ImpactArgs {
                 let text = format_impact_text(&report, self.type_aware);
                 writer.write_text(&text)?;
                 return Ok(());
+            } else if writer.is_dot() {
+                // surface-gaps-v1 (BUG-19): DOT impact graph (reverse calls).
+                let dot = format_impact_dot(&report);
+                writer.write_text(&dot)?;
+                return Ok(());
             } else {
                 writer.write(&report)?;
                 return Ok(());
@@ -121,6 +126,10 @@ impl ImpactArgs {
         if writer.is_text() {
             let text = format_impact_text(&report, self.type_aware);
             writer.write_text(&text)?;
+        } else if writer.is_dot() {
+            // surface-gaps-v1 (BUG-19): direct-compute DOT impact path.
+            let dot = format_impact_dot(&report);
+            writer.write_text(&dot)?;
         } else {
             writer.write(&report)?;
         }

@@ -27,7 +27,7 @@ use tldr_core::analysis::hubs::{
 use tldr_core::callgraph::{build_forward_graph, build_reverse_graph, collect_nodes};
 use tldr_core::{build_project_call_graph, Language};
 
-use crate::output::{format_hubs_text, OutputFormat, OutputWriter};
+use crate::output::{format_hubs_dot, format_hubs_text, OutputFormat, OutputWriter};
 
 /// Algorithm selection for CLI (mirrors HubAlgorithm)
 #[derive(Debug, Clone, Copy, Default, ValueEnum)]
@@ -141,6 +141,11 @@ impl HubsArgs {
         if writer.is_text() {
             let text = format_hubs_text(&report);
             writer.write_text(&text)?;
+        } else if writer.is_dot() {
+            // surface-gaps-v1 (BUG-19): hubs DOT — node-only graph of top
+            // hubs labeled with their composite scores.
+            let dot = format_hubs_dot(&report);
+            writer.write_text(&dot)?;
         } else {
             writer.write(&report)?;
         }

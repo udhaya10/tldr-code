@@ -18,7 +18,7 @@ use tldr_core::callgraph::{build_project_call_graph_v2, BuildConfig};
 use tldr_core::Language;
 
 use crate::commands::daemon_router::{params_with_path, try_daemon_route};
-use crate::output::{OutputFormat, OutputWriter};
+use crate::output::{format_calls_dot, DotCallEdge, OutputFormat, OutputWriter};
 
 /// Build and display cross-file call graph
 #[derive(Debug, Args)]
@@ -115,6 +115,33 @@ impl CallsArgs {
 
                 writer.write_text(&text)?;
                 return Ok(());
+            } else if writer.is_dot() {
+                // surface-gaps-v1 (BUG-19): DOT support for the daemon path.
+                let srcs: Vec<String> = output
+                    .edges
+                    .iter()
+                    .map(|e| format!("{}:{}", e.src_file.display(), e.src_func))
+                    .collect();
+                let dsts: Vec<String> = output
+                    .edges
+                    .iter()
+                    .map(|e| format!("{}:{}", e.dst_file.display(), e.dst_func))
+                    .collect();
+                let labels: Vec<String> = output
+                    .edges
+                    .iter()
+                    .map(|e| format!("{:?}", e.call_type))
+                    .collect();
+                let dot_edges: Vec<DotCallEdge<'_>> = (0..output.edges.len())
+                    .map(|i| DotCallEdge {
+                        src: srcs[i].as_str(),
+                        dst: dsts[i].as_str(),
+                        label: Some(labels[i].as_str()),
+                    })
+                    .collect();
+                let dot = format_calls_dot(&dot_edges);
+                writer.write_text(&dot)?;
+                return Ok(());
             } else {
                 writer.write(&output)?;
                 return Ok(());
@@ -191,6 +218,34 @@ impl CallsArgs {
         };
 
         // Output based on format
+        if writer.is_dot() {
+            // surface-gaps-v1 (BUG-19): direct-compute DOT path.
+            let srcs: Vec<String> = output
+                .edges
+                .iter()
+                .map(|e| format!("{}:{}", e.src_file.display(), e.src_func))
+                .collect();
+            let dsts: Vec<String> = output
+                .edges
+                .iter()
+                .map(|e| format!("{}:{}", e.dst_file.display(), e.dst_func))
+                .collect();
+            let labels: Vec<String> = output
+                .edges
+                .iter()
+                .map(|e| format!("{:?}", e.call_type))
+                .collect();
+            let dot_edges: Vec<DotCallEdge<'_>> = (0..output.edges.len())
+                .map(|i| DotCallEdge {
+                    src: srcs[i].as_str(),
+                    dst: dsts[i].as_str(),
+                    label: Some(labels[i].as_str()),
+                })
+                .collect();
+            let dot = format_calls_dot(&dot_edges);
+            writer.write_text(&dot)?;
+            return Ok(());
+        }
         if writer.is_text() {
             let mut text = String::new();
             text.push_str(&format!(
