@@ -1568,12 +1568,28 @@ pub struct VulnFinding {
     pub line: u32,
     /// Column number
     pub column: u32,
-    /// Taint flow from source to sink
+    /// Taint flow from source to sink. When `direct_sink` is `true` this is
+    /// a single-element vec describing the call site (the source-and-sink
+    /// collapse to the same statement).
     pub taint_flow: Vec<TaintFlow>,
     /// Remediation advice
     pub remediation: String,
     /// Confidence score (0.0-1.0)
     pub confidence: f64,
+    /// True when the source and sink resolve to the same statement (e.g.
+    /// `let file = File::open(path)?` — `path` is tainted untrusted data
+    /// and is consumed by the FileOpen sink in the same expression). The
+    /// `taint_flow` is collapsed to a single entry to avoid emitting two
+    /// identical source/sink records. Omitted from JSON when false.
+    /// (M3 detection-accuracy-v1 BUG-17.)
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub direct_sink: bool,
+}
+
+/// Helper for `skip_serializing_if` on `direct_sink` — keeps the JSON shape
+/// stable for non-degenerate findings (no spurious `direct_sink: false`).
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 /// Vulnerability summary statistics.

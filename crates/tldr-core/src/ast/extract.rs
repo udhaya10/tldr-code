@@ -2668,6 +2668,7 @@ fn extract_rust_function_info(node: &Node, source: &str, is_method: bool) -> Fun
 
     let is_async = get_node_text(node, source).contains("async fn");
     let line_number = node.start_position().row as u32 + 1;
+    let decorators = extract_rust_function_attributes(node, source);
 
     FunctionInfo {
         name,
@@ -2676,8 +2677,100 @@ fn extract_rust_function_info(node: &Node, source: &str, is_method: bool) -> Fun
         docstring: extract_rust_docstring(node, source),
         is_method,
         is_async,
-        decorators: Vec::new(),
+        decorators,
         line_number,
+    }
+}
+
+/// Collect attributes ("decorators") that influence test-detection for a Rust function.
+///
+/// This walks `attribute_item` siblings preceding the function (e.g. `#[test]`,
+/// `#[tokio::test]`, `#[cfg(test)]`, `#[rstest]`, `#[proptest]`) AND the chain of
+/// enclosing `mod_item` ancestors. If any ancestor module is named `test`/`tests`/
+/// `*test*` or carries a `#[cfg(test)]` attribute, a synthetic `cfg(test)` decorator
+/// is appended so dead-code analysis can treat the inner function as test code.
+fn extract_rust_function_attributes(node: &Node, source: &str) -> Vec<String> {
+    let mut decorators: Vec<String> = Vec::new();
+
+    // 1. Collect direct preceding `attribute_item` siblings (`#[test]`, etc.)
+    let mut prev = node.prev_sibling();
+    while let Some(p) = prev {
+        match p.kind() {
+            "attribute_item" => {
+                if let Some(s) = parse_rust_attribute_item(&p, source) {
+                    decorators.push(s);
+                }
+                prev = p.prev_sibling();
+            }
+            "line_comment" | "block_comment" => {
+                // Skip doc comments; attributes may be interleaved with them.
+                prev = p.prev_sibling();
+            }
+            _ => break,
+        }
+    }
+
+    // 2. Walk up the enclosing `mod_item` chain. If any module looks like a test
+    //    module (by name or `#[cfg(test)]` attribute), surface that as a decorator.
+    let mut current = node.parent();
+    while let Some(parent) = current {
+        if parent.kind() == "mod_item" {
+            let mod_name = parent
+                .child_by_field_name("name")
+                .map(|n| get_node_text(&n, source))
+                .unwrap_or_default();
+            let lower = mod_name.to_lowercase();
+            let name_says_test = lower == "test"
+                || lower == "tests"
+                || lower.starts_with("test_")
+                || lower.ends_with("_test")
+                || lower.ends_with("_tests")
+                || lower.contains("testutil");
+            if name_says_test {
+                decorators.push(format!("cfg(test)/* via mod {mod_name} */"));
+            }
+            // Check for `#[cfg(test)]` on this module
+            let mut mod_prev = parent.prev_sibling();
+            while let Some(mp) = mod_prev {
+                match mp.kind() {
+                    "attribute_item" => {
+                        if let Some(s) = parse_rust_attribute_item(&mp, source) {
+                            if s.contains("cfg") && s.contains("test") {
+                                decorators.push(s);
+                            }
+                        }
+                        mod_prev = mp.prev_sibling();
+                    }
+                    "line_comment" | "block_comment" => {
+                        mod_prev = mp.prev_sibling();
+                    }
+                    _ => break,
+                }
+            }
+        }
+        current = parent.parent();
+    }
+
+    decorators
+}
+
+/// Strip `#[ ... ]` wrapping from an `attribute_item` node, returning the inner text.
+/// Returns lowercase-friendly normalized form preserving structural content like
+/// `cfg(test)` or `tokio::test`.
+fn parse_rust_attribute_item(node: &Node, source: &str) -> Option<String> {
+    let raw = get_node_text(node, source);
+    // Strip `#[` ... `]` (and `#![` ... `]` for inner attributes)
+    let trimmed = raw.trim();
+    let inner = trimmed
+        .strip_prefix("#![")
+        .or_else(|| trimmed.strip_prefix("#["))
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or(trimmed);
+    let inner = inner.trim();
+    if inner.is_empty() {
+        None
+    } else {
+        Some(inner.to_string())
     }
 }
 

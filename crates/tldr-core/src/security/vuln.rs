@@ -70,6 +70,9 @@ pub enum VulnType {
     Ssrf,
     /// Unsafe Deserialization
     Deserialization,
+    /// Open Redirect (CWE-601) — HTTP redirect target controllable by user input.
+    /// (M3 detection-accuracy-v1 BUG-16)
+    OpenRedirect,
 }
 
 impl std::fmt::Display for VulnType {
@@ -81,6 +84,7 @@ impl std::fmt::Display for VulnType {
             VulnType::PathTraversal => write!(f, "Path Traversal"),
             VulnType::Ssrf => write!(f, "Server-Side Request Forgery"),
             VulnType::Deserialization => write!(f, "Unsafe Deserialization"),
+            VulnType::OpenRedirect => write!(f, "Open Redirect"),
         }
     }
 }
@@ -221,6 +225,7 @@ fn vuln_type_from_sink(sink_type: TaintSinkType) -> VulnType {
         TaintSinkType::FileOpen | TaintSinkType::FileWrite => VulnType::PathTraversal,
         TaintSinkType::HttpRequest => VulnType::Ssrf,
         TaintSinkType::Deserialize => VulnType::Deserialization,
+        TaintSinkType::OpenRedirect => VulnType::OpenRedirect,
     }
 }
 
@@ -278,6 +283,9 @@ fn sink_type_precedence(sink_type: TaintSinkType) -> u32 {
         TaintSinkType::FileOpen => 60,
         TaintSinkType::FileWrite => 50,
         TaintSinkType::HttpRequest => 40,
+        // Open-redirect ranks below SSRF; both involve URL flow but
+        // the open-redirect surface is generally lower-impact than full SSRF.
+        TaintSinkType::OpenRedirect => 35,
     }
 }
 
@@ -368,6 +376,8 @@ fn get_remediation(vuln_type: VulnType) -> &'static str {
             "Validate URLs against an allowlist of domains and protocols",
         VulnType::Deserialization =>
             "Avoid deserializing untrusted data, or use safer formats like JSON",
+        VulnType::OpenRedirect =>
+            "Validate redirect targets against an allowlist of trusted URLs/origins; do not concatenate user input into the redirect target",
     }
 }
 
@@ -380,6 +390,7 @@ fn get_cwe_id(vuln_type: VulnType) -> &'static str {
         VulnType::PathTraversal => "CWE-22",
         VulnType::Ssrf => "CWE-918",
         VulnType::Deserialization => "CWE-502",
+        VulnType::OpenRedirect => "CWE-601",
     }
 }
 
@@ -757,6 +768,43 @@ fn scan_file_vulns(path: &Path, vuln_filter: Option<VulnType>) -> TldrResult<Vec
                 }
                 if vuln_type == VulnType::CommandInjection
                     && is_safe_subprocess_call(stmt_text)
+                {
+                    continue;
+                }
+                // M3 detection-accuracy-v1 BUG-17: degenerate flow suppression.
+                //
+                // When the canonical engine emits a flow whose source and sink
+                // collapse to the same file + line + expression text AND the
+                // source/sink variables are identical, the JSON `taint_flow`
+                // would emit two identical entries — there is literally no
+                // propagation to describe (the engine's source-pattern and
+                // sink-pattern matched the SAME identifier on the SAME line).
+                //
+                // The `source.var == sink.var` guard is load-bearing: a single
+                // statement can legitimately host BOTH a source (`id =
+                // params[:id]`) AND a sink that USES that tainted `id` later
+                // on the same line (`db.execute("... " + id)` — the Ruby/Lua
+                // single-line pattern from the v1 RED suite). Those legit
+                // flows have distinct sink semantics from the source variable
+                // and MUST NOT be suppressed. Empirically Ruby/Lua emit
+                // sink.var = the call expression text or a different
+                // identifier, so the equality check leaves them alone.
+                //
+                // The narrower var-mismatch class (e.g. Rust `let f =
+                // File::open(path)`) is NOT suppressed here — it survives
+                // and is annotated downstream by the CLI emit layer with
+                // `direct_sink: true` (see `analyze_file` in
+                // crates/tldr-cli/src/commands/remaining/vuln.rs and the
+                // `degenerate_source_eq_sink_suppressed_or_annotated` test
+                // in crates/tldr-cli/tests/detection_accuracy_v1.rs).
+                if flow.source.line == flow.sink.line
+                    && flow.source.var == flow.sink.var
+                    && flow
+                        .source
+                        .statement
+                        .as_deref()
+                        .unwrap_or("")
+                        == flow.sink.statement.as_deref().unwrap_or("")
                 {
                     continue;
                 }

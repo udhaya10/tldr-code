@@ -171,6 +171,12 @@ pub enum TaintSinkType {
     HttpRequest,
     /// Untrusted-data deserialization (RCE-via-deser sink).
     Deserialize,
+    /// HTTP redirect with attacker-controllable target (CWE-601 open-redirect).
+    /// Examples: Express `res.redirect(target)`, Fastify `reply.redirect(target)`,
+    /// Flask/Werkzeug `redirect(url)`, Next.js `NextResponse.redirect(...)`,
+    /// browser `window.location.href = ...` / `window.open(...)`.
+    /// (M3 detection-accuracy-v1 BUG-16)
+    OpenRedirect,
 }
 
 /// Sanitizer types that neutralize taint.
@@ -1979,21 +1985,28 @@ static TYPESCRIPT_AST_SINKS: &[AstSinkPattern] = &[
     // PathTraversal via `vuln_type_from_sink`, producing a high-severity
     // FP class on every Next.js App Router handler that emitted tainted
     // input back as JSON.
+    // M3 detection-accuracy-v1 BUG-16: redirect entries reclassified from
+    // FileWrite -> OpenRedirect (CWE-601). Pre-fix `NextResponse.redirect(t)`
+    // / `Response.redirect(t)` / bare `redirect(t)` projected through
+    // `vuln_type_from_sink(FileWrite) = PathTraversal` and emitted findings
+    // labelled "FileWrite with unsanitized input" / cwe_id=CWE-22 — wrong
+    // ontology for an HTTP redirect with attacker-controllable target.
     AstSinkPattern {
         call_names: &[],
         member_patterns: &[
             ("NextResponse", "redirect"),
             ("Response", "redirect"),
         ],
-        sink_type: TaintSinkType::FileWrite,
+        sink_type: TaintSinkType::OpenRedirect,
     },
     // Bare `redirect(...)` server-action helper from `next/navigation` —
     // call_expression with no receiver. Raw-fallback (empty receiver) entry
     // matches via the substring path on the call_expression's text.
+    // (M3 BUG-16 reclassified to OpenRedirect.)
     AstSinkPattern {
         call_names: &[],
         member_patterns: &[("", "redirect")],
-        sink_type: TaintSinkType::FileWrite,
+        sink_type: TaintSinkType::OpenRedirect,
     },
     // JSX `dangerouslySetInnerHTML={{ __html: tainted }}` — attribute
     // identifier is a jsx_attribute, not a member-access. Raw-fallback entry
@@ -2009,10 +2022,20 @@ static TYPESCRIPT_AST_SINKS: &[AstSinkPattern] = &[
     // wired here as FileWrite but VULN-MIGRATION-V1 M3 reclassified it to
     // HtmlOutput (Xss) — see the HtmlOutput AstSinkPattern below for the
     // M3-reclassified `*.send` entries.
+    // M3 detection-accuracy-v1 BUG-16: `reply.redirect` reclassified to
+    // OpenRedirect (CWE-601). `reply.header` stays under FileWrite — header
+    // emission still maps to PathTraversal in the legacy ontology (no
+    // dedicated "header injection" sink yet).
     AstSinkPattern {
         call_names: &[],
         member_patterns: &[
             ("reply", "redirect"),
+        ],
+        sink_type: TaintSinkType::OpenRedirect,
+    },
+    AstSinkPattern {
+        call_names: &[],
+        member_patterns: &[
             ("reply", "header"),
         ],
         sink_type: TaintSinkType::FileWrite,
@@ -2061,13 +2084,18 @@ static TYPESCRIPT_AST_SINKS: &[AstSinkPattern] = &[
     // tainted target is a server-side path / route resolution. The
     // `*.send` entries live in the HtmlOutput bank below (M3
     // reclassification).
+    // M3 detection-accuracy-v1 BUG-16: Express/NestJS `res.redirect` and
+    // `response.redirect` are HTTP-redirect sinks (CWE-601 open-redirect),
+    // not file writes. Pre-fix the FileWrite -> PathTraversal projection
+    // emitted findings labelled "FileWrite with unsanitized input" with
+    // CWE-22, which is incorrect for a redirect operation.
     AstSinkPattern {
         call_names: &[],
         member_patterns: &[
             ("res", "redirect"),
             ("response", "redirect"),
         ],
-        sink_type: TaintSinkType::FileWrite,
+        sink_type: TaintSinkType::OpenRedirect,
     },
     // VULN-MIGRATION-V1 M3 — `*.send(tainted)` reclassification.
     // Express/Fastify/NestJS reply.send / res.send / response.send /

@@ -25,7 +25,7 @@ use anyhow::Result;
 use clap::Args;
 
 use tldr_core::analysis::references::{
-    find_references, ReferenceKind, ReferencesOptions, ReferencesReport, SearchScope,
+    find_references, Definition, ReferenceKind, ReferencesOptions, ReferencesReport, SearchScope,
 };
 use tldr_core::Language;
 
@@ -233,9 +233,20 @@ fn format_references_text(report: &ReferencesReport) -> String {
 
     let mut output = String::new();
 
-    // Collect all file paths (definition + references) to compute common prefix
+    // M3 detection-accuracy-v1 BUG-20: prefer the canonical multi-definition
+    // shape `report.definitions`. The legacy singular `report.definition` is
+    // a back-compat first-element view; using `definitions` here makes the
+    // text output honest about multiple definitions (e.g. flask
+    // `_make_timedelta` defined in both sansio/app.py and app.py).
+    let defs_for_text: Vec<&Definition> = if !report.definitions.is_empty() {
+        report.definitions.iter().collect()
+    } else {
+        report.definition.iter().collect()
+    };
+
+    // Collect all file paths (definitions + references) to compute common prefix
     let mut all_paths: Vec<&Path> = report.references.iter().map(|r| r.file.as_path()).collect();
-    if let Some(def) = &report.definition {
+    for def in &defs_for_text {
         all_paths.push(def.file.as_path());
     }
     let prefix = if all_paths.is_empty() {
@@ -244,33 +255,43 @@ fn format_references_text(report: &ReferencesReport) -> String {
         common_path_prefix(&all_paths)
     };
 
-    // Header
+    // Header — when multiple definitions exist, list the kind of the first
+    // (defs_for_text is sorted by canonical-def tier so the first is
+    // the highest-confidence definition).
     output.push_str(&format!(
         "References to: {} ({})\n",
         report.symbol,
-        report
-            .definition
-            .as_ref()
+        defs_for_text
+            .first()
             .map(|d| d.kind.as_str())
             .unwrap_or("unknown")
     ));
     output.push('\n');
 
-    // Definition (if found)
-    if let Some(def) = &report.definition {
-        output.push_str("Definition:\n");
-        let def_display = strip_prefix_display(&def.file, &prefix);
-        output.push_str(&format!(
-            "  {}:{}:{} [{}]\n",
-            def_display,
-            def.line,
-            def.column,
-            def.kind.as_str()
-        ));
-        if let Some(sig) = &def.signature {
-            // S7-R46: Expand tabs to spaces
-            let sig_clean = sig.replace('\t', "    ");
-            output.push_str(&format!("    {}\n", sig_clean.trim()));
+    // Definition(s) (if found). Pre-M3 the header was hard-coded "Definition:"
+    // (singular) even when multiple defs were present in the body — a
+    // pluralization mismatch flagged by BUG-20. Switch to "Definitions:" when
+    // the count exceeds one.
+    if !defs_for_text.is_empty() {
+        if defs_for_text.len() > 1 {
+            output.push_str("Definitions:\n");
+        } else {
+            output.push_str("Definition:\n");
+        }
+        for def in &defs_for_text {
+            let def_display = strip_prefix_display(&def.file, &prefix);
+            output.push_str(&format!(
+                "  {}:{}:{} [{}]\n",
+                def_display,
+                def.line,
+                def.column,
+                def.kind.as_str()
+            ));
+            if let Some(sig) = &def.signature {
+                // S7-R46: Expand tabs to spaces
+                let sig_clean = sig.replace('\t', "    ");
+                output.push_str(&format!("    {}\n", sig_clean.trim()));
+            }
         }
         output.push('\n');
     }
@@ -324,6 +345,13 @@ mod tests {
                 kind: DefinitionKind::Function,
                 signature: Some("def test_func(x: int) -> str:".to_string()),
             }),
+            definitions: vec![Definition {
+                file: PathBuf::from("src/lib.py"),
+                line: 42,
+                column: 5,
+                kind: DefinitionKind::Function,
+                signature: Some("def test_func(x: int) -> str:".to_string()),
+            }],
             references: vec![
                 Reference::new(
                     PathBuf::from("src/main.py"),
@@ -424,6 +452,13 @@ mod tests {
             kind: DefinitionKind::Function,
             signature: Some("def test_func(x: int) -> str:".to_string()),
         });
+        report.definitions = vec![Definition {
+            file: PathBuf::from("/home/user/project/src/lib.py"),
+            line: 42,
+            column: 5,
+            kind: DefinitionKind::Function,
+            signature: Some("def test_func(x: int) -> str:".to_string()),
+        }];
         report.references = vec![
             Reference::new(
                 PathBuf::from("/home/user/project/src/main.py"),
@@ -480,6 +515,7 @@ mod tests {
         let report = ReferencesReport {
             symbol: "test_func".to_string(),
             definition: None,
+            definitions: Vec::new(),
             references: vec![
                 Reference::with_details(
                     PathBuf::from("src/a.py"),

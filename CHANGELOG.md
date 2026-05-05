@@ -1,5 +1,139 @@
 # Changelog
 
+## detection-accuracy-v1 — internal milestone
+
+NOT a published release. Closes 4 audit-found bugs that gave wrong or
+misleading answers to security and dead-code questions: `tldr dead`
+flagged 259 functions on ripgrep — 100% of which were
+`#[test]`-marked or lived inside a `#[cfg(test)] mod tests {}` block,
+because the Rust function extractor never read attribute siblings or
+walked enclosing `mod_item` ancestors, so every `dead`-marked entry
+arrived at the dead-code analyzer with `is_test: false`; `tldr vuln`
+labelled Express/NestJS/Fastify/Next.js redirect sinks
+(`res.redirect`, `reply.redirect`, `NextResponse.redirect`, bare
+`redirect()`) as `path_traversal` / CWE-22 / "FileWrite with
+unsanitized input", because every redirect pattern in the JS sink
+bank was wired to `TaintSinkType::FileWrite` which projected to
+`VulnType::PathTraversal` via `vuln_type_from_sink` — wrong CWE,
+wrong vuln-type, wrong remediation; the canonical taint engine emitted
+"degenerate" findings whose source and sink were the SAME statement
+(e.g. `let file = File::open(path)?;` — `path` is tainted untrusted
+data and `File::open` is the FileOpen sink, both on one line),
+producing JSON `taint_flow` arrays with two identical entries that
+misrepresented a one-step direct invocation as a multi-step
+propagation; and `tldr references` emitted `definition: <single
+object>` even when multiple definitions existed (flask
+`_make_timedelta` is defined in BOTH `src/flask/sansio/app.py:52`
+AND `src/flask/app.py:73`), AND the text formatter hard-coded
+"Definition:" (singular) regardless of count, even when listing two
+or more entries underneath. Binary-verified against
+`/tmp/repos/ripgrep`, `/tmp/repos/express`, `/tmp/repos/ts-dom-gen`,
+`/tmp/repos/flask` and gated by 4 regression tests in
+`crates/tldr-cli/tests/detection_accuracy_v1.rs`.
+`vuln_migration_v1_red`: 168/168 GREEN. M1
+(`determinism_and_stderr_hygiene_v1`): 5/5 GREEN. M2
+(`cross_command_consistency_v1`): 7/7 GREEN.
+
+| Bug | File:Line | Before | After |
+|-----|-----------|--------|-------|
+| BUG-4 | `crates/tldr-core/src/ast/extract.rs:2671-2783` (new `extract_rust_function_attributes` + `parse_rust_attribute_item`); `crates/tldr-core/src/analysis/dead.rs:567-590` (extended `has_test_decorator`) | `tldr dead /tmp/repos/ripgrep` → 259 entries in `possibly_dead`, ALL with `is_test: false`, including `config_error_heap_limit` at `crates/searcher/src/searcher/mod.rs:1053` (a `#[test] fn` inside `#[cfg(test)] mod tests {}`) | 13 entries (down 95%); `config_error_heap_limit` is gone; every test-marked function (`#[test]`, `#[tokio::test]`, fns inside `mod tests {}` / `#[cfg(test)] mod ...`) is excluded |
+| BUG-16 | `crates/tldr-core/src/security/taint.rs:174-179` (new `TaintSinkType::OpenRedirect`); `crates/tldr-core/src/security/taint.rs:1995-2098` (rerouted JS redirect entries from `FileWrite` to `OpenRedirect`); `crates/tldr-core/src/security/vuln.rs:60-95`, `:213-225`, `:357-385` (new `VulnType::OpenRedirect` + projection + CWE + remediation); `crates/tldr-cli/src/commands/remaining/vuln.rs:592-595` (CLI map) | `tldr vuln /tmp/repos/express \| jq .findings[0]` → `vuln_type: "path_traversal"`, `cwe_id: "CWE-22"`, `description: "FileWrite with unsanitized input"`, `Sink: FileWrite` for `res.redirect('/user/' + id)` | `vuln_type: "open_redirect"`, `cwe_id: "CWE-601"`, `description: "OpenRedirect with unsanitized input"`, `Sink: OpenRedirect`; FileWrite/PathTraversal regressions guarded by 168/168 RED suite |
+| BUG-17 | `crates/tldr-core/src/security/vuln.rs:774-810` (engine-level same-line+same-var+same-statement suppression for the source-equals-source double-counting case); `crates/tldr-cli/src/commands/remaining/vuln.rs:493-554` (CLI-level direct-sink annotation: collapses `taint_flow` to a single entry + sets `direct_sink: true` when source.expression == sink.expression on the same line) | `tldr vuln --lang typescript /tmp/repos/ts-dom-gen \| jq .findings[0].taint_flow` → two identical entries with `code_snippet: "const content = await fs.readFile(...)"` differing only by `description: "Source: Untrusted file read"` vs `"Sink: FileOpen"` | single-element `taint_flow` with `description: "Direct sink: FileOpen (source: Untrusted file read)"` and a top-level `direct_sink: true` field on the finding; ZERO findings on `/tmp/repos/ripgrep` and `/tmp/repos/ts-dom-gen` have a degenerate dual-entry flow |
+| BUG-20 | `crates/tldr-core/src/analysis/references.rs:65-127` (added `definitions: Vec<Definition>` to `ReferencesReport`); `:2724-2780` (new `find_definitions` plural API; singular `find_definition` is now a first-element view); `:3270-3340` (`find_references` populates both fields); `crates/tldr-cli/src/commands/references.rs:233-300` (text formatter prefers `definitions`, prints "Definitions:" plural when count > 1) | `tldr references _make_timedelta /tmp/repos/flask --format text` → header "Definition:" (singular) followed by 2 entries; JSON `.definition` is a single object | text header is "Definitions:" with both entries listed; JSON now exposes `definitions: [...]` as a 2-entry array (singular `definition` retained for back-compat as the first element) |
+
+### Changed
+
+- **BUG-4** — `crates/tldr-core/src/ast/extract.rs`: every Rust
+  `function_item` extracted by `extract_rust_function_info` now runs
+  through a new `extract_rust_function_attributes` helper that (a)
+  walks `prev_sibling` for `attribute_item` nodes (skipping
+  doc-comment `line_comment` / `block_comment` siblings interleaved
+  between attributes) and parses each `#[ ... ]` form via
+  `parse_rust_attribute_item`, and (b) walks the chain of enclosing
+  `mod_item` ancestors. For each ancestor module it (i) checks the
+  module name against a heuristic — `test`, `tests`, `test_*`,
+  `*_test`, `*_tests`, anything containing `testutil` — and (ii)
+  inspects that module's own `prev_sibling` attributes for
+  `#[cfg(test)]` / `#[cfg_attr(test, ...)]`. Either signal causes a
+  synthetic `cfg(test)` decorator string to be appended. The dead-
+  code analyzer's existing `has_test_decorator` predicate (now in
+  `crates/tldr-core/src/analysis/dead.rs:567-590`) is extended to
+  recognise `cfg(test)`, `cfg_attr(test, ...)`, `tokio::test`,
+  `async_std::test`, `wasm_bindgen_test`, `rstest`, `proptest`, plus
+  any decorator containing `::test`. The downstream chain
+  (`collect_all_functions` → `is_test = … || has_test_decorator(...)`
+  → dead-code filter) was already correct; the entire bug was in the
+  empty-decorator pipeline plumbing.
+- **BUG-16** — `crates/tldr-core/src/security/taint.rs`: introduced
+  `TaintSinkType::OpenRedirect` as a peer to the existing
+  `FileOpen`/`FileWrite`/`HttpRequest`/`HtmlOutput`/etc. variants and
+  rerouted every JS redirect sink pattern there:
+  `(NextResponse|Response, redirect)`, bare `redirect(...)` from
+  `next/navigation`, `(reply, redirect)` (Fastify),
+  `(res|response, redirect)` (Express/NestJS). `(reply, header)`
+  stays under `FileWrite` — there is no dedicated header-injection
+  sink yet. `crates/tldr-core/src/security/vuln.rs`: added
+  `VulnType::OpenRedirect`, extended `vuln_type_from_sink`,
+  `get_remediation`, `get_cwe_id` (CWE-601), `Display`, and
+  `sink_type_precedence` (rank 35, below SSRF). The CLI mapping in
+  `crates/tldr-cli/src/commands/remaining/vuln.rs:584-595` (the
+  match is deliberately exhaustive — no `_` arm — so adding a new
+  core variant is a hard compile error) was extended with the
+  `OpenRedirect → OpenRedirect` arm. The CLI's `VulnType` enum
+  already had an `OpenRedirect` variant from a prior milestone; the
+  display name, CWE, and severity defaults flow through unchanged.
+- **BUG-17** — `crates/tldr-core/src/security/vuln.rs`: added the
+  same-line+same-var+same-statement suppression in `scan_file_vulns`
+  before the dedupe phase. The `source.var == sink.var` guard is
+  load-bearing: a single statement can legitimately host BOTH a
+  source (`id = params[:id]` introduces tainted `id`) AND a sink
+  consuming that `id` later on the same line (e.g. Ruby/Lua's
+  `db.execute("... " + id)` from the v1 RED suite); empirically
+  these have distinct `sink.var` (the call-expression text vs the
+  source variable), so the guard leaves them alone while killing the
+  Python-style same-var double-counting class. The complementary
+  CLI-level fix in `crates/tldr-cli/src/commands/remaining/vuln.rs`
+  detects the `source.expression == sink.expression && source.line ==
+  sink.line && !source.expression.is_empty()` shape that survives
+  the engine-level filter (typically Rust `let f = File::open(path)?`
+  where `source.var = file` ≠ `sink.var = path` but both records
+  point to the same statement) and emits a single-element `taint_flow`
+  with `description: "Direct sink: <Sink> (source: <Source>)"` plus
+  `direct_sink: true` on the finding. The new `direct_sink: bool`
+  field on `crates/tldr-cli/src/commands/remaining/types.rs:1551-1592`
+  is `#[serde(default, skip_serializing_if = "is_false")]` so it
+  vanishes from the JSON for non-degenerate findings (zero schema
+  bloat on the common path).
+- **BUG-20** — `crates/tldr-core/src/analysis/references.rs`: split
+  `find_definition` into a thin first-element view over the new
+  `find_definitions` plural API. Both walk every source file under
+  the project root, collect `Definition` candidates, sort by
+  canonical-def tier (src > non-test > test) then path then line.
+  Pre-fix the singular helper would `break` on the first match,
+  hiding additional definitions in lower-priority files. The
+  `ReferencesReport` struct gains a `definitions: Vec<Definition>`
+  field (always serialized) and retains `definition: Option<Definition>`
+  populated as `definitions.first().cloned()` for backward
+  compatibility with every existing JSON consumer (the singular
+  field is `#[serde(skip_serializing_if = "Option::is_none")]` so
+  no-match cases continue to emit `definitions: []` without the
+  singular key). `crates/tldr-cli/src/commands/references.rs:233-300`:
+  the text formatter now prefers `report.definitions` over
+  `report.definition`, prints `"Definitions:"` (plural) when the
+  count exceeds one, and lists every entry with its file/line/column
+  and signature.
+
+### Tests
+
+- New regression file `crates/tldr-cli/tests/detection_accuracy_v1.rs`
+  with 4 tests: `rust_test_attribute_excluded_from_dead` (BUG-4),
+  `js_redirect_classified_as_open_redirect` (BUG-16),
+  `degenerate_source_eq_sink_suppressed_or_annotated` (BUG-17),
+  `references_definitions_array_and_text_header_plural` (BUG-20).
+- M2 (`cross_command_consistency_v1`): 7/7 GREEN.
+- M1 (`determinism_and_stderr_hygiene_v1`): 5/5 GREEN.
+- Master regression (`vuln_migration_v1_red`): 168/168 GREEN.
+
 ## cross-command-consistency-v1 — internal milestone
 
 NOT a published release. Closes 4 audit-found bugs that made command

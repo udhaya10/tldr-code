@@ -567,7 +567,26 @@ fn is_test_function_name(name: &str) -> bool {
 fn has_test_decorator(decorators: &[String]) -> bool {
     decorators.iter().any(|d| {
         let lower = d.to_lowercase();
-        lower == "test" || lower == "pytest.mark.parametrize" || lower.starts_with("test")
+        // Direct test markers (covers Python `@pytest.mark.parametrize`, generic
+        // `test`/`testXxx`, plus Rust `#[test]`).
+        if lower == "test"
+            || lower == "pytest.mark.parametrize"
+            || lower.starts_with("test")
+        {
+            return true;
+        }
+        // Rust ecosystem test attributes: `#[tokio::test]`, `#[async_std::test]`,
+        // `#[wasm_bindgen_test]`, `#[rstest]`, `#[proptest]`, `#[serial_test::serial]`,
+        // and any `cfg(test)` / `cfg_attr(test, ...)` (synthesized for functions that
+        // live inside `#[cfg(test)] mod tests {}` / `mod tests {}`).
+        lower.contains("::test")
+            || lower.starts_with("tokio::test")
+            || lower.starts_with("async_std::test")
+            || lower.starts_with("wasm_bindgen_test")
+            || lower.starts_with("rstest")
+            || lower.starts_with("proptest")
+            || lower.contains("cfg(test")
+            || lower.contains("cfg_attr(test")
     })
 }
 

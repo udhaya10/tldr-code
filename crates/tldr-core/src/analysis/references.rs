@@ -67,9 +67,26 @@ pub struct ReferencesReport {
     /// Symbol that was searched for
     pub symbol: String,
 
-    /// Definition location (if found)
+    /// Definition location (legacy/back-compat: first definition only).
+    ///
+    /// M3 detection-accuracy-v1 BUG-20: this field is retained for backward
+    /// compatibility but is now a derived view of the first entry in
+    /// `definitions`. Prefer `definitions` for new consumers — see the
+    /// `definitions_array_and_text_header_plural` test in
+    /// `crates/tldr-cli/tests/detection_accuracy_v1.rs`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub definition: Option<Definition>,
+
+    /// All definitions found for the symbol (canonical multi-definition shape).
+    ///
+    /// Always serialized (even when empty) so downstream tools can reliably
+    /// iterate. Pre-M3 only `definition` (singular `Option<Definition>`) was
+    /// emitted, which silently truncated cases where a symbol had multiple
+    /// definitions across files (e.g. flask `_make_timedelta`). When this Vec
+    /// has more than one entry the text formatter prints "Definitions:" in the
+    /// plural and lists all entries. See M3 detection-accuracy-v1 BUG-20.
+    #[serde(default)]
+    pub definitions: Vec<Definition>,
 
     /// All references found (post-truncation; may be a prefix of the
     /// full set if `truncated == true`).
@@ -116,6 +133,7 @@ impl ReferencesReport {
         Self {
             symbol,
             definition: None,
+            definitions: Vec::new(),
             references: Vec::new(),
             total_references: 0,
             shown_references: 0,
@@ -2717,8 +2735,32 @@ pub fn find_definition(
     root: &Path,
     language: Option<&str>,
 ) -> TldrResult<Option<Definition>> {
-    // Collect ALL definitions across ALL files instead of returning the
-    // first match — this is the core change for references-canonical-def-v1.
+    // Back-compat singular: returns the first (highest-tier) definition only.
+    // M3 detection-accuracy-v1 BUG-20 introduced `find_definitions` (plural)
+    // to return ALL of them; this helper now delegates to that and picks the
+    // first to preserve every existing caller's contract.
+    Ok(find_definitions(symbol, root, language)?.into_iter().next())
+}
+
+/// Find every definition of `symbol` reachable under `root`.
+///
+/// Pre-M3 the references engine only ever surfaced ONE definition (the
+/// highest-tier match). Languages with overload-style multi-definition
+/// patterns — flask's `_make_timedelta` having two distinct top-level
+/// definitions in `sansio/app.py` and `app.py`, Python `@overload`d
+/// signatures, TypeScript declaration-merging, Rust trait impls — were
+/// silently collapsed. M3 detection-accuracy-v1 BUG-20 introduces this
+/// plural API; the singular [`find_definition`] is now a thin first-element
+/// view over it for back-compat.
+///
+/// Result is sorted by canonical-def tier (src > non-test > test), then
+/// path, then line — matching the ordering [`find_definition`] previously
+/// used to choose its single winner.
+pub fn find_definitions(
+    symbol: &str,
+    root: &Path,
+    language: Option<&str>,
+) -> TldrResult<Vec<Definition>> {
     let mut candidates: Vec<Definition> = Vec::new();
 
     for entry in walk_project(root)
@@ -2728,10 +2770,6 @@ pub fn find_definition(
         if let Ok(Some(def)) = find_definition_in_file(symbol, entry.path(), language) {
             candidates.push(def);
         }
-    }
-
-    if candidates.is_empty() {
-        return Ok(None);
     }
 
     // Rank: tier 1 (non-test + src) > tier 2 (non-test) > tier 3 (test).
@@ -2745,7 +2783,7 @@ pub fn find_definition(
             .then_with(|| a.line.cmp(&b.line))
     });
 
-    Ok(candidates.into_iter().next())
+    Ok(candidates)
 }
 
 /// Compute the canonical-def ranking tier for a path.
@@ -3246,8 +3284,12 @@ pub fn find_references(
         })
         .collect();
 
-    // Step 4: Find definition (Phase 11)
-    let definition = find_definition(symbol, root, language)?;
+    // Step 4: Find definitions (Phase 11)
+    // M3 detection-accuracy-v1 BUG-20: collect ALL definitions, not just the
+    // first one. `definition` (singular) is preserved for back-compat as the
+    // first entry; `definitions` (plural) carries the full set.
+    let definitions = find_definitions(symbol, root, language)?;
+    let definition = definitions.first().cloned();
 
     // Apply kind filter if specified (Phase 13)
     if let Some(ref kinds) = options.kinds {
@@ -3285,6 +3327,7 @@ pub fn find_references(
     Ok(ReferencesReport {
         symbol: symbol.to_string(),
         definition,
+        definitions,
         references,
         total_references: total_verified,
         shown_references,
@@ -3816,6 +3859,12 @@ mod tests {
                 5,
                 DefinitionKind::Function,
             )),
+            definitions: vec![Definition::new(
+                PathBuf::from("src/auth.py"),
+                42,
+                5,
+                DefinitionKind::Function,
+            )],
             references: vec![Reference::new(
                 PathBuf::from("src/routes.py"),
                 15,

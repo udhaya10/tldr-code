@@ -499,16 +499,32 @@ fn analyze_file(path: &Path) -> Result<Vec<VulnFinding>, RemainingError> {
                         _ => Severity::Medium,
                     };
                     let file_str = f.file.display().to_string();
-                    VulnFinding {
-                        vuln_type,
-                        severity,
-                        cwe_id: f.cwe_id.unwrap_or_default(),
-                        title: format!("{:?}", f.vuln_type),
-                        description: format!("{} with unsanitized input", f.sink.sink_type),
-                        file: file_str.clone(),
-                        line: f.sink.line,
-                        column: 0,
-                        taint_flow: vec![
+                    // M3 detection-accuracy-v1 BUG-17: when the source and
+                    // sink collapse to the same statement (same file + line
+                    // + expression text), emit a single-element taint_flow
+                    // tagged `direct_sink: true` rather than two duplicate
+                    // entries. Pre-fix consumers saw the SAME code snippet
+                    // twice with different "Source:" / "Sink:" labels, which
+                    // misrepresents the dataflow as a multi-step propagation
+                    // when in reality it's a single direct invocation
+                    // (e.g. `let file = File::open(path)?` — path is
+                    // tainted, File::open is the sink, no propagation).
+                    let is_degenerate = f.source.line == f.sink.line
+                        && f.source.expression == f.sink.expression
+                        && !f.source.expression.is_empty();
+                    let taint_flow: Vec<TaintFlow> = if is_degenerate {
+                        vec![TaintFlow {
+                            file: file_str.clone(),
+                            line: f.sink.line,
+                            column: 0,
+                            code_snippet: f.sink.expression.clone(),
+                            description: format!(
+                                "Direct sink: {} (source: {})",
+                                f.sink.sink_type, f.source.source_type
+                            ),
+                        }]
+                    } else {
+                        vec![
                             TaintFlow {
                                 file: file_str.clone(),
                                 line: f.source.line,
@@ -517,15 +533,27 @@ fn analyze_file(path: &Path) -> Result<Vec<VulnFinding>, RemainingError> {
                                 description: format!("Source: {}", f.source.source_type),
                             },
                             TaintFlow {
-                                file: file_str,
+                                file: file_str.clone(),
                                 line: f.sink.line,
                                 column: 0,
                                 code_snippet: f.sink.expression.clone(),
                                 description: format!("Sink: {}", f.sink.sink_type),
                             },
-                        ],
+                        ]
+                    };
+                    VulnFinding {
+                        vuln_type,
+                        severity,
+                        cwe_id: f.cwe_id.unwrap_or_default(),
+                        title: format!("{:?}", f.vuln_type),
+                        description: format!("{} with unsanitized input", f.sink.sink_type),
+                        file: file_str,
+                        line: f.sink.line,
+                        column: 0,
+                        taint_flow,
                         remediation: f.remediation.clone(),
                         confidence: 0.85,
+                        direct_sink: is_degenerate,
                     }
                 })
                 .collect(),
@@ -590,6 +618,7 @@ fn map_core_vuln_type(core_ty: tldr_core::security::vuln::VulnType) -> VulnType 
         CoreVulnType::PathTraversal => VulnType::PathTraversal,
         CoreVulnType::Ssrf => VulnType::Ssrf,
         CoreVulnType::Deserialization => VulnType::Deserialization,
+        CoreVulnType::OpenRedirect => VulnType::OpenRedirect,
     }
 }
 
@@ -808,6 +837,7 @@ fn rust_finding(
         taint_flow: Vec::new(),
         remediation: remediation.to_string(),
         confidence,
+        direct_sink: false,
     }
 }
 
@@ -1645,6 +1675,7 @@ pub fn from_raw(bytes: &[u8]) -> &str {
             taint_flow: vec![],
             remediation: "Test remediation".to_string(),
             confidence: 0.9,
+            direct_sink: false,
         }
     }
 
@@ -1739,6 +1770,7 @@ pub fn from_raw(bytes: &[u8]) -> &str {
             }],
             remediation: "Sanitize input".to_string(),
             confidence: 0.9,
+            direct_sink: false,
         };
 
         let report = VulnReport {
