@@ -1056,6 +1056,18 @@ pub fn format_smells_text(report: &tldr_core::SmellsReport) -> String {
         report.smells.len().to_string().yellow()
     ));
 
+    // determinism-and-stderr-hygiene-v1 (BUG-18): render advisory
+    // messages from `report.warnings[]` to stdout so text-mode users
+    // still see the `--deep` hint that pre-fix went to stderr only.
+    // We render BEFORE the empty-smells short-circuit so the hint
+    // surfaces even on a clean repo.
+    for warning in &report.warnings {
+        output.push_str(&format!("{}\n", warning));
+    }
+    if !report.warnings.is_empty() {
+        output.push('\n');
+    }
+
     if report.smells.is_empty() {
         output.push_str("  No code smells detected.\n");
         return output;

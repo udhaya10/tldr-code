@@ -117,6 +117,7 @@ fn cli_smells_text_does_not_panic_on_cjk_smell_name() {
             avg_smells_per_file: 1.0,
         },
         excluded_test_smells: 0,
+        warnings: Vec::new(),
     };
 
     let out = format_smells_text(&report);

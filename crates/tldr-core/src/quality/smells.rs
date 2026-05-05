@@ -276,6 +276,15 @@ pub struct SmellsReport {
     /// payloads backward-compatible.
     #[serde(default)]
     pub excluded_test_smells: usize,
+    /// Non-fatal advisory messages surfaced for the user (e.g. "8 smell
+    /// analyzers require --deep flag"). Added in
+    /// determinism-and-stderr-hygiene-v1 (BUG-18) to relocate the
+    /// previously-stderr-only `--deep` hint into a structured field that
+    /// JSON consumers can introspect AND that the text formatter renders
+    /// to stdout. `#[serde(default)]` keeps cached daemon payloads
+    /// backward-compatible.
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
 
 /// Summary statistics for smell detection
@@ -518,6 +527,7 @@ pub fn detect_smells_with_walker_opts(
         by_file,
         summary,
         excluded_test_smells,
+        warnings: Vec::new(),
     })
 }
 
@@ -2709,6 +2719,7 @@ pub fn analyze_smells_aggregated_with_walker_opts(
         by_file,
         summary,
         excluded_test_smells,
+        warnings: Vec::new(),
     })
 }
 

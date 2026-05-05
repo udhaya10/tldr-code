@@ -36,8 +36,19 @@ pub fn detect_type1_type2(
         raw_hash_index.entry(frag.raw_hash).or_default().push(idx);
     }
 
+    // determinism-and-stderr-hygiene-v1 (BUG-2): iterating
+    // `raw_hash_index.values()` directly walked the HashMap in
+    // DefaultHasher order. When `options.max_clones` truncated the
+    // result (typical for real repos), DIFFERENT pairs were kept on
+    // each run. Walk a sorted-key view of the buckets so the surviving
+    // pairs are stable across processes. (Sort key = the u64 hash
+    // itself; we just need any total order over the buckets.)
+    let mut raw_hash_keys: Vec<u64> = raw_hash_index.keys().copied().collect();
+    raw_hash_keys.sort_unstable();
+
     // Step 2: Find Type-1 clones (exact raw token match)
-    for indices in raw_hash_index.values() {
+    for key in &raw_hash_keys {
+        let indices = &raw_hash_index[key];
         if indices.len() < 2 {
             continue;
         }
@@ -99,8 +110,13 @@ pub fn detect_type1_type2(
             .push(idx);
     }
 
+    // BUG-2 fix: deterministic walk of normalized-hash buckets too.
+    let mut norm_hash_keys: Vec<u64> = norm_hash_index.keys().copied().collect();
+    norm_hash_keys.sort_unstable();
+
     // Step 4: Find Type-2 clones (normalized token match, not already found as Type-1)
-    for indices in norm_hash_index.values() {
+    for key in &norm_hash_keys {
+        let indices = &norm_hash_index[key];
         if indices.len() < 2 {
             continue;
         }
@@ -224,9 +240,19 @@ pub fn detect_type3(
             }
         }
 
+        // determinism-and-stderr-hygiene-v1 (BUG-2): `shared_counts`
+        // is a HashMap; iterating directly walks it in DefaultHasher
+        // order. With `max_clones` truncation that produced different
+        // surviving pairs across runs. Sort entries by `other_idx`
+        // (fragment-index, deterministic per process because
+        // `fragments` is a Vec built in walker-traversal order) before
+        // the bounded loop so the same pairs are kept every run.
+        let mut shared_counts_sorted: Vec<(usize, usize)> = shared_counts.into_iter().collect();
+        shared_counts_sorted.sort_by_key(|(other_idx, _)| *other_idx);
+
         // Filter by minimum shared tokens
         let size1 = unique_tokens.len();
-        for (other_idx, shared) in shared_counts {
+        for (other_idx, shared) in shared_counts_sorted {
             if clone_pairs.len() >= options.max_clones {
                 break;
             }

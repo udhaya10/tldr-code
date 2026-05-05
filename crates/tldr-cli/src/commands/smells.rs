@@ -216,33 +216,37 @@ impl SmellsArgs {
             }
         }
 
-        // M14 (med-cleanup-bundle-v1): when --deep is absent, advertise
-        // exactly which smell analyzers were skipped so the user is not
-        // silently handed half the analysis surface. This used to be
-        // discoverable only via --help (which lists 18 types but does
-        // not say which require --deep).
+        // determinism-and-stderr-hygiene-v1 (BUG-18): the M14
+        // (med-cleanup-bundle-v1) deep-only-smells hint used to be
+        // unconditionally written to stderr via `eprintln!`, which
+        // broke the JSON-mode contract (`tldr smells <path> 2>err >
+        // out.json` always produced a non-empty stderr stream).
         //
-        // Print to stderr (so it does not contaminate JSON on stdout) and
-        // skip when --quiet is set (matches `writer.progress` semantics)
-        // or when the user asked for a single specific smell type via
-        // --smell-type (the warning would be misleading there).
-        if !self.deep && !quiet && self.smell_type.is_none() {
-            const DEEP_ONLY_SMELLS: &[&str] = &[
-                "low_cohesion",
-                "tight_coupling",
-                "dead_code",
-                "code_clone",
-                "high_cognitive_complexity",
-                "middle_man",
-                "refused_bequest",
-                "inappropriate_intimacy",
-            ];
-            eprintln!(
-                "Note: {} smell analyzers require --deep flag. Run with --deep for: {}",
-                DEEP_ONLY_SMELLS.len(),
-                DEEP_ONLY_SMELLS.join(", ")
-            );
-        }
+        // Relocate the same advisory into `SmellsReport.warnings` so
+        // BOTH JSON consumers (introspectable via `report.warnings[]`)
+        // AND text consumers (rendered to stdout by the text
+        // formatter — see `format_smells_text`) still see it. Skip
+        // injection when `--quiet`, when the user asked for a single
+        // smell type via `--smell-type` (warning would be misleading),
+        // or when `--deep` is set (the analyzers ARE running).
+        let deep_only_warning: Option<String> =
+            (!self.deep && !quiet && self.smell_type.is_none()).then(|| {
+                const DEEP_ONLY_SMELLS: &[&str] = &[
+                    "low_cohesion",
+                    "tight_coupling",
+                    "dead_code",
+                    "code_clone",
+                    "high_cognitive_complexity",
+                    "middle_man",
+                    "refused_bequest",
+                    "inappropriate_intimacy",
+                ];
+                format!(
+                    "Note: {} smell analyzers require --deep flag. Run with --deep for: {}",
+                    DEEP_ONLY_SMELLS.len(),
+                    DEEP_ONLY_SMELLS.join(", ")
+                )
+            });
 
         // Fallback to direct compute
         writer.progress(&format!(
@@ -258,7 +262,7 @@ impl SmellsArgs {
             files: validated_files,
             include_tests,
         };
-        let report = if self.deep {
+        let mut report = if self.deep {
             analyze_smells_aggregated_with_walker_opts(
                 &self.path,
                 self.threshold.into(),
@@ -275,6 +279,10 @@ impl SmellsArgs {
                 walker_opts,
             )?
         };
+
+        if let Some(msg) = deep_only_warning {
+            report.warnings.push(msg);
+        }
 
         // Output based on format
         if writer.is_text() {

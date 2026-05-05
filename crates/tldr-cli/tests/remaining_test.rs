@@ -2901,11 +2901,22 @@ def search():
             .output()
             .unwrap();
 
-        // Per spec: exit code 2 when vulnerabilities found
+        // determinism-and-stderr-hygiene-v1 (BUG-1): a successful scan exits
+        // 0 regardless of finding count. The pre-fix contract (exit 2 on
+        // non-empty findings) made every passing scan-with-findings look
+        // like a tool failure to CI integrations and produced an
+        // ungrammatical "Error: 1 findings detected" stderr line. The
+        // count is conveyed by `summary.total_findings` in the JSON.
         assert_eq!(
             output.status.code(),
-            Some(2),
-            "Exit code should be 2 when vulnerabilities found"
+            Some(0),
+            "Exit code should be 0 when scan completes successfully (regardless of findings)"
+        );
+        // Stderr must be empty on a successful scan (no "Error:" leak).
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.is_empty(),
+            "stderr must be empty on successful scan; got: {stderr}"
         );
     }
 

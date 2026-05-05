@@ -315,11 +315,20 @@ impl VulnArgs {
             println!("{}", output_str);
         }
 
-        // Exit code: 2 if vulnerabilities found (per spec)
-        if !filtered_findings.is_empty() {
-            return Err(RemainingError::findings_detected(filtered_findings.len() as u32).into());
-        }
-
+        // determinism-and-stderr-hygiene-v1 (BUG-1): a successful scan exits 0
+        // regardless of whether findings were detected. Pre-fix the path
+        // returned `Err(RemainingError::findings_detected(_))` whenever
+        // `filtered_findings` was non-empty, which surfaced as
+        // `Error: 1 findings detected` on stderr AND exit code 2 — both
+        // "real error" signals that broke CI integrations (every passing
+        // scan-with-findings looked like a tool failure) and contaminated
+        // grammar (`1 findings`, plural form for a single finding). The
+        // count is already conveyed by `summary.total_findings` in the
+        // JSON / SARIF output, so consumers that want a non-zero exit
+        // can branch on that. Aligns with `tldr secure`, which already
+        // returned `Ok(())` on completion regardless of finding count
+        // (see `crates/tldr-cli/src/commands/remaining/secure.rs` —
+        // it exits 0 unconditionally on a successful scan).
         Ok(())
     }
 }
@@ -1460,11 +1469,12 @@ pub fn from_raw(bytes: &[u8]) -> &str {
 
     /// Run VulnArgs in JSON mode and return the parsed findings array.
     ///
-    /// `VulnArgs::run` deliberately returns `Err(RemainingError::findings_detected(_))`
-    /// whenever the post-filter findings vector is non-empty (CLI exit-code-2
-    /// contract per spec). The JSON output file is written BEFORE that error
-    /// is constructed, so for round-trip introspection in tests we ignore the
-    /// `Result` and read the file directly.
+    /// determinism-and-stderr-hygiene-v1 (BUG-1): `VulnArgs::run` now returns
+    /// `Ok(())` regardless of finding count (was previously
+    /// `Err(RemainingError::findings_detected(_))` for non-empty results
+    /// to surface the spec'd exit-code 2). We still ignore the result here
+    /// because the helper is shape-agnostic — it only reads the on-disk
+    /// JSON output, which is written before `run` returns either way.
     fn run_and_parse_findings(args: &VulnArgs) -> Vec<serde_json::Value> {
         let _ = args.run(OutputFormat::Json);
         let output_path = args.output.as_ref().unwrap();

@@ -129,8 +129,18 @@ impl InheritanceArgs {
             }
         }
 
-        // Summary if not quiet
-        if !quiet {
+        // determinism-and-stderr-hygiene-v1 (BUG-18): the summary
+        // ("Found N classes in Mms") and diamond-inheritance warning
+        // were unconditionally written to stderr, which contaminated
+        // the JSON-mode contract — `tldr inheritance <path> 2>/dev/null
+        // > out.json` produced a clean JSON file but a non-empty stderr
+        // stream, breaking shell pipelines that gate on stderr-empty.
+        // Gate on text format: text consumers still see the summary
+        // (now via a writer-aware path), JSON consumers get a clean
+        // stream. The information is already in the JSON
+        // (`report.count`, `report.scan_time_ms`, `report.diamonds`),
+        // so no data loss for downstream tooling.
+        if !quiet && writer.is_text() {
             eprintln!(
                 "Found {} classes in {}ms",
                 report.count, report.scan_time_ms

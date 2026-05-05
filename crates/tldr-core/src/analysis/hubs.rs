@@ -603,8 +603,22 @@ pub fn compute_pagerank(
     let d = config.damping;
     let base_score = (1.0 - d) / n_f64;
 
+    // determinism-and-stderr-hygiene-v1 (BUG-3): the iteration loop below
+    // walks `nodes` (a `HashSet<FunctionRef>`) per iteration. HashSet
+    // iteration order is non-deterministic (DefaultHasher seeds per
+    // process), and floating-point summation is non-associative, so
+    // identical inputs produced last-digit drift across runs of
+    // `tldr hubs <repo>` — enough to shuffle the top-N when scores
+    // were near-tied. Materialize a deterministic, sorted node list
+    // ONCE and reuse it for every iteration so accumulation order is
+    // stable across processes. Sort key is `(file, name)`, which is
+    // the FunctionRef identity tuple per its PartialEq/Hash impls
+    // (`crates/tldr-core/src/types.rs:1429-1443`).
+    let mut sorted_nodes: Vec<FunctionRef> = nodes.iter().cloned().collect();
+    sorted_nodes.sort_by(|a, b| a.file.cmp(&b.file).then_with(|| a.name.cmp(&b.name)));
+
     // Initialize scores uniformly
-    let mut scores: HashMap<FunctionRef, f64> = nodes
+    let mut scores: HashMap<FunctionRef, f64> = sorted_nodes
         .iter()
         .map(|node| (node.clone(), 1.0 / n_f64))
         .collect();
@@ -612,7 +626,7 @@ pub fn compute_pagerank(
     // Pre-compute out-degrees on reversed graph (= number of callers for each node)
     // For reverse PageRank, "out-degree" is the number of callees (who we point to in the original)
     // But we're computing importance based on who calls us, so we use the reverse graph
-    let out_degrees: HashMap<FunctionRef, usize> = nodes
+    let out_degrees: HashMap<FunctionRef, usize> = sorted_nodes
         .iter()
         .map(|node| {
             // Out-degree in the reverse graph = number of nodes this node points to in reverse
@@ -623,8 +637,11 @@ pub fn compute_pagerank(
         .collect();
 
     // Identify dangling nodes (nodes with no outgoing edges in the original graph)
-    // These are leaf functions that don't call anything
-    let dangling_nodes: Vec<FunctionRef> = nodes
+    // These are leaf functions that don't call anything. Iterating
+    // `sorted_nodes` (deterministic order) ensures the resulting Vec
+    // matches across runs — the `dangling_sum` reduction below depends
+    // on this for byte-stable PageRank values.
+    let dangling_nodes: Vec<FunctionRef> = sorted_nodes
         .iter()
         .filter(|node| out_degrees.get(*node).copied().unwrap_or(0) == 0)
         .cloned()
@@ -643,16 +660,26 @@ pub fn compute_pagerank(
         let mut new_scores: HashMap<FunctionRef, f64> = HashMap::new();
         let mut max_delta: f64 = 0.0;
 
-        for node in nodes {
+        // Iterate the sorted node list (BUG-3 fix) so float
+        // accumulation order is identical across runs; iterating
+        // `nodes` directly walked the HashSet in DefaultHasher order.
+        // We also sort each `callers` slice from `reverse_graph` by
+        // (file, name) before reducing into `incoming_contrib` —
+        // upstream callgraph builders return Vec<FunctionRef> whose
+        // order tracked HashMap insertion order, which is also
+        // process-non-deterministic.
+        for node in &sorted_nodes {
             // Contribution from nodes that call this node (reverse graph)
             // In the original graph, these are the callers of `node`
             let incoming_contrib: f64 = reverse_graph.get(node).map_or(0.0, |callers| {
-                callers
+                let mut sorted_callers: Vec<&FunctionRef> = callers.iter().collect();
+                sorted_callers.sort_by(|a, b| a.file.cmp(&b.file).then_with(|| a.name.cmp(&b.name)));
+                sorted_callers
                     .iter()
                     .map(|caller| {
-                        let caller_out_deg = out_degrees.get(caller).copied().unwrap_or(0);
+                        let caller_out_deg = out_degrees.get(*caller).copied().unwrap_or(0);
                         if caller_out_deg > 0 {
-                            scores[caller] / caller_out_deg as f64
+                            scores[*caller] / caller_out_deg as f64
                         } else {
                             0.0
                         }
@@ -1334,11 +1361,30 @@ pub fn compute_hub_report_with_lines(
         all_scores.retain(|s| s.composite_score >= thresh);
     }
 
-    // Sort by composite score descending
+    // determinism-and-stderr-hygiene-v1 (BUG-3): every sort_by below
+    // previously broke ties by leaving original-Vec order, but the
+    // input Vec was `nodes.iter()` over a HashSet — process-non-
+    // deterministic. When several functions had identical (or
+    // FP-near-identical) scores, the top-N list shuffled across runs.
+    // Add `(file, name)` as a final tiebreaker on every sort so the
+    // total order is stable. (PageRank values themselves are now
+    // byte-stable per the `compute_pagerank` fix above, so the
+    // tiebreaker rarely fires for the primary `composite_score` sort
+    // — but the by_* breakdowns can still tie on integer in_degree /
+    // out_degree, where this matters.)
+    fn hub_id_tiebreak(a: &HubScore, b: &HubScore) -> std::cmp::Ordering {
+        a.function_ref
+            .file
+            .cmp(&b.function_ref.file)
+            .then_with(|| a.function_ref.name.cmp(&b.function_ref.name))
+    }
+
+    // Sort by composite score descending, with file/name tiebreaker
     all_scores.sort_by(|a, b| {
         b.composite_score
             .partial_cmp(&a.composite_score)
             .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| hub_id_tiebreak(a, b))
     });
 
     // Take top K
@@ -1348,12 +1394,13 @@ pub fn compute_hub_report_with_lines(
     // Build by_* breakdowns (only for 'all' algorithm)
     let (by_in_degree, by_out_degree, by_pagerank, by_betweenness) =
         if matches!(algorithm, HubAlgorithm::All) {
-            // Sort copies by each measure
+            // Sort copies by each measure (each with file/name tiebreaker)
             let mut by_in: Vec<HubScore> = hubs.clone();
             by_in.sort_by(|a, b| {
                 b.in_degree
                     .partial_cmp(&a.in_degree)
                     .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| hub_id_tiebreak(a, b))
             });
 
             let mut by_out: Vec<HubScore> = hubs.clone();
@@ -1361,20 +1408,25 @@ pub fn compute_hub_report_with_lines(
                 b.out_degree
                     .partial_cmp(&a.out_degree)
                     .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| hub_id_tiebreak(a, b))
             });
 
             let mut by_pr: Vec<HubScore> = hubs.clone();
             by_pr.sort_by(|a, b| {
                 let a_pr = a.pagerank.unwrap_or(0.0);
                 let b_pr = b.pagerank.unwrap_or(0.0);
-                b_pr.partial_cmp(&a_pr).unwrap_or(std::cmp::Ordering::Equal)
+                b_pr.partial_cmp(&a_pr)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| hub_id_tiebreak(a, b))
             });
 
             let mut by_bc: Vec<HubScore> = hubs.clone();
             by_bc.sort_by(|a, b| {
                 let a_bc = a.betweenness.unwrap_or(0.0);
                 let b_bc = b.betweenness.unwrap_or(0.0);
-                b_bc.partial_cmp(&a_bc).unwrap_or(std::cmp::Ordering::Equal)
+                b_bc.partial_cmp(&a_bc)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| hub_id_tiebreak(a, b))
             });
 
             (by_in, by_out, by_pr, by_bc)

@@ -115,6 +115,36 @@ pub fn detect_clones(path: &Path, options: &ClonesOptions) -> anyhow::Result<Clo
         clone_pairs.extend(type3_pairs);
     }
 
+    // determinism-and-stderr-hygiene-v1 (BUG-2): both `detect_type1_type2`
+    // and `detect_type3` walk `HashMap<u64, Vec<usize>>` /
+    // `HashMap<usize, usize>` buckets via `.values()` / `.iter()`, whose
+    // iteration order is non-deterministic across runs (DefaultHasher
+    // seeds per-process). The same set of pairs is found, but the order
+    // of `clone_pairs[]` shuffles across invocations, so two runs of
+    // `tldr clones <repo>` produce byte-different stdout — breaking
+    // CI byte-diff gates and any downstream tooling that hashes the
+    // report. Sort here, BEFORE id assignment, so IDs are also stable.
+    // Tiebreaker chain matches `ClonePair::canonical()` ordering
+    // (`fragment1.file → fragment1.start_line → fragment2.file →
+    // fragment2.start_line`) plus `clone_type` and `similarity` to
+    // produce a total order over the bag.
+    clone_pairs.sort_by(|a, b| {
+        a.fragment1
+            .file
+            .cmp(&b.fragment1.file)
+            .then_with(|| a.fragment1.start_line.cmp(&b.fragment1.start_line))
+            .then_with(|| a.fragment1.end_line.cmp(&b.fragment1.end_line))
+            .then_with(|| a.fragment2.file.cmp(&b.fragment2.file))
+            .then_with(|| a.fragment2.start_line.cmp(&b.fragment2.start_line))
+            .then_with(|| a.fragment2.end_line.cmp(&b.fragment2.end_line))
+            .then_with(|| (a.clone_type as u8).cmp(&(b.clone_type as u8)))
+            .then_with(|| {
+                b.similarity
+                    .partial_cmp(&a.similarity)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+    });
+
     // Assign sequential 1-indexed IDs
     for (i, pair) in clone_pairs.iter_mut().enumerate() {
         pair.id = i + 1;

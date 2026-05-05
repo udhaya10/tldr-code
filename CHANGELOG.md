@@ -1,5 +1,131 @@
 # Changelog
 
+## determinism-and-stderr-hygiene-v1 — internal milestone
+
+NOT a published release. Closes 4 audit-found bugs that broke CI
+integrations and byte-stable output: `tldr vuln` exited with code 2 and
+"Error: 1 findings detected" on stderr whenever a scan completed with
+non-empty findings (every successful-with-findings run looked like a
+tool failure to CI; grammar disagreed with count); `tldr clones`
+HashMap-iteration order shuffled `clone_pairs[]` across runs (and, when
+`max_clones` truncated, even retained DIFFERENT pairs); `tldr hubs`
+PageRank produced non-deterministic top-N and last-digit float drift
+because the iterative reduction walked a `HashSet<FunctionRef>` per
+iteration; `tldr inheritance` and `tldr smells` leaked progress /
+advisory text to stderr in JSON mode, breaking shell pipelines that
+gate on stderr-empty. Binary-verified against `/tmp/repos/{express,
+flask}` and gated by 5 regression tests in
+`crates/tldr-cli/tests/determinism_and_stderr_hygiene_v1.rs`.
+`vuln_migration_v1_red`: 168/168 GREEN. All AA/AB/AC/AD/AE/AF prior
+milestones still hold.
+
+### Changed
+
+- **BUG-1** — `crates/tldr-cli/src/commands/remaining/vuln.rs:312-323`:
+  removed the `Err(RemainingError::findings_detected(_))` return arm
+  that fired whenever `filtered_findings` was non-empty. The CLI now
+  exits 0 on any successful scan regardless of finding count, mirroring
+  `tldr secure` (which already returned `Ok(())` on completion). The
+  count is conveyed via `summary.total_findings` in the JSON / SARIF
+  output for consumers that want to branch on it. Updated
+  `crates/tldr-cli/tests/remaining_test.rs:test_vuln_exit_code_findings`
+  to assert exit 0 + empty stderr (was: exit 2).
+- **BUG-2** — `crates/tldr-core/src/analysis/clones/detect.rs:34-99`
+  and `:185-289`: replaced direct `HashMap::values()` walks of the
+  raw-hash and normalized-hash bucket indexes with sorted-key views
+  (`raw_hash_keys.sort_unstable()` / `norm_hash_keys.sort_unstable()`).
+  Sorted the `shared_counts` HashMap entries by `other_idx` before the
+  bounded Type-3 loop. Final `clone_pairs[]` is then sorted in
+  `crates/tldr-core/src/analysis/clones/mod.rs:117-145` by
+  `(fragment1.file, fragment1.start_line, fragment1.end_line,
+  fragment2.file, fragment2.start_line, fragment2.end_line, clone_type,
+  similarity)` BEFORE id assignment so the 1-indexed `id` field is
+  also stable.
+- **BUG-3** — `crates/tldr-core/src/analysis/hubs.rs:602-685` (PageRank
+  iteration): materialize a deterministic `sorted_nodes: Vec<FunctionRef>`
+  ONCE (sorted by `(file, name)`, the FunctionRef identity tuple per
+  the PartialEq/Hash impl at `crates/tldr-core/src/types.rs:1429-1443`)
+  and walk that on every iteration instead of the input
+  `HashSet<FunctionRef>` — the float reduction is now associative-stable
+  across processes. Each `reverse_graph[node]` callers slice is also
+  sorted before the inner reduction. Top-N selection in
+  `crates/tldr-core/src/analysis/hubs.rs:1364-1395` now adds a
+  `(file, name)` final tiebreaker on the primary `composite_score`
+  sort and on each `by_in / by_out / by_pr / by_bc` breakdown, so
+  equal-score ties no longer fall through to original-Vec order
+  (which itself was HashSet-derived).
+- **BUG-18** — `crates/tldr-cli/src/commands/inheritance.rs:132-156`:
+  gated the `Found N classes in Mms` summary and diamond-inheritance
+  warning behind `writer.is_text()` so JSON consumers see an empty
+  stderr; text consumers still get the summary.
+  `crates/tldr-cli/src/commands/smells.rs:219-289`: removed the
+  unconditional `eprintln!` of the `--deep` advisory hint; the same
+  string is now pushed into `SmellsReport.warnings[]` (new field on
+  `crates/tldr-core/src/quality/smells.rs:264-289`, `#[serde(default)]`
+  for daemon-cache backward compatibility), which the text formatter
+  renders to stdout (`crates/tldr-cli/src/output.rs:1059-1080`). Net
+  effect: stderr empty in both formats, `warnings[]` introspectable
+  in JSON, hint visible to text users on stdout.
+
+### Architectural note
+
+All four fixes preserve existing semantics:
+
+- BUG-1 keeps the JSON/SARIF schema identical and matches the parity
+  contract already in `vuln_secure_autodetect_parity_v1.rs` (which
+  accepted exit 0 OR 2; now both `vuln` and `secure` always exit 0 on
+  successful scans).
+- BUG-2's sort_unstable on `u64` hash keys is total and deterministic
+  per-process — the surviving pair set under `max_clones` is now a
+  function of bucket-key order rather than DefaultHasher seed.
+- BUG-3 routes every iteration of the PageRank loop through one
+  canonical `sorted_nodes` list, so `incoming_contrib` is summed in
+  the same order on every run. Float values themselves are now
+  byte-stable; the tiebreakers exist primarily for the integer-valued
+  `by_in_degree` / `by_out_degree` breakdowns where ties are common.
+- BUG-18 routes the `--deep` advisory through a structured
+  `warnings[]` field rather than removing it; both JSON consumers
+  (`jq '.warnings[]'`) and text users (rendered by the formatter)
+  retain visibility.
+
+### Retained
+
+- `RemainingError::FindingsDetected` variant and `findings_detected()`
+  constructor are kept in
+  `crates/tldr-cli/src/commands/remaining/error.rs` — no live producer
+  but the variant remains in case a future `--strict` flag wants to
+  re-introduce findings-as-error semantics opt-in.
+- Existing `vuln_autodetect_tests.rs:test_vuln_errors_on_unsupported_autodetected_lang`
+  still asserts exit 2 for the *unsupported autodetect language* path
+  (a real error condition, not a successful scan with findings). The
+  fix only removes the success-with-findings exit-2 path.
+- All tldr-core unit tests (4819) pass unchanged. The new
+  `SmellsReport.warnings` field is `#[serde(default)]` so existing
+  daemon JSON cache entries deserialize cleanly.
+
+### Quantification
+
+| Bug | Repro | Before | After |
+| --- | --- | --- | --- |
+| BUG-1 | `tldr vuln /tmp/repos/express; echo $?` | exit 2, `Error: 1 findings detected` on stderr | exit 0, stderr empty |
+| BUG-2 | 5 runs of `tldr clones /tmp/repos/flask` `md5 -q` (ignoring `stats.detection_time_ms`) | 5 distinct hashes (different `clone_pairs[]` entries AND order) | 1 hash |
+| BUG-3 | 5 runs of `tldr hubs /tmp/repos/{express,flask}` `md5 -q` | 5 distinct hashes (PageRank last-digit drift, top-N shuffled) | 1 hash per repo |
+| BUG-18 | `tldr inheritance /tmp/repos/flask 2>err > /dev/null; wc -c err` | 23 bytes ("Found 63 classes in 39ms") | 0 bytes |
+| BUG-18 | `tldr smells /tmp/repos/flask 2>err > out.json; wc -c err` | ~145 bytes ("Note: 8 smell analyzers require --deep flag …") | 0 bytes; same string now in `out.json`'s `warnings[]` |
+
+### Standing rules upheld
+
+- `Cargo.lock` not staged (no manifest changes).
+- No push, no `cargo publish`, no version bump (still v0.3.0).
+- 168/168 `vuln_migration_v1_red` GREEN before and after.
+- 5/5 new `determinism_and_stderr_hygiene_v1` tests GREEN.
+- All 4819 `tldr-core` unit tests GREEN.
+- Pre-existing test failures in `remaining_test::definition_command::test_definition_invalid_position`,
+  `remaining_test::secure_command::test_secure_detects_taint`, and
+  `tldr-core::tests::rr_module_function_integ_test::ruby_io_popen_with_user_input_via_compute_taint`
+  are unrelated to this milestone — none of those code paths were
+  touched (verified via `git diff --stat HEAD`).
+
 ## hubs-line-population-v1 — internal milestone
 
 NOT a published release. Surgical fix for a single MED bug surfaced by
