@@ -50,7 +50,18 @@ pub struct CallsArgs {
 #[derive(Debug, Serialize, Deserialize)]
 struct CallGraphOutput {
     root: PathBuf,
-    language: Language,
+    /// Resolved language. `None` (serialized as JSON `null`) when the
+    /// caller passed no `--lang` flag and `Language::from_directory`
+    /// found no analyzable files (e.g. the path is an empty directory).
+    ///
+    /// schema-cleanup-v2 (P2.BUG-10): pre-fix the type was `Language`
+    /// and the `unwrap_or(Language::Python)` autodetect fallback caused
+    /// an empty directory to be reported as `language: "python"` —
+    /// silently picking a default that misrepresented the input. Now
+    /// the field is `Option<Language>` and the autodetect failure
+    /// surfaces as JSON `null`, which downstream consumers can branch
+    /// on without parsing English error strings.
+    language: Option<Language>,
     nodes: Vec<String>,
     edges: Vec<EdgeOutput>,
     /// Whether the output was truncated due to max_items limit
@@ -82,10 +93,20 @@ impl CallsArgs {
             anyhow::bail!("Path not found: {}", self.path.display());
         }
 
-        // Determine language (auto-detect from directory, default to Python)
-        let language = self
+        // Determine language. schema-cleanup-v2 (P2.BUG-10): when the
+        // caller did not pass `--lang` AND `Language::from_directory`
+        // detects nothing (e.g. empty directory), preserve the absence
+        // as `None` rather than silently falling back to Python — that
+        // fallback caused empty-dir scans to be reported as
+        // `language: "python"` with zero edges, which misrepresented
+        // the input. The build path below treats `None` as Python for
+        // call-graph construction (the call-graph builder requires a
+        // language) but the JSON `language` field reflects the actual
+        // detection result.
+        let detected_language = self
             .lang
-            .unwrap_or_else(|| Language::from_directory(&self.path).unwrap_or(Language::Python));
+            .or_else(|| Language::from_directory(&self.path));
+        let language = detected_language.unwrap_or(Language::Python);
 
         // Try daemon first for cached result
         if let Some(output) = try_daemon_route::<CallGraphOutput>(
@@ -96,10 +117,14 @@ impl CallsArgs {
             // Output based on format
             if writer.is_text() {
                 let mut text = String::new();
+                let lang_label = output
+                    .language
+                    .map(|l| l.as_str().to_string())
+                    .unwrap_or_else(|| "unknown".to_string());
                 text.push_str(&format!(
-                    "Call Graph for {} ({:?})\n",
+                    "Call Graph for {} ({})\n",
                     output.root.display(),
-                    output.language
+                    lang_label,
                 ));
                 text.push_str(&format!("Edges: {}\n\n", output.total_edges));
 
@@ -209,7 +234,7 @@ impl CallsArgs {
 
         let output = CallGraphOutput {
             root: self.path.clone(),
-            language,
+            language: detected_language,
             nodes,
             edges,
             truncated,
@@ -248,10 +273,13 @@ impl CallsArgs {
         }
         if writer.is_text() {
             let mut text = String::new();
+            let lang_label = detected_language
+                .map(|l| l.as_str().to_string())
+                .unwrap_or_else(|| "unknown".to_string());
             text.push_str(&format!(
-                "Call Graph for {} ({:?})\n",
+                "Call Graph for {} ({})\n",
                 self.path.display(),
-                language
+                lang_label,
             ));
             text.push_str(&format!("Edges: {}\n\n", output.total_edges));
 

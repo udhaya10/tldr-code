@@ -130,6 +130,39 @@ impl HealthArgs {
             anyhow::bail!("Path not found: {}", self.path.display());
         }
 
+        // schema-cleanup-v2 (P2.BUG-10): empty/no-source-file directories
+        // are a valid edge case (e.g. a fresh `mktemp -d` or a tree with
+        // only docs/configs), not a real error. Pre-fix the autodetect
+        // path raised `TldrError::NoSupportedFiles` → exit code 23,
+        // breaking parity with `structure` (which already returns exit 0
+        // + a `warnings` field for the same input). Now we short-circuit
+        // when the user did not pass `--lang` AND the directory contains
+        // no analyzable files, returning a stub report consistent with
+        // `structure`.
+        if lang.is_none()
+            && self.path.is_dir()
+            && Language::from_directory(&self.path).is_none()
+        {
+            let stub = serde_json::json!({
+                "wrapper": "health",
+                "root": self.path.display().to_string(),
+                "language": null,
+                "quick_mode": self.quick,
+                "summary": serde_json::Value::Null,
+                "details": {},
+                "warnings": ["Empty directory: no source files to analyze"],
+            });
+            if writer.is_text() {
+                writer.write_text(&format!(
+                    "Health Report: {} (no source files found)",
+                    self.path.display()
+                ))?;
+            } else {
+                writer.write(&stub)?;
+            }
+            return Ok(());
+        }
+
         writer.progress(&format!(
             "Analyzing code health in {}{}...",
             self.path.display(),

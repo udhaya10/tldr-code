@@ -272,6 +272,20 @@ impl VulnArgs {
         filtered_findings
             .sort_by(|a, b| (&a.file, a.line, a.vuln_type).cmp(&(&b.file, b.line, b.vuln_type)));
 
+        // schema-cleanup-v2 (P2.BUG-9): resolve the enclosing function for
+        // each finding's `(file, line)`. Pre-fix, vuln findings had no
+        // `function` field, so users could not pipe vuln output into
+        // `tldr taint <file> <function>` or `tldr slice <file> <function>
+        // <line>` without manually scanning the source for the enclosing
+        // def. Post-fix, the enrichment runs after sort/filter so the
+        // `extract_file` AST pass executes once per unique file across
+        // surviving findings (rather than once per finding) — keeps the
+        // additive cost ~linear in the number of distinct files. None is
+        // assigned for findings whose line is at module scope or whose
+        // file fails to parse (graceful degradation: a missing
+        // `function` field does not invalidate the rest of the finding).
+        enrich_with_enclosing_function(&mut filtered_findings);
+
         // Build summary.
         //
         // vuln-summary-correctness-v1 (Bug 1 + Bug 2): `files_with_vulns`
@@ -331,6 +345,94 @@ impl VulnArgs {
         // it exits 0 unconditionally on a successful scan).
         Ok(())
     }
+}
+
+// =============================================================================
+// Function-Field Enrichment (schema-cleanup-v2 P2.BUG-9)
+// =============================================================================
+
+/// Resolve the enclosing function name for each finding via `extract_file`.
+///
+/// Iterates `findings` in-place and sets `f.function = Some(name)` for
+/// every finding whose `f.line` falls inside a function or method body
+/// extracted from `f.file`. Findings at module scope (no enclosing
+/// function), findings on unparseable files, and findings on files
+/// outside the supported language set leave `f.function = None`.
+///
+/// Performance: groups findings by file path so `extract_file` runs at
+/// most once per unique file across the post-filter slice (the same
+/// file can appear in multiple findings). Failures are swallowed —
+/// missing function metadata is non-blocking; the rest of the finding
+/// remains valid.
+fn enrich_with_enclosing_function(findings: &mut [VulnFinding]) {
+    use std::collections::HashMap;
+    use tldr_core::ast::extract::extract_file;
+    use tldr_core::types::ModuleInfo;
+
+    // Group finding indices by their file path so `extract_file` runs
+    // at most once per unique file. Iteration over `findings` preserves
+    // the existing post-sort order; we mutate by indexed lookup.
+    let mut by_file: HashMap<String, Vec<usize>> = HashMap::new();
+    for (i, f) in findings.iter().enumerate() {
+        by_file.entry(f.file.clone()).or_default().push(i);
+    }
+
+    for (file_str, indices) in by_file {
+        let path = Path::new(&file_str);
+        // Best-effort extraction; on parse error, leave function = None
+        // for every finding on this file (graceful degradation).
+        let module: ModuleInfo = match extract_file(path, None) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        for idx in indices {
+            let line = findings[idx].line;
+            findings[idx].function = lookup_enclosing_function(&module, line);
+        }
+    }
+}
+
+/// Walk the module's top-level functions and class methods, returning
+/// the innermost (smallest-range) function whose `[line_number,
+/// line_end]` window contains `line`. Returns None when no function
+/// brackets the line (module-level finding) or when the AST extractor
+/// produced 0-valued ranges (legacy extractors that skipped `line_end`).
+fn lookup_enclosing_function(
+    module: &tldr_core::types::ModuleInfo,
+    line: u32,
+) -> Option<String> {
+    let mut best: Option<(u32, String)> = None; // (range_size, name)
+
+    let mut consider = |start: u32, end: u32, name: &str| {
+        // line_end = 0 means the extractor did not populate the range
+        // (legacy construction). Skip — we cannot judge containment.
+        if end == 0 || start == 0 {
+            return;
+        }
+        if line < start || line > end {
+            return;
+        }
+        let range = end.saturating_sub(start);
+        match &best {
+            None => best = Some((range, name.to_string())),
+            Some((cur_range, _)) => {
+                if range < *cur_range {
+                    best = Some((range, name.to_string()));
+                }
+            }
+        }
+    };
+
+    for f in &module.functions {
+        consider(f.line_number, f.line_end, &f.name);
+    }
+    for c in &module.classes {
+        for m in &c.methods {
+            consider(m.line_number, m.line_end, &m.name);
+        }
+    }
+
+    best.map(|(_, name)| name)
 }
 
 // =============================================================================
@@ -550,6 +652,10 @@ fn analyze_file(path: &Path) -> Result<Vec<VulnFinding>, RemainingError> {
                         file: file_str,
                         line: f.sink.line,
                         column: 0,
+                        // schema-cleanup-v2 (P2.BUG-9): populated below in
+                        // `run` via a single `extract_file` pass per file —
+                        // see `enrich_with_enclosing_function`.
+                        function: None,
                         taint_flow,
                         remediation: f.remediation.clone(),
                         confidence: 0.85,
@@ -834,6 +940,9 @@ fn rust_finding(
         file: location.file.to_string(),
         line: location.line,
         column: location.column,
+        // schema-cleanup-v2 (P2.BUG-9): populated by
+        // `enrich_with_enclosing_function` in `VulnArgs::run`.
+        function: None,
         taint_flow: Vec::new(),
         remediation: remediation.to_string(),
         confidence,
@@ -1672,6 +1781,7 @@ pub fn from_raw(bytes: &[u8]) -> &str {
             file: file.to_string(),
             line,
             column,
+            function: None,
             taint_flow: vec![],
             remediation: "Test remediation".to_string(),
             confidence: 0.9,
@@ -1761,6 +1871,7 @@ pub fn from_raw(bytes: &[u8]) -> &str {
             file: "src/x.py".to_string(),
             line: 0,
             column: 0,
+            function: None,
             taint_flow: vec![TaintFlow {
                 file: "src/x.py".to_string(),
                 line: 0,

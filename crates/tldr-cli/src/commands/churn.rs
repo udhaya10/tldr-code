@@ -55,6 +55,34 @@ impl ChurnArgs {
     pub fn run(&self, format: OutputFormat, quiet: bool) -> Result<()> {
         let writer = OutputWriter::new(format, quiet);
 
+        // schema-cleanup-v2 (P2.BUG-10): an empty directory is not a real
+        // error — it's a benign edge case (e.g. fresh `mktemp -d`). Pre-fix
+        // `analyze_churn` raised `Not a git repository` (exit 1) for an
+        // empty mktemp tree, breaking parity with `structure` (exit 0 +
+        // warnings). Short-circuit only when the directory is *empty*
+        // (no entries at all). Non-empty non-git directories still get
+        // the original error — that case is genuinely actionable user
+        // input ("did you mean to git init?").
+        if self.path.is_dir() && is_directory_empty(&self.path) {
+            let stub = serde_json::json!({
+                "root": self.path.display().to_string(),
+                "files": [],
+                "authors": [],
+                "hotspots": [],
+                "summary": serde_json::Value::Null,
+                "warnings": ["Empty directory: no files to analyze"],
+            });
+            if writer.is_text() {
+                writer.write_text(&format!(
+                    "Churn Analysis: {} (no files found)",
+                    self.path.display()
+                ))?;
+            } else {
+                writer.write(&stub)?;
+            }
+            return Ok(());
+        }
+
         writer.progress(&format!(
             "Analyzing churn in {} (last {} days)...",
             self.path.display(),
@@ -80,6 +108,19 @@ impl ChurnArgs {
         }
 
         Ok(())
+    }
+}
+
+/// schema-cleanup-v2 (P2.BUG-10): does the directory contain ZERO
+/// entries? Used to short-circuit the empty-dir edge case before the
+/// `Not a git repository` error path triggers. Returns `false` on any
+/// I/O failure — the caller falls through to the existing error path,
+/// which is the right behavior for a path that exists but cannot be
+/// read.
+fn is_directory_empty(path: &Path) -> bool {
+    match std::fs::read_dir(path) {
+        Ok(mut entries) => entries.next().is_none(),
+        Err(_) => false,
     }
 }
 

@@ -1568,6 +1568,19 @@ pub struct VulnFinding {
     pub line: u32,
     /// Column number
     pub column: u32,
+    /// Enclosing function name (None if the finding's line is at module
+    /// scope and not inside any function/method body).
+    ///
+    /// schema-cleanup-v2 (P2.BUG-9): pre-fix, vuln findings carried no
+    /// indication of which function contained the source line, blocking
+    /// clean piping into `tldr taint <file> <function>` and `tldr slice
+    /// <file> <function> <line>`. The enclosing function is resolved
+    /// post-analysis via `extract_file` over `(file, line)` —
+    /// reusing the same module-info AST extractor that `taint`/`slice`
+    /// rely on, rather than rebuilding language-aware function-range
+    /// scanning inside the vuln pipeline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub function: Option<String>,
     /// Taint flow from source to sink. When `direct_sink` is `true` this is
     /// a single-element vec describing the call site (the source-and-sink
     /// collapse to the same statement).

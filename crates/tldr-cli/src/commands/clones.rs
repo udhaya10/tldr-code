@@ -127,6 +127,19 @@ impl ClonesArgs {
                 let sarif = format_clones_sarif(&report);
                 writer.write_text(&sarif)?;
             }
+            // schema-cleanup-v2 (P2.BUG-6): the global `--format dot`
+            // path previously fell through to the JSON arm below, so
+            // `tldr clones --format dot` silently emitted JSON with
+            // exit 0 — even though the per-command DOT validator
+            // (`validate_format_for_command`) and the `secure --format
+            // dot` error message both advertised clones as DOT-supported.
+            // The dedicated emitter (`format_clones_dot`) was already
+            // present and reachable via the legacy `--output dot` flag;
+            // this arm wires the canonical `--format dot` route to it.
+            OutputFormat::Dot => {
+                let dot = format_clones_dot(&report);
+                writer.write_text(&dot)?;
+            }
             _ => {
                 writer.write(&report)?;
             }

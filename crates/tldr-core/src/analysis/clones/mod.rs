@@ -20,8 +20,46 @@ pub use filter::is_test_file;
 
 use detect::PairKey;
 use extract::extract_fragments_from_file;
-use filter::discover_source_files;
+use filter::{discover_source_files, get_language_from_path};
 use tokenize::tokenize_file_v2;
+
+/// schema-cleanup-v2 (P2.BUG-7): pick the dominant language string
+/// across the discovered files. Tally the per-extension language label
+/// from `get_language_from_path` and return the most-frequent one. Ties
+/// resolve by the first language encountered (deterministic ordering on
+/// the input slice — `discover_source_files` already returns files in
+/// directory-walk order).
+///
+/// Returns the literal `"auto"` only when no file has a recognised
+/// extension (degenerate case — `discover_source_files` should have
+/// rejected those via `is_source_file_for_clones`, so this branch is
+/// effectively unreachable in production).
+fn resolve_dominant_language(files: &[std::path::PathBuf]) -> String {
+    use std::collections::HashMap;
+    let mut counts: HashMap<&'static str, usize> = HashMap::new();
+    let mut order: Vec<&'static str> = Vec::new();
+    for f in files {
+        if let Some(lang) = get_language_from_path(f) {
+            if !counts.contains_key(lang) {
+                order.push(lang);
+            }
+            *counts.entry(lang).or_insert(0) += 1;
+        }
+    }
+    // Pick the language with the highest count; on ties, the first
+    // language seen (insertion order) wins.
+    let mut best: Option<&'static str> = None;
+    let mut best_count: usize = 0;
+    for lang in &order {
+        let c = counts[lang];
+        if c > best_count {
+            best_count = c;
+            best = Some(lang);
+        }
+    }
+    best.map(|s| s.to_string())
+        .unwrap_or_else(|| "auto".to_string())
+}
 
 /// Detect code clones in a directory using the v2 pipeline.
 ///
@@ -47,6 +85,22 @@ pub fn detect_clones(path: &Path, options: &ClonesOptions) -> anyhow::Result<Clo
     if files.is_empty() {
         return Ok(empty_report(path, options, &start));
     }
+
+    // schema-cleanup-v2 (P2.BUG-7): resolve the report's `language` field
+    // to the actual analyzed language string rather than the literal
+    // `"auto"` placeholder. Pre-fix the field always echoed `"auto"` (or
+    // the user's `--lang` flag verbatim), making it impossible for
+    // consumers to programmatically tell what the autodetector actually
+    // picked. Now we either honor the explicit `options.language` or
+    // derive a single dominant language string from the discovered files
+    // via `get_language_from_path` majority count. Falls back to `"auto"`
+    // only when no file in `files` has a recognised extension (degenerate
+    // case — `discover_source_files` should have rejected those files via
+    // `is_source_file_for_clones`).
+    let resolved_language = options
+        .language
+        .clone()
+        .unwrap_or_else(|| resolve_dominant_language(&files));
 
     // Step 2: Tokenize files
     let file_tokens: Vec<tokenize::FileTokens> = files
@@ -76,10 +130,7 @@ pub fn detect_clones(path: &Path, options: &ClonesOptions) -> anyhow::Result<Clo
     if all_fragments.is_empty() {
         return Ok(ClonesReport {
             root: path.to_path_buf(),
-            language: options
-                .language
-                .clone()
-                .unwrap_or_else(|| "auto".to_string()),
+            language: resolved_language.clone(),
             clone_pairs: vec![],
             clone_classes: vec![],
             stats: CloneStats {
@@ -174,10 +225,7 @@ pub fn detect_clones(path: &Path, options: &ClonesOptions) -> anyhow::Result<Clo
 
     Ok(ClonesReport {
         root: path.to_path_buf(),
-        language: options
-            .language
-            .clone()
-            .unwrap_or_else(|| "auto".to_string()),
+        language: resolved_language,
         clone_pairs,
         clone_classes,
         stats: CloneStats {

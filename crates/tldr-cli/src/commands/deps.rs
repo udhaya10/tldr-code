@@ -117,6 +117,46 @@ impl DepsArgs {
             quiet,
         );
 
+        // schema-cleanup-v2 (P2.BUG-10): empty/no-source-file directories
+        // should not surface as `Unsupported language: unknown` (exit code
+        // 11) — that maps a benign edge case (e.g. fresh `mktemp -d`) to
+        // a hard error and breaks parity with `structure` (which already
+        // returns exit 0 + warnings for the same input). Short-circuit
+        // when the user did not pass `--lang` AND
+        // `Language::from_directory` finds no analyzable files.
+        if self.path.is_dir()
+            && self.lang.is_none()
+            && Language::from_directory(&self.path).is_none()
+        {
+            let stub = serde_json::json!({
+                "root": self.path.display().to_string(),
+                "language": null,
+                "internal_dependencies": {},
+                "external_dependencies": {},
+                "circular_dependencies": [],
+                "stats": {
+                    "total_files": 0,
+                    "total_internal_deps": 0,
+                    "total_external_deps": 0,
+                    "max_depth": 0,
+                    "cycles_found": 0,
+                    "leaf_files": 0,
+                    "root_files": 0,
+                },
+                "files_skipped": 0,
+                "warnings": ["Empty directory: no source files to analyze"],
+            });
+            if writer.is_text() {
+                writer.write_text(&format!(
+                    "Dependency Analysis: {} (no source files found)",
+                    self.path.display()
+                ))?;
+            } else {
+                writer.write(&stub)?;
+            }
+            return Ok(());
+        }
+
         // Build options from args
         let options = DepsOptions {
             include_external: self.include_external,

@@ -1,5 +1,108 @@
 # Changelog
 
+## schema-cleanup-v2 — internal milestone
+
+NOT a published release. Third and final milestone of phase 2: closes
+four LOW-severity bugs that all share the surface "schema/UX polish".
+Individually small; together they cover JSON-shape bugs (a missing
+field, a stale literal placeholder), a format-dispatch oversight (a
+DOT advertised but silently emitting JSON), and an exit-code-parity
+regression on empty directories. None block any workflow, but each
+one made the tool feel slightly less coherent than it should.
+
+### Fixed
+
+- **P2.BUG-6: `tldr clones --format dot` silently emitted JSON, exit
+  0.** The clones command's run loop dispatched on the legacy
+  `--output` flag for DOT but had no `OutputFormat::Dot` arm in the
+  format-match block below — so the canonical `--format dot` path
+  fell through to the JSON arm. Meanwhile
+  `validate_format_for_command` (output.rs) and `secure --format dot`'s
+  error message both advertised clones as DOT-supported, leaving users
+  to wonder why their `dot -Tpng` pipeline produced nothing useful. The
+  dedicated emitter `format_clones_dot` was already present and
+  reachable via `--output dot`; the fix wires the canonical
+  `--format dot` route to it.
+  - `crates/tldr-cli/src/commands/clones.rs` — add `OutputFormat::Dot`
+    arm in the run loop's match block.
+
+- **P2.BUG-7: `tldr clones`'s JSON `language` field always echoed
+  `"auto"`.** Pre-fix, the report's `language` field was filled with
+  `options.language.clone().unwrap_or_else(|| "auto".to_string())` —
+  meaning the field reported either the user's `--lang` flag verbatim
+  or the literal placeholder `"auto"`, regardless of what the
+  autodetector actually picked. Consumers programmatically reading
+  the field (e.g. CI integrators routing per-language analysis) had
+  no way to tell what the autodetector chose. The field now resolves
+  to the dominant language string across the discovered files via a
+  new `resolve_dominant_language` helper that tallies extensions
+  against `get_language_from_path` and returns the most-frequent
+  match (insertion-order tiebreak for determinism). Falls back to
+  `"auto"` only when the file set has no recognised extensions, an
+  effectively unreachable case post-`is_source_file_for_clones`.
+  - `crates/tldr-core/src/analysis/clones/mod.rs` — new
+    `resolve_dominant_language` helper; both report-construction sites
+    use it instead of the `"auto"` fallback.
+
+- **P2.BUG-9: `tldr vuln` findings had no enclosing `function` field.**
+  Pre-fix, vuln finding records carried only `(file, line)`, blocking
+  clean piping into `tldr taint <file> <function>` and `tldr slice
+  <file> <function> <line>` — the user had to manually scan source
+  for the enclosing def before chaining further analysis. Findings
+  now carry an `Option<String>` `function` field populated post-filter
+  via `extract_file` (the same AST extractor `taint`/`slice` rely on).
+  Findings at module scope leave `function = None` and the field is
+  omitted from JSON via `skip_serializing_if = "Option::is_none"`,
+  preserving forward compatibility for module-level findings.
+  Performance: enrichment groups findings by file path so
+  `extract_file` runs once per unique file across the post-filter
+  slice, regardless of how many findings target that file.
+  - `crates/tldr-cli/src/commands/remaining/types.rs` — add
+    `function: Option<String>` to `VulnFinding`.
+  - `crates/tldr-cli/src/commands/remaining/vuln.rs` — new
+    `enrich_with_enclosing_function` + `lookup_enclosing_function`
+    helpers; called once after sort/filter, before summary build.
+    All four `VulnFinding` construction sites set `function: None`
+    initially.
+
+- **P2.BUG-10: empty-directory handling was inconsistent across
+  commands; `calls` silently defaulted to `language: "python"` for
+  empty input.** Pre-fix exit codes for an empty directory were
+  scattered: `structure`/`calls`/`vuln` returned 0; `health` returned
+  23 (`No supported files found`); `deps` returned 11 (`Unsupported
+  language: unknown`); `churn` returned 1 (`Not a git repository`).
+  An empty directory is a benign edge case (e.g. fresh `mktemp -d`,
+  a docs-only tree), not an error condition. `calls` additionally
+  used `unwrap_or(Language::Python)` for autodetect failure, so an
+  empty tree was reported as `language: "python"` with zero edges —
+  silently picking a default that misrepresented the input.
+  - `crates/tldr-cli/src/commands/calls.rs` — change `CallGraphOutput.
+    language` from `Language` to `Option<Language>`. Use the autodetect
+    result directly (None when no analyzable files), preserving the
+    existing Python-fallback for the call-graph builder which requires
+    a concrete language. Text output now prints "unknown" rather than
+    `Some(Python)` for an unresolved language.
+  - `crates/tldr-cli/src/commands/health.rs` — short-circuit before
+    invoking `run_health` when the user passed no `--lang` AND
+    `Language::from_directory` finds no analyzable files; emit a stub
+    JSON with `language: null` and `warnings: ["Empty directory: ..."]`,
+    exit 0.
+  - `crates/tldr-cli/src/commands/deps.rs` — same short-circuit pattern
+    for the `Unsupported language: unknown` case.
+  - `crates/tldr-cli/src/commands/churn.rs` — short-circuit only when
+    the directory is *empty* (`std::fs::read_dir` yields nothing).
+    Non-empty non-git directories still surface the original
+    actionable error.
+
+### Tests
+
+- `crates/tldr-cli/tests/schema_cleanup_v2.rs` — 5 new regression
+  tests: clones DOT output is valid + has edges, clones language
+  resolves to `"python"` not `"auto"`, vuln finding has the
+  `function` field set on an in-function fixture, all 6 sample
+  commands exit 0 on an empty directory, and `calls` does not
+  default `language: "python"` for empty input.
+
 ## cli-error-clarity-v2 — internal milestone
 
 NOT a published release. Second milestone of phase 2: closes three
