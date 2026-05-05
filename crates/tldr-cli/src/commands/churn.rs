@@ -157,9 +157,15 @@ pub fn analyze_churn(
     // commit, the per-file rank and average are mathematically
     // meaningless (every file is tied for "most churned" with
     // commit_count == 1, and avg_commits_per_file collapses to 1.0
-    // by construction). Mirror the hotspots gating: emit a stronger
-    // warning, suppress the rank, and zero the average so the JSON
-    // output cannot be mistaken for actionable signal.
+    // by construction). Emit a warning and zero the average.
+    //
+    // schema-cleanup-v1 BUG-12: previously this also blanked
+    // `most_churned_file`, which left consumers with an empty string
+    // even when `files[0]` carried a clear top-N rank by
+    // `lines_changed`. Now we keep `most_churned_file` populated by
+    // picking the file with the highest `lines_changed` regardless
+    // of the degenerate-commit-count case — the summary should
+    // always reflect the data that's available.
     let degenerate = is_degenerate_shallow(is_shallow, total_unique_commits);
     if degenerate {
         warnings.push(format!(
@@ -167,7 +173,14 @@ pub fn analyze_churn(
             total_unique_commits
         ));
         summary.avg_commits_per_file = 0.0;
-        summary.most_churned_file = String::new();
+        // Repick most_churned_file by lines_changed (descending),
+        // since commit_count is degenerate (all == 1).
+        if let Some(top) = file_stats
+            .values()
+            .max_by_key(|f| f.lines_changed)
+        {
+            summary.most_churned_file = top.file.clone();
+        }
     }
 
     Ok(ChurnReport {

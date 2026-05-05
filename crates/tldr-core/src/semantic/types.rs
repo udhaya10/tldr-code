@@ -219,6 +219,16 @@ pub struct SemanticSearchReport {
     /// Search results sorted by score (descending)
     pub results: Vec<SemanticSearchResult>,
 
+    /// Total number of results returned (equals `results.len()`).
+    ///
+    /// schema-cleanup-v1 BUG-15: explicit count populated by the
+    /// search executor so consumers don't need to re-derive it from
+    /// `results | length`. Mirrors the new `total_results` field on
+    /// `EnrichedSearchReport` so semantic search and BM25 search share
+    /// the same schema shape.
+    #[serde(default)]
+    pub total_results: usize,
+
     /// Original query
     pub query: String,
 

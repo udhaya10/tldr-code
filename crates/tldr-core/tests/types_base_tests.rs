@@ -469,6 +469,7 @@ fn test_function_info_creation() {
         is_async: true,
         decorators: vec!["@staticmethod".to_string()],
         line_number: 42,
+        line_end: 42,
     };
 
     assert_eq!(func.name, "process_data");
@@ -487,6 +488,7 @@ fn test_class_info_creation() {
         fields: vec![],
         decorators: vec!["@dataclass".to_string()],
         line_number: 10,
+        line_end: 10,
     };
 
     assert_eq!(class.name, "DataProcessor");
@@ -1678,6 +1680,7 @@ fn test_full_serde_roundtrip_complex_types() {
         is_async: true,
         decorators: vec![],
         line_number: 42,
+        line_end: 42,
     };
 
     let json = serde_json::to_string_pretty(&func).unwrap();

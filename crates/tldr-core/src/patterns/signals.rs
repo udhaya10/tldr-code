@@ -15,6 +15,10 @@ pub struct PatternSignals {
     pub error_handling: ErrorHandlingSignals,
     /// Naming convention signals
     pub naming: NamingSignals,
+    // schema-cleanup-v1 BUG-10: each NamingSignals tuple now carries
+    // a 4th `line: u32` element so that `patterns.naming.violations[]`
+    // can plumb the source line through to the public schema instead
+    // of always reporting line 0.
     /// Resource management signals
     pub resource_management: ResourceManagementSignals,
     /// Validation signals
@@ -192,11 +196,14 @@ impl ErrorHandlingSignals {
 #[derive(Debug, Clone, Default)]
 pub struct NamingSignals {
     /// Function names with their detected case
-    pub function_names: Vec<(String, NamingCase, String)>, // (name, case, file)
+    /// Tuple: (name, case, file, line)
+    pub function_names: Vec<(String, NamingCase, String, u32)>,
     /// Class names with their detected case
-    pub class_names: Vec<(String, NamingCase, String)>,
+    /// Tuple: (name, case, file, line)
+    pub class_names: Vec<(String, NamingCase, String, u32)>,
     /// Constant names with their detected case
-    pub constant_names: Vec<(String, NamingCase, String)>,
+    /// Tuple: (name, case, file, line)
+    pub constant_names: Vec<(String, NamingCase, String, u32)>,
     /// Private member prefix detection
     pub private_prefixes: HashMap<String, usize>, // prefix -> count
 }

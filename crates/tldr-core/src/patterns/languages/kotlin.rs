@@ -45,7 +45,7 @@ impl KotlinSemantics {
             signals
                 .naming
                 .class_names
-                .push((name, case, file_path.display().to_string()));
+                .push((name, case, file_path.display().to_string(), node.start_position().row as u32 + 1));
         }
     }
 
@@ -63,6 +63,7 @@ impl KotlinSemantics {
                 name.clone(),
                 case,
                 file_path.display().to_string(),
+                node.start_position().row as u32 + 1,
             ));
             if name.starts_with("test") {
                 signals.test_idioms.test_function_count += 1;

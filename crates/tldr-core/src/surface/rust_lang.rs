@@ -853,6 +853,7 @@ mod tests {
             fields: vec![],
             decorators: vec![],
             line_number: 1,
+            line_end: 1,
         };
 
         assert_eq!(

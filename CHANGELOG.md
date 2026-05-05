@@ -1,5 +1,220 @@
 # Changelog
 
+## schema-cleanup-v1 — internal milestone
+
+NOT a published release. Closes 9 audit-found schema/dead-UI bugs that
+gave consumers null/empty/redundant fields across `tldr health`,
+`tldr patterns`, `tldr deps`, `tldr churn`, `tldr structure`,
+`tldr semantic`, `tldr search`, `tldr chop`, `tldr interface`, and
+`tldr extract`: `tldr health` printed `Metrics: no data` for every
+non-Java/.NET repo (Robert C. Martin's package abstractness/instability
+metric does not apply to Python / TypeScript / Go / Rust / etc., yet
+the row was always rendered) — dead UI on six languages out of seven;
+`tldr patterns.naming.violations[].line` was hard-coded `0` because
+the `NamingSignals` collector tuples never tracked a line position;
+`tldr deps` JSON had `root: ""` and the text header was
+`Dependency Analysis: ` (trailing space, no path) because
+`make_relative_path(&root, &root)` collapsed to an empty `PathBuf`
+when the root was its own root; `tldr churn.summary.most_churned_file`
+was blanked on shallow clones even though `files[0]` carried a clean
+top-N rank by `lines_changed`; `tldr structure` JSON emitted both
+`functions` (strings) AND `definitions` (objects), and both `methods`
+(strings) AND `method_infos` (objects) — duplicate views of the same
+data with the string arrays carrying no extra information; `tldr
+semantic` and `tldr search` JSON omitted `total_results` entirely
+(`jq '.total_results'` returned `null` because the key didn't exist);
+`tldr chop` schema diverged from `tldr slice` (`count` vs
+`line_count`, no `file` field, broke schema parity); `tldr
+interface.all_exports` was emitted as `null` for any module without
+an explicit Python `__all__` — even when the module clearly had public
+classes/functions; `tldr extract` method/function objects emitted
+both `line` and `line_number` (duplicate values from the BUG-17
+alias) and lacked `line_end`. Binary-verified against
+`/tmp/repos/flask` and gated by 11 regression tests in
+`crates/tldr-cli/tests/schema_cleanup_v1.rs`. M0
+(`vuln_migration_v1_red`): 168/168 GREEN. M1
+(`determinism_and_stderr_hygiene_v1`): 5/5 GREEN. M2
+(`cross_command_consistency_v1`): 7/7 GREEN. M3
+(`detection_accuracy_v1`): 4/4 GREEN. M4
+(`schema_cleanup_v1`): 11/11 GREEN.
+
+| Bug | File:Line | Before | After |
+|-----|-----------|--------|-------|
+| BUG-9 | `crates/tldr-core/src/quality/health.rs:601-624` (text formatter) | `tldr health /tmp/repos/flask --format text` → `Metrics:     no data` row appears on every non-Java repo | `Metrics:` row suppressed unless `summary.avg_distance` is `Some` (real data) OR the metrics sub-result reports a hard failure; JSON sub-result unchanged so consumers can still inspect `details.metrics.details.packages_analyzed` |
+| BUG-10 | `crates/tldr-core/src/patterns/signals.rs:198-205` (added 4th `u32` element to the three naming tuples); `crates/tldr-core/src/patterns/naming.rs:71-120` (consume the new line element + plumb into `NamingViolation.line`); `crates/tldr-core/src/patterns/language_profile.rs:160-200, 276-294` (capture `name_node.start_position().row + 1` at `ExtractNamed` dispatch); plus per-language collectors in `languages/{c,cpp,csharp,elixir,kotlin,lua,ocaml,php,ruby,scala}.rs` | `tldr patterns /tmp/repos/flask \| jq '.naming.violations \| map(.line) \| unique'` → `[0]` (every violation reports line=0) | violations carry their actual AST start_position; on flask `min=90, max=1025` (real lines into `app.py`); 0-line violations now imply "synthetic / no AST source" rather than "we forgot to plumb the line" |
+| BUG-11 | `crates/tldr-core/src/analysis/deps.rs:462, 647` (use `root.clone()` instead of `make_relative_path(&root, &root)`) | `tldr deps /tmp/repos/flask \| jq -r .root` → `""`; text header → `Dependency Analysis: ` | `.root` → `/private/tmp/repos/flask`; text header → `Dependency Analysis: /private/tmp/repos/flask` |
+| BUG-12 | `crates/tldr-cli/src/commands/churn.rs:156-184` (refill `most_churned_file` from highest-`lines_changed` file even on degenerate-shallow clones) | `tldr churn /tmp/repos/flask \| jq -r .summary.most_churned_file` → `""` (blanked, even though `files[0].lines_changed = 682`) | populated from the file with highest `lines_changed`; on flask → `tests/test_basic.py`; the warning about degenerate ranks is preserved so JSON consumers still see the shallow-clone caveat |
+| BUG-13 | `crates/tldr-core/src/types.rs:1067-1110` (FileStructure `functions`/`methods` now `#[serde(skip_serializing)]`); `crates/tldr-core/src/types.rs:1112-1136` (MethodInfo gained `line_end`); `crates/tldr-core/src/ast/extractor.rs:218-226` (populate `MethodInfo.line_end` from `DefinitionInfo.line_end`) | `tldr structure /tmp/repos/flask \| jq '.files[0] \| keys'` → both `functions` (strings) AND `definitions` (objects) AND `methods` (strings) AND `method_infos` (objects) — 7 keys total | redundant string arrays gone from JSON (in-memory struct retained for internal back-compat); `method_infos[]` entries now carry `line_end`; canonical schema is `definitions` (objects, full kind + range + signature) and `method_infos` (the overload-distinguishing companion) |
+| BUG-15 | `crates/tldr-core/src/semantic/types.rs:213-241` (new `total_results` field on `SemanticSearchReport`); `crates/tldr-core/src/semantic/index.rs:430-440` (populate from `results.len()`); `crates/tldr-core/src/search/enriched.rs:84-100` (mirror on `EnrichedSearchReport`); `:1229-1255` (populate at every return site) | `tldr semantic "x" /tmp/repos/flask \| jq '.total_results, (.results \| length)'` → `null, 10` (key doesn't exist); same for `tldr search` | both report types carry `total_results: usize` populated from `results.len()`; on flask flask `total_results: 10` matches `results \| length: 10` |
+| BUG-21 | `crates/tldr-cli/src/commands/contracts/types.rs:622-700` (added `file: String` and `line_count: u32` to `ChopResult`); `crates/tldr-cli/src/commands/contracts/chop.rs:127-152, 328-352` (CLI populates `file` from canonical path; `compute_chop` populates `line_count` from the same source as `count`) | `tldr chop /tmp/repos/flask/src/flask/app.py make_response 1230 1235 \| jq 'keys'` → 7 keys, no `file`, no `line_count` (vs `tldr slice` which has 9 keys including both) | `keys` includes `file` (full canonical path) and `line_count` (matches `count` for back-compat); on `make_response 1230 1235` → 60 lines on the dependency path; degenerate / no-path / same-line cases also return a populated `file` |
+| BUG-22 | `crates/tldr-cli/src/commands/patterns/types.rs:497-510` (changed `all_exports: Option<Vec<String>>` → `Vec<String>`); `crates/tldr-cli/src/commands/patterns/interface.rs:1294-1320` (fall back to union of public function/class names when `__all__` is absent); `:1411-1418` (text formatter no longer wraps in `if let Some(...)`) | `tldr interface /tmp/repos/flask/src/flask/app.py \| jq '.all_exports'` → `null` | `.all_exports` → array (never null); explicit `__all__` (Python only) is preferred; otherwise the union of public function and class names is emitted (sorted, deduped); empty modules → `[]` (empty array) |
+| BUG-23 | `crates/tldr-core/src/types.rs:1184-1259` (added `line_end: u32` to `FunctionInfo` + manual `Serialize` no longer emits `line_number`); `:1265-1338` (same for `ClassInfo`); `:1347-1416` (same for `FieldInfo`); `crates/tldr-core/src/ast/extract.rs` (49 sites updated to derive `line_end` from `node.end_position().row + 1` and pass it through every `FunctionInfo` / `ClassInfo` / `FieldInfo` constructor) | `tldr extract /tmp/repos/flask/src/flask/app.py \| jq '.classes[0].methods[0] \| keys'` → contains `line` AND `line_number` (duplicate of `line`), missing `line_end` | JSON keys for methods/functions/classes/fields now contain `line` AND `line_end`; `line_number` no longer appears in serialized output (the in-memory field name is preserved with `#[serde(alias = "line")]` so deserializing legacy snapshots still works) |
+
+### Changed
+
+- **BUG-9** — `crates/tldr-core/src/quality/health.rs:601-624`: the
+  Martin (Robert C. Martin) package-level abstractness/instability
+  metric is computed only for languages whose module model resembles a
+  packaged JAR / .NET assembly — Java mostly, and even there only when
+  the project follows a clear package convention. For Python /
+  TypeScript / Go / Rust / Ruby / Elixir / OCaml / Lua / Scala the
+  analyzer always emits zero packages, which historically rendered as
+  `Metrics:     no data` in the text dashboard (and `details.metrics.
+  details.packages_analyzed: 0` in JSON). The row is now suppressed in
+  text output unless either (a) `summary.avg_distance` is `Some`
+  (real data was computed) OR (b) the sub-analysis produced a hard
+  failure that the user should see. The "no data" silently-suppressed
+  case is the common path for the languages where Martin's framework
+  doesn't apply. JSON consumers can still inspect
+  `details.metrics.details.packages_analyzed` directly — the underlying
+  sub-analysis structure is unchanged. **Decision rationale**: per the
+  M4 spec, "the dashboard is more honest with 6 working metrics than
+  7 with a dead one"; computing real Martin metrics for Python /
+  TypeScript / Go / Rust would have meaningfully expanded scope into
+  per-language package-boundary heuristics that are themselves a
+  research question, so suppression is the correct minimum-viable
+  fix.
+- **BUG-10** — `crates/tldr-core/src/patterns/signals.rs:198-205`:
+  `NamingSignals.{function,class,constant}_names` changed from
+  `Vec<(String, NamingCase, String)>` to `Vec<(String, NamingCase,
+  String, u32)>` — appended a 4th `u32` element carrying the AST
+  start_position line. `crates/tldr-core/src/patterns/naming.rs:71-120`
+  (the four iteration sites: `detect_majority_convention`,
+  `calculate_consistency`, `find_violations`, plus pattern destructuring)
+  was updated to consume the new tuple shape. `find_violations` now
+  reads the line element and writes it into
+  `NamingViolation.line` instead of the hard-coded `0`. The two
+  data-driven `ExtractNamed` sites in `language_profile.rs:160-200`
+  capture `name_node.start_position().row + 1` at the dispatch level;
+  the per-language semantic extractors in
+  `languages/{c,cpp,csharp,elixir,kotlin,lua,ocaml,php,ruby,scala}.rs`
+  push `node.start_position().row + 1` directly. The shared
+  `push_named` helper also gained a `line: u32` parameter so the new
+  data flows uniformly through every dispatch path. Test fixtures
+  in `crates/tldr-core/src/patterns/naming.rs` and
+  `crates/tldr-core/tests/language_profile_tests.rs` were updated to
+  destructure the 4-tuple and exercise the new line invariant.
+- **BUG-11** — `crates/tldr-core/src/analysis/deps.rs:462, 647`: the
+  two `Ok(DepsReport { ... })` sites in `analyze_dependencies` (one
+  for the empty-directory branch, one for the success branch) replaced
+  `root: make_relative_path(&root, &root)` with `root: root.clone()`.
+  `make_relative_path(&p, &p)` collapses to `PathBuf::new()` because
+  it strips the prefix and the prefix is the entire path. The
+  canonicalized `root` (line 427) is what consumers actually want as
+  "the analyzed directory", so we emit it verbatim. The text
+  formatter at `:2683` already does `format!("Dependency Analysis:
+  {}\n", report.root.display())`, so the trailing-space header
+  resolved itself once the JSON field was populated.
+- **BUG-12** — `crates/tldr-cli/src/commands/churn.rs:156-184`: the
+  pre-fix code suppressed `summary.most_churned_file` (set to `""`)
+  whenever the repo was a degenerate-shallow clone (`is_shallow=true`
+  AND `total_unique_commits <= 1`), on the rationale that ranking by
+  `commit_count` is meaningless when every file has commit_count=1.
+  But the per-file data still has a clean `lines_changed` rank. We
+  now refill `most_churned_file` from the file with the highest
+  `lines_changed` (descending). The degenerate-rank warning is
+  preserved unchanged, so JSON consumers still see the shallow-clone
+  caveat — they just also see the actual top-churned file by
+  line-count, which is the data they wanted in the first place.
+- **BUG-13** — `crates/tldr-core/src/types.rs:1067-1110`: the
+  `FileStructure.functions: Vec<String>` and `FileStructure.methods:
+  Vec<String>` fields were marked `#[serde(skip_serializing)]` (with
+  `#[serde(default)]` so existing snapshots still deserialize), so
+  JSON output emits only the canonical object arrays
+  (`definitions: Vec<DefinitionInfo>`, `method_infos:
+  Vec<MethodInfo>`). The in-memory struct retains both fields for
+  internal callers that haven't migrated. `MethodInfo` (lines
+  1112-1136) gained `line_end: u32` (`#[serde(default)]`) for parity
+  with `DefinitionInfo`, and `crates/tldr-core/src/ast/extractor.rs:
+  218-226` populates `MethodInfo.line_end` from
+  `DefinitionInfo.line_end` when deriving `method_infos` from
+  `definitions`. The `extract` command's method/function objects also
+  benefit (see BUG-23 below).
+- **BUG-15** — `crates/tldr-core/src/semantic/types.rs:213-241`:
+  `SemanticSearchReport` gained `total_results: usize` (`#[serde(
+  default)]`). `crates/tldr-core/src/semantic/index.rs:430-440`
+  populates it from `results.len()` (alongside the existing
+  `matches_above_threshold`). `crates/tldr-core/src/search/enriched.rs:
+  84-100` mirrors the same field on `EnrichedSearchReport`, and the
+  six early-return sites (empty BM25 index, empty regex matches,
+  hybrid empty paths) plus the three success-return sites at
+  `:1229-1255` populate `total_results` from `sorted.len()` /
+  `sorted_enriched.len()`. The two report types now share the
+  `total_results` schema shape — what was previously a `null` key on
+  both is now a populated integer.
+- **BUG-21** — `crates/tldr-cli/src/commands/contracts/types.rs:622-700`:
+  `ChopResult` gained two fields: `file: String` (the analyzed file
+  path, mirroring `tldr slice`'s `file` field) and `line_count: u32`
+  (alias of `count` matching `tldr slice`'s `line_count` field, kept
+  alongside the legacy `count` for back-compat). The two helper
+  constructors `ChopResult::same_line` and `ChopResult::no_path`
+  initialize `file: String::new()` and the CLI backfills it at the
+  call site (`crates/tldr-cli/src/commands/contracts/chop.rs:127-152`)
+  with the canonicalized path so every public-facing `ChopResult` has
+  a populated `file`. `compute_chop`'s success path
+  (`:328-352`) sets `line_count: count` and `file:
+  source_or_path.to_string()`. The schemas of `slice` and `chop` are
+  now aligned: both expose `file`, `function`, `lines`, `line_count`,
+  and a 1-indexed range — consumers can switch between them without
+  reshaping the JSON.
+- **BUG-22** — `crates/tldr-cli/src/commands/patterns/types.rs:497-510`:
+  `InterfaceInfo.all_exports` changed from `Option<Vec<String>>` to
+  `Vec<String>` (with `#[serde(default)]` so legacy snapshots that
+  carried `null` still deserialize as `[]`). `crates/tldr-cli/src/
+  commands/patterns/interface.rs:1294-1320` populates the field with
+  a non-null fallback chain: prefer the explicit Python `__all__`
+  (still extracted by `extract_all_exports` for Python only); else
+  fall back to the union of public function names and public class
+  names (sorted, deduped — mirroring the "import *" semantics that
+  apply when `__all__` is absent). For non-Python languages the
+  fallback is the same union of public symbols. Empty modules return
+  `[]` (empty array), never `null`. The text formatter
+  (`:1411-1418`) was updated to print "Exports:" (not "Exports
+  (`__all__`):") since the field no longer carries explicit-only
+  semantics. **Scope note**: per the M4 spec, the implementation is
+  Python-first (preferring `__all__`) but the union-fallback path
+  works identically for every language with public functions/classes
+  in the report — no separate language-specific extractor is needed.
+- **BUG-23** — `crates/tldr-core/src/types.rs:1184-1259, 1265-1338,
+  1347-1416`: `FunctionInfo`, `ClassInfo`, and `FieldInfo` each gained
+  a `line_end: u32` field (`#[serde(default)]`), and their manual
+  `Serialize` impls were rewritten to emit `line` and `line_end` (in
+  that order) and intentionally OMIT `line_number` (which was
+  redundant with `line` since the BUG-17 alias). `Deserialize` now
+  carries `#[serde(alias = "line")]` on the in-memory `line_number`
+  field so legacy snapshots that emitted `line_number` still
+  round-trip. `crates/tldr-core/src/ast/extract.rs` got 49 mechanical
+  updates: every `let line_number = X.start_position().row as u32 +
+  1;` now emits a paired `let line_end = X.end_position().row as u32
+  + 1;`, and every constructor adds `line_end,` next to the existing
+  `line_number,`. The same pattern was applied to test fixtures in
+  `crates/tldr-cli/src/output_tests.rs`,
+  `crates/tldr-core/src/{analysis/dead.rs,callgraph/builder.rs,context/builder.rs,search/enriched.rs,surface/{python,typescript,go,rust_lang}.rs}`,
+  and the integration tests in `crates/tldr-core/tests/{types_base_tests,
+  field_extraction_test}.rs` and
+  `crates/tldr-cli/tests/{unicode_truncation_test,patterns_test}.rs`.
+  Net effect: the canonical schema for any line-bearing object in
+  tldr is `{ line, line_end }` with no `line_number` duplicate, and
+  `extract`/`structure` consumers can compute function/class length
+  without an additional AST query.
+
+### Tests added
+
+- `crates/tldr-cli/tests/schema_cleanup_v1.rs` — 11 regression tests
+  (one per bug, +1 split between structure schema and method_infos
+  line_end), all GREEN. Covers BUG-9 through BUG-23.
+
+### Verification
+
+- M0 (`vuln_migration_v1_red`): 168/168 GREEN
+- M1 (`determinism_and_stderr_hygiene_v1`): 5/5 GREEN
+- M2 (`cross_command_consistency_v1`): 7/7 GREEN
+- M3 (`detection_accuracy_v1`): 4/4 GREEN
+- M4 (`schema_cleanup_v1`): 11/11 GREEN
+- `tldr --help \| grep -E '^  (similar\|semantic\|embed)' \| wc -l` → 3
+- Reinstalled at both `~/.cargo/bin/tldr` and `~/.local/bin/tldr`,
+  codesigned
+
 ## detection-accuracy-v1 — internal milestone
 
 NOT a published release. Closes 4 audit-found bugs that gave wrong or

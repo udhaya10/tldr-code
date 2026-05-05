@@ -459,7 +459,7 @@ pub fn analyze_dependencies(path: &Path, options: &DepsOptions) -> TldrResult<De
     // Handle empty directory case
     if files.is_empty() {
         return Ok(DepsReport {
-            root: make_relative_path(&root, &root),
+            root: root.clone(),
             language: language.as_str().to_string(),
             internal_dependencies: BTreeMap::new(),
             external_dependencies: BTreeMap::new(),
@@ -644,7 +644,7 @@ pub fn analyze_dependencies(path: &Path, options: &DepsOptions) -> TldrResult<De
     };
 
     Ok(DepsReport {
-        root: make_relative_path(&root, &root),
+        root: root.clone(),
         language: language.as_str().to_string(),
         internal_dependencies: final_deps,
         external_dependencies,

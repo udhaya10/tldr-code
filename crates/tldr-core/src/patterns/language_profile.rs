@@ -164,7 +164,8 @@ impl LanguageProfile {
                             let name = node_text(name_node, source);
                             let case = detect_naming_case(&name);
                             let file = file_path.display().to_string();
-                            push_named(target, name, case, file, signals);
+                            let line = name_node.start_position().row as u32 + 1;
+                            push_named(target, name, case, file, line, signals);
                         }
                     }
                     SignalAction::CallSemantics => {
@@ -195,7 +196,11 @@ impl LanguageProfile {
                                     let name = node_text(name_node, source);
                                     let case = detect_naming_case(&name);
                                     let file = file_path.display().to_string();
-                                    push_named(target, name, case, file, signals);
+                                    let line =
+                                        name_node.start_position().row as u32 + 1;
+                                    push_named(
+                                        target, name, case, file, line, signals,
+                                    );
                                 }
                             }
                             SignalAction::CallSemantics => {
@@ -278,12 +283,19 @@ fn push_named(
     name: String,
     case: NamingCase,
     file: String,
+    line: u32,
     signals: &mut PatternSignals,
 ) {
     match target {
-        NamingTarget::FunctionNames => signals.naming.function_names.push((name, case, file)),
-        NamingTarget::ClassNames => signals.naming.class_names.push((name, case, file)),
-        NamingTarget::ConstantNames => signals.naming.constant_names.push((name, case, file)),
+        NamingTarget::FunctionNames => signals
+            .naming
+            .function_names
+            .push((name, case, file, line)),
+        NamingTarget::ClassNames => signals.naming.class_names.push((name, case, file, line)),
+        NamingTarget::ConstantNames => signals
+            .naming
+            .constant_names
+            .push((name, case, file, line)),
     }
 }
 
@@ -388,7 +400,7 @@ impl PythonSemantics {
             signals
                 .naming
                 .class_names
-                .push((name.clone(), case, file_path.display().to_string()));
+                .push((name.clone(), case, file_path.display().to_string(), name_node.start_position().row as u32 + 1));
 
             if name.ends_with("Error") || name.ends_with("Exception") {
                 let evidence = create_evidence_from(node, source, file_path);
@@ -422,6 +434,7 @@ impl PythonSemantics {
                 name.clone(),
                 case,
                 file_path.display().to_string(),
+                name_node.start_position().row as u32 + 1,
             ));
 
             if name.starts_with("test_") || name.starts_with("test") {
@@ -552,10 +565,12 @@ impl PythonSemantics {
             let name = node_text(left, source);
             let case = detect_naming_case(&name);
             if case == NamingCase::UpperSnakeCase {
-                signals
-                    .naming
-                    .constant_names
-                    .push((name, case, file_path.display().to_string()));
+                signals.naming.constant_names.push((
+                    name,
+                    case,
+                    file_path.display().to_string(),
+                    left.start_position().row as u32 + 1,
+                ));
             }
         }
 
@@ -706,7 +721,7 @@ impl TypeScriptSemantics {
             signals
                 .naming
                 .class_names
-                .push((name.clone(), case, file_path.display().to_string()));
+                .push((name.clone(), case, file_path.display().to_string(), name_node.start_position().row as u32 + 1));
 
             if name.ends_with("Error") || name.ends_with("Exception") {
                 let evidence = create_evidence_from(node, source, file_path);
@@ -732,6 +747,7 @@ impl TypeScriptSemantics {
                 name.clone(),
                 case,
                 file_path.display().to_string(),
+                name_node.start_position().row as u32 + 1,
             ));
 
             if name.starts_with("test") || name.starts_with("it") {
@@ -796,6 +812,7 @@ impl TypeScriptSemantics {
                         name.to_string(),
                         case,
                         file_path.display().to_string(),
+                        node.start_position().row as u32 + 1,
                     ));
                 }
             }
@@ -924,6 +941,7 @@ impl GoSemantics {
                 name.clone(),
                 case,
                 file_path.display().to_string(),
+                name_node.start_position().row as u32 + 1,
             ));
 
             if name.starts_with("Test") {
@@ -997,6 +1015,7 @@ impl GoSemantics {
                 name.to_string(),
                 case,
                 file_path.display().to_string(),
+                node.start_position().row as u32 + 1,
             ));
         }
     }
@@ -1053,6 +1072,7 @@ impl RustSemantics {
                 name.clone(),
                 case,
                 file_path.display().to_string(),
+                name_node.start_position().row as u32 + 1,
             ));
 
             if name.starts_with("test_") {
@@ -1188,7 +1208,7 @@ impl RustSemantics {
             signals
                 .naming
                 .constant_names
-                .push((name, case, file_path.display().to_string()));
+                .push((name, case, file_path.display().to_string(), name_node.start_position().row as u32 + 1));
         }
     }
 }
@@ -1213,7 +1233,7 @@ impl LanguageSemantics for JavaSemantics {
                     signals
                         .naming
                         .class_names
-                        .push((name, case, file_path.display().to_string()));
+                        .push((name, case, file_path.display().to_string(), name_node.start_position().row as u32 + 1));
                 }
             }
             "method_declaration" => {
@@ -1221,10 +1241,11 @@ impl LanguageSemantics for JavaSemantics {
                     let name = node_text(name_node, source);
                     let case = detect_naming_case(&name);
                     signals.naming.function_names.push((
-                        name.clone(),
-                        case,
-                        file_path.display().to_string(),
-                    ));
+                name.clone(),
+                case,
+                file_path.display().to_string(),
+                name_node.start_position().row as u32 + 1,
+            ));
 
                     if name.starts_with("test") {
                         signals.test_idioms.test_function_count += 1;

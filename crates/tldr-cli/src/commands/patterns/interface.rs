@@ -1270,7 +1270,7 @@ pub fn extract_interface_with_lang(
     let root = tree.root_node();
 
     // Extract __all__ exports (Python-specific)
-    let all_exports = if lang == Language::Python {
+    let explicit_all_exports = if lang == Language::Python {
         extract_all_exports(root, source_bytes)
     } else {
         None
@@ -1290,6 +1290,23 @@ pub fn extract_interface_with_lang(
         class_kinds,
         decorator_kinds,
     );
+
+    // schema-cleanup-v1 BUG-22: populate `all_exports` as a non-null
+    // array. Prefer the explicit `__all__` (Python only); otherwise
+    // fall back to the union of public function and class names —
+    // mirroring "import *" semantics. Empty modules → `[]`.
+    let all_exports = if let Some(explicit) = explicit_all_exports {
+        explicit
+    } else {
+        let mut names: Vec<String> = functions
+            .iter()
+            .map(|f| f.name.clone())
+            .chain(classes.iter().map(|c| c.name.clone()))
+            .collect();
+        names.sort();
+        names.dedup();
+        names
+    };
 
     Ok(InterfaceInfo {
         file: path.display().to_string(),
@@ -1391,10 +1408,11 @@ pub fn format_interface_text(info: &InterfaceInfo) -> String {
     lines.push(format!("File: {}", info.file));
     lines.push(String::new());
 
-    // __all__ exports
-    if let Some(ref exports) = info.all_exports {
-        lines.push("Exports (__all__):".to_string());
-        for name in exports {
+    // Public exports (from __all__ if present, else inferred from
+    // public function/class names — see InterfaceInfo::all_exports).
+    if !info.all_exports.is_empty() {
+        lines.push("Exports:".to_string());
+        for name in &info.all_exports {
             lines.push(format!("  {}", name));
         }
         lines.push(String::new());
@@ -1753,10 +1771,11 @@ class Bar:
 "#;
         let info = extract_interface(Path::new("test.py"), source).unwrap();
 
-        assert!(info.all_exports.is_some());
-        let exports = info.all_exports.unwrap();
-        assert!(exports.contains(&"foo".to_string()));
-        assert!(exports.contains(&"Bar".to_string()));
+        // schema-cleanup-v1 BUG-22: all_exports is now Vec<String>
+        // (never null). When `__all__` is present, it carries those.
+        assert!(!info.all_exports.is_empty());
+        assert!(info.all_exports.contains(&"foo".to_string()));
+        assert!(info.all_exports.contains(&"Bar".to_string()));
     }
 
     #[test]
@@ -1808,7 +1827,7 @@ class Child(Parent, Mixin):
     fn test_format_interface_text() {
         let info = InterfaceInfo {
             file: "test.py".to_string(),
-            all_exports: Some(vec!["foo".to_string()]),
+            all_exports: vec!["foo".to_string()],
             functions: vec![FunctionInfo {
                 name: "foo".to_string(),
                 signature: "(x: int) -> str".to_string(),

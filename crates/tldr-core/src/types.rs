@@ -1069,7 +1069,15 @@ pub struct DefinitionInfo {
 pub struct FileStructure {
     /// Path to the source file
     pub path: PathBuf,
-    /// Names of top-level functions defined in this file
+    /// Names of top-level functions defined in this file.
+    ///
+    /// schema-cleanup-v1 BUG-13: kept on the in-memory struct for
+    /// internal consumers but `#[serde(skip_serializing)]` so JSON
+    /// output never carries this redundant string list. New consumers
+    /// should read `definitions[]` (which carries name + line ranges +
+    /// signatures + kind).
+    #[serde(skip_serializing)]
+    #[serde(default)]
     pub functions: Vec<String>,
     /// Names of classes or structs defined in this file
     pub classes: Vec<String>,
@@ -1080,6 +1088,12 @@ pub struct FileStructure {
     /// Java). Kept for backward compatibility; new code should consume
     /// `method_infos` (or `definitions`, which already carries line ranges
     /// + signatures).
+    ///
+    /// schema-cleanup-v1 BUG-13: now `#[serde(skip_serializing)]` —
+    /// JSON output emits `method_infos` (objects) and `definitions`
+    /// instead. Internal consumers may still build/read this field.
+    #[serde(skip_serializing)]
+    #[serde(default)]
     pub methods: Vec<String>,
     /// Detailed method information that distinguishes overloads by line
     /// number and signature. Each element carries `(name, signature, line)`
@@ -1118,6 +1132,14 @@ pub struct MethodInfo {
     pub signature: String,
     /// 1-indexed line number of the method definition.
     pub line: u32,
+    /// 1-indexed end line (inclusive) of the method body.
+    ///
+    /// schema-cleanup-v1 BUG-13: added to align with
+    /// `DefinitionInfo.line_end`, so consumers can compute method
+    /// length without additional AST queries. Defaults to `0` for
+    /// legacy data; new entries are populated from `DefinitionInfo`.
+    #[serde(default)]
+    pub line_end: u32,
 }
 
 /// Import statement information (spec Section 2.1.4)
@@ -1165,6 +1187,14 @@ pub struct ModuleInfo {
 /// canonical name) and `line` (additive alias matching `vuln`/`dead`/etc.)
 /// so consumers can use a single field name across all commands. The
 /// `Deserialize` impl accepts either name (`#[serde(alias = "line")]`).
+///
+/// schema-cleanup-v1 BUG-23: the `line_number` field is no longer
+/// emitted in JSON (the duplicate of `line` was dead surface) and a
+/// new `line_end` field is emitted, mirroring
+/// `DefinitionInfo.line_end` and `MethodInfo.line_end`. The struct
+/// field is still named `line_number` for source compatibility with
+/// the many call-sites that build it, but JSON output is `line` +
+/// `line_end`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct FunctionInfo {
     /// Name of the function
@@ -1186,33 +1216,40 @@ pub struct FunctionInfo {
     /// Decorator or annotation names applied to this function
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub decorators: Vec<String>,
-    /// Line number where this function is defined (1-indexed)
+    /// Line number where this function is defined (1-indexed).
+    ///
+    /// schema-cleanup-v1 BUG-23: deserialized from `line`
+    /// (canonical) or `line_number` (legacy alias).
+    #[serde(alias = "line")]
     pub line_number: u32,
+    /// 1-indexed end line of the function body (inclusive).
+    ///
+    /// schema-cleanup-v1 BUG-23: 0 if not extracted (legacy
+    /// constructions). Populated by the canonical extractors that
+    /// have access to the AST node range.
+    #[serde(default)]
+    pub line_end: u32,
 }
 
-// schema-unification-v1 BUG-17: manual Serialize impl emits both
-// `line_number` (legacy) AND `line` (alias) so consumers using either
-// field name see a value. All other fields preserve their existing
-// `skip_serializing_if` behavior.
+// schema-unification-v1 BUG-17 / schema-cleanup-v1 BUG-23: manual
+// Serialize impl emits `line` and `line_end` (the canonical schema)
+// and intentionally OMITS `line_number` (which was a redundant alias
+// of `line` from BUG-17 — keeping both was dead surface).
 impl Serialize for FunctionInfo {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
     {
         use serde::ser::SerializeStruct;
-        // Field count: name, params, line_number, line + conditional fields.
-        // Compute exact count for serialize_struct (some serializers care).
-        let mut count = 4; // name + params + line_number + line
+        // Field count: name, params, is_method, is_async, line, line_end
+        // + optional fields.
+        let mut count = 6;
         if self.return_type.is_some() {
             count += 1;
         }
         if self.docstring.is_some() {
             count += 1;
         }
-        // is_method/is_async are bool-default-false; emitted unconditionally
-        // here to match the old derive (which had #[serde(default)] only on
-        // the deserialize side).
-        count += 2; // is_method + is_async
         if !self.decorators.is_empty() {
             count += 1;
         }
@@ -1230,8 +1267,8 @@ impl Serialize for FunctionInfo {
         if !self.decorators.is_empty() {
             s.serialize_field("decorators", &self.decorators)?;
         }
-        s.serialize_field("line_number", &self.line_number)?;
         s.serialize_field("line", &self.line_number)?;
+        s.serialize_field("line_end", &self.line_end)?;
         s.end()
     }
 }
@@ -1258,17 +1295,31 @@ pub struct ClassInfo {
     /// Decorator or annotation names applied to this class
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub decorators: Vec<String>,
-    /// Line number where this class is defined (1-indexed)
+    /// Line number where this class is defined (1-indexed).
+    ///
+    /// schema-cleanup-v1 BUG-23: deserialized from `line`
+    /// (canonical) or `line_number` (legacy alias).
+    #[serde(alias = "line")]
     pub line_number: u32,
+    /// 1-indexed end line of the class body (inclusive).
+    ///
+    /// schema-cleanup-v1 BUG-23: 0 if not extracted (legacy
+    /// constructions). Populated by the canonical extractors that
+    /// have access to the AST node range.
+    #[serde(default)]
+    pub line_end: u32,
 }
 
+// schema-unification-v1 BUG-17 / schema-cleanup-v1 BUG-23: emits
+// `line` + `line_end`; intentionally OMITS `line_number` (which was a
+// redundant alias for `line`).
 impl Serialize for ClassInfo {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
     {
         use serde::ser::SerializeStruct;
-        let mut count = 3; // name + methods + line_number; +1 below for line
+        let mut count = 4; // name + methods + line + line_end
         if !self.bases.is_empty() {
             count += 1;
         }
@@ -1281,7 +1332,6 @@ impl Serialize for ClassInfo {
         if !self.decorators.is_empty() {
             count += 1;
         }
-        count += 1; // line alias
         let mut s = serializer.serialize_struct("ClassInfo", count)?;
         s.serialize_field("name", &self.name)?;
         if !self.bases.is_empty() {
@@ -1297,8 +1347,8 @@ impl Serialize for ClassInfo {
         if !self.decorators.is_empty() {
             s.serialize_field("decorators", &self.decorators)?;
         }
-        s.serialize_field("line_number", &self.line_number)?;
         s.serialize_field("line", &self.line_number)?;
+        s.serialize_field("line_end", &self.line_end)?;
         s.end()
     }
 }
@@ -1330,17 +1380,33 @@ pub struct FieldInfo {
     /// Visibility modifier
     #[serde(skip_serializing_if = "Option::is_none")]
     pub visibility: Option<String>,
-    /// Line number where field is defined (1-indexed)
+    /// Line number where field is defined (1-indexed).
+    ///
+    /// schema-cleanup-v1 BUG-23: deserialized from `line`
+    /// (canonical) or `line_number` (legacy alias).
+    #[serde(alias = "line")]
     pub line_number: u32,
+    /// 1-indexed end line of the field declaration. For most languages
+    /// this is the same as `line_number` (single-line declarations);
+    /// surfaces multi-line forms (e.g. lambda-bodied class fields).
+    ///
+    /// schema-cleanup-v1 BUG-23: added for parity with FunctionInfo /
+    /// ClassInfo / MethodInfo / DefinitionInfo.
+    #[serde(default)]
+    pub line_end: u32,
 }
 
+// schema-unification-v1 BUG-17 / schema-cleanup-v1 BUG-23: emits
+// `line` + `line_end`; intentionally OMITS `line_number` (which was a
+// redundant alias of `line` from BUG-17 — kept on the in-memory
+// struct for source compatibility but no longer serialized).
 impl Serialize for FieldInfo {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
     {
         use serde::ser::SerializeStruct;
-        let mut count = 4; // name, is_static, is_constant, line_number
+        let mut count = 5; // name, is_static, is_constant, line, line_end
         if self.field_type.is_some() {
             count += 1;
         }
@@ -1350,7 +1416,6 @@ impl Serialize for FieldInfo {
         if self.visibility.is_some() {
             count += 1;
         }
-        count += 1; // line alias
         let mut s = serializer.serialize_struct("FieldInfo", count)?;
         s.serialize_field("name", &self.name)?;
         if let Some(ft) = &self.field_type {
@@ -1364,8 +1429,8 @@ impl Serialize for FieldInfo {
         if let Some(vis) = &self.visibility {
             s.serialize_field("visibility", vis)?;
         }
-        s.serialize_field("line_number", &self.line_number)?;
         s.serialize_field("line", &self.line_number)?;
+        s.serialize_field("line_end", &self.line_end)?;
         s.end()
     }
 }

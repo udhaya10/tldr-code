@@ -506,6 +506,7 @@ mod tests {
         let class = ClassInfo {
             name: "Server".to_string(),
             line_number: 3,
+            line_end: 3,
             methods: vec![],
             fields: vec![],
             bases: vec![],
@@ -521,6 +522,7 @@ mod tests {
         let class = ClassInfo {
             name: "Handler".to_string(),
             line_number: 3,
+            line_end: 3,
             methods: vec![],
             fields: vec![],
             bases: vec![],

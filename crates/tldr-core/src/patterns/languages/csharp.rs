@@ -42,7 +42,7 @@ impl CSharpSemantics {
             signals
                 .naming
                 .class_names
-                .push((name, case, file_path.display().to_string()));
+                .push((name, case, file_path.display().to_string(), node.start_position().row as u32 + 1));
         }
     }
 
@@ -59,7 +59,7 @@ impl CSharpSemantics {
             signals
                 .naming
                 .function_names
-                .push((name, case, file_path.display().to_string()));
+                .push((name, case, file_path.display().to_string(), node.start_position().row as u32 + 1));
         }
     }
 

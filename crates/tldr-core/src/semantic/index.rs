@@ -426,11 +426,13 @@ impl SemanticIndex {
             .collect();
 
         let matches_above_threshold = results.len();
+        let total_results = results.len();
 
         Ok(SemanticSearchReport {
             query: query.to_string(),
             model: self.model,
             results,
+            total_results,
             total_chunks: self.chunks.len(),
             matches_above_threshold,
             latency_ms: start.elapsed().as_millis() as u64,

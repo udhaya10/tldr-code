@@ -88,6 +88,14 @@ pub struct EnrichedSearchReport {
     pub query: String,
     /// Enriched result cards
     pub results: Vec<EnrichedResult>,
+    /// Total number of result cards returned (equals `results.len()`).
+    ///
+    /// schema-cleanup-v1 BUG-15: explicit count populated by the
+    /// search executor so consumers don't need to re-derive it from
+    /// `results | length`. Mirrors `SemanticSearchReport.total_results`
+    /// for cross-command schema parity.
+    #[serde(default)]
+    pub total_results: usize,
     /// Total number of files searched (indexed by BM25)
     pub total_files_searched: usize,
     /// Search mode used
@@ -866,6 +874,7 @@ pub fn search_with_inner(
                         return Ok(EnrichedSearchReport {
                             query: query.to_string(),
                             results: Vec::new(),
+                            total_results: 0,
                             total_files_searched: 0,
                             search_mode: if structure_cache.is_some() {
                                 "bm25+cached-structure".to_string()
@@ -885,6 +894,7 @@ pub fn search_with_inner(
                         return Ok(EnrichedSearchReport {
                             query: query.to_string(),
                             results: Vec::new(),
+                            total_results: 0,
                             total_files_searched: 0,
                             search_mode: if structure_cache.is_some() {
                                 "bm25+cached-structure".to_string()
@@ -905,6 +915,7 @@ pub fn search_with_inner(
                 return Ok(EnrichedSearchReport {
                     query: pattern.clone(),
                     results: Vec::new(),
+                            total_results: 0,
                     total_files_searched: total,
                     search_mode: if structure_cache.is_some() {
                         "regex+cached-structure".to_string()
@@ -930,6 +941,7 @@ pub fn search_with_inner(
                         return Ok(EnrichedSearchReport {
                             query: hybrid_query.clone(),
                             results: Vec::new(),
+                            total_results: 0,
                             total_files_searched: 0,
                             search_mode: "hybrid(bm25+regex)".to_string(),
                         });
@@ -943,6 +955,7 @@ pub fn search_with_inner(
                         return Ok(EnrichedSearchReport {
                             query: hybrid_query.clone(),
                             results: Vec::new(),
+                            total_results: 0,
                             total_files_searched: 0,
                             search_mode: "hybrid(bm25+regex)".to_string(),
                         });
@@ -957,6 +970,7 @@ pub fn search_with_inner(
                 return Ok(EnrichedSearchReport {
                     query: hybrid_query.clone(),
                     results: Vec::new(),
+                            total_results: 0,
                     total_files_searched: total_files,
                     search_mode: "hybrid(bm25+regex)".to_string(),
                 });
@@ -1218,9 +1232,11 @@ pub fn search_with_inner(
                     result.callers.sort();
                 }
             }
+            let total_results = sorted.len();
             Ok(EnrichedSearchReport {
                 query: report_query,
                 results: sorted,
+                total_results,
                 total_files_searched: total_files,
                 search_mode: format!("{}+{}+callgraph", mode_prefix, structure_label),
             })
@@ -1228,18 +1244,22 @@ pub fn search_with_inner(
         None if options.include_callgraph => {
             // Build live call graph (best-effort)
             let sorted_enriched = try_enrich_with_callgraph(sorted, root, language);
+            let total_results = sorted_enriched.len();
             Ok(EnrichedSearchReport {
                 query: report_query,
                 results: sorted_enriched,
+                total_results,
                 total_files_searched: total_files,
                 search_mode: format!("{}+{}+callgraph", mode_prefix, structure_label),
             })
         }
         None => {
             // No call graph enrichment
+            let total_results = sorted.len();
             Ok(EnrichedSearchReport {
                 query: report_query,
                 results: sorted,
+                total_results,
                 total_files_searched: total_files,
                 search_mode: format!("{}+{}", mode_prefix, structure_label),
             })
@@ -1772,6 +1792,7 @@ def parse_json(text):
         let report = EnrichedSearchReport {
             query: "authentication".to_string(),
             results: Vec::new(),
+            total_results: 0,
             total_files_searched: 42,
             search_mode: "bm25+structure".to_string(),
         };

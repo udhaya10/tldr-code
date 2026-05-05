@@ -348,6 +348,7 @@ fn extract_python_function_info(node: &Node, source: &str, is_method: bool) -> F
         || has_async_keyword(node, source);
 
     let line_number = node.start_position().row as u32 + 1;
+    let line_end = node.end_position().row as u32 + 1;
 
     FunctionInfo {
         name,
@@ -358,6 +359,7 @@ fn extract_python_function_info(node: &Node, source: &str, is_method: bool) -> F
         is_async,
         decorators: Vec::new(), // Set by caller for decorated functions
         line_number,
+        line_end,
     }
 }
 
@@ -458,6 +460,7 @@ fn extract_python_class_info(node: &Node, source: &str) -> ClassInfo {
     let bases = extract_python_bases(node, source);
     let docstring = extract_python_class_docstring(node, source);
     let line_number = node.start_position().row as u32 + 1;
+    let line_end = node.end_position().row as u32 + 1;
 
     // Extract methods
     let mut methods = Vec::new();
@@ -476,6 +479,7 @@ fn extract_python_class_info(node: &Node, source: &str) -> ClassInfo {
         fields,
         decorators: Vec::new(),
         line_number,
+        line_end,
     }
 }
 
@@ -603,6 +607,7 @@ fn extract_python_field_from_assignment(
         Some("public".to_string())
     };
     let line_number = node.start_position().row as u32 + 1;
+    let line_end = node.end_position().row as u32 + 1;
 
     Some(FieldInfo {
         name,
@@ -612,6 +617,7 @@ fn extract_python_field_from_assignment(
         is_constant,
         visibility,
         line_number,
+        line_end,
     })
 }
 
@@ -645,6 +651,7 @@ fn extract_python_self_assignments(node: &Node, source: &str, fields: &mut Vec<F
                                             Some("public".to_string())
                                         };
                                         let line_number = inner.start_position().row as u32 + 1;
+                                        let line_end = inner.end_position().row as u32 + 1;
 
                                         fields.push(FieldInfo {
                                             name,
@@ -654,6 +661,7 @@ fn extract_python_self_assignments(node: &Node, source: &str, fields: &mut Vec<F
                                             is_constant: false,
                                             visibility,
                                             line_number,
+                                            line_end,
                                         });
                                     }
                                 }
@@ -715,6 +723,7 @@ fn extract_python_module_constants(root: &Node, source: &str) -> Vec<FieldInfo> 
                                     .child_by_field_name("type")
                                     .map(|n| get_node_text(&n, source));
                                 let line_number = inner.start_position().row as u32 + 1;
+                                let line_end = inner.end_position().row as u32 + 1;
                                 constants.push(FieldInfo {
                                     name,
                                     field_type,
@@ -723,6 +732,7 @@ fn extract_python_module_constants(root: &Node, source: &str) -> Vec<FieldInfo> 
                                     is_constant: true,
                                     visibility: None,
                                     line_number,
+                                    line_end,
                                 });
                             }
                         }
@@ -795,6 +805,7 @@ fn extract_rust_const_or_static(node: &Node, source: &str, is_const: bool) -> Op
         .or_else(|| Some("private".to_string()));
 
     let line_number = node.start_position().row as u32 + 1;
+    let line_end = node.end_position().row as u32 + 1;
 
     Some(FieldInfo {
         name,
@@ -804,6 +815,7 @@ fn extract_rust_const_or_static(node: &Node, source: &str, is_const: bool) -> Op
         is_constant: true,
         visibility,
         line_number,
+        line_end,
     })
 }
 
@@ -856,6 +868,7 @@ fn extract_go_const_spec(node: &Node, source: &str) -> Option<FieldInfo> {
     };
 
     let line_number = node.start_position().row as u32 + 1;
+    let line_end = node.end_position().row as u32 + 1;
 
     Some(FieldInfo {
         name,
@@ -865,6 +878,7 @@ fn extract_go_const_spec(node: &Node, source: &str) -> Option<FieldInfo> {
         is_constant: true,
         visibility,
         line_number,
+        line_end,
     })
 }
 
@@ -921,6 +935,7 @@ fn extract_go_var_spec(node: &Node, source: &str) -> Option<FieldInfo> {
     };
 
     let line_number = node.start_position().row as u32 + 1;
+    let line_end = node.end_position().row as u32 + 1;
 
     Some(FieldInfo {
         name,
@@ -930,6 +945,7 @@ fn extract_go_var_spec(node: &Node, source: &str) -> Option<FieldInfo> {
         is_constant: false, // var, not const
         visibility,
         line_number,
+        line_end,
     })
 }
 
@@ -954,6 +970,7 @@ fn extract_ts_module_constants(root: &Node, source: &str) -> Vec<FieldInfo> {
                                     .child_by_field_name("value")
                                     .map(|n| get_node_text(&n, source));
                                 let line_number = decl_child.start_position().row as u32 + 1;
+                                let line_end = decl_child.end_position().row as u32 + 1;
                                 constants.push(FieldInfo {
                                     name,
                                     field_type: None,
@@ -962,6 +979,7 @@ fn extract_ts_module_constants(root: &Node, source: &str) -> Vec<FieldInfo> {
                                     is_constant: true,
                                     visibility: None,
                                     line_number,
+                                    line_end,
                                 });
                             }
                         }
@@ -988,6 +1006,8 @@ fn extract_ts_module_constants(root: &Node, source: &str) -> Vec<FieldInfo> {
                                             .map(|n| get_node_text(&n, source));
                                         let line_number =
                                             decl_child.start_position().row as u32 + 1;
+                                        let line_end =
+                                            decl_child.end_position().row as u32 + 1;
                                         constants.push(FieldInfo {
                                             name,
                                             field_type: None,
@@ -996,6 +1016,7 @@ fn extract_ts_module_constants(root: &Node, source: &str) -> Vec<FieldInfo> {
                                             is_constant: true,
                                             visibility: None,
                                             line_number,
+                                            line_end,
                                         });
                                     }
                                 }
@@ -1076,6 +1097,7 @@ fn extract_preproc_def_constant(node: &Node, source: &str, constants: &mut Vec<F
     if let Some(name) = name {
         if is_upper_case_name(&name) {
             let line_number = node.start_position().row as u32 + 1;
+            let line_end = node.end_position().row as u32 + 1;
             constants.push(FieldInfo {
                 name,
                 field_type: None,
@@ -1084,6 +1106,7 @@ fn extract_preproc_def_constant(node: &Node, source: &str, constants: &mut Vec<F
                 is_constant: true,
                 visibility: None,
                 line_number,
+                line_end,
             });
         }
     }
@@ -1110,6 +1133,7 @@ fn extract_c_const_declaration(node: &Node, source: &str, constants: &mut Vec<Fi
             if let Some(name) = name {
                 if is_upper_case_name(&name) {
                     let line_number = node.start_position().row as u32 + 1;
+                    let line_end = node.end_position().row as u32 + 1;
                     constants.push(FieldInfo {
                         name,
                         field_type: field_type.clone(),
@@ -1118,6 +1142,7 @@ fn extract_c_const_declaration(node: &Node, source: &str, constants: &mut Vec<Fi
                         is_constant: true,
                         visibility: None,
                         line_number,
+                        line_end,
                     });
                 }
             }
@@ -1152,6 +1177,7 @@ fn extract_ruby_module_constants(root: &Node, source: &str) -> Vec<FieldInfo> {
                 let name = get_node_text(&left, source);
                 if is_upper_case_name(&name) {
                     let line_number = child.start_position().row as u32 + 1;
+                    let line_end = child.end_position().row as u32 + 1;
                     constants.push(FieldInfo {
                         name,
                         field_type: None,
@@ -1160,6 +1186,7 @@ fn extract_ruby_module_constants(root: &Node, source: &str) -> Vec<FieldInfo> {
                         is_constant: true,
                         visibility: None,
                         line_number,
+                        line_end,
                     });
                 }
             }
@@ -1216,6 +1243,7 @@ fn extract_kotlin_module_constants(root: &Node, source: &str) -> Vec<FieldInfo> 
                 // Extract if: const val (explicit const), or val with UPPER_CASE name
                 if has_const_modifier || (is_val && is_upper_case_name(&name)) {
                     let line_number = child.start_position().row as u32 + 1;
+                    let line_end = child.end_position().row as u32 + 1;
                     constants.push(FieldInfo {
                         name,
                         field_type: None,
@@ -1224,6 +1252,7 @@ fn extract_kotlin_module_constants(root: &Node, source: &str) -> Vec<FieldInfo> 
                         is_constant: true,
                         visibility: None,
                         line_number,
+                        line_end,
                     });
                 }
             }
@@ -1273,6 +1302,7 @@ fn extract_swift_module_constants(root: &Node, source: &str) -> Vec<FieldInfo> {
             if let Some(name) = name {
                 if is_let && is_upper_case_name(&name) {
                     let line_number = child.start_position().row as u32 + 1;
+                    let line_end = child.end_position().row as u32 + 1;
                     constants.push(FieldInfo {
                         name,
                         field_type: None,
@@ -1281,6 +1311,7 @@ fn extract_swift_module_constants(root: &Node, source: &str) -> Vec<FieldInfo> {
                         is_constant: true,
                         visibility: None,
                         line_number,
+                        line_end,
                     });
                 }
             }
@@ -1361,6 +1392,7 @@ fn extract_csharp_const_from_declaration(
                                 val
                             };
                             let line_number = node.start_position().row as u32 + 1;
+                            let line_end = node.end_position().row as u32 + 1;
                             constants.push(FieldInfo {
                                 name,
                                 field_type: field_type.clone(),
@@ -1369,6 +1401,7 @@ fn extract_csharp_const_from_declaration(
                                 is_constant: true,
                                 visibility: None,
                                 line_number,
+                                line_end,
                             });
                         }
                     }
@@ -1409,6 +1442,7 @@ fn extract_scala_module_constants(root: &Node, source: &str) -> Vec<FieldInfo> {
             if let Some(name) = name {
                 if is_upper_case_name(&name) {
                     let line_number = child.start_position().row as u32 + 1;
+                    let line_end = child.end_position().row as u32 + 1;
                     constants.push(FieldInfo {
                         name,
                         field_type: None,
@@ -1417,6 +1451,7 @@ fn extract_scala_module_constants(root: &Node, source: &str) -> Vec<FieldInfo> {
                         is_constant: true,
                         visibility: None,
                         line_number,
+                        line_end,
                     });
                 }
             }
@@ -1456,6 +1491,7 @@ fn extract_php_module_constants(root: &Node, source: &str) -> Vec<FieldInfo> {
                         }
                         if let Some(name) = name {
                             let line_number = child.start_position().row as u32 + 1;
+                            let line_end = child.end_position().row as u32 + 1;
                             constants.push(FieldInfo {
                                 name,
                                 field_type: None,
@@ -1464,6 +1500,7 @@ fn extract_php_module_constants(root: &Node, source: &str) -> Vec<FieldInfo> {
                                 is_constant: true,
                                 visibility: None,
                                 line_number,
+                                line_end,
                             });
                         }
                     }
@@ -1525,6 +1562,7 @@ fn extract_php_define_call(
         if !name.is_empty() {
             let default_value = second_arg.map(|a| get_node_text(&a, source));
             let line_number = parent.start_position().row as u32 + 1;
+            let line_end = parent.end_position().row as u32 + 1;
             constants.push(FieldInfo {
                 name,
                 field_type: None,
@@ -1533,6 +1571,7 @@ fn extract_php_define_call(
                 is_constant: true,
                 visibility: None,
                 line_number,
+                line_end,
             });
         }
     }
@@ -1588,6 +1627,7 @@ fn extract_lua_constant_from_assignment(node: &Node, source: &str, constants: &m
                 if is_upper_case_name(&name) {
                     let default_value = expr_list.as_ref().map(|e| get_node_text(e, source));
                     let line_number = node.start_position().row as u32 + 1;
+                    let line_end = node.end_position().row as u32 + 1;
                     constants.push(FieldInfo {
                         name,
                         field_type: None,
@@ -1596,6 +1636,7 @@ fn extract_lua_constant_from_assignment(node: &Node, source: &str, constants: &m
                         is_constant: true,
                         visibility: None,
                         line_number,
+                        line_end,
                     });
                 }
             }
@@ -1632,6 +1673,7 @@ fn extract_elixir_module_constants(root: &Node, source: &str) -> Vec<FieldInfo> 
                             let default_value =
                                 root.child(i + 1).map(|n| get_node_text(&n, source));
                             let line_number = child.start_position().row as u32 + 1;
+                            let line_end = child.end_position().row as u32 + 1;
                             constants.push(FieldInfo {
                                 name,
                                 field_type: None,
@@ -1640,6 +1682,7 @@ fn extract_elixir_module_constants(root: &Node, source: &str) -> Vec<FieldInfo> 
                                 is_constant: true,
                                 visibility: None,
                                 line_number,
+                                line_end,
                             });
                         }
                     }
@@ -1679,6 +1722,7 @@ fn extract_ocaml_module_constants(root: &Node, source: &str) -> Vec<FieldInfo> {
                     if let Some(name) = name {
                         if is_upper_case_name(&name) {
                             let line_number = child.start_position().row as u32 + 1;
+                            let line_end = child.end_position().row as u32 + 1;
                             constants.push(FieldInfo {
                                 name,
                                 field_type: None,
@@ -1687,6 +1731,7 @@ fn extract_ocaml_module_constants(root: &Node, source: &str) -> Vec<FieldInfo> {
                                 is_constant: true,
                                 visibility: None,
                                 line_number,
+                                line_end,
                             });
                         }
                     }
@@ -1836,6 +1881,7 @@ fn extract_ts_assignment_function(
     });
     let is_async = get_node_text(&right, source).starts_with("async");
     let line_number = assignment.start_position().row as u32 + 1;
+    let line_end = assignment.end_position().row as u32 + 1;
 
     // Walk up through expression_statement / parenthesized_expression to
     // find a leading JSDoc comment.
@@ -1854,6 +1900,7 @@ fn extract_ts_assignment_function(
         is_async,
         decorators: Vec::new(),
         line_number,
+        line_end,
     });
 }
 
@@ -1897,6 +1944,7 @@ fn extract_ts_pair_function(pair: &Node, source: &str, functions: &mut Vec<Funct
     });
     let is_async = get_node_text(&value, source).starts_with("async");
     let line_number = pair.start_position().row as u32 + 1;
+    let line_end = pair.end_position().row as u32 + 1;
 
     functions.push(FunctionInfo {
         name,
@@ -1907,6 +1955,7 @@ fn extract_ts_pair_function(pair: &Node, source: &str, functions: &mut Vec<Funct
         is_async,
         decorators: Vec::new(),
         line_number,
+        line_end,
     });
 }
 
@@ -1946,6 +1995,7 @@ fn extract_ts_variable_functions(node: &Node, source: &str, functions: &mut Vec<
                     let is_async = get_node_text(&val, source).starts_with("async")
                         || get_node_text(&child, source).starts_with("async");
                     let line_number = child.start_position().row as u32 + 1;
+                    let line_end = child.end_position().row as u32 + 1;
 
                     functions.push(FunctionInfo {
                         name,
@@ -1956,6 +2006,7 @@ fn extract_ts_variable_functions(node: &Node, source: &str, functions: &mut Vec<
                         is_async,
                         decorators: Vec::new(),
                         line_number,
+                        line_end,
                     });
                 }
             }
@@ -2007,6 +2058,7 @@ fn extract_ts_function_info(node: &Node, source: &str, is_method: bool) -> Funct
 
     let is_async = get_node_text(node, source).starts_with("async");
     let line_number = node.start_position().row as u32 + 1;
+    let line_end = node.end_position().row as u32 + 1;
 
     FunctionInfo {
         name,
@@ -2017,6 +2069,7 @@ fn extract_ts_function_info(node: &Node, source: &str, is_method: bool) -> Funct
         is_async,
         decorators: Vec::new(),
         line_number,
+        line_end,
     }
 }
 
@@ -2094,6 +2147,7 @@ fn extract_ts_classes_detailed(node: &Node, source: &str, classes: &mut Vec<Clas
                     .map(|n| get_node_text(&n, source))
                     .unwrap_or_default();
                 let line_number = child.start_position().row as u32 + 1;
+                let line_end = child.end_position().row as u32 + 1;
                 classes.push(ClassInfo {
                     name,
                     bases: Vec::new(),
@@ -2102,6 +2156,7 @@ fn extract_ts_classes_detailed(node: &Node, source: &str, classes: &mut Vec<Clas
                     fields: Vec::new(),
                     decorators: Vec::new(),
                     line_number,
+                    line_end,
                 });
             }
             _ => {
@@ -2118,6 +2173,7 @@ fn extract_ts_class_info(node: &Node, source: &str) -> ClassInfo {
         .unwrap_or_default();
 
     let line_number = node.start_position().row as u32 + 1;
+    let line_end = node.end_position().row as u32 + 1;
 
     // Extract methods
     let mut methods = Vec::new();
@@ -2155,6 +2211,7 @@ fn extract_ts_class_info(node: &Node, source: &str) -> ClassInfo {
         fields,
         decorators: Vec::new(),
         line_number,
+        line_end,
     }
 }
 
@@ -2222,6 +2279,7 @@ fn extract_ts_field_from_definition(node: &Node, source: &str) -> Option<FieldIn
     };
 
     let line_number = node.start_position().row as u32 + 1;
+    let line_end = node.end_position().row as u32 + 1;
 
     let is_constant = is_static && is_upper_case_name(&name);
 
@@ -2233,6 +2291,7 @@ fn extract_ts_field_from_definition(node: &Node, source: &str) -> Option<FieldIn
         is_constant,
         visibility,
         line_number,
+        line_end,
     })
 }
 
@@ -2267,6 +2326,7 @@ fn extract_go_function_info(node: &Node, source: &str) -> FunctionInfo {
         .map(|n| get_node_text(&n, source));
 
     let line_number = node.start_position().row as u32 + 1;
+    let line_end = node.end_position().row as u32 + 1;
     let docstring = extract_go_docstring(node, source);
 
     FunctionInfo {
@@ -2278,6 +2338,7 @@ fn extract_go_function_info(node: &Node, source: &str) -> FunctionInfo {
         is_async: false,
         decorators: Vec::new(),
         line_number,
+        line_end,
     }
 }
 
@@ -2403,6 +2464,7 @@ fn extract_go_types_pass1(node: &Node, source: &str, classes: &mut Vec<ClassInfo
                     if let Some(tn) = type_node {
                         if tn.kind() == "struct_type" {
                             let line_number = spec.start_position().row as u32 + 1;
+                            let line_end = spec.end_position().row as u32 + 1;
                             let fields = extract_go_struct_fields(&tn, source);
                             classes.push(ClassInfo {
                                 name,
@@ -2412,9 +2474,11 @@ fn extract_go_types_pass1(node: &Node, source: &str, classes: &mut Vec<ClassInfo
                                 fields,
                                 decorators: Vec::new(),
                                 line_number,
+                                line_end,
                             });
                         } else if tn.kind() == "interface_type" {
                             let line_number = spec.start_position().row as u32 + 1;
+                            let line_end = spec.end_position().row as u32 + 1;
                             let methods = extract_go_interface_methods(&tn, source);
                             classes.push(ClassInfo {
                                 name,
@@ -2424,6 +2488,7 @@ fn extract_go_types_pass1(node: &Node, source: &str, classes: &mut Vec<ClassInfo
                                 fields: Vec::new(),
                                 decorators: Vec::new(),
                                 line_number,
+                                line_end,
                             });
                         }
                     }
@@ -2465,6 +2530,7 @@ fn extract_go_interface_methods_recursive(
             let mut params = Vec::new();
             let mut return_type = None;
             let line_number = child.start_position().row as u32 + 1;
+            let line_end = child.end_position().row as u32 + 1;
 
             let mut inner_cursor = child.walk();
             for inner in child.children(&mut inner_cursor) {
@@ -2510,6 +2576,7 @@ fn extract_go_interface_methods_recursive(
                     is_async: false,
                     decorators: Vec::new(),
                     line_number,
+                    line_end,
                 });
             }
         } else {
@@ -2544,6 +2611,7 @@ fn extract_go_methods_to_classes(node: &Node, source: &str, classes: &mut Vec<Cl
                         fields: Vec::new(),
                         decorators: Vec::new(),
                         line_number: 0, // Unknown, defined elsewhere
+                        line_end: 0,
                     });
                 }
             }
@@ -2605,6 +2673,7 @@ fn extract_go_struct_fields(struct_node: &Node, source: &str) -> Vec<FieldInfo> 
                     }
 
                     let line_number = field.start_position().row as u32 + 1;
+                    let line_end = field.end_position().row as u32 + 1;
                     for name in names {
                         let visibility = if name
                             .chars()
@@ -2624,6 +2693,7 @@ fn extract_go_struct_fields(struct_node: &Node, source: &str) -> Vec<FieldInfo> 
                             is_constant: false,
                             visibility,
                             line_number,
+                            line_end,
                         });
                     }
                 }
@@ -2668,6 +2738,7 @@ fn extract_rust_function_info(node: &Node, source: &str, is_method: bool) -> Fun
 
     let is_async = get_node_text(node, source).contains("async fn");
     let line_number = node.start_position().row as u32 + 1;
+    let line_end = node.end_position().row as u32 + 1;
     let decorators = extract_rust_function_attributes(node, source);
 
     FunctionInfo {
@@ -2679,6 +2750,7 @@ fn extract_rust_function_info(node: &Node, source: &str, is_method: bool) -> Fun
         is_async,
         decorators,
         line_number,
+        line_end,
     }
 }
 
@@ -2872,6 +2944,7 @@ fn collect_rust_struct_defs(node: &Node, source: &str, classes: &mut Vec<ClassIn
                 .unwrap_or_default();
 
             let line_number = child.start_position().row as u32 + 1;
+            let line_end = child.end_position().row as u32 + 1;
 
             // Extract struct fields (Gap 3)
             let fields = if child.kind() == "struct_item" {
@@ -2895,6 +2968,7 @@ fn collect_rust_struct_defs(node: &Node, source: &str, classes: &mut Vec<ClassIn
                 fields,
                 decorators: Vec::new(),
                 line_number,
+                line_end,
             });
         }
         collect_rust_struct_defs(&child, source, classes);
@@ -2934,6 +3008,7 @@ fn extract_methods_from_trait_body(trait_node: &Node, source: &str) -> Vec<Funct
 
                         let is_async = get_node_text(&item, source).contains("async fn");
                         let line_number = item.start_position().row as u32 + 1;
+                        let line_end = item.end_position().row as u32 + 1;
 
                         methods.push(FunctionInfo {
                             name,
@@ -2944,6 +3019,7 @@ fn extract_methods_from_trait_body(trait_node: &Node, source: &str) -> Vec<Funct
                             is_async,
                             decorators: Vec::new(),
                             line_number,
+                            line_end,
                         });
                     }
                 }
@@ -3074,6 +3150,7 @@ fn extract_rust_struct_fields(struct_node: &Node, source: &str) -> Vec<FieldInfo
                             .or_else(|| Some("private".to_string()));
 
                         let line_number = field.start_position().row as u32 + 1;
+                        let line_end = field.end_position().row as u32 + 1;
                         fields.push(FieldInfo {
                             name,
                             field_type,
@@ -3082,6 +3159,7 @@ fn extract_rust_struct_fields(struct_node: &Node, source: &str) -> Vec<FieldInfo
                             is_constant: false,
                             visibility,
                             line_number,
+                            line_end,
                         });
                     }
                 }
@@ -3119,6 +3197,7 @@ fn extract_java_function_info(node: &Node, source: &str) -> FunctionInfo {
         .map(|n| get_node_text(&n, source));
 
     let line_number = node.start_position().row as u32 + 1;
+    let line_end = node.end_position().row as u32 + 1;
 
     FunctionInfo {
         name,
@@ -3129,6 +3208,7 @@ fn extract_java_function_info(node: &Node, source: &str) -> FunctionInfo {
         is_async: false,
         decorators: Vec::new(),
         line_number,
+        line_end,
     }
 }
 
@@ -3187,6 +3267,7 @@ fn extract_java_classes_detailed(node: &Node, source: &str, classes: &mut Vec<Cl
                 .unwrap_or_default();
 
             let line_number = child.start_position().row as u32 + 1;
+            let line_end = child.end_position().row as u32 + 1;
 
             // Extract methods
             let mut methods = Vec::new();
@@ -3212,6 +3293,7 @@ fn extract_java_classes_detailed(node: &Node, source: &str, classes: &mut Vec<Cl
                 fields,
                 decorators: Vec::new(),
                 line_number,
+                line_end,
             });
         }
         extract_java_classes_detailed(&child, source, classes);
@@ -3337,6 +3419,7 @@ fn extract_java_class_fields(body: &Node, source: &str) -> Vec<FieldInfo> {
 
                         let is_constant = is_static && is_final && is_upper_case_name(&name);
                         let line_number = child.start_position().row as u32 + 1;
+                        let line_end = child.end_position().row as u32 + 1;
 
                         fields.push(FieldInfo {
                             name,
@@ -3346,6 +3429,7 @@ fn extract_java_class_fields(body: &Node, source: &str) -> Vec<FieldInfo> {
                             is_constant,
                             visibility: visibility.clone(),
                             line_number,
+                            line_end,
                         });
                     }
                 }
@@ -3437,6 +3521,7 @@ fn extract_lua_assignment_functions(node: &Node, source: &str, functions: &mut V
     let params = extract_lua_params(&func_def, source);
     let docstring = extract_lua_docstring_before(node, source);
     let line_number = node.start_position().row as u32 + 1;
+    let line_end = node.end_position().row as u32 + 1;
 
     functions.push(FunctionInfo {
         name,
@@ -3447,6 +3532,7 @@ fn extract_lua_assignment_functions(node: &Node, source: &str, functions: &mut V
         is_async: false,
         decorators: Vec::new(),
         line_number,
+        line_end,
     });
 }
 
@@ -3485,6 +3571,7 @@ fn extract_lua_function_info(node: &Node, source: &str) -> FunctionInfo {
     let params = extract_lua_params(node, source);
     let docstring = extract_lua_docstring_before(node, source);
     let line_number = node.start_position().row as u32 + 1;
+    let line_end = node.end_position().row as u32 + 1;
 
     FunctionInfo {
         name,
@@ -3495,6 +3582,7 @@ fn extract_lua_function_info(node: &Node, source: &str) -> FunctionInfo {
         is_async: false,
         decorators: Vec::new(),
         line_number,
+        line_end,
     }
 }
 
@@ -3637,6 +3725,7 @@ fn extract_luau_assignment_functions(node: &Node, source: &str, functions: &mut 
     let return_type = extract_luau_return_type(&func_def, source);
     let docstring = extract_lua_docstring_before(node, source);
     let line_number = node.start_position().row as u32 + 1;
+    let line_end = node.end_position().row as u32 + 1;
 
     functions.push(FunctionInfo {
         name,
@@ -3647,6 +3736,7 @@ fn extract_luau_assignment_functions(node: &Node, source: &str, functions: &mut 
         is_async: false,
         decorators: Vec::new(),
         line_number,
+        line_end,
     });
 }
 
@@ -3660,6 +3750,7 @@ fn extract_luau_function_info(node: &Node, source: &str) -> FunctionInfo {
     let return_type = extract_luau_return_type(node, source);
     let docstring = extract_lua_docstring_before(node, source);
     let line_number = node.start_position().row as u32 + 1;
+    let line_end = node.end_position().row as u32 + 1;
 
     FunctionInfo {
         name,
@@ -3670,6 +3761,7 @@ fn extract_luau_function_info(node: &Node, source: &str) -> FunctionInfo {
         is_async: false,
         decorators: Vec::new(),
         line_number,
+        line_end,
     }
 }
 
@@ -3777,6 +3869,7 @@ fn extract_swift_function_info(node: &Node, source: &str, is_method: bool) -> Fu
     let docstring = extract_swift_docstring_before(node, source);
     let is_async = get_node_text(node, source).contains("async ");
     let line_number = node.start_position().row as u32 + 1;
+    let line_end = node.end_position().row as u32 + 1;
 
     FunctionInfo {
         name,
@@ -3787,6 +3880,7 @@ fn extract_swift_function_info(node: &Node, source: &str, is_method: bool) -> Fu
         is_async,
         decorators: Vec::new(),
         line_number,
+        line_end,
     }
 }
 
@@ -3971,6 +4065,7 @@ fn extract_swift_class_info(node: &Node, source: &str) -> ClassInfo {
     let bases = extract_swift_bases(node, source);
     let docstring = extract_swift_docstring_before(node, source);
     let line_number = node.start_position().row as u32 + 1;
+    let line_end = node.end_position().row as u32 + 1;
 
     // Extract methods from the body
     let mut methods = Vec::new();
@@ -4008,6 +4103,7 @@ fn extract_swift_class_info(node: &Node, source: &str) -> ClassInfo {
         fields: Vec::new(),
         decorators: Vec::new(),
         line_number,
+        line_end,
     }
 }
 
@@ -4094,6 +4190,7 @@ fn extract_ocaml_function_info(binding: &Node, definition: &Node, source: &str) 
     let return_type = extract_ocaml_return_type(binding, source);
     let docstring = extract_ocaml_docstring_before(definition, source);
     let line_number = definition.start_position().row as u32 + 1;
+    let line_end = definition.end_position().row as u32 + 1;
 
     FunctionInfo {
         name,
@@ -4104,6 +4201,7 @@ fn extract_ocaml_function_info(binding: &Node, definition: &Node, source: &str) 
         is_async: false,
         decorators: Vec::new(),
         line_number,
+        line_end,
     }
 }
 
@@ -4566,6 +4664,7 @@ fn extract_c_function_info(node: &Node, source: &str) -> FunctionInfo {
 
     let docstring = extract_c_docstring(node, source);
     let line_number = node.start_position().row as u32 + 1;
+    let line_end = node.end_position().row as u32 + 1;
 
     FunctionInfo {
         name,
@@ -4576,6 +4675,7 @@ fn extract_c_function_info(node: &Node, source: &str) -> FunctionInfo {
         is_async: false,
         decorators: Vec::new(),
         line_number,
+        line_end,
     }
 }
 
@@ -4818,6 +4918,7 @@ fn extract_cpp_function_info(node: &Node, source: &str, is_method: bool) -> Func
 
     let docstring = extract_c_docstring(node, source);
     let line_number = node.start_position().row as u32 + 1;
+    let line_end = node.end_position().row as u32 + 1;
 
     // Check for virtual keyword in the source text of the function
     let text = get_node_text(node, source);
@@ -4838,6 +4939,7 @@ fn extract_cpp_function_info(node: &Node, source: &str, is_method: bool) -> Func
         is_async: false,
         decorators,
         line_number,
+        line_end,
     }
 }
 
@@ -4876,6 +4978,7 @@ fn extract_cpp_class_info(node: &Node, source: &str) -> ClassInfo {
     let bases = extract_cpp_bases(node, source);
     let docstring = extract_c_docstring(node, source);
     let line_number = node.start_position().row as u32 + 1;
+    let line_end = node.end_position().row as u32 + 1;
 
     // Extract methods from class body
     let mut methods = Vec::new();
@@ -4891,6 +4994,7 @@ fn extract_cpp_class_info(node: &Node, source: &str) -> ClassInfo {
         fields: Vec::new(),
         decorators: Vec::new(),
         line_number,
+        line_end,
     }
 }
 
@@ -4976,6 +5080,7 @@ fn extract_ruby_function_info(node: &Node, source: &str, is_method: bool) -> Fun
     let params = extract_ruby_params(node, source);
     let docstring = extract_ruby_docstring(node, source);
     let line_number = node.start_position().row as u32 + 1;
+    let line_end = node.end_position().row as u32 + 1;
 
     // singleton_method => class method (self.foo)
     let is_singleton = node.kind() == "singleton_method";
@@ -4994,6 +5099,7 @@ fn extract_ruby_function_info(node: &Node, source: &str, is_method: bool) -> Fun
         is_async: false,
         decorators,
         line_number,
+        line_end,
     }
 }
 
@@ -5141,6 +5247,7 @@ fn extract_ruby_class_info(node: &Node, source: &str) -> ClassInfo {
 
     let docstring = extract_ruby_docstring(node, source);
     let line_number = node.start_position().row as u32 + 1;
+    let line_end = node.end_position().row as u32 + 1;
 
     // Extract methods from class body
     let mut methods = Vec::new();
@@ -5156,6 +5263,7 @@ fn extract_ruby_class_info(node: &Node, source: &str) -> ClassInfo {
         fields: Vec::new(),
         decorators: Vec::new(),
         line_number,
+        line_end,
     }
 }
 
@@ -5167,6 +5275,7 @@ fn extract_ruby_module_info(node: &Node, source: &str) -> ClassInfo {
 
     let docstring = extract_ruby_docstring(node, source);
     let line_number = node.start_position().row as u32 + 1;
+    let line_end = node.end_position().row as u32 + 1;
 
     // Extract methods from module body
     let mut methods = Vec::new();
@@ -5182,6 +5291,7 @@ fn extract_ruby_module_info(node: &Node, source: &str) -> ClassInfo {
         fields: Vec::new(),
         decorators: vec!["module".to_string()],
         line_number,
+        line_end,
     }
 }
 
@@ -5251,6 +5361,7 @@ fn extract_php_function_info(node: &Node, source: &str, is_method: bool) -> Func
     let return_type = extract_php_return_type(node, source);
     let docstring = extract_php_docstring(node, source);
     let line_number = node.start_position().row as u32 + 1;
+    let line_end = node.end_position().row as u32 + 1;
 
     // Check for visibility and static modifiers on method_declaration
     let mut decorators = Vec::new();
@@ -5280,6 +5391,7 @@ fn extract_php_function_info(node: &Node, source: &str, is_method: bool) -> Func
         is_async: false,
         decorators,
         line_number,
+        line_end,
     }
 }
 
@@ -5400,6 +5512,7 @@ fn extract_php_class_info(node: &Node, source: &str) -> ClassInfo {
     let bases = extract_php_bases(node, source);
     let docstring = extract_php_docstring(node, source);
     let line_number = node.start_position().row as u32 + 1;
+    let line_end = node.end_position().row as u32 + 1;
 
     // Extract methods from class body
     let mut methods = Vec::new();
@@ -5415,6 +5528,7 @@ fn extract_php_class_info(node: &Node, source: &str) -> ClassInfo {
         fields: Vec::new(),
         decorators: Vec::new(),
         line_number,
+        line_end,
     }
 }
 
@@ -5426,6 +5540,7 @@ fn extract_php_interface_info(node: &Node, source: &str) -> ClassInfo {
 
     let docstring = extract_php_docstring(node, source);
     let line_number = node.start_position().row as u32 + 1;
+    let line_end = node.end_position().row as u32 + 1;
 
     let mut methods = Vec::new();
     if let Some(body) = node.child_by_field_name("body") {
@@ -5440,6 +5555,7 @@ fn extract_php_interface_info(node: &Node, source: &str) -> ClassInfo {
         fields: Vec::new(),
         decorators: vec!["interface".to_string()],
         line_number,
+        line_end,
     }
 }
 
@@ -5451,6 +5567,7 @@ fn extract_php_trait_info(node: &Node, source: &str) -> ClassInfo {
 
     let docstring = extract_php_docstring(node, source);
     let line_number = node.start_position().row as u32 + 1;
+    let line_end = node.end_position().row as u32 + 1;
 
     let mut methods = Vec::new();
     if let Some(body) = node.child_by_field_name("body") {
@@ -5465,6 +5582,7 @@ fn extract_php_trait_info(node: &Node, source: &str) -> ClassInfo {
         fields: Vec::new(),
         decorators: vec!["trait".to_string()],
         line_number,
+        line_end,
     }
 }
 
@@ -5585,6 +5703,7 @@ fn extract_csharp_function_info(node: &Node, source: &str) -> FunctionInfo {
 
     let decorators = extract_csharp_attributes(node, source);
     let line_number = node.start_position().row as u32 + 1;
+    let line_end = node.end_position().row as u32 + 1;
 
     FunctionInfo {
         name,
@@ -5595,6 +5714,7 @@ fn extract_csharp_function_info(node: &Node, source: &str) -> FunctionInfo {
         is_async,
         decorators,
         line_number,
+        line_end,
     }
 }
 
@@ -5700,6 +5820,7 @@ fn extract_csharp_class_info(node: &Node, source: &str) -> ClassInfo {
         .unwrap_or_default();
 
     let line_number = node.start_position().row as u32 + 1;
+    let line_end = node.end_position().row as u32 + 1;
 
     // Extract base types from base_list
     let bases = extract_csharp_bases(node, source);
@@ -5729,6 +5850,7 @@ fn extract_csharp_class_info(node: &Node, source: &str) -> ClassInfo {
         fields: Vec::new(),
         decorators: Vec::new(),
         line_number,
+        line_end,
     }
 }
 
@@ -5844,6 +5966,7 @@ fn extract_kotlin_function_info(node: &Node, source: &str, is_method: bool) -> F
 
     let decorators = extract_kotlin_annotations(node, source);
     let line_number = node.start_position().row as u32 + 1;
+    let line_end = node.end_position().row as u32 + 1;
 
     FunctionInfo {
         name,
@@ -5854,6 +5977,7 @@ fn extract_kotlin_function_info(node: &Node, source: &str, is_method: bool) -> F
         is_async,
         decorators,
         line_number,
+        line_end,
     }
 }
 
@@ -6016,6 +6140,7 @@ fn extract_kotlin_class_info(node: &Node, source: &str) -> ClassInfo {
     };
 
     let line_number = node.start_position().row as u32 + 1;
+    let line_end = node.end_position().row as u32 + 1;
     let bases = extract_kotlin_bases(node, source);
     let docstring = extract_kotlin_docstring(node, source);
 
@@ -6042,6 +6167,7 @@ fn extract_kotlin_class_info(node: &Node, source: &str) -> ClassInfo {
         fields: Vec::new(),
         decorators: Vec::new(),
         line_number,
+        line_end,
     }
 }
 
@@ -6060,6 +6186,7 @@ fn extract_kotlin_object_info(node: &Node, source: &str) -> ClassInfo {
     };
 
     let line_number = node.start_position().row as u32 + 1;
+    let line_end = node.end_position().row as u32 + 1;
 
     // Extract methods from class_body
     let mut methods = Vec::new();
@@ -6084,6 +6211,7 @@ fn extract_kotlin_object_info(node: &Node, source: &str) -> ClassInfo {
         fields: Vec::new(),
         decorators: Vec::new(),
         line_number,
+        line_end,
     }
 }
 
@@ -6195,6 +6323,7 @@ fn extract_scala_function_info(node: &Node, source: &str, is_method: bool) -> Fu
     let return_type = extract_scala_return_type(node, source);
     let docstring = extract_scala_docstring(node, source);
     let line_number = node.start_position().row as u32 + 1;
+    let line_end = node.end_position().row as u32 + 1;
 
     FunctionInfo {
         name,
@@ -6205,6 +6334,7 @@ fn extract_scala_function_info(node: &Node, source: &str, is_method: bool) -> Fu
         is_async: false, // Scala handles async via Futures, not a keyword
         decorators: Vec::new(),
         line_number,
+        line_end,
     }
 }
 
@@ -6359,6 +6489,7 @@ fn extract_scala_class_info(node: &Node, source: &str) -> ClassInfo {
         });
 
     let line_number = node.start_position().row as u32 + 1;
+    let line_end = node.end_position().row as u32 + 1;
     let bases = extract_scala_bases(node, source);
     let docstring = extract_scala_docstring(node, source);
 
@@ -6374,6 +6505,7 @@ fn extract_scala_class_info(node: &Node, source: &str) -> ClassInfo {
         fields: Vec::new(),
         decorators: Vec::new(),
         line_number,
+        line_end,
     }
 }
 
@@ -6392,6 +6524,7 @@ fn extract_scala_object_info(node: &Node, source: &str) -> ClassInfo {
         });
 
     let line_number = node.start_position().row as u32 + 1;
+    let line_end = node.end_position().row as u32 + 1;
     let bases = extract_scala_bases(node, source);
     let docstring = extract_scala_docstring(node, source);
 
@@ -6406,6 +6539,7 @@ fn extract_scala_object_info(node: &Node, source: &str) -> ClassInfo {
         fields: Vec::new(),
         decorators: Vec::new(),
         line_number,
+        line_end,
     }
 }
 
@@ -6424,6 +6558,7 @@ fn extract_scala_trait_info(node: &Node, source: &str) -> ClassInfo {
         });
 
     let line_number = node.start_position().row as u32 + 1;
+    let line_end = node.end_position().row as u32 + 1;
     let bases = extract_scala_bases(node, source);
     let docstring = extract_scala_docstring(node, source);
 
@@ -6438,6 +6573,7 @@ fn extract_scala_trait_info(node: &Node, source: &str) -> ClassInfo {
         fields: Vec::new(),
         decorators: Vec::new(),
         line_number,
+        line_end,
     }
 }
 
@@ -6594,6 +6730,7 @@ fn extract_elixir_function_info(node: &Node, source: &str) -> FunctionInfo {
 
     let docstring = extract_elixir_docstring(node, source);
     let line_number = node.start_position().row as u32 + 1;
+    let line_end = node.end_position().row as u32 + 1;
 
     let _ = is_private; // Could be used for decorators but not needed per spec
 
@@ -6606,6 +6743,7 @@ fn extract_elixir_function_info(node: &Node, source: &str) -> FunctionInfo {
         is_async: false,
         decorators: Vec::new(),
         line_number,
+        line_end,
     }
 }
 
@@ -6726,6 +6864,7 @@ fn extract_elixir_module_info(node: &Node, source: &str) -> ClassInfo {
     }
 
     let line_number = node.start_position().row as u32 + 1;
+    let line_end = node.end_position().row as u32 + 1;
 
     // Extract functions from do_block
     let mut methods = Vec::new();
@@ -6746,6 +6885,7 @@ fn extract_elixir_module_info(node: &Node, source: &str) -> ClassInfo {
         fields: Vec::new(),
         decorators: Vec::new(),
         line_number,
+        line_end,
     }
 }
 

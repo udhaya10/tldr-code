@@ -736,7 +736,7 @@ public class UserService {
             .naming
             .class_names
             .iter()
-            .any(|(name, _, _)| name == "UserService"),
+            .any(|(name, _, _, _)| name == "UserService"),
         "UserService should be detected"
     );
 
@@ -1154,7 +1154,7 @@ public class UserService {
         .naming
         .class_names
         .iter()
-        .any(|(n, _, _)| n == "UserService"));
+        .any(|(n, _, _, _)| n == "UserService"));
 
     // Methods: processUser, testCreateUser
     assert!(signals.naming.function_names.len() >= 2);
@@ -2194,9 +2194,12 @@ fn test_invariant_evidence_line_numbers_are_1_indexed() {
     let source = "def hello():\n    pass\n";
     let signals = detect_signals(Language::Python, source);
 
-    // All evidence should have line >= 1 (1-indexed, never 0)
-    for (_, _, _) in &signals.naming.function_names {
-        // function_names is (name, case, file) not evidence, skip
+    // All evidence should have line >= 1 (1-indexed, never 0).
+    //
+    // schema-cleanup-v1 BUG-10: function_names is now
+    // (name, case, file, line) — exercise the new line position.
+    for (_, _, _, line) in &signals.naming.function_names {
+        assert!(*line >= 1, "naming line should be 1-indexed, got {line}");
     }
     // Check evidence vectors directly
     for ev in &signals.error_handling.try_except_blocks {
@@ -2268,10 +2271,14 @@ def very_long_function():
 "#;
     let signals = detect_signals(Language::Python, source);
 
-    // Check that snippet extraction yields reasonable snippets
-    for (_, _, _) in &signals.naming.function_names {
-        // function_names has (name, case, file) not snippets
-        // Evidence with snippets is in other signal vectors
+    // Check that snippet extraction yields reasonable snippets.
+    //
+    // schema-cleanup-v1 BUG-10: function_names is now
+    // (name, case, file, line) — but it carries no snippet, so we
+    // just consume the iterator to keep the structural invariant
+    // alive on this fixture.
+    for (_, _, _, _) in &signals.naming.function_names {
+        // Evidence with snippets is in other signal vectors.
     }
     // This is a structural invariant test -- the refactor must preserve
     // the 3-line snippet limit in get_snippet()

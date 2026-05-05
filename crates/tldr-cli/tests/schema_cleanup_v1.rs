@@ -1,0 +1,407 @@
+//! schema-cleanup-v1 — regression tests for 9 schema/dead-UI bugs (M4):
+//!
+//! - BUG-9:  `health.metrics` sub-row was always "Metrics: no data" for
+//!   all the languages whose package model doesn't fit Robert C. Martin's
+//!   abstractness/instability framework. Fix: suppress the dead row in
+//!   text output (JSON sub-result is unchanged so consumers still see
+//!   the failure case).
+//! - BUG-10: `patterns.naming.violations[].line` was hard-coded `0`.
+//!   Fix: plumb the AST start_position line through the
+//!   `NamingSignals` collector tuples so violations carry a real line.
+//! - BUG-11: `tldr deps` JSON had `root: ""` and the text header read
+//!   `Dependency Analysis: ` with no path. Root cause:
+//!   `make_relative_path(&root, &root)` returns an empty PathBuf when
+//!   `root.is_self()`. Fix: emit the canonical root path verbatim.
+//! - BUG-12: `tldr churn` blanked `summary.most_churned_file` whenever
+//!   the repo was a degenerate-shallow clone, even though `files[]`
+//!   carried a clean top-N rank by `lines_changed`. Fix: refill
+//!   `most_churned_file` from the file with the highest `lines_changed`
+//!   so the summary always reflects the data that's available.
+//! - BUG-13: `tldr structure` JSON had redundant `functions` (strings)
+//!   AND `definitions` (objects), `methods` (strings) AND `method_infos`
+//!   (objects). Fix: `#[serde(skip_serializing)]` on the legacy string
+//!   arrays — internal callers can still build them, JSON consumers see
+//!   only the canonical object arrays. `MethodInfo` also gained
+//!   `line_end` for parity with `DefinitionInfo`.
+//! - BUG-15: `tldr semantic` and `tldr search` JSON omitted
+//!   `total_results` entirely (so `jq '.total_results'` returned
+//!   `null`). Fix: add the field to both report structs and populate it
+//!   from `results.len()`.
+//! - BUG-21: `tldr chop` schema diverged from `tldr slice` (`count` vs
+//!   `line_count`, no `file` field, etc.). Fix: add `file` and
+//!   `line_count` to `ChopResult` (keeping `count` for back-compat) and
+//!   ensure the CLI populates `file` from the canonical path.
+//! - BUG-22: `tldr interface.all_exports` was emitted as `null` when no
+//!   `__all__` was defined. Fix: change the field to `Vec<String>` and
+//!   populate it with the explicit `__all__` (Python only) OR the union
+//!   of public function/class names — never `null`.
+//! - BUG-23: `tldr extract` method/function objects emitted `line` AND
+//!   `line_number` (duplicate values from the BUG-17 alias) but no
+//!   `line_end`. Fix: drop `line_number` from JSON serialization, add
+//!   `line_end` (populated from `node.end_position()`).
+
+use assert_cmd::Command;
+use serde_json::Value;
+use std::path::PathBuf;
+
+fn tldr_cmd() -> Command {
+    Command::new(assert_cmd::cargo::cargo_bin!("tldr"))
+}
+
+fn flask_repo() -> PathBuf {
+    let p = PathBuf::from("/tmp/repos/flask");
+    assert!(
+        p.exists(),
+        "test fixture missing: /tmp/repos/flask (clone the flask repo before running)"
+    );
+    p
+}
+
+fn flask_app_py() -> PathBuf {
+    let p = flask_repo().join("src/flask/app.py");
+    assert!(p.exists(), "fixture missing: {}", p.display());
+    p
+}
+
+fn run_json(args: &[&str]) -> Value {
+    let output = tldr_cmd().args(args).output().expect("run tldr");
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    serde_json::from_str(&stdout).unwrap_or_else(|e| {
+        panic!(
+            "parse JSON failed: {e}; args were {:?}; stdout was:\n{stdout}",
+            args
+        )
+    })
+}
+
+fn run_text(args: &[&str]) -> String {
+    let mut argv: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+    argv.extend(["--format".into(), "text".into()]);
+    let output = tldr_cmd()
+        .args(&argv)
+        .output()
+        .expect("run tldr (text)");
+    String::from_utf8(output.stdout).expect("utf8 stdout")
+}
+
+// =============================================================================
+// BUG-9: health metrics dead UI
+// =============================================================================
+
+#[test]
+fn bug9_health_metrics_not_dead_ui() {
+    let path = flask_repo();
+    let text = run_text(&["health", path.to_str().unwrap()]);
+    // The "Metrics: no data" row was dead UI on every Python repo.
+    // Either the row is suppressed entirely (current behavior) OR it
+    // carries actual data — never the literal "no data" string.
+    assert!(
+        !text.contains("Metrics:     no data"),
+        "BUG-9 regression: 'Metrics: no data' is dead UI and should not appear in health text output:\n{text}"
+    );
+}
+
+// =============================================================================
+// BUG-10: patterns naming.violations[].line populated
+// =============================================================================
+
+#[test]
+fn bug10_patterns_naming_violations_have_line() {
+    let path = flask_repo();
+    let v = run_json(&["patterns", path.to_str().unwrap()]);
+    let violations = v
+        .pointer("/naming/violations")
+        .and_then(|x| x.as_array())
+        .unwrap_or_else(|| panic!("patterns: missing .naming.violations array; got {v}"));
+    assert!(
+        !violations.is_empty(),
+        "expected at least one naming violation in flask (existed pre-fix); got 0"
+    );
+    let max_line = violations
+        .iter()
+        .filter_map(|x| x.get("line").and_then(|n| n.as_u64()))
+        .max()
+        .unwrap_or(0);
+    assert!(
+        max_line > 0,
+        "BUG-10 regression: every violation reported line=0; expected line>0 from AST start_position. violations: {violations:?}"
+    );
+}
+
+// =============================================================================
+// BUG-11: deps root populated
+// =============================================================================
+
+#[test]
+fn bug11_deps_root_populated() {
+    let path = flask_repo();
+    let v = run_json(&["deps", path.to_str().unwrap()]);
+    let root = v
+        .get("root")
+        .and_then(|x| x.as_str())
+        .unwrap_or_else(|| panic!("deps: missing .root string; got {v}"));
+    assert!(
+        !root.is_empty(),
+        "BUG-11 regression: deps .root is empty string; expected the analyzed path"
+    );
+    // Text formatter should include the root in the header.
+    let text = run_text(&["deps", path.to_str().unwrap()]);
+    let first_line = text.lines().next().unwrap_or("");
+    assert!(
+        first_line.starts_with("Dependency Analysis: ") && first_line.len() > "Dependency Analysis: ".len(),
+        "BUG-11 regression: text header has empty root: {first_line:?}"
+    );
+}
+
+// =============================================================================
+// BUG-12: churn most_churned_file populated even on shallow clone
+// =============================================================================
+
+#[test]
+fn bug12_churn_most_churned_file_populated() {
+    let path = flask_repo();
+    let v = run_json(&["churn", path.to_str().unwrap()]);
+    let mcf = v
+        .pointer("/summary/most_churned_file")
+        .and_then(|x| x.as_str())
+        .unwrap_or_else(|| {
+            panic!("churn: missing .summary.most_churned_file string; got {v}")
+        });
+    // /tmp/repos/flask happens to be a shallow clone (1 commit) — the
+    // pre-fix behavior blanked this field; post-fix we refill it from
+    // the file with the highest lines_changed.
+    let files_len = v
+        .pointer("/files")
+        .and_then(|x| x.as_array())
+        .map(|a| a.len())
+        .unwrap_or(0);
+    if files_len > 0 {
+        assert!(
+            !mcf.is_empty(),
+            "BUG-12 regression: most_churned_file is empty even though .files has {files_len} entries"
+        );
+    }
+}
+
+// =============================================================================
+// BUG-13: structure no redundant string arrays; method_infos has line_end
+// =============================================================================
+
+#[test]
+fn bug13_structure_no_redundant_string_arrays() {
+    let path = flask_repo();
+    let v = run_json(&["structure", path.to_str().unwrap()]);
+    let files = v.pointer("/files").and_then(|x| x.as_array()).expect("files");
+    assert!(!files.is_empty(), "no files in structure output");
+    let f0 = &files[0];
+    let keys: Vec<&str> = f0
+        .as_object()
+        .expect("file is object")
+        .keys()
+        .map(|s| s.as_str())
+        .collect();
+    // schema-cleanup-v1: legacy string arrays must NOT appear in JSON.
+    assert!(
+        !keys.contains(&"functions"),
+        "BUG-13 regression: structure JSON still has 'functions' (strings); expected only 'definitions' (objects). keys: {keys:?}"
+    );
+    assert!(
+        !keys.contains(&"methods"),
+        "BUG-13 regression: structure JSON still has 'methods' (strings); expected only 'method_infos' (objects). keys: {keys:?}"
+    );
+    // Canonical object arrays must remain.
+    assert!(
+        keys.contains(&"definitions") || keys.contains(&"method_infos"),
+        "expected 'definitions' or 'method_infos' to be present; keys: {keys:?}"
+    );
+}
+
+#[test]
+fn bug13_method_infos_have_line_end() {
+    let path = flask_repo();
+    let v = run_json(&["structure", path.to_str().unwrap()]);
+    // Find any file that has a non-empty method_infos array.
+    let files = v.pointer("/files").and_then(|x| x.as_array()).expect("files");
+    let mi = files
+        .iter()
+        .filter_map(|f| f.get("method_infos").and_then(|x| x.as_array()))
+        .find(|a| !a.is_empty())
+        .unwrap_or_else(|| panic!("no file with non-empty method_infos in flask"));
+    let first = &mi[0];
+    let keys: Vec<&str> = first
+        .as_object()
+        .expect("method_info is object")
+        .keys()
+        .map(|s| s.as_str())
+        .collect();
+    assert!(
+        keys.contains(&"line"),
+        "method_infos[0] missing 'line': {keys:?}"
+    );
+    assert!(
+        keys.contains(&"line_end"),
+        "BUG-13 regression: method_infos[0] missing 'line_end' (added for parity with DefinitionInfo): {keys:?}"
+    );
+}
+
+// =============================================================================
+// BUG-15: semantic + search total_results populated
+// =============================================================================
+
+#[test]
+fn bug15_semantic_total_results_populated() {
+    let path = flask_repo();
+    let v = run_json(&[
+        "semantic",
+        "create flask app",
+        path.to_str().unwrap(),
+    ]);
+    let total = v.get("total_results").and_then(|x| x.as_u64());
+    assert!(
+        total.is_some(),
+        "BUG-15 regression: semantic JSON .total_results is null/missing; expected integer. got: {v}"
+    );
+    let results_len = v
+        .pointer("/results")
+        .and_then(|x| x.as_array())
+        .map(|a| a.len() as u64)
+        .unwrap_or(0);
+    assert_eq!(
+        total.unwrap(),
+        results_len,
+        "BUG-15: total_results ({}) should equal results.len() ({})",
+        total.unwrap(),
+        results_len
+    );
+}
+
+#[test]
+fn bug15_search_total_results_populated() {
+    let path = flask_repo();
+    let v = run_json(&["search", "create", path.to_str().unwrap()]);
+    let total = v.get("total_results").and_then(|x| x.as_u64());
+    assert!(
+        total.is_some(),
+        "BUG-15 regression: search JSON .total_results is null/missing; expected integer. got: {v}"
+    );
+    let results_len = v
+        .pointer("/results")
+        .and_then(|x| x.as_array())
+        .map(|a| a.len() as u64)
+        .unwrap_or(0);
+    assert_eq!(
+        total.unwrap(),
+        results_len,
+        "BUG-15: search total_results ({}) should equal results.len() ({})",
+        total.unwrap(),
+        results_len
+    );
+}
+
+// =============================================================================
+// BUG-21: chop schema parity with slice
+// =============================================================================
+
+#[test]
+fn bug21_chop_file_and_line_count_populated() {
+    let path = flask_app_py();
+    // Use lines that lie within the same function so the chop has a
+    // real result (1230 -> 1235 inside `make_response`).
+    let v = run_json(&[
+        "chop",
+        path.to_str().unwrap(),
+        "make_response",
+        "1230",
+        "1235",
+    ]);
+    let file = v.get("file").and_then(|x| x.as_str()).unwrap_or("");
+    assert!(
+        !file.is_empty(),
+        "BUG-21 regression: chop .file is null/empty (parity with slice broken). got: {v}"
+    );
+    let line_count = v.get("line_count").and_then(|x| x.as_u64());
+    assert!(
+        line_count.is_some(),
+        "BUG-21 regression: chop missing 'line_count' (slice-parity field). got: {v}"
+    );
+    let lines_len = v
+        .pointer("/lines")
+        .and_then(|x| x.as_array())
+        .map(|a| a.len() as u64)
+        .unwrap_or(0);
+    assert_eq!(
+        line_count.unwrap(),
+        lines_len,
+        "BUG-21: line_count should equal lines.len(); got {} vs {}",
+        line_count.unwrap(),
+        lines_len
+    );
+}
+
+// =============================================================================
+// BUG-22: interface all_exports never null
+// =============================================================================
+
+#[test]
+fn bug22_interface_all_exports_populated() {
+    let path = flask_app_py();
+    let v = run_json(&["interface", path.to_str().unwrap()]);
+    let exports = v.get("all_exports");
+    assert!(
+        exports.is_some(),
+        "BUG-22 regression: .all_exports field is missing entirely; got {v}"
+    );
+    let exports = exports.unwrap();
+    assert!(
+        !exports.is_null(),
+        "BUG-22 regression: .all_exports is null; expected array (use [] for empty modules)"
+    );
+    assert!(
+        exports.is_array(),
+        "BUG-22: .all_exports must be an array, got {exports:?}"
+    );
+    // flask/app.py defines public Flask class etc. — should have entries.
+    assert!(
+        !exports.as_array().unwrap().is_empty(),
+        "BUG-22: flask/app.py has public symbols, expected non-empty all_exports"
+    );
+}
+
+// =============================================================================
+// BUG-23: extract methods carry line_end, not line_number
+// =============================================================================
+
+#[test]
+fn bug23_extract_methods_have_line_end_not_line_number() {
+    let path = flask_app_py();
+    let v = run_json(&["extract", path.to_str().unwrap()]);
+    // Find any class with a non-empty methods array.
+    let classes = v
+        .get("classes")
+        .and_then(|x| x.as_array())
+        .expect("classes array");
+    let methods = classes
+        .iter()
+        .filter_map(|c| c.get("methods").and_then(|x| x.as_array()))
+        .find(|a| !a.is_empty())
+        .unwrap_or_else(|| panic!("no class with non-empty methods in flask/app.py"));
+    let first = &methods[0];
+    let keys: Vec<&str> = first
+        .as_object()
+        .expect("method is object")
+        .keys()
+        .map(|s| s.as_str())
+        .collect();
+    assert!(
+        keys.contains(&"line"),
+        "extract method missing 'line': {keys:?}"
+    );
+    assert!(
+        keys.contains(&"line_end"),
+        "BUG-23 regression: extract method missing 'line_end': {keys:?}"
+    );
+    assert!(
+        !keys.contains(&"line_number"),
+        "BUG-23 regression: extract method still emits 'line_number' (duplicate of 'line'); should be dropped from JSON. keys: {keys:?}"
+    );
+}

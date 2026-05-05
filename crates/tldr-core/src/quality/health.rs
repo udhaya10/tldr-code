@@ -599,24 +599,38 @@ impl HealthReport {
         }
 
         // Martin metrics
-        let metrics_line = if let Some(avg_d) = self.summary.avg_distance {
-            format!(
+        //
+        // schema-cleanup-v1 BUG-9: the Martin (Robert C. Martin)
+        // package-level abstractness/instability metric is computed only
+        // for languages that surface a clear notion of a "package" with
+        // a complete set of internal-vs-external dependencies (Java,
+        // .NET assemblies, etc.). For Python / TypeScript / Go / Rust /
+        // most others the analyzer always emits zero packages, which
+        // historically rendered as "Metrics:     no data" (and the JSON
+        // showed `packages_analyzed: 0` for every repo).
+        //
+        // To stop printing dead UI we now only emit the Metrics row
+        // when there's actual data (avg_distance is Some) OR the sub-
+        // analysis produced an explicit failure that the user should
+        // see. The "no data" case is silently suppressed in text
+        // output. JSON consumers can still inspect
+        // `details.metrics.details.packages_analyzed` directly.
+        if let Some(avg_d) = self.summary.avg_distance {
+            output.push_str(&format!(
                 "Metrics:     avg D={:.2} (distance from main sequence)\n",
                 avg_d
-            )
+            ));
         } else if let Some(result) = self.sub_results.get("metrics") {
             if !result.success {
-                format!(
+                output.push_str(&format!(
                     "Metrics:     {}\n",
                     result.error.as_deref().unwrap_or("failed")
-                )
-            } else {
-                "Metrics:     no data\n".to_string()
+                ));
             }
-        } else {
-            "Metrics:     not analyzed\n".to_string()
-        };
-        output.push_str(&metrics_line);
+            // success && no avg_distance: silently skip ("no data" is
+            // dead UI for languages without true package boundaries).
+        }
+        // missing sub-result entirely: silently skip ("not analyzed").
 
         // Footer
         output.push('\n');

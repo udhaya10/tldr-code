@@ -222,6 +222,7 @@ fn extract_file_structure(
             name: d.name.clone(),
             signature: d.signature.clone(),
             line: d.line_start,
+            line_end: d.line_end,
         })
         .collect();
 

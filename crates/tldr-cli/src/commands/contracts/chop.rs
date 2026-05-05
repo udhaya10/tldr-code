@@ -125,7 +125,8 @@ impl ChopArgs {
         ));
 
         // Compute the chop - gracefully handle errors (out-of-range lines, missing functions)
-        let result = match compute_chop(
+        let canonical_str = canonical_path.to_string_lossy().to_string();
+        let mut result = match compute_chop(
             canonical_path.to_str().unwrap_or_default(),
             &self.function,
             self.source_line,
@@ -136,8 +137,10 @@ impl ChopArgs {
             Err(e) => {
                 // Return valid result with error explanation instead of failing
                 ChopResult {
+                    file: canonical_str.clone(),
                     lines: vec![],
                     count: 0,
+                    line_count: 0,
                     source_line: self.source_line,
                     target_line: self.target_line,
                     path_exists: false,
@@ -146,6 +149,13 @@ impl ChopArgs {
                 }
             }
         };
+        // schema-cleanup-v1 BUG-21: ensure `file` is always populated
+        // for parity with `tldr slice`. compute_chop's helpers
+        // (`same_line`, `no_path`) initialize this field as empty —
+        // backfill it here at the call site.
+        if result.file.is_empty() {
+            result.file = canonical_str;
+        }
 
         // Output based on format - check both local and global format options
         let use_text = matches!(self.output_format, ContractsOutputFormat::Text)
@@ -326,8 +336,10 @@ pub fn compute_chop(
     let count = lines.len() as u32;
 
     Ok(ChopResult {
+        file: source_or_path.to_string(),
         lines,
         count,
+        line_count: count,
         source_line,
         target_line,
         path_exists: true,
@@ -411,8 +423,10 @@ mod tests {
     #[test]
     fn test_format_with_path() {
         let result = ChopResult {
+            file: "test.py".to_string(),
             lines: vec![2, 3, 4],
             count: 3,
+            line_count: 3,
             source_line: 2,
             target_line: 4,
             path_exists: true,

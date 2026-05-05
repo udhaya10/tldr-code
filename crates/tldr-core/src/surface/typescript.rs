@@ -1197,6 +1197,7 @@ mod tests {
         let class = crate::types::ClassInfo {
             name: "MyClass".to_string(),
             line_number: 1,
+            line_end: 1,
             methods: vec![],
             fields: vec![],
             bases: vec![],
@@ -1212,6 +1213,7 @@ mod tests {
         let class = crate::types::ClassInfo {
             name: "MyInterface".to_string(),
             line_number: 1,
+            line_end: 1,
             methods: vec![],
             fields: vec![],
             bases: vec![],

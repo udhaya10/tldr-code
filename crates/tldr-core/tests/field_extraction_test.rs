@@ -855,6 +855,7 @@ mod serde_backward_compat {
             fields: vec![],
             decorators: vec![],
             line_number: 10,
+            line_end: 10,
         };
 
         // WHEN: We serialize
@@ -884,9 +885,11 @@ mod serde_backward_compat {
                 is_constant: false,
                 visibility: Some("public".to_string()),
                 line_number: 2,
+                line_end: 2,
             }],
             decorators: vec![],
             line_number: 1,
+            line_end: 1,
         };
 
         // WHEN: We serialize and deserialize
@@ -917,6 +920,7 @@ mod serde_backward_compat {
             is_constant: false,
             visibility: None,
             line_number: 5,
+            line_end: 5,
         };
 
         // WHEN: We serialize
@@ -936,9 +940,17 @@ mod serde_backward_compat {
             "None visibility should be omitted"
         );
 
-        // But name and line_number should always be present
+        // But name and line should always be present.
+        //
+        // schema-cleanup-v1 BUG-23: `line_number` is no longer
+        // serialized — `line` is the canonical key now (BUG-17 had
+        // emitted both, BUG-23 dropped the duplicate).
         assert!(json.contains("\"name\""));
-        assert!(json.contains("\"line_number\""));
+        assert!(json.contains("\"line\""));
+        assert!(
+            !json.contains("\"line_number\""),
+            "BUG-23: line_number should no longer appear in JSON output"
+        );
     }
 
     #[test]
@@ -952,6 +964,7 @@ mod serde_backward_compat {
             is_constant: true,
             visibility: Some("public".to_string()),
             line_number: 3,
+            line_end: 3,
         };
 
         // WHEN: We serialize and deserialize

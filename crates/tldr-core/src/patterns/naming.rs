@@ -68,13 +68,13 @@ pub fn signals_to_pattern(signals: &PatternSignals) -> Option<NamingPattern> {
 }
 
 /// Detect the majority naming convention from a list of names
-fn detect_majority_convention(names: &[(String, NamingCase, String)]) -> NamingCase {
+fn detect_majority_convention(names: &[(String, NamingCase, String, u32)]) -> NamingCase {
     if names.is_empty() {
         return NamingCase::Unknown;
     }
 
     let mut counts: HashMap<NamingCase, usize> = HashMap::new();
-    for (_, case, _) in names {
+    for (_, case, _, _) in names {
         if *case != NamingCase::Unknown {
             *counts.entry(*case).or_insert(0) += 1;
         }
@@ -88,18 +88,24 @@ fn detect_majority_convention(names: &[(String, NamingCase, String)]) -> NamingC
 }
 
 /// Calculate consistency score for a set of names against expected convention
-fn calculate_consistency(names: &[(String, NamingCase, String)], expected: &NamingCase) -> f64 {
+fn calculate_consistency(
+    names: &[(String, NamingCase, String, u32)],
+    expected: &NamingCase,
+) -> f64 {
     if names.is_empty() || *expected == NamingCase::Unknown {
         return 0.0;
     }
 
-    let matching = names.iter().filter(|(_, case, _)| case == expected).count();
+    let matching = names
+        .iter()
+        .filter(|(_, case, _, _)| case == expected)
+        .count();
     matching as f64 / names.len() as f64
 }
 
 /// Find violations (names not matching the expected convention)
 fn find_violations(
-    names: &[(String, NamingCase, String)],
+    names: &[(String, NamingCase, String, u32)],
     expected: &NamingCase,
 ) -> Vec<NamingViolation> {
     if *expected == NamingCase::Unknown {
@@ -108,13 +114,16 @@ fn find_violations(
 
     names
         .iter()
-        .filter(|(_, case, _)| *case != NamingCase::Unknown && case != expected)
-        .map(|(name, case, file)| NamingViolation {
+        .filter(|(_, case, _, _)| *case != NamingCase::Unknown && case != expected)
+        .map(|(name, case, file, line)| NamingViolation {
             name: name.clone(),
             expected: naming_case_to_convention(*expected),
             actual: naming_case_to_convention(*case),
             file: file.clone(),
-            line: 0, // Line info not tracked in signals
+            // schema-cleanup-v1 BUG-10: line number now plumbed
+            // through from the AST start_position via the
+            // 4-tuple stored in NamingSignals.
+            line: *line,
         })
         .collect()
 }
@@ -147,16 +156,19 @@ mod tests {
             "find_user_by_id".to_string(),
             NamingCase::SnakeCase,
             "service.py".to_string(),
+            0,
         ));
         signals.naming.function_names.push((
             "get_all_users".to_string(),
             NamingCase::SnakeCase,
             "service.py".to_string(),
+            0,
         ));
         signals.naming.function_names.push((
             "create_user".to_string(),
             NamingCase::SnakeCase,
             "service.py".to_string(),
+            0,
         ));
 
         let pattern = signals_to_pattern(&signals).unwrap();
@@ -171,11 +183,13 @@ mod tests {
             "UserService".to_string(),
             NamingCase::PascalCase,
             "service.py".to_string(),
+            0,
         ));
         signals.naming.class_names.push((
             "OrderRepository".to_string(),
             NamingCase::PascalCase,
             "repo.py".to_string(),
+            0,
         ));
 
         let pattern = signals_to_pattern(&signals).unwrap();
@@ -189,11 +203,13 @@ mod tests {
             "MAX_RETRY_COUNT".to_string(),
             NamingCase::UpperSnakeCase,
             "config.py".to_string(),
+            0,
         ));
         signals.naming.constant_names.push((
             "DEFAULT_TIMEOUT".to_string(),
             NamingCase::UpperSnakeCase,
             "config.py".to_string(),
+            0,
         ));
 
         let pattern = signals_to_pattern(&signals).unwrap();
@@ -207,16 +223,19 @@ mod tests {
             "find_user".to_string(),
             NamingCase::SnakeCase,
             "service.py".to_string(),
+            0,
         ));
         signals.naming.function_names.push((
             "getUser".to_string(), // Violation!
             NamingCase::CamelCase,
             "service.py".to_string(),
+            0,
         ));
         signals.naming.function_names.push((
             "create_user".to_string(),
             NamingCase::SnakeCase,
             "service.py".to_string(),
+            0,
         ));
 
         let pattern = signals_to_pattern(&signals).unwrap();

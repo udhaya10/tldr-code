@@ -1860,6 +1860,7 @@ mod tests {
                     is_async: false,
                     decorators: vec![],
                     line_number: 42,
+                    line_end: 42,
                 }],
                 classes: vec![],
                 constants: vec![],
@@ -1896,6 +1897,7 @@ mod tests {
                     is_async: false,
                     decorators: vec![],
                     line_number: 10,
+                    line_end: 10,
                 }],
                 classes: vec![],
                 constants: vec![],
@@ -1944,6 +1946,7 @@ mod tests {
             fields: vec![],
             decorators: decorators.into_iter().map(|s| s.to_string()).collect(),
             line_number: 1,
+            line_end: 1,
         }
     }
 
@@ -2171,10 +2174,12 @@ mod tests {
                         is_async: false,
                         decorators: vec![],
                         line_number: 5,
+                        line_end: 5,
                     }],
                     fields: vec![],
                     decorators: vec!["interface".to_string()],
                     line_number: 3,
+                    line_end: 3,
                 }],
                 constants: vec![],
                 call_graph: IntraFileCallGraph::default(),
@@ -2449,6 +2454,7 @@ mod tests {
                         is_async: false,
                         decorators: vec![],
                         line_number: 5,
+                        line_end: 5,
                     },
                     FunctionInfo {
                         name: "generateMetadata".to_string(),
@@ -2459,6 +2465,7 @@ mod tests {
                         is_async: true,
                         decorators: vec![],
                         line_number: 20,
+                        line_end: 20,
                     },
                     // Private function should NOT get framework treatment
                     FunctionInfo {
@@ -2470,6 +2477,7 @@ mod tests {
                         is_async: false,
                         decorators: vec![],
                         line_number: 30,
+                        line_end: 30,
                     },
                 ],
                 classes: vec![],

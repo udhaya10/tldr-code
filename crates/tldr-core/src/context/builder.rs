@@ -727,6 +727,7 @@ def helper(n):
             is_async: false,
             decorators: vec![],
             line_number: 1,
+            line_end: 1,
         };
 
         let sig = build_signature(&func, Language::Python);
@@ -744,6 +745,7 @@ def helper(n):
             is_async: true,
             decorators: vec![],
             line_number: 1,
+            line_end: 1,
         };
 
         let sig = build_signature(&func, Language::Python);

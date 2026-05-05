@@ -1658,6 +1658,7 @@ fn make_module_info() -> ModuleInfo {
                 is_async: true,
                 decorators: vec![],
                 line_number: 10,
+                line_end: 10,
             },
             FunctionInfo {
                 name: "helper".to_string(),
@@ -1668,6 +1669,7 @@ fn make_module_info() -> ModuleInfo {
                 is_async: false,
                 decorators: vec![],
                 line_number: 25,
+                line_end: 25,
             },
         ],
         classes: vec![ClassInfo {
@@ -1684,6 +1686,7 @@ fn make_module_info() -> ModuleInfo {
                     is_async: false,
                     decorators: vec![],
                     line_number: 32,
+                    line_end: 32,
                 },
                 FunctionInfo {
                     name: "run".to_string(),
@@ -1694,6 +1697,7 @@ fn make_module_info() -> ModuleInfo {
                     is_async: true,
                     decorators: vec![],
                     line_number: 40,
+                    line_end: 40,
                 },
             ],
             fields: vec![FieldInfo {
@@ -1704,9 +1708,11 @@ fn make_module_info() -> ModuleInfo {
                 is_constant: false,
                 visibility: None,
                 line_number: 33,
+                line_end: 33,
             }],
             decorators: vec![],
             line_number: 30,
+            line_end: 30,
         }],
         constants: vec![FieldInfo {
             name: "MAX_RETRIES".to_string(),
@@ -1716,6 +1722,7 @@ fn make_module_info() -> ModuleInfo {
             is_constant: true,
             visibility: None,
             line_number: 5,
+            line_end: 5,
         }],
         call_graph: IntraFileCallGraph {
             calls: {

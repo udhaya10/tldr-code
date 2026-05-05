@@ -201,6 +201,7 @@ mod tests {
             is_async: false,
             decorators: vec![],
             line_number: 1,
+            line_end: 1,
         };
         assert!(is_entry_point(&main_func));
 
@@ -213,6 +214,7 @@ mod tests {
             is_async: false,
             decorators: vec![],
             line_number: 1,
+            line_end: 1,
         };
         assert!(is_entry_point(&test_func));
 
@@ -225,6 +227,7 @@ mod tests {
             is_async: false,
             decorators: vec!["app.route(\"/user\")".to_string()],
             line_number: 1,
+            line_end: 1,
         };
         assert!(is_entry_point(&route_func));
 
@@ -237,6 +240,7 @@ mod tests {
             is_async: false,
             decorators: vec![],
             line_number: 1,
+            line_end: 1,
         };
         assert!(!is_entry_point(&normal_func));
     }

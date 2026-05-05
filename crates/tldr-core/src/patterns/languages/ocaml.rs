@@ -61,10 +61,11 @@ impl OcamlSemantics {
                 if !name.is_empty() {
                     let case = detect_naming_case(&name);
                     signals.naming.function_names.push((
-                        name.clone(),
-                        case,
-                        file_path.display().to_string(),
-                    ));
+                name.clone(),
+                case,
+                file_path.display().to_string(),
+                node.start_position().row as u32 + 1,
+            ));
                     if name.starts_with("test_") {
                         signals.test_idioms.test_function_count += 1;
                     }
@@ -86,7 +87,7 @@ impl OcamlSemantics {
             signals
                 .naming
                 .class_names
-                .push((name, case, file_path.display().to_string()));
+                .push((name, case, file_path.display().to_string(), node.start_position().row as u32 + 1));
         } else {
             let text = node_text(node, source);
             if text.starts_with("module ") {
@@ -102,7 +103,7 @@ impl OcamlSemantics {
                     signals
                         .naming
                         .class_names
-                        .push((name, case, file_path.display().to_string()));
+                        .push((name, case, file_path.display().to_string(), node.start_position().row as u32 + 1));
                 }
             }
         }

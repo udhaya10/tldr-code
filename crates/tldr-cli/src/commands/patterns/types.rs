@@ -499,8 +499,18 @@ pub struct ClassInfo {
 pub struct InterfaceInfo {
     /// File path
     pub file: String,
-    /// Contents of __all__ if defined
-    pub all_exports: Option<Vec<String>>,
+    /// Public exports of the module.
+    ///
+    /// schema-cleanup-v1 BUG-22: previously `Option<Vec<String>>` and
+    /// emitted as `null` for any file without an explicit Python
+    /// `__all__` declaration. Now always a populated array — when
+    /// `__all__` is defined, its contents are used verbatim;
+    /// otherwise this falls back to the union of public function and
+    /// class names, mirroring what would be exported under "import *"
+    /// semantics. Empty modules return `[]` (empty array), never
+    /// `null`.
+    #[serde(default)]
+    pub all_exports: Vec<String>,
     /// Public functions
     pub functions: Vec<FunctionInfo>,
     /// Public classes
@@ -1152,7 +1162,7 @@ mod tests {
     fn test_interface_info_serialization() {
         let info = InterfaceInfo {
             file: "test.py".to_string(),
-            all_exports: Some(vec!["func1".to_string()]),
+            all_exports: vec!["func1".to_string()],
             functions: vec![FunctionInfo {
                 name: "func1".to_string(),
                 signature: "def func1(x: int) -> str".to_string(),

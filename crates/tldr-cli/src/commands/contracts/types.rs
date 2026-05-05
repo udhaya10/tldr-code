@@ -625,11 +625,32 @@ impl DeadStore {
 /// all statements on any path from source to target.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChopResult {
+    /// File path the chop was computed in.
+    ///
+    /// schema-cleanup-v1 BUG-21: added for parity with `tldr slice`,
+    /// which carries `file` in its JSON output. Empty string when the
+    /// caller-provided path could not be canonicalized (e.g.
+    /// validation failed before chop was attempted).
+    #[serde(default)]
+    pub file: String,
+
     /// Lines on the dependency path (sorted)
     pub lines: Vec<u32>,
 
-    /// Number of lines on the path
+    /// Number of lines on the path.
+    ///
+    /// schema-cleanup-v1 BUG-21: kept for back-compat. New consumers
+    /// should prefer `line_count` (alias) which matches `tldr slice`.
     pub count: u32,
+
+    /// Number of lines on the path. Alias of `count` for parity with
+    /// `tldr slice` (whose schema uses `line_count`).
+    ///
+    /// schema-cleanup-v1 BUG-21: ADDITIVE field — populated to the
+    /// same value as `count` so consumers using either field name see
+    /// matching values.
+    #[serde(default)]
+    pub line_count: u32,
 
     /// Source line (where data flows FROM)
     pub source_line: u32,
@@ -651,8 +672,10 @@ impl ChopResult {
     /// Create a result for when source and target are the same line.
     pub fn same_line(line: u32, function: impl Into<String>) -> Self {
         Self {
+            file: String::new(),
             lines: vec![line],
             count: 1,
+            line_count: 1,
             source_line: line,
             target_line: line,
             path_exists: true,
@@ -664,8 +687,10 @@ impl ChopResult {
     /// Create a result for when no path exists.
     pub fn no_path(source: u32, target: u32, function: impl Into<String>) -> Self {
         Self {
+            file: String::new(),
             lines: vec![],
             count: 0,
+            line_count: 0,
             source_line: source,
             target_line: target,
             path_exists: false,
@@ -1272,8 +1297,10 @@ mod tests {
     #[test]
     fn test_chop_result_struct() {
         let result = ChopResult {
+            file: "test.py".to_string(),
             lines: vec![2, 3, 4],
             count: 3,
+            line_count: 3,
             source_line: 2,
             target_line: 4,
             path_exists: true,
