@@ -124,8 +124,15 @@ impl ChopArgs {
             self.function
         ));
 
-        // Compute the chop - gracefully handle errors (out-of-range lines, missing functions)
-        let canonical_str = canonical_path.to_string_lossy().to_string();
+        // Compute the chop - gracefully handle errors (out-of-range lines, missing functions).
+        //
+        // (path-and-schema-cleanup-v3 P3.BUG-N2) Reads use the canonical
+        // path for existence/traversal safety, but the JSON `file` field
+        // echoes the user-supplied path so macOS does not rewrite
+        // `/tmp/...` to `/private/tmp/...`. Mirrors the M2 BUG-8 fix
+        // already applied to halstead/cognitive/reaching-defs/dead-stores/
+        // resources.
+        let user_path_str = self.file.display().to_string();
         let mut result = match compute_chop(
             canonical_path.to_str().unwrap_or_default(),
             &self.function,
@@ -137,7 +144,7 @@ impl ChopArgs {
             Err(e) => {
                 // Return valid result with error explanation instead of failing
                 ChopResult {
-                    file: canonical_str.clone(),
+                    file: user_path_str.clone(),
                     lines: vec![],
                     count: 0,
                     line_count: 0,
@@ -153,9 +160,10 @@ impl ChopArgs {
         // for parity with `tldr slice`. compute_chop's helpers
         // (`same_line`, `no_path`) initialize this field as empty —
         // backfill it here at the call site.
-        if result.file.is_empty() {
-            result.file = canonical_str;
-        }
+        // (P3.BUG-N2) Always force the user-supplied path, overriding
+        // whatever compute_chop or its helpers set, so the emitted
+        // `file` matches the input verbatim.
+        result.file = user_path_str;
 
         // Output based on format - check both local and global format options
         let use_text = matches!(self.output_format, ContractsOutputFormat::Text)

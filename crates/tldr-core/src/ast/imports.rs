@@ -108,6 +108,63 @@ fn extract_python_imports_recursive(node: &Node, source: &str, imports: &mut Vec
                     }
                 }
             }
+            "future_import_statement" => {
+                // from __future__ import annotations
+                //
+                // (path-and-schema-cleanup-v3 P3.BUG-N3) Tree-sitter Python
+                // emits a dedicated `future_import_statement` node for
+                // `from __future__ import X` (distinct from the regular
+                // `import_from_statement` because `__future__` triggers
+                // compile-time pragma behaviour). The previous extractor
+                // did not handle this node kind, so `__future__` imports
+                // were silently dropped. Treat them like any other
+                // `from M import X, Y` — `__future__` is a real module
+                // reference that downstream consumers (deps, change-impact,
+                // imports surface) should see.
+                let mut names = Vec::new();
+                let mut import_cursor = child.walk();
+                for import_child in child.children(&mut import_cursor) {
+                    match import_child.kind() {
+                        // Each imported feature: `annotations`,
+                        // `division`, etc. Tree-sitter exposes these as
+                        // bare `dotted_name`/`identifier` children of the
+                        // future_import_statement node.
+                        "dotted_name" | "identifier" => {
+                            let text = get_node_text(&import_child, source);
+                            // Skip the literal `__future__` keyword if
+                            // tree-sitter ever surfaces it as an
+                            // identifier-shaped child (defensive).
+                            if text != "__future__" {
+                                names.push(text);
+                            }
+                        }
+                        "aliased_import" => {
+                            let name = import_child
+                                .child_by_field_name("name")
+                                .map(|n| get_node_text(&n, source))
+                                .unwrap_or_default();
+                            let alias = import_child
+                                .child_by_field_name("alias")
+                                .map(|n| get_node_text(&n, source));
+                            imports.push(ImportInfo {
+                                module: "__future__".to_string(),
+                                names: vec![name],
+                                is_from: true,
+                                alias,
+                            });
+                        }
+                        _ => {}
+                    }
+                }
+                if !names.is_empty() {
+                    imports.push(ImportInfo {
+                        module: "__future__".to_string(),
+                        names,
+                        is_from: true,
+                        alias: None,
+                    });
+                }
+            }
             "import_from_statement" => {
                 // from X import Y, Z
                 let module = child

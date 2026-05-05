@@ -148,11 +148,25 @@ impl CohesionArgs {
         };
 
         // Analyze based on path type
-        let report = if canonical_path.is_dir() {
+        let mut report = if canonical_path.is_dir() {
             analyze_directory(&canonical_path, self, start, timeout)?
         } else {
             analyze_single_file(&canonical_path, self)?
         };
+
+        // (path-and-schema-cleanup-v3 P3.BUG-N2) When the user supplied
+        // a single file path, echo it verbatim in each class's
+        // `file_path`. The canonical path was used for the read above,
+        // but downstream consumers expect the JSON to mirror the input
+        // (no `/tmp/...` -> `/private/tmp/...` rewrite on macOS).
+        // Directory mode skips this — each file there is the resolved
+        // path of a walker entry, not user-supplied.
+        if !canonical_path.is_dir() {
+            let user_path_str = self.path.display().to_string();
+            for class in &mut report.classes {
+                class.file_path = user_path_str.clone();
+            }
+        }
 
         // Resolve format: global -f flag takes priority over hidden --output-format
         let use_text = matches!(global_format, GlobalOutputFormat::Text)

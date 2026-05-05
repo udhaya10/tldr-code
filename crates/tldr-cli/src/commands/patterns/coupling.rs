@@ -1403,11 +1403,19 @@ fn run_pair_mode(args: &CouplingArgs, format: OutputFormat) -> Result<()> {
         .into());
     }
 
+    // (path-and-schema-cleanup-v3 P3.BUG-N2) For JSON emit, echo the
+    // user-supplied paths so macOS does not rewrite `/tmp/...` to
+    // `/private/tmp/...`. The canonical paths are still used for the
+    // actual file reads and AST analysis above; only the emitted
+    // `path_a` / `path_b` strings are re-derived from `args`.
+    let user_path_a = args.path_a.display().to_string();
+    let user_path_b = path_b_ref.display().to_string();
+
     // Handle self-coupling case
     if path_a == path_b {
         let report = CouplingReport {
-            path_a: path_a.to_string_lossy().to_string(),
-            path_b: path_b.to_string_lossy().to_string(),
+            path_a: user_path_a.clone(),
+            path_b: user_path_b.clone(),
             a_to_b: CrossCalls::default(),
             b_to_a: CrossCalls::default(),
             total_calls: 0,
@@ -1445,10 +1453,10 @@ fn run_pair_mode(args: &CouplingArgs, format: OutputFormat) -> Result<()> {
     );
     let verdict = CouplingVerdict::from_score(coupling_score);
 
-    // Build report
+    // Build report — emit user-supplied paths (P3.BUG-N2)
     let report = CouplingReport {
-        path_a: path_a.to_string_lossy().to_string(),
-        path_b: path_b.to_string_lossy().to_string(),
+        path_a: user_path_a,
+        path_b: user_path_b,
         a_to_b,
         b_to_a,
         total_calls,

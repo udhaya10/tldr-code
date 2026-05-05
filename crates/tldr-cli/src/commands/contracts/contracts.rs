@@ -828,7 +828,14 @@ impl ContractsArgs {
         }
 
         // Parse and analyze
-        let report = run_contracts(&canonical_path, &self.function, language, self.limit)?;
+        let mut report = run_contracts(&canonical_path, &self.function, language, self.limit)?;
+
+        // (path-and-schema-cleanup-v3 P3.BUG-N2) Echo the user-supplied
+        // path in the JSON `file` field. `validate_file_path` is still
+        // called above for existence/traversal, but the canonical value
+        // is discarded for emit so macOS does not rewrite `/tmp/...`
+        // to `/private/tmp/...`. Mirrors the M2 BUG-8 fix.
+        report.file = self.file.clone();
 
         // Output based on format
         let use_text = matches!(self.output_format, ContractsOutputFormat::Text)

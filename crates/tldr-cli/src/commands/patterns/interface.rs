@@ -1552,7 +1552,13 @@ pub fn run(args: InterfaceArgs, format: OutputFormat) -> anyhow::Result<()> {
         };
 
         let source = read_file_safe(&canonical_path)?;
-        let info = extract_interface(&canonical_path, &source)?;
+        let mut info = extract_interface(&canonical_path, &source)?;
+
+        // (path-and-schema-cleanup-v3 P3.BUG-N2) Echo the user-supplied
+        // path in the JSON `file` field. The canonical path is used for
+        // the actual read, but the emit path mirrors the input verbatim
+        // so macOS does not rewrite `/tmp/...` to `/private/tmp/...`.
+        info.file = path.display().to_string();
 
         // Output
         match format {

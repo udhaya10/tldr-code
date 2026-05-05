@@ -9,10 +9,6 @@ use anyhow::Result;
 use clap::Args;
 use serde::{Deserialize, Serialize};
 
-fn is_false(v: &bool) -> bool {
-    !*v
-}
-
 use tldr_core::callgraph::cross_file_types::CallType;
 use tldr_core::callgraph::{build_project_call_graph_v2, BuildConfig};
 use tldr_core::Language;
@@ -65,7 +61,13 @@ struct CallGraphOutput {
     nodes: Vec<String>,
     edges: Vec<EdgeOutput>,
     /// Whether the output was truncated due to max_items limit
-    #[serde(skip_serializing_if = "is_false", default)]
+    ///
+    /// (path-and-schema-cleanup-v3 P3.BUG-N5) Always emitted — including
+    /// when `false` — so schema consumers do not need to handle the
+    /// absent-key case. Previously elided via `skip_serializing_if`, but
+    /// downstream tooling (and `references`, `dead`, `dice`, etc.) all
+    /// treat `truncated` as a stable boolean key.
+    #[serde(default)]
     truncated: bool,
     /// Total number of edges before truncation
     total_edges: usize,

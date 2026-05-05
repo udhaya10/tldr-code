@@ -1,5 +1,153 @@
 # Changelog
 
+## path-and-schema-cleanup-v3 — internal milestone
+
+NOT a published release. Closes 5 small bugs surfaced by the convergence
+audit that followed phase 2 (`schema-cleanup-v2`). One MED, one MED
+regression of M2 BUG-8, three LOW. All exercise visible CLI output —
+either user-supplied paths surviving canonicalisation, schema fields
+always being present, or the program slicer correctly resolving Python
+dunder methods with multi-line def signatures.
+
+### Fixed
+
+- **P3.BUG-N1 (MED) — `slice`/`chop` on Python `__init__` with
+  multi-line def signatures returned `line_count: 0`.** Triggered by
+  the exact shape of `flask.Flask.__init__` (line 310 `def __init__(`
+  with body not starting until line 323): the CFG entry block's line
+  range was set to body-start in `process_block`, so any criterion
+  line on the signature (e.g. line 312, the second parameter) fell in
+  no block and `find_nodes_for_line` returned empty. Fix: pre-seed
+  the entry block's lines to `(def_line, def_line)` from
+  `build_cfg_for_function` before walking the body, so the entry
+  block covers the signature too. `__init_subclass__` and other
+  dunders that already worked stay working — the change is additive
+  to the entry block's line range. Affects every language whose
+  function nodes have multi-line signatures (Python, TypeScript,
+  Kotlin, Scala, Swift), not just `__init__`.
+
+- **P3.BUG-N2 (MED, regression of M2 BUG-8) — 5 commands emitted
+  `/private/tmp/...` instead of the user-supplied `/tmp/...` path.**
+  M2 BUG-8 (`cross-command-consistency-v1`) fixed this for halstead /
+  cognitive / reaching-defs / dead-stores / resources, but the
+  audit found that `chop`, `cohesion`, `coupling`, `interface`, and
+  `contracts` were missed. Fix: each command still calls
+  `validate_file_path` for existence/traversal but discards the
+  canonicalised value when emitting JSON, echoing the user-supplied
+  path instead. Mirrors the M2 pattern exactly. The previously
+  fixed commands are unchanged and verified still GREEN.
+
+- **P3.BUG-N3 (LOW) — `from __future__ import annotations` was
+  silently dropped by `tldr imports`.** Tree-sitter Python emits a
+  dedicated `future_import_statement` node (distinct from the
+  regular `import_from_statement` because `__future__` triggers
+  compile-time pragma behaviour); the imports extractor in
+  `crates/tldr-core/src/ast/imports.rs` had no match arm for it, so
+  the unhandled node fell through to the recursive default which
+  found no nested `import_from_statement` and emitted nothing. Fix:
+  add a `future_import_statement` arm that emits the same
+  `ImportInfo { module: "__future__", names, is_from: true }` shape
+  any other from-import would. Aliased forms (`from __future__
+  import annotations as _`) round-trip correctly too.
+
+- **P3.BUG-N4 (LOW) — `tldr structure`'s `definitions: []` field was
+  elided from the JSON when empty.** `FileStructure::definitions`
+  carried `#[serde(default, skip_serializing_if = "Vec::is_empty")]`
+  which forced schema consumers to handle the absent-key case. Fix:
+  remove `skip_serializing_if`. `definitions: []` is now always
+  present, even on empty / comments-only / single-line files.
+
+- **P3.BUG-N5 (LOW) — `tldr calls`'s `truncated: false` field was
+  elided from the JSON when not truncated.** The `CallGraphOutput`
+  struct had `#[serde(skip_serializing_if = "is_false", default)]`
+  on `truncated`, which forced consumers to differentiate "missing"
+  from "false". Fix: drop the skip-if (and the local `is_false`
+  helper, now unused) so `truncated` is always emitted as a stable
+  boolean. Mirrors the always-present `truncated` field in
+  `references` and `dead`.
+
+### Files changed (production)
+
+- `crates/tldr-core/src/cfg/extractor.rs` — N1: pre-seed entry block
+  with the function's def line in `build_cfg_for_function`; new
+  `seed_entry_block_start` method on `CfgBuilder`.
+- `crates/tldr-core/src/ast/imports.rs` — N3: handle
+  `future_import_statement` in the Python extractor.
+- `crates/tldr-core/src/types.rs` — N4: drop
+  `skip_serializing_if = "Vec::is_empty"` on
+  `FileStructure::definitions`.
+- `crates/tldr-cli/src/commands/calls.rs` — N5: drop
+  `skip_serializing_if = "is_false"` on
+  `CallGraphOutput::truncated`; remove the now-unused `is_false`
+  helper.
+- `crates/tldr-cli/src/commands/contracts/chop.rs` — N2: emit
+  user-supplied path in `ChopResult.file`.
+- `crates/tldr-cli/src/commands/contracts/contracts.rs` — N2:
+  emit user-supplied path in `ContractsReport.file`.
+- `crates/tldr-cli/src/commands/patterns/cohesion.rs` — N2: emit
+  user-supplied path in each `ClassCohesion.file_path` for
+  single-file mode.
+- `crates/tldr-cli/src/commands/patterns/coupling.rs` — N2: emit
+  user-supplied paths in `CouplingReport.path_a` / `path_b`.
+- `crates/tldr-cli/src/commands/patterns/interface.rs` — N2: emit
+  user-supplied path in `InterfaceInfo.file` for single-file mode.
+
+### Tests added
+
+- `crates/tldr-cli/tests/path_and_schema_cleanup_v3.rs` — 11 tests
+  covering all 5 bugs:
+  * `slice_resolves_python_init_dunder` — slice on multi-line
+    `__init__` signature line returns non-empty.
+  * `chop_resolves_python_init_dunder` — chop spanning signature →
+    body returns non-empty.
+  * `slice_other_dunders_still_work` — regression guard for
+    `__init_subclass__`.
+  * `chop_path_preserves_user_supplied`,
+    `cohesion_path_preserves_user_supplied`,
+    `coupling_path_preserves_user_supplied`,
+    `interface_path_preserves_user_supplied`,
+    `contracts_path_preserves_user_supplied` — each runs the
+    command on a `/tmp/<unique>/...` fixture and asserts the
+    emitted path does not start with `/private/`.
+  * `python_imports_includes_future` — fixture with
+    `from __future__ import annotations`, asserts
+    `imports[].module == "__future__"` is present.
+  * `structure_definitions_always_present_even_on_empty` — empty
+    `.py` fixture, asserts `definitions: []` is in the JSON.
+  * `calls_truncated_field_always_present` — small project, asserts
+    `truncated: false` is emitted.
+
+### Quantification
+
+| Suite | Tests |
+| --- | --- |
+| `vuln_migration_v1_red` (master regression) | 168/168 GREEN |
+| `path_and_schema_cleanup_v3` (new) | 11/11 GREEN |
+| `determinism_and_stderr_hygiene_v1` | 5/5 GREEN |
+| `cross_command_consistency_v1` | 7/7 GREEN |
+| `detection_accuracy_v1` | 4/4 GREEN |
+| `schema_cleanup_v1` | 11/11 GREEN |
+| `surface_gaps_v1` | 6/6 GREEN |
+| `cross_language_extraction_v2` | 6/6 GREEN |
+| `cli_error_clarity_v2` | 7/7 GREEN |
+| `schema_cleanup_v2` | 5/5 GREEN |
+| `cli_basic_tests` | 70/70 GREEN |
+| `rr_framework_integ_test` (tldr-core) | 18/18 GREEN |
+| `cpp_method_name_extraction_v1` | 2/2 GREEN |
+| `structure_method_infos_all_langs_v1` | 4/4 GREEN |
+
+### Standing rules upheld
+
+- One atomic commit, one CHANGELOG entry, one local annotated tag
+  `path-and-schema-cleanup-v3`
+- Cargo.lock not staged
+- No push, no `cargo publish`, no version bump (manifest stays at 0.3.0)
+- Explicit-add only (10 files: 9 production + 1 test + CHANGELOG)
+- 168/168 master regression `vuln_migration_v1_red` preserved
+- All 11 prior milestone test files preserved GREEN
+- M2 BUG-8 commands (halstead/cognitive/reaching-defs/dead-stores/
+  resources) re-tested for path preservation — no regression.
+
 ## bug13-stale-test-followup-v1 — internal milestone
 
 NOT a published release. Aligns 4 stale-test assertions left red by

@@ -1113,7 +1113,13 @@ pub struct FileStructure {
     /// Import statements found in this file
     pub imports: Vec<ImportInfo>,
     /// Detailed definition information with line ranges and signatures
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    ///
+    /// (path-and-schema-cleanup-v3 P3.BUG-N4) Always emitted, even if
+    /// empty. Previously elided via `skip_serializing_if = "Vec::is_empty"`,
+    /// which forced consumers to handle the absent-key case. Schema
+    /// consumers expect a stable shape — `definitions: []` is the
+    /// canonical empty value.
+    #[serde(default)]
     pub definitions: Vec<DefinitionInfo>,
 }
 

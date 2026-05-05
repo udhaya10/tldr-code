@@ -169,7 +169,15 @@ fn build_cfg_for_function(
         });
     }
 
+    // (path-and-schema-cleanup-v3 P3.BUG-N1) Pre-seed the entry block with
+    // the function's def-line range so criterion lines that fall on the
+    // signature (e.g. multi-line `def __init__(\n self,\n ...)` parameter
+    // rows) still resolve to a CFG block. Without this, the entry block
+    // was set to body-start in `process_block`, so any slice/chop with a
+    // criterion line in the signature returned an empty result.
+    let def_line = func_node.start_position().row as u32 + 1;
     let mut builder = CfgBuilder::new(function_name.to_string(), source, language);
+    builder.seed_entry_block_start(def_line);
 
     // Get the function body
     let body_node = get_function_body(func_node, language);
@@ -222,6 +230,19 @@ impl<'a> CfgBuilder<'a> {
             current_block_id: 0,
             exit_blocks: Vec::new(),
             loop_exit_blocks: Vec::new(),
+        }
+    }
+
+    /// Pre-seed the entry block's line range with the function's def
+    /// line. (path-and-schema-cleanup-v3 P3.BUG-N1) Without this, the
+    /// entry block was set to the body's first line in `process_block`,
+    /// so criterion lines on the function signature (multi-line params)
+    /// did not resolve to any block and slice/chop returned an empty
+    /// set. Setting the start to the def line means the entry block
+    /// covers the signature too.
+    fn seed_entry_block_start(&mut self, def_line: u32) {
+        if let Some(entry) = self.blocks.get_mut(0) {
+            entry.lines = (def_line, def_line);
         }
     }
 
