@@ -268,21 +268,10 @@ public:
             })
             .unwrap_or_else(|| panic!("[{}] {} not in structure output", case.lang, case.filename));
 
-        // Legacy `methods: [String]` must still be present and contain
-        // three "bar" entries (additive contract — backward compat).
-        let methods = f0
-            .get("methods")
-            .and_then(Value::as_array)
-            .unwrap_or_else(|| panic!("[{}] methods array missing", case.lang));
-        let bar_count_legacy = methods
-            .iter()
-            .filter(|m| m.as_str() == Some("bar"))
-            .count();
-        assert_eq!(
-            bar_count_legacy, 3,
-            "[{}] legacy methods array must retain all 3 bar overloads, got {}: {:?}",
-            case.lang, bar_count_legacy, methods
-        );
+        // (The legacy `methods: [String]` flat array was removed by
+        // schema-cleanup-v1 BUG-13 in favor of the canonical
+        // `method_infos[]`; assertions below now exclusively cover that
+        // canonical field.)
 
         // method_infos must produce three DISTINCT entries with different line numbers.
         let method_infos = f0

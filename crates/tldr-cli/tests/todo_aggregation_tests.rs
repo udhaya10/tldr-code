@@ -398,9 +398,16 @@ fn test_todo_sub_results_track_errors() {
         .arg("-f")
         .arg("json");
 
-    // Sub-results should track success/failure
+    // Sub-result tracking: schema-cleanup-v1 marked the per-analyzer
+    // `sub_results` HashMap with `skip_serializing_if = "HashMap::is_empty"`
+    // (an empty map is suppressed from JSON). The canonical replacement is
+    // the `summary` block, which always contains the per-analyzer counts
+    // (dead_count, similar_pairs, low_cohesion_count, etc.). Either may
+    // appear; this assertion accepts both.
     cmd.assert().success().stdout(
-        predicate::str::contains("\"details\"").or(predicate::str::contains("\"sub_results\"")),
+        predicate::str::contains("\"summary\"")
+            .or(predicate::str::contains("\"details\""))
+            .or(predicate::str::contains("\"sub_results\"")),
     );
 }
 

@@ -1,5 +1,61 @@
 # Changelog
 
+## bug13-stale-test-followup-v1 — internal milestone
+
+NOT a published release. Aligns 4 stale-test assertions left red by
+`schema-cleanup-v1` (M4) BUG-13. The phase-1 schema cleanup intentionally
+marked the redundant `functions: [String]` and `methods: [String]` flat
+arrays as `#[serde(skip_serializing)]` on `tldr structure` output — the
+canonical replacement is the richer `definitions[]` (with kind / line_start
+/ line_end) and `method_infos[]` (with name / line / line_end /
+signature). Three test files in `crates/tldr-cli/tests/` continued
+asserting on the removed legacy arrays plus one `todo_aggregation_tests`
+case asserted on the also-skipped `sub_results` field whose canonical
+replacement is the always-present `summary` block. All four assertions
+were updated to read the canonical schema; per-test intent (overload
+disambiguation, qualified-name unqualification, sub-result tracking)
+is unchanged. No production code changed.
+
+### Changed
+- `crates/tldr-cli/tests/cpp_method_name_extraction_v1.rs` — drop legacy
+  `methods: [String]` and `functions: [String]` assertions; switch to
+  canonical `method_infos[]` and `definitions[kind=function][].name`.
+- `crates/tldr-cli/tests/structure_method_infos_all_langs_v1.rs` — drop
+  the "legacy methods array must retain 3 bars" block in the cpp/
+  kotlin/scala overload test; the canonical `method_infos[]` distinct-
+  line assertion remains.
+- `crates/tldr-cli/tests/todo_aggregation_tests.rs` — assert the
+  canonical `summary` block (always present) in addition to the
+  retained-for-forward-compat `details`/`sub_results` predicates.
+
+### Architectural note
+Continues the pattern from `test-fixture-realignment-v1`
+(commit b230ad8): when a milestone fixes a semantic bug or removes a
+redundant schema field, follow up on stale test assertions in adjacent
+suites whose intent the canonical fields already cover.
+
+### Retained
+- All M4 production code intact.
+- The canonical `method_infos[]` and `definitions[]` assertions in all
+  three structure-related test files are unchanged — they were doing
+  the real work all along.
+
+### Quantification
+
+| Suite | Before | After |
+| --- | --- | --- |
+| `cpp_method_name_extraction_v1` | 0/2 | 2/2 |
+| `structure_method_infos_all_langs_v1` | 3/4 | 4/4 |
+| `todo_aggregation_tests::test_todo_sub_results_track_errors` | FAIL | OK |
+
+### Standing rules upheld
+- One atomic commit, one CHANGELOG entry, one local annotated tag
+- Cargo.lock not staged
+- No push, no `cargo publish`, no version bump (manifest stays at 0.3.0)
+- Explicit-add only (4 files: 3 tests + CHANGELOG)
+- 168/168 master regression `vuln_migration_v1_red` preserved
+- All other phase-1 + phase-2 milestone test files preserved GREEN
+
 ## schema-cleanup-v2 — internal milestone
 
 NOT a published release. Third and final milestone of phase 2: closes

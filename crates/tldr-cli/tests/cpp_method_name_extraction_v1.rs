@@ -72,21 +72,10 @@ fn test_cpp_overload_method_names_extracted() {
         })
         .expect("Foo.cpp not in structure output");
 
-    // 1) Legacy flat `methods: [String]` field MUST contain three "bar"
-    //    entries — pre-fix it contained ["", "", ""].
-    let methods = f0
-        .get("methods")
-        .and_then(Value::as_array)
-        .expect("methods array missing");
-    let names: Vec<&str> = methods.iter().filter_map(|m| m.as_str()).collect();
-    assert_eq!(
-        names,
-        vec!["bar", "bar", "bar"],
-        "expected [\"bar\",\"bar\",\"bar\"] in methods, got {names:?}"
-    );
-
-    // 2) `method_infos` MUST have 3 entries, all named "bar", with three
+    // 1) `method_infos` MUST have 3 entries, all named "bar", with three
     //    DISTINCT `line` values.
+    // (The legacy flat `methods: [String]` array was removed by
+    // schema-cleanup-v1 BUG-13 in favor of the canonical `method_infos[]`.)
     let method_infos = f0
         .get("method_infos")
         .and_then(Value::as_array)
@@ -163,20 +152,27 @@ void Foo::bar() {}
         .expect("Foo.cpp not in structure output");
 
     // The out-of-class definition is a top-level `function_definition`
-    // (not inside `field_declaration_list`), so it appears in `functions`,
-    // not in `methods`. We assert the unqualified name was extracted.
-    let functions = f0
-        .get("functions")
+    // (not inside `field_declaration_list`), so it appears in `definitions`
+    // with kind "function", not in `method_infos`. We assert the unqualified
+    // name was extracted.
+    // (The legacy `functions: [String]` flat array was removed by
+    // schema-cleanup-v1 BUG-13 in favor of the canonical `definitions[]`.)
+    let definitions = f0
+        .get("definitions")
         .and_then(Value::as_array)
-        .expect("functions array missing");
-    let names: Vec<&str> = functions.iter().filter_map(|m| m.as_str()).collect();
+        .expect("definitions array missing");
+    let fn_names: Vec<&str> = definitions
+        .iter()
+        .filter(|d| d.get("kind").and_then(Value::as_str) == Some("function"))
+        .filter_map(|d| d.get("name").and_then(Value::as_str))
+        .collect();
     assert!(
-        names.contains(&"bar"),
-        "expected 'bar' in functions (unqualified out-of-class name), got {names:?}"
+        fn_names.contains(&"bar"),
+        "expected 'bar' in definitions[kind=function] (unqualified out-of-class name), got {fn_names:?}"
     );
     // Pre-fix this would have been "" — explicitly verify no empty entries.
     assert!(
-        !names.contains(&""),
-        "functions list contains empty string entries: {names:?}"
+        !fn_names.contains(&""),
+        "function definitions contain empty name entries: {fn_names:?}"
     );
 }
