@@ -765,6 +765,52 @@ pub fn get_function_node_kinds_vec(language: Language) -> Vec<&'static str> {
     get_function_node_kinds(language).to_vec()
 }
 
+/// Resolve the (start_line, end_line) bounds of a function in a parsed source.
+///
+/// Used by chop/slice to surface a meaningful range in `LineOutsideFunction`
+/// errors instead of leaking the `u32::MAX` sentinel that previously rendered
+/// as `lines 1-4294967295` in user-facing messages
+/// (pdg-bounds-and-stdout-hygiene-v1, P11.BUG-AGG-5).
+///
+/// Returns:
+/// - `Some((start, end))` if the function is found in the parsed tree. Both
+///   line numbers are 1-indexed and inclusive of the function's first and
+///   last source lines (signature through closing brace / `end` keyword).
+/// - `None` if the function cannot be located. Callers MUST treat this as a
+///   distinct case from "found but line is outside" — emit a clear "could not
+///   determine function bounds" message rather than a fabricated range.
+pub fn find_function_bounds(
+    source: &str,
+    function_name: &str,
+    language: Language,
+) -> Option<(u32, u32)> {
+    let tree = crate::ast::parser::parse(source, language).ok()?;
+    let root = tree.root_node();
+    let node = find_function_node(root, function_name, language, source)?;
+    let start = node.start_position().row as u32 + 1;
+    let end = node.end_position().row as u32 + 1;
+    if end < start {
+        return None;
+    }
+    Some((start, end))
+}
+
+/// File-aware variant of [`find_function_bounds`] that accepts either a
+/// path to a source file or a raw source string. Mirrors the
+/// `source_or_path` convention used by `get_cfg_context`/`get_pdg_context`.
+pub fn find_function_bounds_from_path_or_source(
+    source_or_path: &str,
+    function_name: &str,
+    language: Language,
+) -> Option<(u32, u32)> {
+    let source = if std::path::Path::new(source_or_path).exists() {
+        std::fs::read_to_string(source_or_path).ok()?
+    } else {
+        source_or_path.to_string()
+    };
+    find_function_bounds(&source, function_name, language)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

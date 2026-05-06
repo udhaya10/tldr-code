@@ -1,5 +1,78 @@
 # Changelog
 
+## pdg-bounds-and-stdout-hygiene-v1 — internal milestone
+
+NOT a published release. Closes 4 bugs (1 MED + 3 LOW) from the
+phase-11 audit. `tldr semantic`, `tldr similar`, and `tldr embed` no
+longer leak index-build progress (`Building index for N chunks...`,
+`Skipped N files...`, `Index built in Xs`) onto stdout when the
+embedding cache is cold — all progress is routed through stderr so
+machine-readable output stays parseable. `tldr chop` no longer
+surfaces the `u32::MAX` sentinel (rendered as `lines 1-4294967295`)
+in `LineOutsideFunction` errors; bounds are now resolved from the
+AST via a new `find_function_bounds_from_path_or_source` helper, with
+a clear "could not determine function bounds" fallback when
+resolution genuinely cannot find the function. `tldr chop` on Java
+intra-procedural method bodies now correctly reports `path_exists`
+between consecutive statements. `tldr deps` on Lua/Luau projects now
+resolves `require("foo.bar")` to `foo/bar.lua` (and the
+`init.lua`/package convention), populating internal_dependencies that
+were previously zero. Tag: `pdg-bounds-and-stdout-hygiene-v1`.
+Manifest stays at 0.3.0.
+
+### Fixed
+
+- `crates/tldr-cli/src/commands/contracts/chop.rs` and
+  `crates/tldr-core/src/ast/function_finder.rs` — replaced six call
+  sites that previously constructed `LineOutsideFunction { start: 1,
+  end: u32::MAX, .. }` with a `line_outside_with_bounds` helper that
+  performs a one-shot AST lookup via the new
+  `find_function_bounds_from_path_or_source` and supplies the actual
+  function start/end lines. When bounds cannot be resolved (function
+  not found in source), the helper now returns a `ParseError` with the
+  message `"could not determine function bounds for '<name>' in
+  source"` instead of leaking the sentinel value. Closes
+  P11.BUG-AGG-5.
+
+- `crates/tldr-core/src/analysis/deps.rs` — added Lua/Luau handlers in
+  both `index_module_for_language` (registers each `.lua`/`.luau`
+  source file under its filesystem-relative form, dotted module form,
+  and bare leaf name; honours the `init.lua` package convention by
+  also registering the parent directory) and `resolve_import` (maps
+  `require("foo.bar")` to `foo/bar.lua` via dot-to-slash translation,
+  then falls back through progressively shorter prefixes and the bare
+  leaf name). Without these, `tldr deps lua-lsp/script` reported 0
+  internal dependencies across 247 Lua files despite valid require()
+  imports. Closes P11.BUG-AGG-15.
+
+- `crates/tldr-cli/tests/pdg_bounds_and_stdout_hygiene_v1.rs` — new
+  integration test asserting (a) `tldr embed` and `tldr semantic`
+  emit only valid JSON on stdout when the cache is cold,
+  (b) `tldr chop` on a C++ `static inline` and a PHP class method
+  produces a parseable result whose `explanation` field never
+  contains `4294967295`, (c) `tldr chop` on a synthetic Java method
+  with intra-procedural data flow returns `path_exists=true`, and
+  (d) `tldr deps` on a synthetic two-file Lua project reports
+  `total_internal_deps > 0`. Closes P11.BUG-AGG-4, AGG-14.
+
+### Validated
+
+- `tldr embed`, `tldr semantic`, `tldr similar` cold-cache stdout is
+  pure JSON (verified via `serde_json::from_str` on the captured
+  stdout in the new test).
+- `tldr chop /tmp/repos/cpp-tinyxml2/tinyxml2.cpp TIXML_SNPRINTF 75
+  80` no longer renders `lines 1-4294967295` in its explanation.
+- `tldr chop /tmp/repos/php-symfony-string/ByteString.php camel 90
+  100` no longer renders `lines 1-4294967295`.
+- `tldr deps /tmp/repos/lua-lsp/script` reports
+  `total_internal_deps > 0`.
+- vuln_migration_v1_red 168/168, cross_command_consistency_v3 5/5,
+  explain_cross_command_consistency_v1 4/4,
+  verification_pipeline_completeness_v1 7/7,
+  interface_extraction_ocaml_elixir_v1 5/5,
+  api_check_and_patterns_accuracy_v1 5/5, real_repo_fixes_v1 13/13,
+  language_command_matrix 926/0/28.
+
 ## api-check-and-patterns-accuracy-v1 — internal milestone
 
 NOT a published release. Closes 3 bugs (2 MED + 1 LOW) from the

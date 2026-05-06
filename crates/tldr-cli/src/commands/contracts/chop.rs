@@ -43,6 +43,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::Args;
 
+use tldr_core::ast::function_finder::find_function_bounds_from_path_or_source;
 use tldr_core::pdg::get_slice;
 use tldr_core::{Language, SliceDirection};
 
@@ -51,6 +52,50 @@ use crate::output::{OutputFormat, OutputWriter};
 use super::error::{ContractsError, ContractsResult};
 use super::types::{ChopResult, OutputFormat as ContractsOutputFormat};
 use super::validation::{validate_file_path, validate_function_name, MAX_CFG_DEPTH};
+
+/// Resolve the function's actual line bounds for use in user-facing
+/// `LineOutsideFunction` error messages.
+///
+/// (pdg-bounds-and-stdout-hygiene-v1 P11.BUG-AGG-5) Previously chop/slice
+/// emitted `lines 1-4294967295` (UINT32_MAX) when bounds couldn't be
+/// resolved, which leaked the sentinel value into user output. This helper
+/// performs a one-shot AST lookup and falls back to the parse error path
+/// if the function is not found in the source — callers handle the None
+/// case by emitting a clear "could not determine function bounds" message.
+fn resolve_fn_bounds(
+    source_or_path: &str,
+    function_name: &str,
+    language: Language,
+) -> Option<(u32, u32)> {
+    find_function_bounds_from_path_or_source(source_or_path, function_name, language)
+}
+
+/// Construct a `LineOutsideFunction` error using the function's resolved
+/// bounds, or a `ParseError` with a clear message if bounds can't be
+/// determined. Replaces the prior pattern of hardcoding `start: 1, end:
+/// u32::MAX`, which produced misleading "lines 1-4294967295" messages.
+fn line_outside_with_bounds(
+    line: u32,
+    function: &str,
+    source_or_path: &str,
+    language: Language,
+) -> ContractsError {
+    match resolve_fn_bounds(source_or_path, function, language) {
+        Some((start, end)) => ContractsError::LineOutsideFunction {
+            line,
+            function: function.to_string(),
+            start,
+            end,
+        },
+        None => ContractsError::ParseError {
+            file: PathBuf::from(source_or_path),
+            message: format!(
+                "could not determine function bounds for '{}' in source",
+                function
+            ),
+        },
+    }
+}
 
 // =============================================================================
 // CLI Arguments
@@ -229,20 +274,20 @@ pub fn compute_chop(
 
     // Validate line numbers are non-zero
     if source_line == 0 {
-        return Err(ContractsError::LineOutsideFunction {
-            line: source_line,
-            function: function_name.to_string(),
-            start: 1,
-            end: u32::MAX,
-        });
+        return Err(line_outside_with_bounds(
+            source_line,
+            function_name,
+            source_or_path,
+            language,
+        ));
     }
     if target_line == 0 {
-        return Err(ContractsError::LineOutsideFunction {
-            line: target_line,
-            function: function_name.to_string(),
-            start: 1,
-            end: u32::MAX,
-        });
+        return Err(line_outside_with_bounds(
+            target_line,
+            function_name,
+            source_or_path,
+            language,
+        ));
     }
 
     // Compute forward slice from source_line
@@ -263,12 +308,7 @@ pub fn compute_chop(
                 file: PathBuf::from(source_or_path),
             }
         } else if err_str.contains("outside") || err_str.contains("line") {
-            ContractsError::LineOutsideFunction {
-                line: source_line,
-                function: function_name.to_string(),
-                start: 1,
-                end: u32::MAX,
-            }
+            line_outside_with_bounds(source_line, function_name, source_or_path, language)
         } else {
             ContractsError::ParseError {
                 file: PathBuf::from(source_or_path),
@@ -279,12 +319,12 @@ pub fn compute_chop(
 
     // If forward slice is empty, source_line might be outside function
     if forward_slice.is_empty() {
-        return Err(ContractsError::LineOutsideFunction {
-            line: source_line,
-            function: function_name.to_string(),
-            start: 1,
-            end: u32::MAX,
-        });
+        return Err(line_outside_with_bounds(
+            source_line,
+            function_name,
+            source_or_path,
+            language,
+        ));
     }
 
     // Compute backward slice from target_line
@@ -299,12 +339,7 @@ pub fn compute_chop(
     .map_err(|e| {
         let err_str = e.to_string();
         if err_str.contains("outside") || err_str.contains("line") {
-            ContractsError::LineOutsideFunction {
-                line: target_line,
-                function: function_name.to_string(),
-                start: 1,
-                end: u32::MAX,
-            }
+            line_outside_with_bounds(target_line, function_name, source_or_path, language)
         } else {
             ContractsError::ParseError {
                 file: PathBuf::from(source_or_path),
@@ -315,12 +350,12 @@ pub fn compute_chop(
 
     // If backward slice is empty, target_line might be outside function
     if backward_slice.is_empty() {
-        return Err(ContractsError::LineOutsideFunction {
-            line: target_line,
-            function: function_name.to_string(),
-            start: 1,
-            end: u32::MAX,
-        });
+        return Err(line_outside_with_bounds(
+            target_line,
+            function_name,
+            source_or_path,
+            language,
+        ));
     }
 
     // Check path existence: source_line must be in backward_slice(target_line)

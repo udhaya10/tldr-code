@@ -1082,7 +1082,77 @@ fn index_module_for_language(
         Language::Elixir => index_elixir_module(index, file_path, relative),
         Language::Ocaml => index_ocaml_module(index, file_path, relative),
         Language::Php => index_php_module(index, file_path, relative),
+        Language::Lua | Language::Luau => index_lua_module(index, file_path, relative),
         _ => {}
+    }
+}
+
+/// Index a Lua/Luau source file under every reasonable spelling that a
+/// `require()` call may use to reference it.
+///
+/// (pdg-bounds-and-stdout-hygiene-v1 P11.BUG-AGG-15) Without this, every
+/// Lua project reported zero internal dependencies because the deps
+/// resolver had no Lua entry — `tldr deps lua-lsp/script` showed 247
+/// files with 0 internal_dependencies despite valid `require("...")`
+/// imports throughout. Lua's idiom `require("foo.bar")` maps a dot-
+/// separated module path to the filesystem `foo/bar.lua`, so we register
+/// the file under:
+///   - `foo/bar`           — relative path (filesystem form)
+///   - `foo.bar`           — dotted form (require argument)
+///   - `bar`               — bare leaf name
+///
+/// Any of these spellings will match against the `module` field on a
+/// captured `ImportInfo` from the require-call extractor.
+fn index_lua_module(index: &mut HashMap<String, PathBuf>, file_path: &Path, relative: &Path) {
+    let fp = file_path.to_path_buf();
+    let stem = relative.with_extension("");
+    let stem_str = stem.to_string_lossy().to_string();
+
+    // Canonical filesystem-relative form: "src/foo/bar"
+    index.insert(stem_str.clone(), fp.clone());
+
+    // Dotted module form: "src.foo.bar" — what require("src.foo.bar") passes
+    let dotted = path_to_module_name(&stem);
+    if !dotted.is_empty() && dotted != stem_str {
+        index
+            .entry(dotted)
+            .or_insert_with(|| fp.clone());
+    }
+
+    // Bare leaf name: "bar" — what require("bar") might pass for a
+    // top-level module that happens to live in a subdirectory of
+    // package.path. We use `entry().or_insert_with` so that an existing
+    // bare-name registration (e.g. from a same-named root module) wins.
+    if let Some(name) = stem.file_name() {
+        let name_str = name.to_string_lossy();
+        if name_str != "init" {
+            index
+                .entry(name_str.to_string())
+                .or_insert_with(|| fp.clone());
+        }
+    }
+
+    // Lua package convention: foo/init.lua is loaded by `require("foo")`.
+    if relative.ends_with("init.lua") || relative.ends_with("init.luau") {
+        if let Some(parent) = stem.parent() {
+            let parent_dotted = path_to_module_name(parent);
+            if !parent_dotted.is_empty() {
+                index
+                    .entry(parent_dotted)
+                    .or_insert_with(|| fp.clone());
+            }
+            let parent_relative = parent.to_string_lossy().to_string();
+            if !parent_relative.is_empty() {
+                index
+                    .entry(parent_relative)
+                    .or_insert_with(|| fp.clone());
+            }
+            if let Some(parent_name) = parent.file_name() {
+                index
+                    .entry(parent_name.to_string_lossy().to_string())
+                    .or_insert_with(|| fp.clone());
+            }
+        }
     }
 }
 
@@ -1451,8 +1521,68 @@ fn resolve_import(
         Language::Elixir => resolve_elixir_import(import, root, current_file, index),
         Language::Ocaml => resolve_ocaml_import(import, root, current_file, index),
         Language::Php => resolve_php_import(import, root, current_file, index),
+        Language::Lua | Language::Luau => resolve_lua_import(import, index),
         _ => None,
     }
+}
+
+// =============================================================================
+// Lua / Luau import resolution
+// =============================================================================
+
+/// Resolve a Lua `require("module.path")` to a file path within the project.
+///
+/// (pdg-bounds-and-stdout-hygiene-v1 P11.BUG-AGG-15) Lua's idiom maps the
+/// dotted require argument to a filesystem path by replacing `.` with `/`
+/// and appending `.lua`. We try a sequence of lookups against the index
+/// populated by [`index_lua_module`]:
+///   1. The raw module string as-is (covers an exact match in the index).
+///   2. The dot-to-slash translation (`foo.bar` -> `foo/bar`) — what the
+///      filesystem-relative entry was registered under.
+///   3. Progressively shorter prefixes for nested module references that
+///      may resolve to a parent `init.lua` (Lua package convention).
+///   4. The bare leaf name as a last resort (matches a top-level module).
+fn resolve_lua_import(
+    import: &ImportInfo,
+    index: &HashMap<String, PathBuf>,
+) -> Option<PathBuf> {
+    let module = &import.module;
+    if module.is_empty() {
+        return None;
+    }
+
+    // 1. Direct lookup (exact spelling registered in index).
+    if let Some(path) = index.get(module) {
+        return Some(path.clone());
+    }
+
+    // 2. Translate dotted form to filesystem-relative form.
+    if module.contains('.') {
+        let slashed = module.replace('.', "/");
+        if let Some(path) = index.get(&slashed) {
+            return Some(path.clone());
+        }
+    }
+
+    // 3. Progressively shorter prefixes — useful when a deeper module is
+    //    actually served by a parent `init.lua`.
+    let parts: Vec<&str> = module.split('.').collect();
+    if parts.len() > 1 {
+        for i in (1..parts.len()).rev() {
+            let dotted_prefix = parts[..i].join(".");
+            if let Some(path) = index.get(&dotted_prefix) {
+                return Some(path.clone());
+            }
+            let slashed_prefix = parts[..i].join("/");
+            if let Some(path) = index.get(&slashed_prefix) {
+                return Some(path.clone());
+            }
+        }
+    }
+
+    // 4. Bare leaf name fallback.
+    let leaf = parts.last().copied().unwrap_or(module.as_str());
+    index.get(leaf).cloned()
 }
 
 /// Resolve Python import to file path.
