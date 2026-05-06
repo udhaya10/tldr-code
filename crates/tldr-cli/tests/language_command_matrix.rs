@@ -2297,11 +2297,33 @@ fn check_clones(lang: &str) {
     if !status.success() {
         fail_cell("clones", lang, "non-zero exit", &stdout, &stderr);
     }
-    if json.get("clone_pairs").and_then(Value::as_array).is_none() {
+    let pairs = json.get("clone_pairs").and_then(Value::as_array);
+    if pairs.is_none() {
         fail_cell("clones", lang, ".clone_pairs is not an array", &stdout, &stderr);
     }
     if json.get("stats").is_none() {
         fail_cell("clones", lang, ".stats missing", &stdout, &stderr);
+    }
+    // Strengthened invariant (language-command-matrix-strengthen-v1): the
+    // clone fixture writes `c_dup_one` and `c_dup_two` as a near-duplicate
+    // pair (per fixtures/mod.rs build_fixture_with_clone, line 274:
+    // "ensure the clone detector finds at least one candidate pair"). The
+    // detector MUST find at least one pair on this fixture.
+    let n_pairs = pairs.map(|a| a.len()).unwrap_or(0);
+    let stats_found = json
+        .get("stats")
+        .and_then(|s| s.get("clones_found"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    if n_pairs == 0 && stats_found == 0 {
+        fail_cell(
+            "clones",
+            lang,
+            ".clone_pairs empty AND stats.clones_found = 0 — \
+             expected ≥1 pair from c_dup fixture (fixtures/mod.rs:274)",
+            &stdout,
+            &stderr,
+        );
     }
 }
 
@@ -2346,11 +2368,32 @@ fn check_dice(lang: &str) {
     if !status.success() {
         fail_cell("dice", lang, "non-zero exit", &stdout, &stderr);
     }
-    if json.get("dice_coefficient").and_then(Value::as_f64).is_none() {
+    let coeff = json.get("dice_coefficient").and_then(Value::as_f64);
+    if coeff.is_none() {
         fail_cell(
             "dice",
             lang,
             ".dice_coefficient missing or not a number",
+            &stdout,
+            &stderr,
+        );
+    }
+    // Strengthened invariant (language-command-matrix-strengthen-v1): the
+    // entry file and c_dup file from build_fixture_with_clone share enough
+    // syntactic structure (per fixtures/mod.rs clone_dup_payload, line 284:
+    // "trivial function that mirrors `helper`") that the dice coefficient
+    // MUST be non-trivially positive. Threshold ≥0.1 is robustly above
+    // tokenizer noise on per-language syntax differences.
+    let value = coeff.unwrap_or(0.0);
+    if value < 0.1 {
+        fail_cell(
+            "dice",
+            lang,
+            &format!(
+                ".dice_coefficient = {:.4} < 0.1 — expected ≥0.1 between \
+                 entry file and c_dup near-duplicate (fixtures/mod.rs:284)",
+                value
+            ),
             &stdout,
             &stderr,
         );
@@ -2571,6 +2614,15 @@ fn check_specs(lang: &str) {
     if json.get("summary").is_none() {
         fail_cell("specs", lang, ".summary missing", &stdout, &stderr);
     }
+    // Shape-only by design (language-command-matrix-strengthen-v1):
+    // write_minimal_test_dir (line 2477) emits a single test (e.g.
+    // `test_helper` asserting `1 + 1 == 2`) that does NOT call the
+    // production `helper` function from the canonical fixture — there is no
+    // function-under-test relationship to extract a spec from. Empty
+    // `.functions` is the correct semantic outcome here, not a bug. To
+    // strengthen this cell, write_minimal_test_dir would need to emit a
+    // test that actually calls `helper(...)` and asserts on its return —
+    // future milestone.
 }
 
 fn check_invariants(lang: &str) {
@@ -2596,6 +2648,13 @@ fn check_invariants(lang: &str) {
     if json.get("summary").is_none() {
         fail_cell("invariants", lang, ".summary missing", &stdout, &stderr);
     }
+    // Shape-only by design (language-command-matrix-strengthen-v1):
+    // matches check_specs rationale — write_minimal_test_dir (line 2477)
+    // emits a degenerate `assert 1 + 1 == 2` test that records no
+    // input/output observations against entry-file functions. Empty
+    // `.functions` is the correct semantic outcome. Strengthening
+    // requires test bodies that actually call entry-file functions and
+    // assert on observed return values — future milestone.
 }
 
 fn check_verify(lang: &str) {
@@ -2669,8 +2728,29 @@ fn check_search(lang: &str) {
     if !status.success() {
         fail_cell("search", lang, "non-zero exit", &stdout, &stderr);
     }
-    if json.get("results").and_then(Value::as_array).is_none() {
+    let results = json.get("results").and_then(Value::as_array);
+    if results.is_none() {
         fail_cell("search", lang, ".results is not an array", &stdout, &stderr);
+    }
+    // Strengthened invariant (language-command-matrix-strengthen-v1): every
+    // canonical fixture defines a function literally named `helper` and a
+    // `main` that calls `helper()` (see fixtures/mod.rs build_python at
+    // line 396, build_typescript at 412, etc.). Searching for the literal
+    // token "helper" MUST return ≥1 result.
+    let n = results.map(|a| a.len()).unwrap_or(0);
+    let total = json
+        .get("total_results")
+        .and_then(Value::as_u64)
+        .unwrap_or(n as u64);
+    if n == 0 && total == 0 {
+        fail_cell(
+            "search",
+            lang,
+            ".results empty — expected ≥1 hit for literal token \
+             \"helper\" defined and called in canonical fixture",
+            &stdout,
+            &stderr,
+        );
     }
 }
 
@@ -2688,8 +2768,29 @@ fn check_semantic(lang: &str) {
     if !status.success() {
         fail_cell("semantic", lang, "non-zero exit", &stdout, &stderr);
     }
-    if json.get("results").and_then(Value::as_array).is_none() {
+    let results = json.get("results").and_then(Value::as_array);
+    if results.is_none() {
         fail_cell("semantic", lang, ".results is not an array", &stdout, &stderr);
+    }
+    // Strengthened invariant (language-command-matrix-strengthen-v1): the
+    // canonical fixture defines `helper` (returns constant 1) and
+    // `b_util` (returns constant 2). Semantic search for "helper function
+    // returning a constant" MUST return ≥1 result against these chunks.
+    let n = results.map(|a| a.len()).unwrap_or(0);
+    let total = json
+        .get("total_results")
+        .and_then(Value::as_u64)
+        .unwrap_or(n as u64);
+    if n == 0 && total == 0 {
+        fail_cell(
+            "semantic",
+            lang,
+            ".results empty — expected ≥1 result for query \"helper \
+             function returning a constant\" against fixture defining \
+             helper-as-constant (fixtures/mod.rs:396)",
+            &stdout,
+            &stderr,
+        );
     }
 }
 
@@ -2707,11 +2808,28 @@ fn check_similar(lang: &str) {
     if !status.success() {
         fail_cell("similar", lang, "non-zero exit", &stdout, &stderr);
     }
-    if json.get("similar_files").and_then(Value::as_array).is_none() {
+    let arr = json.get("similar_files").and_then(Value::as_array);
+    if arr.is_none() {
         fail_cell(
             "similar",
             lang,
             ".similar_files is not an array",
+            &stdout,
+            &stderr,
+        );
+    }
+    // Strengthened invariant (language-command-matrix-strengthen-v1): the
+    // build_fixture_with_clone fixture writes a c_dup file mirroring
+    // helper's structure (fixtures/mod.rs clone_dup_payload, line 284).
+    // Embedding-similarity search from the entry file MUST surface ≥1
+    // similar file (the c_dup duplicate, the util sibling, or both).
+    let n = arr.map(|a| a.len()).unwrap_or(0);
+    if n == 0 {
+        fail_cell(
+            "similar",
+            lang,
+            ".similar_files empty — expected ≥1 entry given c_dup \
+             near-duplicate fixture (fixtures/mod.rs:284)",
             &stdout,
             &stderr,
         );

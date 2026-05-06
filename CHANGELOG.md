@@ -1,5 +1,62 @@
 # Changelog
 
+## language-command-matrix-strengthen-v1 — followup
+
+NOT a published release. Tightens shape-only invariants in 5
+`check_<cmd>` helpers in `crates/tldr-cli/tests/language_command_matrix.rs`
+so cells that previously accepted empty results now assert the
+non-empty material designated by the canonical fixture.
+
+Cell totals after this strengthening: **908 passing, 18 failing,
+28 ignored** (was 926/0/28 in language-command-matrix-extension-v1).
+The 18 new failures are all in `clones × {18 languages}` — a single
+systemic product/fixture bug surfaced by the strengthened invariant.
+Triage report: `/tmp/audit_phase8/MATRIX_STRENGTHENING_REPORT.md`.
+
+### Strengthened
+
+- `check_clones` now asserts `.clone_pairs.len() >= 1 OR
+  .stats.clones_found >= 1` on the c_dup fixture (was: shape-only
+  array check). Cites `fixtures/mod.rs:274` ("ensure the clone
+  detector finds at least one candidate pair"). Currently fails on
+  all 18 languages — see triage report BUG-1.
+- `check_dice` now asserts `.dice_coefficient >= 0.1` between the
+  entry file and c_dup near-duplicate (was: shape-only number
+  check). Passes on all 18 languages (≥0.5 in practice).
+- `check_search` now asserts `.results.len() >= 1 OR
+  .total_results >= 1` for the literal token "helper" against
+  fixtures that all define `helper` (was: shape-only array check).
+  Passes on all 18 languages.
+- `check_similar` now asserts `.similar_files.len() >= 1` on the
+  c_dup fixture (was: shape-only array check). Passes on all 18
+  languages.
+- `check_semantic` now asserts `.results.len() >= 1 OR
+  .total_results >= 1` for the natural-language query "helper
+  function returning a constant" (was: shape-only array check).
+  Passes on all 18 languages.
+
+### Documented as shape-only-by-design
+
+- `check_specs` and `check_invariants` retain shape-only assertions
+  because `write_minimal_test_dir` (line 2477) emits a degenerate
+  test body that does not call the production `helper` function;
+  empty `.functions` is the correct semantic outcome with this
+  fixture material. Inline comments cite the rationale and outline
+  the future strengthening path (rewrite the minimal test dir to
+  call entry-file functions concretely).
+
+### Notes
+
+- All 18 `clones` failures share one root cause: the type-1/2/3
+  detector reports zero pairs on the c_dup near-duplicate fixture
+  even at relaxed `--min-tokens 10 --min-lines 3`. This is either
+  a clone-detector regression or a fixture-size issue (c_dup body
+  may be too small under literal/identifier normalization). Fix
+  routed to a separate milestone.
+- No assertions were weakened back to shape-only after observing
+  failures — per the milestone contract, real product bugs stay red
+  in the matrix until fix milestones land.
+
 ## language-command-matrix-extension-v1 — followup
 
 NOT a published release. Extends the (cmd × lang) audit matrix in
