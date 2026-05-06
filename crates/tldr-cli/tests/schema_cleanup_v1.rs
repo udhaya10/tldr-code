@@ -42,7 +42,9 @@
 
 use assert_cmd::Command;
 use serde_json::Value;
+use std::fs;
 use std::path::PathBuf;
+use tempfile::TempDir;
 
 fn tldr_cmd() -> Command {
     Command::new(assert_cmd::cargo::cargo_bin!("tldr"))
@@ -107,25 +109,84 @@ fn bug9_health_metrics_not_dead_ui() {
 
 #[test]
 fn bug10_patterns_naming_violations_have_line() {
-    let path = flask_repo();
-    let v = run_json(&["patterns", path.to_str().unwrap()]);
+    // BUG-10 contract: when naming violations exist, every violation
+    // carries a `line > 0` plumbed through from the AST start_position
+    // 4-tuple in `NamingSignals`.
+    //
+    // Originally this test ran `tldr patterns` against the real flask
+    // repo, which had several single-word identifiers (e.g. `print`)
+    // that the OLD classifier flagged as `snake_case` violations
+    // against `camel_case` expectations. After
+    // `language-coverage-fixes-v1` (P4.BUG-N4, commit ef5f6cf),
+    // `signals::detect_naming_case` now requires `≥1 underscore` to
+    // classify as snake_case / upper_snake_case, and the violation
+    // emitter (`patterns::naming::is_compatible`) treats single-word
+    // `LowerAlpha` / `UpperAlpha` identifiers as compatible with both
+    // adjacent conventions. Flask's previous "violations" were ALL of
+    // that single-word shape — post-N4 flask correctly returns zero
+    // naming violations (and the `violations` field is even
+    // `skip_serializing_if = "Vec::is_empty"`, so it disappears from
+    // the JSON entirely).
+    //
+    // Use a synthetic fixture instead: a Python file with a
+    // snake_case majority and ONE camelCase function. Under the
+    // corrected classifier, the camelCase function is `NamingCase::
+    // CamelCase` (not `LowerAlpha`), and `is_compatible(CamelCase,
+    // SnakeCase)` is `false`, so it is reported as a violation.
+    // This preserves the original BUG-10 contract: any violation
+    // that IS reported must carry `line > 0`.
+    let dir = TempDir::new().expect("tempdir");
+    let py = dir.path().join("sample.py");
+    fs::write(
+        &py,
+        r#"
+def first_function():
+    pass
+
+def second_function():
+    pass
+
+def third_function():
+    pass
+
+def badCamelCase():
+    pass
+
+class GoodClass:
+    pass
+
+class AnotherClass:
+    pass
+"#,
+    )
+    .expect("write sample.py");
+
+    let v = run_json(&["patterns", dir.path().to_str().unwrap()]);
     let violations = v
         .pointer("/naming/violations")
         .and_then(|x| x.as_array())
-        .unwrap_or_else(|| panic!("patterns: missing .naming.violations array; got {v}"));
+        .unwrap_or_else(|| {
+            panic!("patterns: missing .naming.violations array; got {v}")
+        });
     assert!(
         !violations.is_empty(),
-        "expected at least one naming violation in flask (existed pre-fix); got 0"
+        "synthetic fixture (snake_case majority + one camelCase fn) \
+         should produce ≥1 naming violation under the corrected \
+         classifier; got 0. Full output: {v}"
     );
-    let max_line = violations
-        .iter()
-        .filter_map(|x| x.get("line").and_then(|n| n.as_u64()))
-        .max()
-        .unwrap_or(0);
-    assert!(
-        max_line > 0,
-        "BUG-10 regression: every violation reported line=0; expected line>0 from AST start_position. violations: {violations:?}"
-    );
+    // Every violation must carry a non-zero line number from the AST
+    // start_position. This is the BUG-10 schema-cleanup contract.
+    for viol in violations {
+        let line = viol
+            .get("line")
+            .and_then(|n| n.as_u64())
+            .unwrap_or_else(|| panic!("violation missing .line field: {viol}"));
+        assert!(
+            line > 0,
+            "BUG-10 regression: violation reported line=0; expected \
+             line>0 from AST start_position. violation: {viol}"
+        );
+    }
 }
 
 // =============================================================================

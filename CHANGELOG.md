@@ -1,5 +1,85 @@
 # Changelog
 
+## naming-classifier-test-followup-v1 — internal milestone
+
+NOT a published release. Aligns one stale test left red by
+`language-coverage-fixes-v1` (P4.BUG-N4, commit ef5f6cf). The phase-4
+milestone tightened `signals::detect_naming_case` so that single-word
+lowercase identifiers (e.g. `print`, `init`, `save`) are no longer
+classified as `snake_case` violations against `camel_case`/`pascal_case`
+expectations — they are now `LowerAlpha` and treated as compatible
+with both adjacent conventions by `patterns::naming::is_compatible`.
+The flask repo's only naming violations were precisely of this
+single-word shape, so post-N4 `tldr patterns /tmp/repos/flask`
+correctly returns zero naming violations and the `violations` field
+disappears from the JSON entirely (`#[serde(skip_serializing_if =
+"Vec::is_empty")]`). The adjacent test
+`bug10_patterns_naming_violations_have_line` in `schema_cleanup_v1.rs`
+asserted `!violations.is_empty()` against flask, which was correct
+pre-N4 but is now stale. No production code changed; the BUG-10
+schema-cleanup contract (every emitted violation carries a
+`line > 0` from the AST `start_position`) is preserved exactly.
+
+### Changed
+
+- `crates/tldr-cli/tests/schema_cleanup_v1.rs:108-186` —
+  `bug10_patterns_naming_violations_have_line` rewritten to use a
+  synthetic `TempDir` Python fixture (3 snake_case functions + 1
+  camelCase function `badCamelCase` + 2 PascalCase classes) instead
+  of the flask repo. Under the corrected classifier, the camelCase
+  function is `NamingCase::CamelCase` (not `LowerAlpha`); since
+  `is_compatible(CamelCase, SnakeCase)` is `false`, it is reported
+  as a violation. The test asserts (a) `.naming.violations` is
+  non-empty, and (b) for every violation, `.line` exists and is
+  `> 0` — the original BUG-10 contract from `schema-cleanup-v1`.
+  Imports widened to bring in `std::fs` and `tempfile::TempDir`.
+
+### Architectural note
+
+Same pattern as `test-fixture-realignment-v1`,
+`bug13-stale-test-followup-v1`, and `calls-dot-test-followup-v1`:
+when a milestone changes externally-visible behaviour (single-word
+identifiers no longer flagged as naming violations), follow-up on
+adjacent tests whose old assertions encoded the prior contract. The
+realigned test no longer depends on the exact flask corpus; it
+self-contains a fixture that deterministically exercises the BUG-10
+line-plumbing contract under the corrected classifier. This
+preserves the milestone separation: P4.BUG-N4 changed *which names
+get flagged*; BUG-10 governed *which fields populate when a name
+is flagged*. Both contracts are still tested, by their respective
+suites.
+
+### Retained
+
+- All `language-coverage-fixes-v1` (P4.BUG-N4) production code
+  (`signals::detect_naming_case`, `patterns::naming::is_compatible`,
+  `naming_case_to_convention` with `LowerAlpha → SnakeCase` and
+  `UpperAlpha → PascalCase` mappings).
+- All other `schema_cleanup_v1` BUG-10 invariants (NamingSignals
+  4-tuple `(name, case, file, line)`, AST `start_position` plumbing).
+- The `language_coverage_fixes_v1::test_n4_patterns_naming_no_single
+  _word_violations` complementary contract: violations must contain
+  underscores (no single-word false positives).
+
+### Quantification
+
+| Suite | Before | After |
+| --- | --- | --- |
+| `schema_cleanup_v1::bug10_patterns_naming_violations_have_line` | FAIL (post-N4 stale) | PASS |
+| `schema_cleanup_v1` (full) | 9/11 | 10/11 (bug12 remains pre-existing churn JSON failure) |
+| `vuln_migration_v1_red` (master regression) | 168/168 | 168/168 |
+
+### Standing rules upheld
+
+- One atomic commit, one CHANGELOG entry, one local annotated tag
+- `Cargo.lock` not staged (explicit-add list only: 2 files)
+- No push, no `cargo publish`, no version bump (manifest stays at 0.3.0)
+- No `#[allow(...)]` suppression, no test weakening, no scope cuts —
+  the BUG-10 contract is preserved as written, only the corpus
+  changed
+- No `git stash`, no destructive git
+- 168/168 master regression preserved
+
 ## language-coverage-fixes-v1 — internal milestone
 
 NOT a published release. Closes 5 bugs surfaced by the phase-4 UX
