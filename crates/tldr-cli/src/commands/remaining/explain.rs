@@ -894,7 +894,15 @@ fn extract_name_from_expr(node: Node, source: &[u8]) -> String {
 
 /// Compute complexity metrics for a function
 fn compute_complexity(func_node: Node) -> ComplexityInfo {
-    let mut cyclomatic = 1; // Base complexity
+    // cross-command-consistency-v3 (P5.BUG-N2): the local
+    // `count_complexity_recursive` walker is preserved for `num_blocks`,
+    // `num_edges`, and `has_loops` (fields that are unique to
+    // `ComplexityInfo` and have no canonical equivalent). The cyclomatic
+    // value is intentionally discarded here — the caller `ExplainArgs::run`
+    // overwrites it with the canonical
+    // `tldr_core::calculate_complexity` value so `tldr explain` and
+    // `tldr complexity` always agree on cyclomatic for the same function.
+    let mut cyclomatic = 1; // Base complexity (overwritten by caller)
     let mut num_blocks = 1;
     let mut num_edges = 0;
     let mut has_loops = false;
@@ -1307,8 +1315,23 @@ impl ExplainArgs {
         // Analyze purity
         report.purity = analyze_purity(func_node, source_bytes);
 
-        // Compute complexity
-        report.complexity = Some(compute_complexity(func_node));
+        // Compute complexity. Local walker fills `num_blocks`, `num_edges`,
+        // and `has_loops`; cyclomatic is then overwritten with the canonical
+        // value from `tldr_core::calculate_complexity` so `tldr explain` and
+        // `tldr complexity` always agree (cross-command-consistency-v3
+        // P5.BUG-N2). Falling back to the local cyclomatic only on canonical
+        // failure preserves explain output for files that the canonical path
+        // cannot find the function in (e.g. nested-class disambiguation
+        // edge cases).
+        let mut complexity_info = compute_complexity(func_node);
+        if let Ok(canonical) = tldr_core::calculate_complexity(
+            self.file.to_str().unwrap_or_default(),
+            &self.function,
+            language,
+        ) {
+            complexity_info.cyclomatic = canonical.cyclomatic;
+        }
+        report.complexity = Some(complexity_info);
 
         // Collect local function names for call graph analysis
         let local_functions = collect_function_names(root, source_bytes, func_kinds);

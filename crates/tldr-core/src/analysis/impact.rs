@@ -49,6 +49,65 @@ fn last_segment(qualified: &str) -> &str {
     }
 }
 
+/// Match `candidate` against `target` allowing both directions of
+/// qualification (cross-command-consistency-v3 P5.BUG-N3).
+///
+/// When the user runs `tldr impact Flask.run`, we don't know in advance
+/// whether the call graph emitted edges with the qualified form
+/// (`Flask.run`) or the bare method name (`run`). Symmetrically, AST-based
+/// fallback may emit either shape depending on language. The previous
+/// `impact_analysis` only allowed two directions:
+///
+/// 1. Exact match: `candidate == target`
+/// 2. Strip the qualifier on the candidate: `last_segment(candidate) == target`
+///
+/// That catches `target="run"` matching `candidate="Flask.run"` but **not**
+/// the reverse: a user-typed `Flask.run` against a graph emitting bare `run`.
+/// `whatbreaks` accepts the qualified shape because its detection path
+/// swallows the resulting `FunctionNotFound` instead of bubbling it up,
+/// which masks the same gap.
+///
+/// This helper closes the asymmetry by also accepting:
+///
+/// 3. Strip the qualifier on the target: `last_segment(target) == candidate`
+/// 4. Last-segment-on-both: `last_segment(target) == last_segment(candidate)`
+///
+/// Cases (3) and (4) are guarded so `target="run"` does NOT match a candidate
+/// like `OtherClass.different_method` that has the same final segment as
+/// some unrelated qualified name — the guard requires the target to have
+/// a qualifier of its own (so the user explicitly typed `Class.method`).
+pub(crate) fn names_match(candidate: &str, target: &str) -> bool {
+    if candidate == target {
+        return true;
+    }
+    // Direction 1 (legacy): candidate is qualified, target is bare.
+    if last_segment(candidate) == target {
+        return true;
+    }
+    // Direction 2 (new): target is qualified, candidate is bare or
+    // identically qualified. Only honor when target actually has a
+    // qualifier — otherwise we'd accept any bare candidate that ends in
+    // `target`, which would re-introduce false matches.
+    let target_has_qualifier = target.contains('.') || target.contains("::");
+    if target_has_qualifier {
+        let target_tail = last_segment(target);
+        if candidate == target_tail {
+            return true;
+        }
+        // Both qualified: compare tails. Pathological case where the user
+        // types `Foo.run` and the graph has `Bar.run` — same simple name,
+        // different class. We accept it as a candidate (impact will
+        // surface every match; over-inclusion is acceptable for P5.BUG-N3
+        // because the alternative is the silent "Function not found"
+        // failure the user is actively complaining about, and downstream
+        // disambiguation still happens via `target_file` filter).
+        if last_segment(candidate) == target_tail {
+            return true;
+        }
+    }
+    false
+}
+
 /// Analyze impact of changing a function.
 ///
 /// # Arguments
@@ -78,7 +137,10 @@ pub fn impact_analysis(
         // with a strict last-segment compare anchored on `.` / `::` separators. The
         // legacy form happens to be equivalent for most inputs but the explicit segment
         // compare avoids any future regression where a non-separator suffix sneaks in.
-        if edge.dst_func == target_func || last_segment(&edge.dst_func) == target_func {
+        // cross-command-consistency-v3 (P5.BUG-N3): also match the reverse
+        // direction so a user-typed qualified name (`Flask.run`) resolves
+        // against bare-name edges (`run`). Centralized in `names_match`.
+        if names_match(&edge.dst_func, target_func) {
             // Apply file filter if provided
             if let Some(filter) = target_file {
                 if !edge.dst_file.ends_with(filter) && edge.dst_file != filter {
@@ -99,7 +161,7 @@ pub fn impact_analysis(
     if !found_any {
         // Look for the function as a source in any edge
         for edge in call_graph.edges() {
-            if edge.src_func == target_func || last_segment(&edge.src_func) == target_func {
+            if names_match(&edge.src_func, target_func) {
                 if let Some(filter) = target_file {
                     if !edge.src_file.ends_with(filter) && edge.src_file != filter {
                         continue;
@@ -323,8 +385,14 @@ fn find_function_in_ast(
         let methods = extract_methods(&tree, &source, language);
 
         for func_name in functions.iter().chain(methods.iter()) {
-            // Match: exact name or Class.method suffix
-            if func_name == target_func || func_name.ends_with(&format!(".{}", target_func)) {
+            // cross-command-consistency-v3 (P5.BUG-N3): use the symmetric
+            // matcher so AST-extracted bare names (e.g. `run`) reconcile
+            // against user-typed qualified names (e.g. `Flask.run`). Bare
+            // method names are how `extract_methods` reports class members
+            // for most languages, so the previous one-direction match
+            // returned `None` for every `Class.method` query and produced
+            // the user-visible `Function not found` regression.
+            if names_match(func_name, target_func) {
                 found.push((func_name.clone(), file_path.clone()));
             }
         }

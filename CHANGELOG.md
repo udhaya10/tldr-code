@@ -1,5 +1,138 @@
 # Changelog
 
+## cross-command-consistency-v3 — internal milestone
+
+NOT a published release. Closes 3 actionable bugs from the phase-5
+UX audit (`/tmp/audit_phase5/FINDINGS.md`). Each bug surfaced as a
+cross-command inconsistency the user could feel: copying a function
+name from one command into another would silently fail, or two
+commands reporting the "same" metric would disagree. The fixes
+share a single underlying theme: routing user input through the
+canonical resolver instead of letting each command roll its own,
+which is what produced the divergence in the first place.
+
+### Changed
+
+- `crates/tldr-core/src/ast/extract.rs:34-90` — Adds
+  `extract_file_with_lang(path, base_path, lang_hint)` alongside the
+  existing `extract_file`. The new function plumbs the caller's
+  language hint through to `parse_file_with_lang` so the parser pool
+  honors it instead of falling back to extension-based detection.
+  `extract_file` is preserved as a `lang_hint = None` shim for
+  in-tree callers that don't have a hint to forward.
+- `crates/tldr-core/src/ast/mod.rs:19` and `crates/tldr-core/src/lib.rs:101` —
+  Re-exports `extract_file_with_lang` next to `extract_file` so the
+  CLI and daemon can reach it without an `ast::extract::` deep import.
+- `crates/tldr-core/src/types.rs:189-263` — Adds
+  `Language::from_path_with_siblings`, a sibling-aware variant of
+  `from_path` that flips `.h` → `Cpp` when the parent directory
+  contains any C++ source (`.cpp`/`.cc`/`.cxx`/`.c++`) or richer
+  header (`.hpp`/`.hh`/`.hxx`/`.h++`). Every other extension defers
+  to canonical `from_path`, keeping the widening intentionally
+  narrow. Mirrors the philosophy of
+  `language-coverage-fixes-v1`'s `scan_extensions` widening (which
+  fixed the same `.h` ambiguity for directory walks); this milestone
+  closes the corresponding gap on the single-file `extract` path.
+- `crates/tldr-cli/src/commands/extract.rs:11-87` — Resolves the
+  language BEFORE choosing daemon vs. direct route: explicit
+  `--lang` wins, otherwise `from_path_with_siblings` autodetects.
+  The resolved hint is forwarded to both the daemon
+  (`params_with_file_lang`) and the direct path
+  (`extract_file_with_lang`). The previous code passed `None` to
+  `extract_file` regardless of `self.lang`, silently dropping the
+  flag.
+- `crates/tldr-daemon/src/handlers/ast.rs:118-179` — Adds the
+  `language` field to `ExtractRequest` and routes it through
+  `extract_file_with_lang` (parsed to `Language` with a 400
+  BadRequest on unknown values, mirroring `imports`/`structure`).
+  `extract_file` is no longer imported here.
+- `crates/tldr-cli/src/commands/remaining/explain.rs:910-928,
+  1316-1336` — `compute_complexity` now produces a `ComplexityInfo`
+  whose `cyclomatic` field is overwritten in `ExplainArgs::run` with
+  the canonical value from `tldr_core::calculate_complexity`. Local
+  walker is retained for `num_blocks`/`num_edges`/`has_loops` (no
+  canonical equivalent in `ComplexityMetrics`); the cyclomatic
+  number now comes from the same source `tldr complexity` uses.
+- `crates/tldr-core/src/analysis/impact.rs:51-115, 76-114, 322-349`
+  — Introduces `names_match(candidate, target)` and uses it in
+  `impact_analysis` (both forward and reverse edge passes) and in
+  `find_function_in_ast`. The matcher accepts: exact, candidate
+  with qualifier stripped, target with qualifier stripped (when
+  user explicitly qualified), and tail-on-tail when both are
+  qualified. Closes the asymmetry where
+  `tldr impact Class.method` errored while
+  `tldr whatbreaks Class.method` accepted the same name (the
+  latter just hid the `FunctionNotFound` inside a sub-result; both
+  paths now actually resolve qualified names).
+
+### Architectural note
+
+All three bugs trace to the same anti-pattern: each command
+reinventing user-facing primitives instead of routing through one
+canonical resolver. `extract` had its own (broken) language-hint
+plumbing, `explain` had its own (under-counting) cyclomatic
+calculator, and `impact` had its own (one-directional)
+qualified-name matcher. The fixes are uniformly *"delete the
+divergent path; route through the canonical one"*, not *"add a new
+flag to paper over the symptom"*. After this milestone the
+canonical sources of truth for each primitive are:
+
+| Primitive | Canonical source |
+| --- | --- |
+| Language hint plumbing through extract | `parse_file_with_lang` (already canonical for `imports`/`structure`/CFG/DFG) |
+| `.h` autodetect | `Language::from_path_with_siblings` (single-file analogue of `scan_extensions`) |
+| Cyclomatic complexity | `tldr_core::calculate_complexity` (the dedicated `tldr complexity` command's calculator) |
+| Function-name resolution in impact | `analysis::impact::names_match` (now also used by AST fallback) |
+
+The canonical path for `whatbreaks` (`whatbreaks_analysis` →
+`run_impact_analysis` → `impact_analysis_with_ast_fallback` →
+`impact_analysis`) was untouched: it inherits the qualified-name
+fix automatically because both call sites it goes through now use
+`names_match`.
+
+### Retained
+
+- All previous extract autodetect behaviour for non-`.h`
+  extensions (the new `from_path_with_siblings` only widens `.h`).
+- `extract_file(path, base_path)` as a `None`-hint shim — every
+  in-tree caller still compiles unchanged.
+- Local complexity walker fields (`num_blocks`, `num_edges`,
+  `has_loops`) — unique to the explain report; only cyclomatic is
+  delegated.
+- All `v031-issue-7` qualified-name matching semantics in
+  `impact_analysis` (the legacy-direction path, now expressed as
+  the first branch of `names_match`).
+- `language-coverage-fixes-v1` `scan_extensions` / `matches_for_scan`
+  widening for directory walks — `from_path_with_siblings` is the
+  per-file companion, not a replacement.
+
+### Quantification
+
+| Suite | Before | After |
+| --- | --- | --- |
+| `cross_command_consistency_v3` (new) | n/a | 5/5 GREEN |
+| `vuln_migration_v1_red` (master regression) | 168/168 | 168/168 |
+| `language_coverage_fixes_v1` | 5/5 | 5/5 |
+| `naming_majority_determinism_v1` | 2/2 | 2/2 |
+| `tldr extract /tmp/repos/cpp-tinyxml2/tinyxml2.h` | language=c, 0 classes, class-as-function leakage | language=cpp, 27 classes, 0 leakage |
+| `tldr extract --lang cpp tinyxml2.h` | language=c (flag dropped) | language=cpp |
+| Flask cyclomatic agreement (4 methods) | 1/4 (only `__init__` accidentally agreed) | 4/4 |
+| `tldr impact Flask.run /tmp/repos/flask` | "Function not found" error | resolves to 1 target |
+
+### Standing rules upheld
+
+- One atomic commit, one CHANGELOG entry, one local annotated tag
+- `Cargo.lock` not staged (explicit-add list only)
+- No push, no `cargo publish`, no version bump (manifest stays at 0.3.0)
+- No `#[allow(...)]` suppression, no test weakening, no scope cuts —
+  every divergence is fixed by routing through the canonical
+  resolver, not by suppressing the user-visible symptom
+- No `git stash`, no destructive git
+- 168/168 master regression preserved
+- Binary reinstalled to `~/.cargo/bin/tldr` and `~/.local/bin/tldr`,
+  ad-hoc codesigned, semantic feature count = 3 (similar / semantic
+  / embed)
+
 ## naming-majority-determinism-v1 — internal milestone
 
 NOT a published release. Fixes a non-determinism regression in

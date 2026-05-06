@@ -193,6 +193,78 @@ impl Language {
             .and_then(|ext| Self::from_extension(&format!(".{}", ext)))
     }
 
+    /// Detect language from file path with sibling-aware widening for the
+    /// C/C++ `.h` header ambiguity (cross-command-consistency-v3 P5.BUG-N1).
+    ///
+    /// `from_path` uses a single-bucket classifier where `.h` always maps to
+    /// `Language::C`. That's correct for headers in pure C projects but wrong
+    /// for the (much more common) case of a C++ project keeping its public
+    /// headers as `.h` next to `.cpp` translation units (e.g. `tinyxml2.h` /
+    /// `tinyxml2.cpp`). Without widening, the C tree-sitter grammar parses
+    /// the file and returns `class Foo {…}` declarations as zero-classes
+    /// plus a function with `return_type: "class"` — silent garbage.
+    ///
+    /// This method:
+    ///
+    /// 1. For `.h` files only, scans the file's parent directory for any C++
+    ///    source (`.cpp`/`.cc`/`.cxx`/`.c++`) or richer header extension
+    ///    (`.hpp`/`.hh`/`.hxx`/`.h++`). When at least one such sibling
+    ///    exists, returns `Language::Cpp`.
+    /// 2. For every other extension (including `.h` with no C++ siblings),
+    ///    falls back to [`Self::from_path`] verbatim.
+    ///
+    /// The widening is intentionally narrow: it only flips `.h` → C++ when
+    /// the directory provides positive evidence. Mixed projects that keep
+    /// pure-C `.h` files in their own directories continue to be treated as
+    /// C, preserving backwards behaviour.
+    ///
+    /// Used by `tldr extract` when no explicit `--lang` is supplied. Other
+    /// commands (`structure`, `dead`, etc.) walk directories and rely on
+    /// [`Self::matches_for_scan`] / [`Self::scan_extensions`] for the same
+    /// widening.
+    pub fn from_path_with_siblings(path: &std::path::Path) -> Option<Self> {
+        // Only the C/C++ `.h` header is ambiguous. Everything else: defer
+        // to the canonical single-bucket classifier.
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|s| s.to_ascii_lowercase());
+        if ext.as_deref() != Some("h") {
+            return Self::from_path(path);
+        }
+
+        // `.h` next to any C++ sibling → Cpp; otherwise C.
+        let parent = match path.parent() {
+            Some(p) if !p.as_os_str().is_empty() => p,
+            _ => return Self::from_path(path),
+        };
+
+        // Read up to a bounded number of entries to keep this cheap on
+        // pathological directories. The decision only needs *one* positive
+        // C++ sibling, so we early-return on the first hit.
+        let read_dir = match std::fs::read_dir(parent) {
+            Ok(rd) => rd,
+            Err(_) => return Self::from_path(path),
+        };
+
+        const CPP_SIBLING_EXTS: &[&str] =
+            &["cpp", "cc", "cxx", "c++", "hpp", "hh", "hxx", "h++"];
+
+        for entry in read_dir.flatten() {
+            let p = entry.path();
+            let Some(sib_ext) = p.extension().and_then(|e| e.to_str()) else {
+                continue;
+            };
+            let sib_ext_lc = sib_ext.to_ascii_lowercase();
+            if CPP_SIBLING_EXTS.contains(&sib_ext_lc.as_str()) {
+                return Some(Language::Cpp);
+            }
+        }
+
+        // No C++ sibling found → canonical (C).
+        Self::from_path(path)
+    }
+
     /// Returns `true` if `path`'s extension belongs to the broader scan
     /// family of this language.
     ///

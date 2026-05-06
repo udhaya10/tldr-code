@@ -17,7 +17,7 @@ use crate::types::{ClassInfo, FieldInfo, FunctionInfo, IntraFileCallGraph, Langu
 use crate::TldrResult;
 
 use super::imports::extract_imports_from_tree;
-use super::parser::parse_file;
+use super::parser::parse_file_with_lang;
 
 /// Extract complete module information from a file.
 ///
@@ -32,6 +32,39 @@ use super::parser::parse_file;
 /// * `Err(TldrError::UnsupportedLanguage)` - Unknown file extension
 /// * `Err(TldrError::ParseError)` - Syntax error
 pub fn extract_file(file_path: &Path, base_path: Option<&Path>) -> TldrResult<ModuleInfo> {
+    extract_file_with_lang(file_path, base_path, None)
+}
+
+/// Extract complete module information from a file with an optional language hint.
+///
+/// When `lang_hint` is `Some(_)`, that language is used directly instead of
+/// path-extension detection. This is required so callers (e.g. the `tldr extract`
+/// CLI receiving `--lang cpp`) can correctly classify files whose canonical
+/// extension would otherwise be misdetected — most importantly the `.h`
+/// header ambiguity (`from_path` returns `Language::C`, but headers in C++
+/// projects must be parsed as C++ so `class` declarations populate `classes`
+/// instead of leaking through `functions[].return_type == "class"`).
+///
+/// When `lang_hint` is `None`, behavior matches [`extract_file`]: the language
+/// is inferred from the path extension via the parser pool.
+///
+/// # Arguments
+/// * `file_path` - Path to the source file
+/// * `base_path` - Optional base path for relative file paths in output
+/// * `lang_hint` - Optional language override that takes precedence over
+///   path-extension detection
+///
+/// # Returns
+/// * `Ok(ModuleInfo)` - Complete module information
+/// * `Err(TldrError::PathNotFound)` - File doesn't exist
+/// * `Err(TldrError::PathTraversal)` - Path escapes base_path
+/// * `Err(TldrError::UnsupportedLanguage)` - Unknown extension and no hint
+/// * `Err(TldrError::ParseError)` - Syntax error
+pub fn extract_file_with_lang(
+    file_path: &Path,
+    base_path: Option<&Path>,
+    lang_hint: Option<crate::types::Language>,
+) -> TldrResult<ModuleInfo> {
     // Check for path traversal if base_path provided
     if let Some(base) = base_path {
         let canonical_file = dunce::canonicalize(file_path)
@@ -44,7 +77,7 @@ pub fn extract_file(file_path: &Path, base_path: Option<&Path>) -> TldrResult<Mo
         }
     }
 
-    let (tree, source, language) = parse_file(file_path)?;
+    let (tree, source, language) = parse_file_with_lang(file_path, lang_hint)?;
 
     extract_from_tree(&tree, &source, language, file_path, base_path)
 }

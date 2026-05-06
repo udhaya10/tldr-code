@@ -13,8 +13,8 @@ use crate::server::{DaemonResponse, HandlerError};
 use crate::state::DaemonState;
 
 use tldr_core::{
-    detect_or_parse_language, extract_file, get_code_structure, get_file_tree, get_imports,
-    validate_file_path, CodeStructure, FileTree, ImportInfo, Language, ModuleInfo,
+    detect_or_parse_language, get_code_structure, get_file_tree, get_imports, validate_file_path,
+    CodeStructure, FileTree, ImportInfo, Language, ModuleInfo,
 };
 
 // =============================================================================
@@ -122,6 +122,15 @@ pub async fn structure(
 #[derive(Debug, Deserialize)]
 pub struct ExtractRequest {
     pub file: String,
+    /// Optional language hint (cross-command-consistency-v3 P5.BUG-N1).
+    ///
+    /// When the CLI's `tldr extract --lang cpp /path/to/foo.h` routes through
+    /// the daemon, this field carries the resolved language so the daemon's
+    /// parser pool uses the requested grammar instead of falling back to
+    /// `from_path` detection (which would mis-classify `.h` as C and produce
+    /// zero classes plus class-as-function leakage).
+    #[serde(default)]
+    pub language: Option<String>,
 }
 
 /// Extract handler - extracts complete module info from a file
@@ -138,16 +147,31 @@ pub async fn extract(
         project.join(&request.file)
     };
 
-    // Run in blocking context (M10)
-    let result = tokio::task::spawn_blocking(move || extract_file(&file_path, Some(&project)))
-        .await
-        .map_err(|e| {
+    // Resolve the language hint BEFORE moving into the blocking closure so
+    // any parse error on the language string surfaces as a 400 BadRequest
+    // (consistent with other handlers like `imports`).
+    let lang_hint: Option<tldr_core::Language> = match request.language.as_deref() {
+        Some(s) => Some(s.parse().map_err(|_| {
             HandlerError(
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Task join error: {}", e),
+                axum::http::StatusCode::BAD_REQUEST,
+                format!("Unsupported language: {}", s),
             )
-        })?
-        .map_err(|e| HandlerError(axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        })?),
+        None => None,
+    };
+
+    // Run in blocking context (M10)
+    let result = tokio::task::spawn_blocking(move || {
+        tldr_core::extract_file_with_lang(&file_path, Some(&project), lang_hint)
+    })
+    .await
+    .map_err(|e| {
+        HandlerError(
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Task join error: {}", e),
+        )
+    })?
+    .map_err(|e| HandlerError(axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     Ok(Json(DaemonResponse::ok(result)))
 }
