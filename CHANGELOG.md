@@ -1,5 +1,90 @@
 # Changelog
 
+## explain-cross-command-consistency-v1 — internal milestone
+
+NOT a published release. Closes 2 cross-command consistency bugs
+surfaced by the phase-11 audit (1 HIGH + 1 LOW). All four
+participating commands — `explain`, `impact`, `references`,
+`context` — now agree on the caller / callee relationships of a
+target function, and `change-impact` metadata reports real
+graph counts even on the `NoChanges` early-return path. Tag:
+`explain-cross-command-consistency-v1`. Manifest stays at 0.3.0.
+
+### Fixed
+
+- `crates/tldr-cli/src/commands/remaining/explain.rs:1144-1390`
+  (P11.BUG-AGG-1, HIGH) — `tldr explain` returned empty
+  `callers` / `callees` while `tldr impact` / `tldr references` /
+  `tldr context` found them on the same target. Confirmed across
+  Rust, TypeScript, Go, Java; root cause was that explain's
+  per-file walker (`find_callers` / `find_callees`) only scanned
+  the single source file passed on the command line, missing every
+  caller defined in another file. The fix mirrors the
+  `cross-command-consistency-v3 (P5.BUG-N2)` pattern that aligned
+  cyclomatic between `explain` and `complexity`: explain now
+  enriches its results with cross-file edges from the same
+  project-wide call graph used by `impact` (built via
+  `build_project_call_graph` and queried via
+  `impact_analysis_with_ast_fallback`). Same-file callers / callees
+  from the existing per-file walker are preserved; only additional
+  cross-file edges get appended (deduplicated by `name + file +
+  line`). Project root is inferred from the file's parent
+  directory by walking up to the first project marker
+  (`Cargo.toml`, `package.json`, `go.mod`, `pyproject.toml`,
+  `setup.py`, `pom.xml`, `build.gradle[.kts]`, `.git`); when no
+  marker is found the immediate parent directory is used so the
+  enrichment still pulls in same-directory callers / callees the
+  per-file walker cannot see by construction. Any failure building
+  the project graph is silently ignored so explain still returns
+  its other fields (signature, purity, complexity, docstring) on
+  files that the project graph cannot ingest. The cyclomatic
+  parity invariant from `cross-command-consistency-v3` is
+  unaffected — that fix uses
+  `tldr_core::calculate_complexity` independently of this code
+  path.
+- `crates/tldr-core/src/analysis/change_impact.rs:358-388`
+  (P11.BUG-AGG-11, LOW) — `tldr change-impact` reported
+  `metadata.call_graph_nodes = 0` and
+  `metadata.call_graph_edges = 0` whenever
+  `status = NoChanges`, even when `tldr calls` clearly returned a
+  non-empty graph for the same project. Root cause: the
+  empty-changed-files early-return called `make_status_report`,
+  which always emitted zeroes for the metadata counts. The fix:
+  when the status would be `NoChanges` and a baseline was
+  successfully established, the change-impact path now builds the
+  project call graph and emits real edge counts in the metadata
+  before returning, so `change-impact` (NoChanges) and `calls`
+  agree. If building the call graph fails, we fall back to the
+  pre-existing zero-shape report so the command still succeeds.
+  The `Completed` happy path's metadata population is unchanged;
+  the other early-return statuses (`NoBaseline`, `DetectionFailed`,
+  Session-mode `Completed` with no files) deliberately keep the
+  zero-shape metadata because in those cases the baseline was
+  not established and reporting graph counts would be misleading.
+
+### Tests
+
+- `crates/tldr-cli/tests/explain_cross_command_consistency_v1.rs`
+  (new, 4 tests) — synthetic Python project where `lib.py::target`
+  is called from `app.py`. Asserts `tldr explain lib.py target`
+  reports ≥1 caller (cross-file), `helper` shows up in callees,
+  and gated assertion against the real ripgrep repo confirms
+  `tldr explain ... check_symlink_loop` finds ≥1 caller (matches
+  `tldr impact`). A fourth test initialises a tempdir as a clean
+  git repo, runs `tldr change-impact` (NoChanges), and asserts the
+  metadata is either populated with non-zero counts or omitted
+  when `tldr calls` reports a non-empty graph for the same input.
+
+### Validation
+
+- `cargo build --release --features semantic` — succeeds.
+- `explain_cross_command_consistency_v1` — 4/4 GREEN.
+- `cross_command_consistency_v3` — 5/5 GREEN (cyclomatic parity
+  invariant preserved).
+- `vuln_migration_v1_red` — 168/168 GREEN.
+- `real_repo_fixes_v1` — 13/13 GREEN.
+- `language_command_matrix` — 926/0/28 GREEN.
+
 ## review-followup-v1 — internal milestone
 
 NOT a published release. Closes 6 concerns surfaced by the final

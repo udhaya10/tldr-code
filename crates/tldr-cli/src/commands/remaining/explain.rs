@@ -31,6 +31,7 @@ use super::types::{CallInfo, ComplexityInfo, ExplainReport, ParamInfo, PurityInf
 
 use crate::output::{OutputFormat, OutputWriter};
 use tldr_core::types::Language;
+use tldr_core::{build_project_call_graph, impact_analysis_with_ast_fallback};
 
 // =============================================================================
 // CLI Arguments
@@ -1232,6 +1233,199 @@ fn format_explain_text(report: &ExplainReport) -> String {
 }
 
 // =============================================================================
+// Project-wide Call Graph Enrichment
+// (explain-cross-command-consistency-v1: route callers/callees through the
+// canonical project-wide call graph used by `impact`/`references`/`context`,
+// matching the `cross-command-consistency-v3` pattern that aligned cyclomatic
+// between `explain` and `complexity`.)
+// =============================================================================
+
+/// Determine a project root for `file`. Walks up from the file's parent
+/// directory until a recognised project marker is found
+/// (`Cargo.toml`, `package.json`, `go.mod`, `pyproject.toml`, `setup.py`,
+/// `pom.xml`, `build.gradle`, `.git`). Falls back to the immediate parent
+/// directory so the call graph at least scans alongside files (which still
+/// surfaces same-directory callers / callees that the per-file walker
+/// misses).
+fn explain_project_root(file: &std::path::Path) -> std::path::PathBuf {
+    let parent = file
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let markers = [
+        "Cargo.toml",
+        "package.json",
+        "go.mod",
+        "pyproject.toml",
+        "setup.py",
+        "pom.xml",
+        "build.gradle",
+        "build.gradle.kts",
+        ".git",
+    ];
+    let mut cursor: Option<&std::path::Path> = Some(&parent);
+    while let Some(dir) = cursor {
+        for m in &markers {
+            if dir.join(m).exists() {
+                return dir.to_path_buf();
+            }
+        }
+        cursor = dir.parent();
+    }
+    parent
+}
+
+/// Return true if `edge_path` and `target_file` refer to the same file.
+/// Compares canonicalized paths first; falls back to suffix / equality
+/// match if canonicalization fails (e.g. relative paths from the call
+/// graph against an absolute target).
+fn paths_equivalent(edge_path: &std::path::Path, target_file: &std::path::Path) -> bool {
+    if edge_path == target_file {
+        return true;
+    }
+    let edge_canon = edge_path.canonicalize().ok();
+    let target_canon = target_file.canonicalize().ok();
+    if let (Some(a), Some(b)) = (edge_canon.as_ref(), target_canon.as_ref()) {
+        if a == b {
+            return true;
+        }
+    }
+    // Fall back to suffix match in either direction (relative vs absolute).
+    if edge_path.ends_with(target_file) || target_file.ends_with(edge_path) {
+        return true;
+    }
+    false
+}
+
+/// Strict last-segment compare for qualified names
+/// (mirrors `tldr_core::analysis::impact::last_segment` so the explain
+/// merge applies the same matching rules `impact` uses).
+fn explain_last_segment(qualified: &str) -> &str {
+    let dot_idx = qualified.rfind('.');
+    let coloncolon_idx = qualified.rfind("::").map(|i| i + 1);
+    let cut = match (dot_idx, coloncolon_idx) {
+        (Some(d), Some(c)) => Some(d.max(c)),
+        (Some(d), None) => Some(d),
+        (None, Some(c)) => Some(c),
+        (None, None) => None,
+    };
+    match cut {
+        Some(i) if i < qualified.len() => &qualified[i + 1..],
+        _ => qualified,
+    }
+}
+
+/// Two function names are equivalent when their last segments match, or
+/// one is a qualified form of the other.
+fn explain_names_match(candidate: &str, target: &str) -> bool {
+    if candidate == target {
+        return true;
+    }
+    if explain_last_segment(candidate) == target {
+        return true;
+    }
+    let target_has_qualifier = target.contains('.') || target.contains("::");
+    if target_has_qualifier {
+        let target_tail = explain_last_segment(target);
+        if candidate == target_tail {
+            return true;
+        }
+        if explain_last_segment(candidate) == target_tail {
+            return true;
+        }
+    }
+    false
+}
+
+/// Enrich `report.callers` and `report.callees` with cross-file results
+/// derived from the project-wide call graph (`build_project_call_graph` /
+/// `impact_analysis_with_ast_fallback`) — the same data source used by
+/// `tldr impact`, `tldr references`, and `tldr context`. Same-file
+/// results from the existing per-file walker are preserved; cross-file
+/// callers/callees that the per-file walker cannot see by construction
+/// are appended (deduplicated by `name+file+line`). Any failure here is
+/// silently ignored so explain still returns its other fields when the
+/// project graph cannot be built.
+fn enrich_with_project_graph(
+    report: &mut ExplainReport,
+    file: &std::path::Path,
+    function: &str,
+    language: Language,
+) {
+    let project_root = explain_project_root(file);
+    let graph = match build_project_call_graph(&project_root, language, None, true) {
+        Ok(g) => g,
+        Err(_) => return,
+    };
+
+    // Callers: use the same path `tldr impact` uses so the results agree.
+    if let Ok(impact) = impact_analysis_with_ast_fallback(
+        &graph,
+        function,
+        1, // direct callers only (consistent with the per-file walker)
+        None,
+        &project_root,
+        language,
+    ) {
+        for tree in impact.targets.values() {
+            // Only enrich when the target's file matches our subject file —
+            // explain is per-function-per-file, so cross-file callers of a
+            // homonym in a different file should not be merged in.
+            if !paths_equivalent(&tree.file, file) {
+                continue;
+            }
+            for caller in &tree.callers {
+                let caller_file = caller.file.display().to_string();
+                let caller_name = caller.function.clone();
+                // Avoid self-references and duplicates.
+                if explain_names_match(&caller_name, function)
+                    && paths_equivalent(&caller.file, file)
+                {
+                    continue;
+                }
+                let already = report.callers.iter().any(|c| {
+                    c.name == caller_name && c.file == caller_file
+                });
+                if already {
+                    continue;
+                }
+                report
+                    .callers
+                    .push(CallInfo::new(caller_name, caller_file, 0));
+            }
+        }
+    }
+
+    // Callees: scan project edges for `src_func == function` defined in `file`.
+    for edge in graph.edges() {
+        if !explain_names_match(&edge.src_func, function) {
+            continue;
+        }
+        if !paths_equivalent(&edge.src_file, file) {
+            continue;
+        }
+        let dst_file = edge.dst_file.display().to_string();
+        let dst_name = edge.dst_func.clone();
+        // Skip self-recursion duplicates of the same target name.
+        if explain_names_match(&dst_name, function)
+            && paths_equivalent(&edge.dst_file, file)
+        {
+            continue;
+        }
+        let already = report.callees.iter().any(|c| {
+            c.name == dst_name
+                && (c.file == dst_file || c.file == "<external>")
+        });
+        if already {
+            continue;
+        }
+        report
+            .callees
+            .push(CallInfo::new(dst_name, dst_file, 0));
+    }
+}
+
+// =============================================================================
 // Entry Point
 // =============================================================================
 
@@ -1341,6 +1535,15 @@ impl ExplainArgs {
 
         // Find callers
         report.callers = find_callers(root, source_bytes, &self.function, &file_path, func_kinds);
+
+        // explain-cross-command-consistency-v1 (P11.BUG-AGG-1): the
+        // per-file walker above only sees callers/callees defined in the
+        // same source file. Enrich with cross-file results from the
+        // project-wide call graph used by `tldr impact` /
+        // `tldr references` / `tldr context` so the four commands agree
+        // on relationships. Same-file results are preserved; only
+        // additional cross-file edges get appended.
+        enrich_with_project_graph(&mut report, &self.file, &self.function, language);
 
         // Output based on format
         if writer.is_text() {

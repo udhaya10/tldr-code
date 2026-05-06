@@ -360,6 +360,33 @@ pub fn change_impact_extended(
             DetectionMethod::Session => ChangeImpactStatus::Completed,
             _ => ChangeImpactStatus::NoChanges,
         };
+        // explain-cross-command-consistency-v1 (P11.BUG-AGG-11): when the
+        // baseline was established but the working tree has no changes,
+        // the call graph still exists and downstream consumers ask the
+        // same question they ask of `tldr calls` — "how big is the
+        // graph?". Build it and report real counts here so the metadata
+        // is consistent across `change-impact` (NoChanges) and `calls`.
+        // Errors building the graph fall back to the zero-shape report
+        // so the command still succeeds.
+        if matches!(status, ChangeImpactStatus::NoChanges) {
+            if let Ok(call_graph) = build_project_call_graph(project, language, None, true) {
+                let edge_count = call_graph.edges().count();
+                return Ok(ChangeImpactReport {
+                    changed_files: vec![],
+                    affected_tests: vec![],
+                    affected_test_functions: vec![],
+                    affected_functions: vec![],
+                    detection_method: method.to_string(),
+                    metadata: Some(ChangeImpactMetadata {
+                        language: language.to_string(),
+                        call_graph_nodes: edge_count,
+                        call_graph_edges: edge_count,
+                        analysis_depth: Some(depth),
+                    }),
+                    status,
+                });
+            }
+        }
         return Ok(make_status_report(method, language, depth, status));
     }
 
