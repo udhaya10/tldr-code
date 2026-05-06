@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 
 use super::bm25::{Bm25Index, Bm25Result};
 use super::text::{self, SearchMatch};
+use super::tokenizer::Tokenizer;
 use crate::ast::parser::parse_file;
 use crate::types::{CodeStructure, DefinitionInfo, Language};
 use crate::TldrResult;
@@ -862,8 +863,41 @@ pub fn search_with_inner(
     let top_k = options.top_k;
     let mode_prefix;
 
+    // ux-and-explain-completeness-v1 (P12.AGG12-13): when the BM25
+    // tokenizer would filter every query term as a stopword (e.g. user
+    // searches for `fn new`, `function`, `def `), BM25 returns 0 results
+    // even though the literal token appears thousands of times in the
+    // corpus. Pre-compute the tokenization here and route to the literal
+    // regex path on the fallback. This preserves BM25 semantics for
+    // distinctive queries while keeping short-token queries useful.
+    let bm25_falls_back_to_literal = matches!(options.search_mode, SearchMode::Bm25)
+        && Tokenizer::new().tokenize(query).is_empty()
+        && !query.trim().is_empty();
+
     // Stage 1 & 2: BM25/Regex dispatch -- get raw results
     let (raw_results, total_files) = match &options.search_mode {
+        SearchMode::Bm25 if bm25_falls_back_to_literal => {
+            // Fall back to literal substring search via regex with all
+            // metacharacters escaped. mode_prefix surfaces the fallback in
+            // the report so downstream consumers can see what happened.
+            mode_prefix = "literal-fallback";
+            let escaped = regex::escape(query.trim());
+            let (matches, total) = do_regex_search(&escaped, root, language, top_k)?;
+            if matches.is_empty() {
+                return Ok(EnrichedSearchReport {
+                    query: query.to_string(),
+                    results: Vec::new(),
+                    total_results: 0,
+                    total_files_searched: total,
+                    search_mode: if structure_cache.is_some() {
+                        "literal-fallback+cached-structure".to_string()
+                    } else {
+                        "literal-fallback+structure".to_string()
+                    },
+                });
+            }
+            (regex_matches_to_bm25_results(&matches), total)
+        }
         SearchMode::Bm25 => {
             mode_prefix = "bm25";
             match bm25_index {

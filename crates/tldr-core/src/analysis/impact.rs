@@ -76,7 +76,7 @@ fn last_segment(qualified: &str) -> &str {
 /// like `OtherClass.different_method` that has the same final segment as
 /// some unrelated qualified name — the guard requires the target to have
 /// a qualifier of its own (so the user explicitly typed `Class.method`).
-pub(crate) fn names_match(candidate: &str, target: &str) -> bool {
+pub fn names_match(candidate: &str, target: &str) -> bool {
     if candidate == target {
         return true;
     }

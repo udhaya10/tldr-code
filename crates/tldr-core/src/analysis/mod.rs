@@ -75,7 +75,7 @@ pub use hubs::{
     compute_out_degree, enumerate_function_lines, FunctionLineLookup, HubAlgorithm, HubReport,
     HubScore, RiskLevel,
 };
-pub use impact::{impact_analysis, impact_analysis_with_ast_fallback};
+pub use impact::{impact_analysis, impact_analysis_with_ast_fallback, names_match};
 pub use importers::find_importers;
 pub use references::{
     classify_reference_kind, find_references, find_text_candidates, verify_candidates_with_ast,

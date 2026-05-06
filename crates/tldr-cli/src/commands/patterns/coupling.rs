@@ -54,9 +54,20 @@ use crate::output::{common_path_prefix, strip_prefix_display, OutputFormat};
 /// - **Pair mode** (2 args): `tldr coupling file_a file_b` -- compare two files
 /// - **Project-wide mode** (1 arg): `tldr coupling directory/` -- scan all pairs
 ///
-/// Measures cross-module function calls and computes a coupling score.
-/// A lower score indicates looser coupling (good), while a higher score
-/// indicates tighter coupling (may need refactoring).
+/// Measures **cross-module function call edges** (one module invoking a
+/// function defined in another) and computes a coupling score from
+/// those edges. A lower score indicates looser coupling; a higher score
+/// indicates tighter coupling that may benefit from refactoring.
+///
+/// ux-and-explain-completeness-v1 (P12.AGG12-14): this command
+/// intentionally measures *call edges*, not import-level dependencies.
+/// Two files where module A merely `import`s symbols from module B
+/// without calling them will report `total_calls = 0`. To inspect
+/// import-level dependencies, use `tldr deps` or `tldr imports`. The
+/// distinction matters because a Python file commonly imports many
+/// symbols (e.g. `from flask import Flask, request, g, ...`) but
+/// invokes only a subset at the call-graph level — coupling tracks the
+/// invocation surface, not the import surface.
 ///
 /// Supports: Python, Go, Rust, TypeScript, JavaScript, Java, C, C++,
 /// Ruby, C#, PHP, Scala, Elixir, Lua, Luau, OCaml.

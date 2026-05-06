@@ -31,7 +31,10 @@ use super::types::{CallInfo, ComplexityInfo, ExplainReport, ParamInfo, PurityInf
 
 use crate::output::{OutputFormat, OutputWriter};
 use tldr_core::types::Language;
-use tldr_core::{build_project_call_graph, impact_analysis_with_ast_fallback};
+use tldr_core::{
+    build_project_call_graph, find_references, impact_analysis_with_ast_fallback, names_match,
+    ReferenceKind, ReferencesOptions,
+};
 
 // =============================================================================
 // CLI Arguments
@@ -1337,15 +1340,55 @@ fn explain_names_match(candidate: &str, target: &str) -> bool {
     false
 }
 
+/// Path-aware caller dedup: returns true if `report.callers` already
+/// contains an entry equivalent to `(name, file)`. ux-and-explain-completeness-v1
+/// (P12.AGG12-1): the previous string-equality check missed the relative-vs-
+/// absolute path mismatch between the per-file walker (absolute) and the
+/// project-graph (relative-to-root), causing duplicate `locate_app` callers
+/// in `flask` (one with `line=0`, one with the real line number).
+fn caller_already_present(
+    callers: &[CallInfo],
+    candidate_name: &str,
+    candidate_file: &str,
+) -> bool {
+    let candidate_path = std::path::Path::new(candidate_file);
+    callers.iter().any(|c| {
+        if !names_match(&c.name, candidate_name) && !names_match(candidate_name, &c.name) {
+            return false;
+        }
+        let existing_path = std::path::Path::new(&c.file);
+        c.file == candidate_file || paths_equivalent(existing_path, candidate_path)
+    })
+}
+
+/// Path-aware callee dedup, mirroring `caller_already_present`.
+fn callee_already_present(
+    callees: &[CallInfo],
+    candidate_name: &str,
+    candidate_file: &str,
+) -> bool {
+    let candidate_path = std::path::Path::new(candidate_file);
+    callees.iter().any(|c| {
+        if !names_match(&c.name, candidate_name) && !names_match(candidate_name, &c.name) {
+            return false;
+        }
+        if c.file == "<external>" {
+            return true;
+        }
+        let existing_path = std::path::Path::new(&c.file);
+        c.file == candidate_file || paths_equivalent(existing_path, candidate_path)
+    })
+}
+
 /// Enrich `report.callers` and `report.callees` with cross-file results
 /// derived from the project-wide call graph (`build_project_call_graph` /
 /// `impact_analysis_with_ast_fallback`) — the same data source used by
 /// `tldr impact`, `tldr references`, and `tldr context`. Same-file
 /// results from the existing per-file walker are preserved; cross-file
 /// callers/callees that the per-file walker cannot see by construction
-/// are appended (deduplicated by `name+file+line`). Any failure here is
-/// silently ignored so explain still returns its other fields when the
-/// project graph cannot be built.
+/// are appended (deduplicated path-aware by `name+file`). Any failure
+/// here is silently ignored so explain still returns its other fields
+/// when the project graph cannot be built.
 fn enrich_with_project_graph(
     report: &mut ExplainReport,
     file: &std::path::Path,
@@ -1383,10 +1426,7 @@ fn enrich_with_project_graph(
                 {
                     continue;
                 }
-                let already = report.callers.iter().any(|c| {
-                    c.name == caller_name && c.file == caller_file
-                });
-                if already {
+                if caller_already_present(&report.callers, &caller_name, &caller_file) {
                     continue;
                 }
                 report
@@ -1412,17 +1452,122 @@ fn enrich_with_project_graph(
         {
             continue;
         }
-        let already = report.callees.iter().any(|c| {
-            c.name == dst_name
-                && (c.file == dst_file || c.file == "<external>")
-        });
-        if already {
+        if callee_already_present(&report.callees, &dst_name, &dst_file) {
             continue;
         }
         report
             .callees
             .push(CallInfo::new(dst_name, dst_file, 0));
     }
+}
+
+/// Enrich `report.callers` using `find_references` for languages whose
+/// project call graph misses cross-file caller edges (notably C# and
+/// other class-heavy languages).
+///
+/// ux-and-explain-completeness-v1 (P12.AGG12-1): the call-graph builder
+/// for some languages (CSharp, Kotlin, Scala, OCaml functor wrappers,
+/// etc.) under-reports cross-file edges — `tldr references` finds calls
+/// that `tldr impact` cannot. Mirror that same data source here so
+/// `explain.callers` is non-empty whenever any reference of kind `call`
+/// exists.
+///
+/// For each Call reference found, locate the enclosing function in the
+/// caller file via `extract_file` (matches the surface used by
+/// `enumerate_function_lines`). Skip self-references (call inside the
+/// target function in the target file). Dedup path-aware against
+/// existing entries.
+fn enrich_with_references(
+    report: &mut ExplainReport,
+    file: &std::path::Path,
+    function: &str,
+    language: Language,
+) {
+    let project_root = explain_project_root(file);
+    let mut options = ReferencesOptions::new();
+    options.kinds = Some(vec![ReferenceKind::Call]);
+    options.language = Some(language.as_str().to_string());
+    options.limit = Some(500); // generous; explain doesn't need to return everything
+
+    let report_refs = match find_references(function, &project_root, &options) {
+        Ok(r) => r,
+        Err(_) => return,
+    };
+
+    // Cache of caller-file -> Vec<(function_name, line_start, line_end)> so we
+    // don't re-parse the same file repeatedly when multiple call sites
+    // share an enclosing function file.
+    use std::collections::HashMap;
+    let mut file_funcs_cache: HashMap<std::path::PathBuf, Vec<(String, u32, u32)>> = HashMap::new();
+
+    for r in &report_refs.references {
+        let ref_path = &r.file;
+        let funcs = file_funcs_cache.entry(ref_path.clone()).or_insert_with(|| {
+            collect_functions_with_bounds(ref_path)
+        });
+        // Find enclosing function whose [line_start..=line_end] contains r.line.
+        let enclosing = funcs
+            .iter()
+            .find(|(_, start, end)| {
+                let line = r.line as u32;
+                line >= *start && (*end == 0 || line <= *end)
+            })
+            .map(|(name, _, _)| name.clone());
+
+        let caller_name = match enclosing {
+            Some(n) => n,
+            // Fall back to "<module>" for top-level call sites, mirroring
+            // call-graph entry-point semantics.
+            None => "<module>".to_string(),
+        };
+        let caller_file = ref_path.display().to_string();
+
+        // Skip self-reference: call inside the target function in the
+        // target file (the AST hit at the definition or recursive call).
+        if explain_names_match(&caller_name, function) && paths_equivalent(ref_path, file) {
+            continue;
+        }
+        if caller_already_present(&report.callers, &caller_name, &caller_file) {
+            continue;
+        }
+        report
+            .callers
+            .push(CallInfo::new(caller_name, caller_file, r.line as u32));
+    }
+}
+
+/// Collect `(function_name, line_start, line_end)` triples for every
+/// top-level function and method in `file`. Returns an empty Vec if the
+/// file fails to parse — callers tolerate this by attributing call
+/// sites to `<module>`.
+fn collect_functions_with_bounds(file: &std::path::Path) -> Vec<(String, u32, u32)> {
+    let module = match tldr_core::extract_file(file, None) {
+        Ok(m) => m,
+        Err(_) => return Vec::new(),
+    };
+    let mut out: Vec<(String, u32, u32)> = Vec::new();
+    for f in &module.functions {
+        out.push((f.name.clone(), f.line_number, f.line_end));
+    }
+    for class in &module.classes {
+        for m in &class.methods {
+            // Index both the bare method name and the qualified Class.method
+            // form so `find` can match either shape from the call-graph /
+            // references emitter.
+            out.push((m.name.clone(), m.line_number, m.line_end));
+            out.push((
+                format!("{}.{}", class.name, m.name),
+                m.line_number,
+                m.line_end,
+            ));
+        }
+    }
+    // Sort so the most-specific (innermost) function comes first when
+    // multiple bounds contain the same line — by ascending line_start
+    // descending end, but in practice find() returns first match so we
+    // sort by descending line_start (innermost wins).
+    out.sort_by(|a, b| b.1.cmp(&a.1));
+    out
 }
 
 // =============================================================================
@@ -1465,8 +1610,21 @@ impl ExplainArgs {
 
         let root = tree.root_node();
 
-        // Find the function
-        let func_node = find_function_node(root, source_bytes, &self.function, func_kinds)
+        // Find the function. ux-and-explain-completeness-v1 (P12.AGG12-1):
+        // delegate to the canonical `tldr_core::ast::function_finder::find_function_node`
+        // first — it covers cross-language patterns (Lua/Luau dot-indexed
+        // `function m.reset()`, JS arrow / object pair / assignment forms,
+        // qualified `Class.method`, etc.) that the local explain walker
+        // historically missed. Fall back to the local walker only on canonical
+        // failure to preserve any pattern the canonical impl doesn't handle yet.
+        let canonical_node = tldr_core::ast::function_finder::find_function_node(
+            root,
+            &self.function,
+            language,
+            &source,
+        );
+        let func_node = canonical_node
+            .or_else(|| find_function_node(root, source_bytes, &self.function, func_kinds))
             .ok_or_else(|| RemainingError::symbol_not_found(&self.function, &self.file))?;
 
         // Get file path string
@@ -1544,6 +1702,17 @@ impl ExplainArgs {
         // on relationships. Same-file results are preserved; only
         // additional cross-file edges get appended.
         enrich_with_project_graph(&mut report, &self.file, &self.function, language);
+
+        // ux-and-explain-completeness-v1 (P12.AGG12-1): some languages
+        // under-report call edges in the project call graph (e.g. C#,
+        // Kotlin, Scala class-method invocations). For those, `tldr
+        // references` still surfaces real call sites via text+AST
+        // verification. Mirror that data source so explain's caller list
+        // matches the "real" set users see from `tldr references`.
+        // Path-aware dedup means same-file walker results and
+        // call-graph results that already populated the list won't be
+        // duplicated.
+        enrich_with_references(&mut report, &self.file, &self.function, language);
 
         // Output based on format
         if writer.is_text() {

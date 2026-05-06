@@ -340,7 +340,10 @@ pub enum Command {
     #[command(visible_alias = "res")]
     Resources(ResourcesArgs),
 
-    /// Analyze coupling between modules/classes (afferent/efferent, instability)
+    /// Analyze coupling between modules/classes via cross-module call edges
+    /// (afferent/efferent, instability). Measures function-call coupling, not
+    /// import-level dependencies — use `tldr deps` or `tldr imports` for that
+    /// (P12.AGG12-14).
     #[command(visible_alias = "coup")]
     Coupling(CouplingArgs),
 

@@ -9,6 +9,7 @@ use anyhow::Result;
 use clap::Args;
 use serde::{Deserialize, Serialize};
 
+use tldr_core::ast::function_finder::find_function_bounds_from_path_or_source;
 use tldr_core::{get_slice_rich, Language, SliceDirection};
 
 use crate::commands::daemon_router::{params_with_file_function_line, try_daemon_route};
@@ -99,6 +100,12 @@ struct SliceOutput {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     edges: Vec<SliceEdgeOutput>,
     line_count: usize,
+    /// Diagnostic explanation when the result is empty for a known
+    /// reason (e.g. criterion line is outside the function bounds).
+    /// ux-and-explain-completeness-v1 (P12.AGG12-15): mirrors `chop`'s
+    /// pattern so empty results are not silent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    explanation: Option<String>,
 }
 
 /// Legacy daemon output (old format without rich data)
@@ -152,6 +159,19 @@ impl SliceArgs {
                 if let Some(var) = &output.variable {
                     text.push_str(&format!("Variable: {}\n", var));
                 }
+                // P12.AGG12-15: surface OOR diagnostic in text output too.
+                if output.lines.is_empty() {
+                    if let Some(diag) = slice_oor_explanation(
+                        self.file.to_str().unwrap_or_default(),
+                        &self.function,
+                        self.line,
+                        language,
+                    ) {
+                        text.push_str(&format!("\n{}\n", diag));
+                        writer.write_text(&text)?;
+                        return Ok(());
+                    }
+                }
                 text.push_str(&format!(
                     "\nSlice contains {} lines:\n\n",
                     output.lines.len()
@@ -198,6 +218,18 @@ impl SliceArgs {
                         }
                     })
                     .collect();
+                // P12.AGG12-15: same OOR diagnostic as the direct-compute
+                // path, applied to the daemon's legacy output.
+                let explanation = if output.lines.is_empty() {
+                    slice_oor_explanation(
+                        self.file.to_str().unwrap_or_default(),
+                        &self.function,
+                        self.line,
+                        language,
+                    )
+                } else {
+                    None
+                };
                 let rich_output = SliceOutput {
                     file: output.file,
                     function: output.function,
@@ -208,6 +240,7 @@ impl SliceArgs {
                     lines: output.lines,
                     slice_lines,
                     edges: Vec::new(),
+                    explanation,
                 };
                 writer.write(&rich_output)?;
                 return Ok(());
@@ -265,6 +298,21 @@ impl SliceArgs {
         let data_count = edges.iter().filter(|e| e.dep_type == "data").count();
         let ctrl_count = edges.iter().filter(|e| e.dep_type == "control").count();
 
+        // ux-and-explain-completeness-v1 (P12.AGG12-15): when the slice
+        // is empty, attribute it. The most common cause is the criterion
+        // line being outside the resolved function bounds — mirror chop's
+        // diagnostic pattern so users aren't left guessing.
+        let explanation = if lines.is_empty() {
+            slice_oor_explanation(
+                self.file.to_str().unwrap_or_default(),
+                &self.function,
+                self.line,
+                language,
+            )
+        } else {
+            None
+        };
+
         let output = SliceOutput {
             file: self.file.clone(),
             function: self.function.clone(),
@@ -275,6 +323,7 @@ impl SliceArgs {
             lines,
             slice_lines,
             edges,
+            explanation,
         };
 
         // Output based on format
@@ -304,6 +353,12 @@ fn format_rich_text(output: &SliceOutput, data_count: usize, ctrl_count: usize) 
     ));
     if let Some(var) = &output.variable {
         text.push_str(&format!("Variable: {}\n", var));
+    }
+
+    // P12.AGG12-15: emit the OOR diagnostic prominently when present.
+    if let Some(diag) = &output.explanation {
+        text.push_str(&format!("\n{}\n", diag));
+        return text;
     }
 
     // Count non-blank lines for accurate summary
@@ -401,6 +456,33 @@ fn format_rich_text(output: &SliceOutput, data_count: usize, ctrl_count: usize) 
     text
 }
 
+/// Produce a `LineOutsideFunction`-style diagnostic when slice's
+/// criterion line falls outside the resolved bounds of the named
+/// function. ux-and-explain-completeness-v1 (P12.AGG12-15): mirrors
+/// the diagnostic emitted by `chop` so empty slices on out-of-range
+/// criterion lines are not silent. Returns None when the function
+/// cannot be located in source (a different failure mode that should
+/// not be reported as "outside function").
+fn slice_oor_explanation(
+    source_or_path: &str,
+    function_name: &str,
+    line: u32,
+    language: Language,
+) -> Option<String> {
+    let (start, end) =
+        find_function_bounds_from_path_or_source(source_or_path, function_name, language)?;
+    if line < start || line > end {
+        Some(format!(
+            "Analysis could not be completed: line {} is outside function '{}' (lines {}-{})",
+            line, function_name, start, end
+        ))
+    } else {
+        None
+    }
+}
+
+// Optional helper accessor used in tests and richtext path; matches
+// `read_file_lines` location in the file.
 /// Read file lines for source enrichment
 fn read_file_lines(path: &PathBuf) -> Vec<String> {
     std::fs::read_to_string(path)

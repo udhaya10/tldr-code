@@ -1,5 +1,227 @@
 # Changelog
 
+## ux-and-explain-completeness-v1 — internal milestone
+
+NOT a published release. Final P12 milestone shipped under the
+`no-synthetic-fixtures-v1` test architecture. Closes the five
+remaining UX-class bugs from the P12 audit covering `explain`
+caller completeness across 4 languages, BM25 short-token
+fallback, `slice` out-of-range diagnostic, `coupling` doc
+clarity, and `vuln`/`secure` autodetect coverage of all 18
+supported languages. Each bug was reproduced live against the
+release binary on `/tmp/repos/<corpus>` BEFORE any fix:
+
+| Bug ID         | Pre-fix repro                                                                                                                   | Pre-fix result                                  | Post-fix result                                       |
+|----------------|---------------------------------------------------------------------------------------------------------------------------------|-------------------------------------------------|-------------------------------------------------------|
+| P12.AGG12-1    | `tldr explain /tmp/repos/ts-dom-gen/src/build.ts emitFlavor` callers count                                                      | 1 vs `references` 6                             | 1 (matches impact); references=6 (1 def + 5 calls)    |
+| P12.AGG12-1    | `tldr explain /tmp/repos/spring-petclinic/.../OwnerController.java findPaginatedForOwnersLastName` callers                      | 1 (line=0)                                      | 1                                                     |
+| P12.AGG12-1    | `tldr explain /tmp/repos/csharp-newtonsoft-bson/.../BsonBinaryWriter.cs WriteToken` callers                                     | 0 (impact also 0 — references finds 2)          | 2 (enriched via find_references)                      |
+| P12.AGG12-1    | `tldr explain /tmp/repos/flask/src/flask/cli.py find_best_app` phantom line=0 dups                                              | 2 callers (1 phantom dup of locate_app, line=0) | 1 caller, no line=0 phantom                           |
+| P12.AGG12-1    | `tldr explain /tmp/repos/lua-lsp/script/files.lua m.reset`                                                                      | `Error: symbol 'm.reset' not found`             | resolves; reports 2 callers                           |
+| P12.AGG12-13   | `tldr search "fn new" /tmp/repos/ripgrep` total_results                                                                         | 0                                               | 10 (literal-fallback+structure+callgraph)             |
+| P12.AGG12-14   | `tldr coupling --help` clarity on calls vs imports                                                                              | ambiguous                                       | doc clarifies: measures call edges, not imports       |
+| P12.AGG12-15   | `tldr slice /tmp/repos/c-sds/sds.c sdsnew 100`                                                                                  | silent `lines: []`                              | `explanation: line 100 outside function 'sdsnew' (lines 154-157)` |
+| P12.AGG12-16   | `tldr vuln /tmp/repos/rails-html-sanitizer` (no `--lang`)                                                                       | rc=2, "not yet supported by autodetect"         | rc=0, runs cleanly                                    |
+
+Tag: `ux-and-explain-completeness-v1`. Manifest stays at 0.3.0.
+
+### Fixed
+
+- `crates/tldr-cli/src/commands/remaining/explain.rs`,
+  `crates/tldr-core/src/analysis/{impact.rs,mod.rs}`,
+  `crates/tldr-core/src/lib.rs`: `tldr explain` now produces
+  caller lists that match the `tldr impact` / `tldr references`
+  view across all supported languages. Three coordinated fixes:
+  1. **Canonical function lookup**: explain now delegates to
+     `tldr_core::ast::function_finder::find_function_node`
+     before the local walker, picking up Lua/Luau dot-indexed
+     functions (`function m.reset()`), JS arrow / object-pair /
+     assignment forms, and qualified `Class.method` paths the
+     local walker never handled. Lua dotted names that
+     previously failed with `symbol not found` now resolve.
+  2. **Path-aware caller dedup**: `enrich_with_project_graph`
+     used string equality on caller-file paths to suppress
+     duplicates. Same-file walker results emit absolute paths;
+     project-graph results emit relative-to-root paths. The two
+     never matched, so Python's `find_best_app` showed
+     `locate_app` twice — once with the real line, once with
+     `line=0` from the project graph. New helpers
+     `caller_already_present` / `callee_already_present` use
+     `paths_equivalent` (canonicalize + suffix match) and
+     `names_match` so the dedup actually fires regardless of
+     path representation. The phantom `line=0` entries are
+     gone.
+  3. **find_references enrichment for cross-language gaps**:
+     `enrich_with_references` queries the same `find_references`
+     pipeline `tldr references` uses (kind=Call), maps each call
+     site back to its enclosing function via `extract_file`
+     (functions + class methods, indexed by both bare and
+     `Class.method` forms), and appends any caller the call
+     graph missed. C# `WriteToken` callers (was 0) now resolve
+     to 2 — `BsonDataWriter.cs::Write` and
+     `BsonBinaryWriter.Async.cs::WriteAsync` — exactly what
+     `tldr references` already finds. The path-aware dedup
+     keeps existing call-graph entries from being shadowed by
+     reference-derived entries.
+  `analysis::impact::names_match` was widened from `pub(crate)`
+  to `pub` and re-exported via `tldr_core` so explain (and
+  future consumers) can reuse the same qualified-name semantics
+  as impact. Also re-exports `find_references`,
+  `ReferencesOptions`, `ReferenceKind`, `Reference`, and
+  `ReferencesReport`.
+
+  Multi-language verification (post-fix):
+  - flask Python `find_best_app`: callers=1, no line=0 phantom
+  - ts-dom-gen TypeScript `emitFlavor`: callers=1
+  - spring-petclinic Java `findPaginatedForOwnersLastName`: callers=1
+  - csharp-newtonsoft-bson C# `WriteToken`: callers=2
+  - lua-lsp Lua `m.reset`: callers=2 (was: error)
+  - ripgrep Rust `check_symlink_loop`: callers=1 (regression baseline)
+  - go-httprouter Go `CleanPath`: callers=6 (regression baseline)
+
+  (P12.BUG-AGG12-1)
+
+- `crates/tldr-core/src/search/enriched.rs`: BM25 mode now
+  falls back to literal substring search when every query
+  token would be filtered as a stopword. Pre-fix, the
+  tokenizer's stopword list (which intentionally drops `fn`,
+  `def`, `function`, `class`, `new`, `var`, `let`, `const`,
+  `pub`, `if`, etc.) would reduce a query like `fn new` to
+  zero tokens, and BM25 returned 0 results. The new
+  `bm25_falls_back_to_literal` gate runs at dispatch time:
+  if `Tokenizer::new().tokenize(query).is_empty()` and the
+  trimmed query is non-empty, the dispatch routes through
+  `do_regex_search` with `regex::escape(query.trim())` so the
+  literal substring is matched. The report's `search_mode`
+  field becomes `literal-fallback+structure` (or
+  `+callgraph`) so consumers can see the fallback fired.
+  Distinctive queries (function names, variable names) still
+  go through BM25 unchanged.
+
+  Multi-language verification (post-fix):
+  - `tldr search "fn new" /tmp/repos/ripgrep` → 10 results
+    (was 0)
+  - `tldr search "function" /tmp/repos/express` → 10 results
+    (was 0)
+  - `tldr search "def " /tmp/repos/flask` → 10 results
+    (was 0)
+
+  `crates/tldr-cli/src/commands/search.rs` `--help` text
+  describes the literal-fallback path so users know what
+  `search_mode: literal-fallback+...` in the output means.
+  (P12.BUG-AGG12-13)
+
+- `crates/tldr-cli/src/commands/patterns/coupling.rs`,
+  `crates/tldr-cli/src/main.rs`: clarified that `tldr
+  coupling` measures **cross-module call edges**, not
+  import-level dependencies. The pre-fix doc/help left users
+  confused when `tldr coupling A B` reported `total_calls=0`
+  on a pair where `tldr deps` showed import dependencies —
+  the import surface and the call surface diverge whenever a
+  file imports symbols it doesn't directly invoke (very
+  common in Python). The doc now points users at `tldr deps`
+  / `tldr imports` for the import view, and the clap-level
+  short help reflects the same distinction. No behavior
+  change. (P12.BUG-AGG12-14)
+
+- `crates/tldr-cli/src/commands/slice.rs`: `tldr slice`
+  emits a `LineOutsideFunction`-style diagnostic when the
+  criterion line falls outside the resolved bounds of the
+  named function. Pre-fix, `tldr slice c-sds/sds.c sdsnew
+  100` (sdsnew is at lines 154-157) returned `lines: [],
+  line_count: 0` silently. Post-fix, the JSON output carries
+  an `explanation` field — `"Analysis could not be
+  completed: line 100 is outside function 'sdsnew' (lines
+  154-157)"` — mirroring the message `tldr chop` emits in
+  the same situation. The new `slice_oor_explanation` helper
+  reuses
+  `tldr_core::ast::function_finder::find_function_bounds_from_path_or_source`
+  (the same routine `chop` uses) so bounds reporting is
+  unified across the two PDG commands. Both the daemon-cached
+  output path and the direct-compute path emit the
+  diagnostic; in-range slices keep their existing
+  `lines/slice_lines/edges` shape unchanged.
+
+  Multi-language verification (post-fix, OOR diagnostic
+  shape):
+  - c sdsnew @ line 100 → emitted
+  - rust check_symlink_loop in-range @ line 1893 → 5 lines, no diag
+  - python find_best_app @ line 550 (OOR) → emitted
+  - go CleanPath in-range @ line 30 → 20 lines, no diag
+
+  (P12.BUG-AGG12-15)
+
+- `crates/tldr-cli/src/commands/remaining/vuln.rs`:
+  `is_natively_analyzed` now returns `true` for every
+  language the canonical taint engine routes (the dispatch
+  table at `crates/tldr-core/src/security/taint.rs:764`).
+  Pre-fix, the autodetect gate accepted only Python, Rust,
+  TypeScript, and JavaScript — so `tldr vuln
+  /tmp/repos/rails-html-sanitizer` exited 2 with `taint
+  analysis for ruby is not yet supported by autodetect; pass
+  --lang ruby explicitly`, even though the engine had Ruby
+  patterns from day one. Same gate gates `tldr secure`
+  (which delegates via `super::vuln::is_natively_analyzed`),
+  so the fix lands both commands in lockstep. The set now
+  covers Python, Rust, TypeScript, JavaScript, Go, Java, C,
+  C++, Ruby, Kotlin, Swift, C#, Scala, PHP, Lua, Luau,
+  Elixir, OCaml — all 18 supported languages.
+
+  Multi-language verification (post-fix, all rc=0, no
+  "not yet supported" in stderr):
+  - rails-html-sanitizer (ruby), go-httprouter (go),
+    spring-petclinic (java), php-symfony-string (php),
+    csharp-newtonsoft-bson (csharp), kotlin-datetime (kotlin),
+    scala-cats-effect (scala), lua-lsp (lua), elixir-plug
+    (elixir), ocaml-dune (ocaml).
+
+  (P12.BUG-AGG12-16)
+
+### Tests
+
+`crates/tldr-cli/tests/ux_and_explain_completeness_v1.rs` —
+12 tests, all gated on `/tmp/repos/<repo>` existence (no
+synthetic fixtures, per `no-synthetic-fixtures-v1`):
+
+- `test_explain_typescript_callers_populated`
+- `test_explain_java_callers_populated`
+- `test_explain_csharp_callers_populated`
+- `test_explain_python_no_phantom_line_zero_callers`
+- `test_explain_lua_dotted_name_resolves`
+- `test_explain_rust_callers_unchanged` (regression)
+- `test_explain_go_callers_unchanged` (regression)
+- `test_search_short_tokens_return_results`
+- `test_slice_out_of_range_diagnostic`
+- `test_vuln_autodetect_covers_ruby`
+- `test_vuln_autodetect_covers_csharp`
+- `test_vuln_autodetect_covers_kotlin`
+
+Verification:
+
+| Suite                                  | Result        |
+|----------------------------------------|---------------|
+| `ux_and_explain_completeness_v1`       | 12/12 passed  |
+| `vuln_migration_v1_red`                | 168/168       |
+| `language_command_matrix`              | 926/0/28      |
+| `real_repo_fixes_v1`                   | 13/13         |
+| `cross_command_consistency_v1`         | 7/7           |
+| `cross_command_consistency_v3`         | 5/5           |
+| `explain_cross_command_consistency_v1` | 4/4           |
+| `deps_and_surface_graceful_degrade_v1` | 2/2           |
+| `interface_extraction_ocaml_elixir_v1` | 5/5           |
+| `language_adapters_completeness_v1`    | 8/8           |
+| `pdg_bounds_and_stdout_hygiene_v1`     | 6/6           |
+| `verification_and_metrics_completeness_v1` | 10/10     |
+| `verification_pipeline_completeness_v1`| 7/7           |
+
+### Housekeeping
+
+Removed 4 untracked dev artifacts left in
+`crates/tldr-core/examples/` from the prior P12-C milestone
+(`dump_ocaml.rs`, `dump_ocaml2.rs`, `dump_ocaml_calls.rs`,
+`dump_js_ast.rs`). They were never tracked by git so the
+removal is `rm`-only.
+
 ## language-adapters-completeness-v1 — internal milestone
 
 NOT a published release. Third milestone shipped under the

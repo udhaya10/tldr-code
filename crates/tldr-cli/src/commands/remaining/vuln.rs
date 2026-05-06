@@ -500,18 +500,37 @@ fn collect_files(
 /// An explicit `--lang <L>` bypasses this — the user has signalled
 /// they understand which backend will run.
 pub(super) fn is_natively_analyzed(lang: Language) -> bool {
-    // VAL-011 (M12, v0.2.2-hotfix-bundle): TypeScript and JavaScript
-    // promoted into the autodetect-supported set. The taint engine at
-    // `crates/tldr-core/src/security/taint.rs:909` already routes both
-    // through `TYPESCRIPT_PATTERNS` (sources, sinks, sanitizers all
-    // populated; v0.2.2 M7 expanded the sink set with SSRF). The CLI
-    // gate just hadn't been told. Pre-VAL-011 the gate listed only
-    // Python and Rust, so `tldr vuln <ts-file>` (no `--lang`) exited
-    // 2 with "not yet supported" — issue parcadei/tldr-code#1, sub-
-    // issue #1.C.
+    // ux-and-explain-completeness-v1 (P12.AGG12-16): the taint pattern
+    // dispatch at `crates/tldr-core/src/security/taint.rs:764` covers
+    // ALL 18 supported languages (Python, TypeScript, JavaScript, Go,
+    // Java, Rust, C, Cpp, Ruby, Kotlin, Swift, CSharp, Scala, Php,
+    // Lua/Luau, Elixir, OCaml). The autodetect gate had been frozen
+    // at the four langs the canonical taint engine first shipped for
+    // (Python/Rust + the v0.2.2-hotfix-bundle TS/JS promotion), which
+    // forced users on every other language to pass `--lang <L>`
+    // explicitly even though the pipeline supports them. Bring the
+    // gate in lockstep with the engine — `tldr vuln /tmp/repos/<any>`
+    // now runs cleanly without `--lang`.
     matches!(
         lang,
-        Language::Python | Language::Rust | Language::TypeScript | Language::JavaScript
+        Language::Python
+            | Language::Rust
+            | Language::TypeScript
+            | Language::JavaScript
+            | Language::Go
+            | Language::Java
+            | Language::C
+            | Language::Cpp
+            | Language::Ruby
+            | Language::Kotlin
+            | Language::Swift
+            | Language::CSharp
+            | Language::Scala
+            | Language::Php
+            | Language::Lua
+            | Language::Luau
+            | Language::Elixir
+            | Language::Ocaml
     )
 }
 
