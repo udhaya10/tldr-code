@@ -161,7 +161,17 @@ fn check_structure(lang: &str) {
                     .and_then(Value::as_array)
                     .map(|a| !a.is_empty())
                     .unwrap_or(false);
-                fns || cls || methods
+                // language-command-matrix-test-followup-v1: post-M4
+                // schema-cleanup-v1 moved function/method names from the
+                // redundant `functions`/`methods` string arrays into a
+                // structured `.definitions[]` array. Accept that as the
+                // canonical signal the structure command extracted something.
+                let defs = f
+                    .get("definitions")
+                    .and_then(Value::as_array)
+                    .map(|a| !a.is_empty())
+                    .unwrap_or(false);
+                fns || cls || methods || defs
             })
         })
         .unwrap_or(false);
@@ -169,7 +179,7 @@ fn check_structure(lang: &str) {
         fail_cell(
             "structure",
             lang,
-            "no files with non-empty functions/classes/methods",
+            "no files with non-empty functions/classes/methods/definitions",
             &stdout,
             &stderr,
         );

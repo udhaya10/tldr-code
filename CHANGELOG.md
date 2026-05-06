@@ -1,5 +1,84 @@
 # Changelog
 
+## language-command-matrix-test-followup-v1 — followup
+
+NOT a published release. Aligns 15 stale `test_structure_on_<lang>`
+cells in `crates/tldr-cli/tests/language_command_matrix.rs` with the
+canonical post-M4 schema. Same pattern as
+`naming-classifier-test-followup-v1`, `calls-dot-test-followup-v1`,
+`bug13-stale-test-followup-v1`, and `test-fixture-realignment-v1`:
+the production code is correct, the test was reading the pre-M4
+shape. Schema reality wins; the assertion was widened, not the
+schema.
+
+### Changed
+
+- `crates/tldr-cli/tests/language_command_matrix.rs:119-177` —
+  `check_structure(lang)` now also accepts a non-empty
+  `.files[].definitions[]` array as evidence that the structure
+  command extracted something. Concretely, the
+  `has_any_fn_or_class` closure ORs in a `defs` non-empty check
+  alongside the existing `fns`/`cls`/`methods` checks, and the
+  failure-message string now reads
+  `"no files with non-empty functions/classes/methods/definitions"`.
+  No production code touched.
+
+### Architectural note
+
+The `schema-cleanup-v1` milestone (commit `3e9b159` from a prior
+session) moved function/method names out of the redundant
+`.files[].functions[]` and `.files[].methods[]` string arrays into
+the structured `.files[].definitions[]` array, where each entry now
+carries `name`, `kind`, `line_start`, `line_end`, `signature`, etc.
+For function-only fixtures (the majority of the matrix's per-language
+fixtures), the structure command now populates
+`.files[].definitions[]` and leaves the legacy `functions`/`methods`
+fields `null`. The matrix's `check_structure` was still asserting on
+the legacy fields exclusively, which is why exactly the cells whose
+canonical fixtures define a class (`java`, `csharp`, `elixir`)
+passed and the other 15 failed. This followup widens the assertion
+to recognise the canonical post-M4 shape; the legacy checks are
+retained for backward compatibility because some legacy paths may
+still populate them.
+
+### Retained
+
+- The `language` field assertion (`actual_lang == lang`) is
+  unchanged; a non-zero exit still fails the cell with the same
+  message.
+- The `functions`/`classes`/`methods` checks are kept (OR'd with
+  `definitions`), not replaced — backward compatibility with any
+  legacy code path that still populates the old string arrays.
+- All other `check_*` helpers (`check_extract`, `check_calls`,
+  `check_complexity`, etc.) untouched — only `check_structure` was
+  reading the pre-M4 schema.
+- Per-fixture content in `crates/tldr-cli/tests/fixtures/` is left
+  alone — the fixtures correctly represent each language's typical
+  surface; the test was the part out of step.
+
+### Quantification
+
+| Suite | Before | After |
+| --- | --- | --- |
+| `language_command_matrix` (full) | 219/234 | 234/234 |
+| `language_command_matrix` `test_structure_on_*` cells | 3/18 | 18/18 |
+| `vuln_migration_v1_red` (master regression) | 168/168 | 168/168 |
+| `tldr structure /tmp/x` on a 2-function Python file | `definitions[]` len 2, `functions` null | unchanged (production code untouched) |
+
+### Standing rules upheld
+
+- One atomic commit, one CHANGELOG entry, one local annotated tag
+- `Cargo.lock` not staged (explicit-add list only)
+- No push, no `cargo publish`, no version bump (manifest stays at
+  0.3.0)
+- No `#[allow(...)]` suppression, no test weakening, no scope cuts —
+  the assertion was widened to match the canonical schema, not
+  loosened or deleted
+- No `git stash`, no destructive git
+- 168/168 master regression preserved
+- Production code untouched; this is purely a test-realignment
+  followup against the post-M4 schema
+
 ## kotlin-extract-and-cpp-extensions-v1 — internal milestone
 
 NOT a published release. Closes 2 actionable bugs from the phase-6
