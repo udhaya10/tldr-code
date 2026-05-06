@@ -1,5 +1,62 @@
 # Changelog
 
+## interface-extraction-ocaml-elixir-v1 — internal milestone
+
+NOT a published release. Closes 2 MED interface-extraction bugs from
+the phase-11 audit. `tldr interface` now populates function names and
+signatures for OCaml `let`-bindings, and surfaces public Elixir
+functions defined inside `defmodule ... do ... end` blocks (with
+`def`/`defmacro` exported and `defp`/`defmacrop` skipped). Tag:
+`interface-extraction-ocaml-elixir-v1`. Manifest stays at 0.3.0.
+
+### Fixed
+
+- `crates/tldr-cli/src/commands/patterns/interface.rs` — `tldr
+  interface` returned 17 entries with empty `name`/`signature` strings
+  for every OCaml function in `/tmp/repos/ocaml-dune/src/rpc/io_buffer.ml`,
+  even though `tldr extract` returned the names correctly. Root cause:
+  the visitor matched `value_definition` and `let_binding` as function
+  kinds for OCaml, but `get_node_name` only looked up
+  `child_by_field_name("name")` (which OCaml's tree-sitter grammar does
+  not expose) and had no language-specific fallback. Added an OCaml
+  branch to `get_node_name` that recovers the identifier from
+  `value_definition > let_binding > pattern (value_name)`, mirroring
+  `tldr-core`'s `extract_ocaml_function_info`. Added
+  `extract_ocaml_signature` (parameters + optional return-type
+  annotation) so `interface` reports a meaningful signature instead of
+  an empty string. (P11.BUG-AGG-8, MED)
+
+- `crates/tldr-cli/src/commands/patterns/interface.rs` — `tldr
+  interface` returned `{all_exports: 0, functions: 0, classes: 0}` for
+  Elixir modules such as `lib/plug/conn.ex`, while `tldr extract`
+  reported 152 functions for the same file. Root cause: in Elixir's
+  tree-sitter grammar, `def`, `defp`, `defmodule`, `defmacro`, and
+  `defmacrop` are all `call` nodes; the interface walker had `call` in
+  both `func_kinds` and `class_kinds` and (a) took the function branch
+  first, (b) `continue`d on `defmodule` because its target wasn't `def`,
+  and (c) therefore never recursed into the module body where every
+  public function in real Elixir code lives. Restructured
+  `visit_top_level` so the Elixir `call` dispatch happens before the
+  generic `func_kinds`/`class_kinds` branches: `def`/`defmacro` push a
+  function, `defp`/`defmacrop` are dropped, and `defmodule` recurses
+  into its `do_block`. Also widened `get_node_name`'s Elixir handling
+  to accept `defmacro`/`defmacrop` and to fall back to `node.child(1)`
+  when `child_by_field_name("arguments")` is unavailable. Added
+  `extract_elixir_signature` so signatures are populated. (P11.BUG-AGG-9,
+  MED)
+
+### Tests
+
+- `crates/tldr-cli/tests/interface_extraction_ocaml_elixir_v1.rs` (NEW) —
+  five regression tests: synthetic OCaml `.ml` with three `let`-bindings
+  asserting non-empty names; synthetic Elixir `.ex` with one `def` and
+  one `defp` asserting public is exported and private is not;
+  real-repo gates on `/tmp/repos/ocaml-dune` (>=10 OCaml functions
+  named) and `/tmp/repos/elixir-plug/lib/plug/conn.ex` (>=10
+  functions/exports including `assign`, `halt`, `put_session`); and a
+  Python regression test asserting `def foo` is exported and `def _bar`
+  is not (no regression for languages with name-based visibility).
+
 ## verification-pipeline-completeness-v1 — internal milestone
 
 NOT a published release. Closes 3 verification-pipeline bugs from the

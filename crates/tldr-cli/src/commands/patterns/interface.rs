@@ -327,19 +327,78 @@ fn get_node_name<'a>(node: Node<'a>, source: &'a [u8], lang: Language) -> Option
             if node.kind() == "call" {
                 if let Some(target) = node.child(0) {
                     let target_text = node_text(target, source);
-                    if target_text == "def" || target_text == "defp" || target_text == "defmodule" {
-                        if let Some(args) = node.child_by_field_name("arguments") {
-                            if let Some(first_arg) = args.child(0) {
+                    if target_text == "def"
+                        || target_text == "defp"
+                        || target_text == "defmacro"
+                        || target_text == "defmacrop"
+                        || target_text == "defmodule"
+                    {
+                        // The Elixir tree-sitter grammar exposes the
+                        // arguments either via a named "arguments" field
+                        // or as the second positional child depending on
+                        // grammar version. Try field first, fall back to
+                        // child(1) — and accept either an `arguments`
+                        // wrapper or a bare `call`/`identifier`.
+                        let args_node = node
+                            .child_by_field_name("arguments")
+                            .or_else(|| node.child(1));
+                        if let Some(args) = args_node {
+                            // If args is the `arguments` wrapper, peel one
+                            // level. Otherwise `args` itself is the first
+                            // argument node (call / identifier / alias).
+                            let first_arg = if args.kind() == "arguments" {
+                                args.child(0)
+                            } else {
+                                Some(args)
+                            };
+                            if let Some(first_arg) = first_arg {
                                 // For def/defp, the first arg may be a call (name + params)
                                 if first_arg.kind() == "call" {
                                     if let Some(fn_name) = first_arg.child(0) {
                                         return Some(node_text(fn_name, source).to_string());
                                     }
                                 }
+                                // For def with a guard: `def fn(x) when guard`,
+                                // the first arg is a `binary_operator` whose
+                                // left side is the call we want.
+                                if first_arg.kind() == "binary_operator" {
+                                    let mut bin_cursor = first_arg.walk();
+                                    for bin_child in first_arg.children(&mut bin_cursor) {
+                                        if bin_child.kind() == "call" {
+                                            if let Some(fname) = bin_child.child(0) {
+                                                return Some(
+                                                    node_text(fname, source).to_string(),
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
                                 return Some(node_text(first_arg, source).to_string());
                             }
                         }
                     }
+                }
+            }
+        }
+        Language::Ocaml => {
+            // OCaml `value_definition` wraps one or more `let_binding` children.
+            // The function name lives on `let_binding.pattern` (a `value_name`).
+            // BUG-AGG-8 (P11): the interface extractor was walking
+            // `value_definition` directly and querying `child_by_field_name("name")`
+            // which doesn't exist for OCaml — leaving every name empty.
+            if node.kind() == "value_definition" {
+                let mut cursor = node.walk();
+                for child in node.children(&mut cursor) {
+                    if child.kind() == "let_binding" {
+                        if let Some(pat) = child.child_by_field_name("pattern") {
+                            return Some(node_text(pat, source).to_string());
+                        }
+                    }
+                }
+            }
+            if node.kind() == "let_binding" {
+                if let Some(pat) = node.child_by_field_name("pattern") {
+                    return Some(node_text(pat, source).to_string());
                 }
             }
         }
@@ -466,8 +525,185 @@ pub fn extract_function_signature(func_node: Node, source: &[u8], lang: Language
         Language::Ruby => extract_ruby_signature(func_node, source),
         Language::Php => extract_php_signature(func_node, source),
         Language::Scala => extract_scala_signature(func_node, source),
+        Language::Ocaml => extract_ocaml_signature(func_node, source),
+        Language::Elixir => extract_elixir_signature(func_node, source),
         _ => extract_generic_signature(func_node, source),
     }
+}
+
+/// OCaml signature: walk the `let_binding` parameters and optional return type.
+///
+/// BUG-AGG-8 (P11): without an OCaml-specific signature extractor the
+/// generic fallback (`child_by_field_name("parameters")`) returns nothing,
+/// so signatures are empty strings even when names are present.
+fn extract_ocaml_signature(func_node: Node, source: &[u8]) -> String {
+    // Find the inner let_binding if we were handed a value_definition.
+    let binding_owned;
+    let binding = if func_node.kind() == "value_definition" {
+        let mut found: Option<Node> = None;
+        let mut cursor = func_node.walk();
+        for child in func_node.children(&mut cursor) {
+            if child.kind() == "let_binding" {
+                found = Some(child);
+                break;
+            }
+        }
+        match found {
+            Some(b) => {
+                binding_owned = b;
+                binding_owned
+            }
+            None => return String::new(),
+        }
+    } else {
+        func_node
+    };
+
+    let mut params = Vec::new();
+    let mut cursor = binding.walk();
+    for child in binding.children(&mut cursor) {
+        if child.kind() == "parameter" {
+            // Parameter may have a "pattern" field with value_pattern /
+            // typed_pattern / unit / tuple_pattern, or fall back to the
+            // raw text.
+            if let Some(pattern) = child.child_by_field_name("pattern") {
+                let text = node_text(pattern, source).trim();
+                if !text.is_empty() {
+                    params.push(text.to_string());
+                    continue;
+                }
+            }
+            // Fallback: walk children for value_pattern / value_name.
+            let mut inner_cursor = child.walk();
+            let mut handled = false;
+            for inner in child.children(&mut inner_cursor) {
+                if inner.kind() == "value_pattern" || inner.kind() == "value_name" {
+                    params.push(node_text(inner, source).to_string());
+                    handled = true;
+                    break;
+                }
+            }
+            if !handled {
+                let text = node_text(child, source).trim();
+                if !text.is_empty() {
+                    params.push(text.to_string());
+                }
+            }
+        }
+    }
+
+    let mut sig = format!("({})", params.join(", "));
+
+    // Optional return type: `: type` between the last parameter and `=`.
+    let return_type = extract_ocaml_signature_return_type(binding, source);
+    if let Some(ret) = return_type {
+        sig.push_str(" : ");
+        sig.push_str(&ret);
+    }
+
+    sig
+}
+
+fn extract_ocaml_signature_return_type(binding: Node, source: &[u8]) -> Option<String> {
+    let mut last_was_colon = false;
+    let mut past_all_params = false;
+    let mut cursor = binding.walk();
+    for child in binding.children(&mut cursor) {
+        let kind = child.kind();
+        if kind == "parameter" {
+            past_all_params = false;
+            last_was_colon = false;
+            continue;
+        }
+        if kind != "parameter" && !past_all_params {
+            past_all_params = true;
+        }
+        if past_all_params && kind == ":" {
+            last_was_colon = true;
+            continue;
+        }
+        if last_was_colon && kind == "=" {
+            return None;
+        }
+        if last_was_colon && kind != "=" {
+            let t = node_text(child, source).trim().to_string();
+            if !t.is_empty() {
+                return Some(t);
+            }
+            last_was_colon = false;
+        }
+        if kind == "=" {
+            break;
+        }
+    }
+    None
+}
+
+/// Elixir signature: extract the parameter list of a `def`/`defp`/`defmacro`
+/// call node. BUG-AGG-9 (P11): without an Elixir-specific signature
+/// extractor, `tldr interface` would emit empty signatures for Elixir
+/// modules even after wiring up name extraction.
+fn extract_elixir_signature(func_node: Node, source: &[u8]) -> String {
+    if func_node.kind() != "call" {
+        return String::new();
+    }
+    // Structure: (call (identifier "def") (arguments (call (identifier "name") (arguments ...))))
+    let args_node = match func_node
+        .child_by_field_name("arguments")
+        .or_else(|| func_node.child(1))
+    {
+        Some(a) => a,
+        None => return String::new(),
+    };
+    let first_arg = if args_node.kind() == "arguments" {
+        match args_node.child(0) {
+            Some(a) => a,
+            None => return String::new(),
+        }
+    } else {
+        args_node
+    };
+
+    // Identifier-only def (no params): `def foo do ... end`
+    if first_arg.kind() == "identifier" {
+        return "()".to_string();
+    }
+
+    // call form: `def foo(a, b)` -> first_arg is a call(name, arguments)
+    let inner_call = match first_arg.kind() {
+        "call" => first_arg,
+        "binary_operator" => {
+            // `def foo(...) when guard` — find the inner call.
+            let mut found: Option<Node> = None;
+            let mut cursor = first_arg.walk();
+            for c in first_arg.children(&mut cursor) {
+                if c.kind() == "call" {
+                    found = Some(c);
+                    break;
+                }
+            }
+            match found {
+                Some(c) => c,
+                None => return String::new(),
+            }
+        }
+        _ => return String::new(),
+    };
+
+    // The call's second child is its `arguments` block. The arguments
+    // text is the raw source slice — for `def foo(a, b)` that's `(a, b)`,
+    // so just emit it verbatim. When it's a bareword call (no parens) the
+    // text won't have surrounding parens; wrap it in that case.
+    if let Some(call_args) = inner_call.child(1) {
+        if call_args.kind() == "arguments" {
+            let raw = node_text(call_args, source).trim();
+            if raw.starts_with('(') && raw.ends_with(')') {
+                return raw.to_string();
+            }
+            return format!("({})", raw);
+        }
+    }
+    "()".to_string()
 }
 
 /// Python signature: reconstruct from parameter nodes.
@@ -1551,32 +1787,57 @@ fn visit_top_level(
     for child in node.children(&mut cursor) {
         let kind = child.kind();
 
-        if func_kinds.contains(&kind) {
-            if is_node_public(child, source, lang) {
-                // For Elixir, filter to only `def` (not `defp` which is private)
-                if lang == Language::Elixir {
-                    if let Some(target) = child.child(0) {
-                        let target_text = node_text(target, source);
-                        if target_text == "defp" {
-                            continue;
-                        }
-                        if target_text != "def" {
-                            continue;
+        // Elixir-specific dispatch: `call` nodes match BOTH func_kinds and
+        // class_kinds, so the original logic always took the function
+        // branch and `defmodule` calls were dropped. BUG-AGG-9 (P11):
+        // restructure so we route on the call target name.
+        //
+        // - `def` / `defmacro` -> public function
+        // - `defp` / `defmacrop` -> private, skip
+        // - `defmodule` -> recurse into its `do_block` so nested public
+        //   `def`s surface as top-level exports (matches `tldr extract`'s
+        //   walk; mirrors how the Plug.Conn module exposes its public
+        //   API even though every function lives one level deep).
+        if lang == Language::Elixir && kind == "call" {
+            let target_text = child.child(0).map(|t| node_text(t, source)).unwrap_or("");
+            match target_text {
+                "def" | "defmacro" => {
+                    functions.push(extract_function_info(child, source, lang));
+                }
+                "defp" | "defmacrop" => {
+                    // private, skip
+                }
+                "defmodule" => {
+                    // Recurse into the module body. Module body is a `do_block`
+                    // child of the call node.
+                    let mut mod_cursor = child.walk();
+                    for mod_child in child.children(&mut mod_cursor) {
+                        if mod_child.kind() == "do_block" {
+                            visit_top_level(
+                                mod_child,
+                                source,
+                                lang,
+                                func_kinds,
+                                class_kinds,
+                                decorator_kinds,
+                                functions,
+                                classes,
+                                depth + 1,
+                            );
                         }
                     }
                 }
+                _ => {}
+            }
+            continue;
+        }
+
+        if func_kinds.contains(&kind) {
+            if is_node_public(child, source, lang) {
                 functions.push(extract_function_info(child, source, lang));
             }
         } else if class_kinds.contains(&kind) {
             if is_node_public(child, source, lang) {
-                // For Elixir, filter to only `defmodule`
-                if lang == Language::Elixir {
-                    if let Some(target) = child.child(0) {
-                        if node_text(target, source) != "defmodule" {
-                            continue;
-                        }
-                    }
-                }
                 classes.push(extract_class_info(child, source, lang));
             }
         } else if decorator_kinds.contains(&kind) {
