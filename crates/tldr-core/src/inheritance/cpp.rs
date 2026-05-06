@@ -98,6 +98,15 @@ fn visit_node_with_lang(
                 extract_macro_prefixed_class(node, source, file_path, lang)
             {
                 classes.push(class);
+                // review-followup-v1 (Concern 2): when the misparse path
+                // recovered the real class, do NOT recurse into the
+                // `function_definition` / `declaration` children — the
+                // `type` child is a `class_specifier` whose `name` is the
+                // macro token (e.g. `TINYXML2_LIB`). Recursing emits that
+                // macro name as a phantom `InheritanceNode` with zero
+                // bases. The node is fully accounted for by the
+                // `extract_macro_prefixed_class` result, so skip the walk.
+                return;
             }
         }
         _ => {}

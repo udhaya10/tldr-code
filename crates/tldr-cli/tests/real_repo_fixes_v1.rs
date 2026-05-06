@@ -15,17 +15,6 @@ use assert_cmd::Command;
 use serde_json::Value;
 use std::path::Path;
 
-fn run_tldr_json(args: &[&str]) -> Option<Value> {
-    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("tldr"));
-    cmd.args(args).arg("--format").arg("json");
-    let output = cmd.output().expect("failed to execute tldr");
-    if !output.status.success() {
-        return None;
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-    serde_json::from_str(&stdout).ok()
-}
-
 fn run_tldr_json_strict(args: &[&str]) -> Value {
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("tldr"));
     cmd.args(args).arg("--format").arg("json");
@@ -226,9 +215,3 @@ fn test_r8_self_diff_elixir_identical() {
     assert_self_diff_identical("/tmp/repos/elixir-plug/test/plug_test.exs");
 }
 
-// Silence dead-code warnings for utilities not used in every gating
-// configuration.
-#[allow(dead_code)]
-fn _unused_run_tldr_json(args: &[&str]) -> Option<Value> {
-    run_tldr_json(args)
-}

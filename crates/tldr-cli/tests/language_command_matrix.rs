@@ -2074,6 +2074,13 @@ fn check_chop(lang: &str) {
 
 /// Find the `helper` function's start line in an `extract` JSON output.
 /// Returns `None` if not found; callers fall back to a sane default.
+///
+/// review-followup-v1 (Concern 6): post-M4 schema-cleanup-v1, most
+/// language fixtures populate `.definitions[]` (with `functions` left
+/// null). Without searching that array, slice/chop fall back to
+/// `helper_line = 2` for those languages and the test stops exercising
+/// the actual line-finding logic. The third arm below restores that
+/// signal.
 fn extract_helper_line(json: &Value) -> Option<u64> {
     let funcs = json.get("functions").and_then(Value::as_array);
     if let Some(arr) = funcs {
@@ -2098,6 +2105,22 @@ fn extract_helper_line(json: &Value) -> Option<u64> {
                             return Some(l);
                         }
                     }
+                }
+            }
+        }
+    }
+    // Post-M4 .definitions[] schema — many languages populate this and
+    // leave `functions` null. Each entry has a `name` and `line` (or
+    // `line_start`) field at top level.
+    let defs = json.get("definitions").and_then(Value::as_array);
+    if let Some(arr) = defs {
+        for d in arr {
+            if d.get("name").and_then(Value::as_str) == Some("helper") {
+                if let Some(l) = d.get("line").and_then(Value::as_u64) {
+                    return Some(l);
+                }
+                if let Some(l) = d.get("line_start").and_then(Value::as_u64) {
+                    return Some(l);
                 }
             }
         }

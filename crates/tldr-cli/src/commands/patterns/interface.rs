@@ -1414,6 +1414,7 @@ fn collect_top_level_definitions(
             class_kinds,
             &mut functions,
             &mut classes,
+            0,
         );
     } else {
         visit_top_level(
@@ -1443,6 +1444,7 @@ fn collect_top_level_definitions(
 /// * kotlin/swift normally have classes at the file root, but extension-only
 ///   files (Span+Extras.swift) and nested object_declaration trees benefit
 ///   from a full walk.
+#[allow(clippy::too_many_arguments)]
 fn deep_collect(
     node: Node,
     source: &[u8],
@@ -1451,7 +1453,16 @@ fn deep_collect(
     class_kinds: &[&str],
     functions: &mut Vec<FunctionInfo>,
     classes: &mut Vec<ClassInfo>,
+    depth: usize,
 ) {
+    // review-followup-v1 (Concern 4): defense-in-depth bound matching
+    // `visit_top_level`'s `MAX_CONTAINER_DEPTH = 8`. Tree-sitter limits
+    // real-code nesting in practice, but a corrupt or adversarial AST
+    // could still produce deep recursion; cap it here for consistency.
+    const MAX_DEEP_WALK_DEPTH: usize = 8;
+    if depth > MAX_DEEP_WALK_DEPTH {
+        return;
+    }
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         let kind = child.kind();
@@ -1472,7 +1483,16 @@ fn deep_collect(
             // Still recurse into the body — nested classes that are themselves
             // public should also surface (mirrors tree-walk behaviour of
             // `tldr extract` for cpp / csharp).
-            deep_collect(child, source, lang, func_kinds, class_kinds, functions, classes);
+            deep_collect(
+                child,
+                source,
+                lang,
+                func_kinds,
+                class_kinds,
+                functions,
+                classes,
+                depth + 1,
+            );
             continue;
         }
         if func_kinds.contains(&kind)
@@ -1481,7 +1501,16 @@ fn deep_collect(
         {
             functions.push(extract_function_info(child, source, lang));
         }
-        deep_collect(child, source, lang, func_kinds, class_kinds, functions, classes);
+        deep_collect(
+            child,
+            source,
+            lang,
+            func_kinds,
+            class_kinds,
+            functions,
+            classes,
+            depth + 1,
+        );
     }
 }
 

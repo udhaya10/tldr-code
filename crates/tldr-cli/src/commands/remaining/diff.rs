@@ -2848,23 +2848,59 @@ fn detect_class_changes(
 ) -> Vec<ASTChange> {
     let mut changes = Vec::new();
 
-    // Build lookup maps by name
-    let map_b: HashMap<&str, &ClassNode> = classes_b.iter().map(|c| (c.name.as_str(), c)).collect();
+    // review-followup-v1 (Concern 1): build a multi-value index keyed by class
+    // name so duplicate class names (nested Python `Config` inside two
+    // different parents, Kotlin / C# inner types, namespace-shadowing names)
+    // pair up by structural identity instead of collapsing into a single
+    // map entry. The previous `HashMap<&str, &ClassNode>` kept only the
+    // *last* class per name, so `tldr diff <file> <file>` produced false
+    // positives for files with duplicate class names. Mirrors the upgrade
+    // applied to `detect_changes` in real-repo-fixes-v1 (P9.BUG-R8).
+    let mut index_b: HashMap<&str, Vec<usize>> = HashMap::new();
+    for (j, c) in classes_b.iter().enumerate() {
+        index_b.entry(c.name.as_str()).or_default().push(j);
+    }
 
     // Track which classes have been matched
     let mut matched_a: Vec<bool> = vec![false; classes_a.len()];
     let mut matched_b: Vec<bool> = vec![false; classes_b.len()];
 
-    // First pass: exact name matches
+    // First pass: exact name matches with stable best-of pairing.
+    //
+    // For each A class, pick the unmatched B class with the same name that
+    // best matches by (body, line) — in that priority. Self-diff (every
+    // A == every B) lands on the line-aligned twin every time, so two
+    // duplicate-named classes pair to themselves and `total_changes == 0`.
+    // The pairing key uses `normalized_body` and `end_line - line` span
+    // alongside the start-line distance to break ties between two `Config`
+    // classes in the same file.
     for (i, class_a) in classes_a.iter().enumerate() {
-        let _ = class_a.end_line;
-        let _ = &class_a.body;
-        let _ = &class_a.normalized_body;
-        if let Some(&class_b) = map_b.get(class_a.name.as_str()) {
+        let candidates = match index_b.get(class_a.name.as_str()) {
+            Some(c) => c,
+            None => continue,
+        };
+
+        let chosen = candidates
+            .iter()
+            .copied()
+            .filter(|&j| !matched_b[j])
+            .min_by_key(|&j| {
+                let c_b = &classes_b[j];
+                // Lower is better. Priority order: same body shape, then
+                // closest end-line span, then closest start-line.
+                let body_mismatch = (class_a.normalized_body != c_b.normalized_body) as u32;
+                let raw_body_mismatch = (class_a.body != c_b.body) as u32;
+                let span_a = (class_a.end_line as i64 - class_a.line as i64).unsigned_abs() as u32;
+                let span_b = (c_b.end_line as i64 - c_b.line as i64).unsigned_abs() as u32;
+                let span_diff = (span_a as i64 - span_b as i64).unsigned_abs() as u32;
+                let line_diff = (class_a.line as i64 - c_b.line as i64).unsigned_abs() as u32;
+                (body_mismatch, raw_body_mismatch, span_diff, line_diff)
+            });
+
+        if let Some(j) = chosen {
             matched_a[i] = true;
-            if let Some(j) = classes_b.iter().position(|c| c.name == class_a.name) {
-                matched_b[j] = true;
-            }
+            matched_b[j] = true;
+            let class_b = &classes_b[j];
 
             // Diff the matched pair
             if let Some(change) = diff_class_pair(class_a, class_b, file_a, file_b) {

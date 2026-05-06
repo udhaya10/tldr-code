@@ -1,5 +1,163 @@
 # Changelog
 
+## review-followup-v1 — internal milestone
+
+NOT a published release. Closes 6 concerns surfaced by the final
+review pass on milestones M4 (`cross-command-consistency-v3`) and
+M10 (`real-repo-fixes-v1`). Independent critic reviewers flagged
+one critical product bug (Concern 1, parallel pattern in the diff
+walker not fully upgraded), one rule violation (Concern 3,
+`#[allow(dead_code)]` on an unused test helper), and four quality
+fixes (ghost macro nodes, recursion guard, test-gating gaps, schema
+blind spot). All 6 fixed in one atomic commit. Tag:
+`review-followup-v1`. Manifest stays at 0.3.0.
+
+### Changed
+
+- `crates/tldr-cli/src/commands/remaining/diff.rs:2841-2917` —
+  `detect_class_changes` upgraded to the same multi-value index +
+  best-of pairing pattern that `detect_changes` (function-level
+  diff) received in real-repo-fixes-v1 (P9.BUG-R8). The previous
+  `HashMap<&str, &ClassNode>` kept only the LAST class per name, so
+  files with duplicate class names — nested Python `Config`,
+  Kotlin / C# inner types, namespace-shadowing names — produced
+  false-positive class-level diffs even on byte-identical input.
+  The pairing key is `(body_mismatch, raw_body_mismatch, span_diff,
+  line_diff)`; for self-diff the line-aligned twin always wins, so
+  every duplicate-named class pairs to itself and `total_changes`
+  is 0. The three placeholder `let _ = class_a.{end_line, body,
+  normalized_body}` suppressors are removed — the upgraded code
+  consumes those fields in the pairing key. Concern 1.
+- `crates/tldr-core/src/inheritance/cpp.rs:96-117` — when
+  `extract_macro_prefixed_class` recovers the real class from a
+  `function_definition` / `declaration` misparse, the walker now
+  `return`s instead of recursing into children. Without this the
+  recursive pass re-entered the misparse's `type` child (a
+  `class_specifier` whose `name` is the macro token) and emitted a
+  phantom `InheritanceNode` named `TINYXML2_LIB` (or
+  `BOOST_API`, etc.) with zero bases. The recovered class fully
+  accounts for the node, so the early return is correct and the
+  ghost is gone. Concern 2.
+- `crates/tldr-cli/tests/real_repo_fixes_v1.rs:18-44, 229-234` —
+  removed the unused `_unused_run_tldr_json` function and its
+  `#[allow(dead_code)]` attribute. The unused `run_tldr_json`
+  helper (only ever called by the dead function) is also removed —
+  no allow, no underscore-prefix workaround, just deletion. Direct
+  fix of the standing-rule violation against suppression. Concern 3.
+- `crates/tldr-cli/src/commands/patterns/interface.rs:1409-1417,
+  1446-1500` — `deep_collect` now takes a `depth` parameter and
+  returns early when `depth > MAX_DEEP_WALK_DEPTH (=8)`, mirroring
+  `visit_top_level`'s defense-in-depth bound. Concern 4.
+- `crates/tldr-cli/tests/cross_command_consistency_v3.rs:33-36,
+  86-179, 194-258` — three M4 tests
+  (`test_n1_extract_cpp_h_uses_cpp_parser`,
+  `test_n1_extract_lang_flag_honored`,
+  `test_n2_cyclomatic_complexity_explain_agree`) gained a
+  synthetic TempDir fallback that always runs. Each builds a
+  minimal fixture exercising the same code path (sibling-based
+  cpp autodetect, explicit `--lang cpp` override, complexity /
+  explain agreement on a Python branchy function) so the test
+  isn't a silent no-op when `/tmp/repos/...` is absent. The
+  deeper real-repo signal is preserved unchanged. Concern 5.
+- `crates/tldr-cli/tests/language_command_matrix.rs:2077-2122` —
+  `extract_helper_line` now searches `.definitions[]` after
+  `functions[]` and `classes[].methods[]`. Post-M4 schema-cleanup-v1
+  most language fixtures populate `.definitions[]` and leave
+  `functions` null, so the previous helper returned `None` and
+  `check_slice` / `check_chop` fell back to `helper_line = 2`. The
+  fallback worked only because the product is line-tolerant; the
+  test was no longer exercising the actual line-finding path.
+  Concern 6.
+
+### Tests added
+
+- `crates/tldr-cli/tests/review_followup_v1.rs` (new file) — 5
+  tests covering the observable surface of Concerns 1, 2, and 5:
+  * `test_concern1_class_self_diff_with_duplicate_classes` — Python
+    file with three `Config` classes (one module-level, two nested
+    inside different parents); self-diff returns identical=true,
+    total_changes=0.
+  * `test_concern2_no_macro_ghost_nodes_in_cpp_inheritance` —
+    synthetic `class TINYXML2_LIB Foo : public Bar { ... };` header;
+    asserts no all-uppercase-macro-style node names appear in
+    `tldr inheritance` output, AND that `Foo` itself is still
+    recovered (the fix is targeted, not a regression).
+  * `test_concern5_n1_extract_h_synthetic_fallback`,
+    `test_concern5_n1_extract_lang_flag_synthetic`,
+    `test_concern5_n2_complexity_explain_agree_synthetic` — mirror
+    the synthetic halves added to `cross_command_consistency_v3.rs`.
+
+### Architectural note
+
+Concerns 1 and 3 are the substantive fixes. Concern 1 closes a
+silent diff bug whose surface area was masked because the existing
+self-diff tests (M10) used real-repo files where most class names
+ARE unique within a file. Concern 3 closes a rule violation whose
+fix was straightforward (delete the dead code) but whose presence
+showed that suppression had crept in even after the standing rule
+was articulated.
+
+Concerns 2, 4, and 6 are quality fixes — none affected behaviour
+on the canonical fixture matrix (still 926/0/28), but each closed
+a class of false-positives or test-coverage blind spots that
+would have caused noise on real codebases.
+
+Concern 5 closes the test-gating gap left over from M4: the
+`/tmp/repos`-only tests existed primarily for development-machine
+deeper signal, and on a fresh checkout they early-returned as
+no-ops. The synthetic fallbacks ensure the same code paths get
+exercised in any environment.
+
+### Retained
+
+- The `detect_changes` (function-level) upgrade from
+  real-repo-fixes-v1 P9.BUG-R8 is unchanged; Concern 1 mirrors
+  that pattern at the class level.
+- `extract_macro_prefixed_class`'s recovery logic is unchanged —
+  only the visitor's recursion-after-recovery is suppressed.
+- `visit_top_level` and its `MAX_CONTAINER_DEPTH = 8` constant are
+  unchanged; `deep_collect` adopts the same numeric bound under
+  a sibling constant `MAX_DEEP_WALK_DEPTH`.
+- `tldr complexity` and `tldr explain` continue to delegate to the
+  canonical `tldr_core::calculate_complexity`; the synthetic
+  fallback exercises that contract on a deterministic Python
+  function and keeps the real-repo Flask methods as the deeper
+  test target.
+
+### Quantification
+
+| Suite | Before review-followup-v1 | After |
+| --- | --- | --- |
+| `review_followup_v1` (new) | n/a | 5/5 GREEN |
+| `real_repo_fixes_v1` | 13/13 GREEN | 13/13 GREEN |
+| `cross_command_consistency_v3` | 5/5 GREEN | 5/5 GREEN |
+| `vuln_migration_v1_red` (master regression) | 168/168 | 168/168 |
+| `language_command_matrix` | 926/0/28 | 926/0/28 |
+| `tldr diff <synthetic 3-Config py> <self>` | identical=false, ≥2 changes | identical=true, 0 changes |
+| `tldr inheritance <macro-prefixed cpp .h>` macro-name nodes | ≥1 (`TINYXML2_LIB` ghost) | 0 |
+| M4 synthetic-fallback tests on a clean checkout | no-op (early return) | exercise code path |
+| `extract_helper_line` on `.definitions[]`-only fixture | `None` (line=2 fallback) | actual line returned |
+
+### Standing rules upheld
+
+- One atomic commit, one CHANGELOG entry, one local annotated tag
+- `Cargo.lock` not staged (explicit-add list only)
+- No push, no `cargo publish`, no version bump (manifest stays at
+  0.3.0)
+- No `#[allow(...)]` to silence warnings — Concern 3 *removed* an
+  existing one. The single retained `#[allow(clippy::too_many_arguments)]`
+  on `deep_collect` matches the sibling `visit_top_level`'s pre-existing
+  attribute (style lint on tree-walking helpers, not a fix-suppressor).
+- No `git stash`, no destructive git
+- 168/168 master regression preserved; 926/0/28 language matrix
+  preserved
+- Binary reinstalled to `~/.cargo/bin/tldr` and `~/.local/bin/tldr`,
+  ad-hoc codesigned, semantic feature count = 3 (similar /
+  semantic / embed)
+- Build with `--features semantic`: NO new warnings (the two
+  pre-existing `tldr-core` warnings on `bytes_to_mb_ceil` and
+  `count_loc` documentation are unchanged and unrelated)
+
 ## real-repo-fixes-v1 — internal milestone
 
 NOT a published release. Closes 5 distinct bugs surfaced by the
