@@ -9,7 +9,7 @@
 //! - Reaching definitions (`reaching-defs`)
 //! - Available expressions / CSE detection (`available`)
 //! - Program slicing (`slice`)
-//! - Text search with regex (`search`)
+//! - Token-based search with BM25 ranking + structure / call-graph signals (`search`); pass `--regex` for literal regex matching
 //! - LLM context generation (`context`)
 //! - Code smell detection (`smells`)
 //!

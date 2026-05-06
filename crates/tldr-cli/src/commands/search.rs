@@ -13,10 +13,20 @@ use tldr_core::{enriched_search, EnrichedSearchOptions, Language, SearchMode};
 
 use crate::output::{format_enriched_search_text, OutputFormat, OutputWriter};
 
-/// Enriched search: BM25 search with function-level context cards
+/// Enriched search: BM25 search with function-level context cards.
+///
+/// By default this command performs token-based ranking using BM25 with
+/// structure and call-graph signals. Common high-frequency tokens
+/// (stopwords) are filtered automatically by IDF, so very common
+/// keywords (for example `def`, `function`, `var`) may return zero
+/// results even when they appear thousands of times in the corpus.
+/// Pass `--regex` to interpret the query as a literal regex pattern
+/// instead, or `--hybrid <PATTERN>` to combine BM25 ranking with a
+/// regex filter. (P11.BUG-AGG-12: doc accuracy)
 #[derive(Debug, Args)]
 pub struct SmartSearchArgs {
-    /// Search query (natural language or code terms)
+    /// Search query (natural language or code terms; BM25 by default,
+    /// regex when `--regex` is set)
     pub query: String,
 
     /// Directory to search in (default: current directory)

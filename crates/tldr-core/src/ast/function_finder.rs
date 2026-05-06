@@ -583,8 +583,25 @@ pub fn get_function_name(node: Node, language: Language, source: &str) -> Option
                 .map(|n| n.utf8_text(source.as_bytes()).unwrap_or("").to_string())
         }
         Language::Elixir => {
-            // Elixir: def/defp are calls. The first argument after "def" is the function clause
-            // Structure: (call (identifier "def") (arguments (call (identifier "func_name") ...)))
+            // Elixir: def/defp are calls. The first argument after "def" is the function clause.
+            //
+            // Structure (no guard):
+            //   (call (identifier "def") (arguments (call (identifier "func_name") ...)))
+            //
+            // Structure (with guard):
+            //   (call (identifier "def")
+            //         (arguments (binary_operator
+            //                        left:  (call (identifier "func_name") ...)
+            //                        op:    "when"
+            //                        right: (guard expr))
+            //                    (do_block ...)))
+            //
+            // The DFG used to miss the guarded form because it only looked
+            // for `call`/`identifier` immediately under `arguments`. When the
+            // function clause is wrapped in a `binary_operator` for a `when`
+            // guard, the function-name `call` is the left child of the
+            // binary_operator, not a direct child of `arguments`.
+            // (P11.BUG-AGG-16)
             if node.kind() == "call" {
                 // First child should be "def" or "defp"
                 let first_child = node.child(0)?;
@@ -599,7 +616,8 @@ pub fn get_function_name(node: Node, language: Language, source: &str) -> Option
                             );
                         }
                         if args.kind() == "arguments" || args.kind() == "call" {
-                            // Find the first identifier
+                            // Find the first identifier or descend through
+                            // `binary_operator` for guard clauses.
                             let mut cursor = args.walk();
                             for child in args.children(&mut cursor) {
                                 if child.kind() == "identifier" {
@@ -615,6 +633,35 @@ pub fn get_function_name(node: Node, language: Language, source: &str) -> Option
                                         if name.kind() == "identifier" {
                                             return Some(
                                                 name.utf8_text(source.as_bytes())
+                                                    .unwrap_or("")
+                                                    .to_string(),
+                                            );
+                                        }
+                                    }
+                                }
+                                // Guard clause: descend into binary_operator's
+                                // left child to recover the function name.
+                                if child.kind() == "binary_operator" {
+                                    let mut bin_cursor = child.walk();
+                                    for bin_child in child.children(&mut bin_cursor) {
+                                        if bin_child.kind() == "call" {
+                                            if let Some(name) = bin_child.child(0) {
+                                                if name.kind() == "identifier" {
+                                                    return Some(
+                                                        name.utf8_text(source.as_bytes())
+                                                            .unwrap_or("")
+                                                            .to_string(),
+                                                    );
+                                                }
+                                            }
+                                        }
+                                        if bin_child.kind() == "identifier" {
+                                            // `def func_name when guard` (no args)
+                                            // is rare but the LHS may be a bare
+                                            // identifier.
+                                            return Some(
+                                                bin_child
+                                                    .utf8_text(source.as_bytes())
                                                     .unwrap_or("")
                                                     .to_string(),
                                             );

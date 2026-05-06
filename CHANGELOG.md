@@ -1,5 +1,52 @@
 # Changelog
 
+## docs-and-elixir-dfg-v1 — internal milestone
+
+NOT a published release. Final atomic milestone of phase 11 — closes
+the last 2 LOW bugs from the audit. `tldr search`'s help text used to
+suggest "regex search" but the default behavior is BM25 ranking with
+structure and call-graph signals, where common high-frequency tokens
+are filtered as stopwords by IDF. Users typing literal keywords like
+`def ` or `function` could see zero results despite obvious matches.
+The clap doc now explicitly describes BM25 ranking, names the
+stopword-filtering behavior, and points users at the existing
+`--regex` flag for literal pattern matching. `tldr reaching-defs`,
+`slice`, and `taint` previously failed with `Function not found` for
+guard-clause Elixir functions (`def assign(conn, key, value) when
+is_atom(key)`); the DFG resolver only matched the simple-call AST
+shape `(call (identifier "def") (arguments (call ...)))` and missed
+the `binary_operator` wrapper inserted by tree-sitter when a `when`
+guard is present. Both `function_finder::get_function_name` and the
+DFG `extract_elixir_parameters` helper now descend through the
+binary_operator's left child to recover the function head and its
+parameters — matching the AST shape that the call-graph extractor
+already supported. Tag: `docs-and-elixir-dfg-v1`. Manifest stays at
+0.3.0.
+
+### Fixed
+
+- `crates/tldr-cli/src/commands/search.rs` and
+  `crates/tldr-cli/src/main.rs`: `tldr search --help` now describes
+  BM25 ranking and IDF stopword filtering accurately, and surfaces
+  the `--regex` flag as the supported way to opt into literal regex
+  matching. (P11.BUG-AGG-12)
+- `crates/tldr-core/src/ast/function_finder.rs`: Elixir
+  `get_function_name` now descends through `binary_operator` wrappers
+  produced by `when` guard clauses, recovering the function name from
+  the call on the LHS. Resolves `Function not found` for any
+  single-clause guarded `def`/`defp` Elixir function across DFG,
+  reaching-defs, slice, and taint commands. (P11.BUG-AGG-16)
+- `crates/tldr-core/src/dfg/extractor.rs`: DFG parameter extraction
+  for Elixir now follows the same binary_operator descent so guarded
+  function parameters become proper definitions in the dataflow
+  graph. (P11.BUG-AGG-16)
+
+### Tests
+
+- `crates/tldr-cli/tests/docs_and_elixir_dfg_v1.rs`: 3 tests covering
+  the search-help wording, guarded Elixir reaching-defs success, and
+  unguarded Elixir reaching-defs regression. (3/3 passing)
+
 ## pdg-bounds-and-stdout-hygiene-v1 — internal milestone
 
 NOT a published release. Closes 4 bugs (1 MED + 3 LOW) from the

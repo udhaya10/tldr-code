@@ -1647,8 +1647,23 @@ impl<'a> DfgBuilder<'a> {
     // Elixir parameter extraction
     // =====================================================================
 
-    /// Extract Elixir function parameters as definitions
-    /// Elixir: (call (identifier "def") (arguments (call (identifier "foo") (arguments (identifier "x")))))
+    /// Extract Elixir function parameters as definitions.
+    ///
+    /// Two AST shapes are recognized:
+    ///
+    /// 1. No guard:
+    ///    `(call (identifier "def") (arguments (call (identifier "foo") (arguments (identifier "x")))))`
+    /// 2. With guard (`def foo(x) when is_atom(x)`):
+    ///    `(call (identifier "def")
+    ///           (arguments (binary_operator
+    ///                          left:  (call (identifier "foo") (arguments (identifier "x")))
+    ///                          op:    "when"
+    ///                          right: (guard expr))
+    ///                      (do_block ...)))`
+    ///
+    /// Without recognizing the `binary_operator` wrapper (P11.BUG-AGG-16),
+    /// guarded functions had their parameters silently dropped from the
+    /// DFG which made `reaching-defs`/`slice`/`taint` unable to resolve them.
     fn extract_elixir_parameters(&mut self, func_node: Node) -> TldrResult<()> {
         if func_node.kind() != "call" {
             return Ok(());
@@ -1658,19 +1673,23 @@ impl<'a> DfgBuilder<'a> {
         let mut cursor = func_node.walk();
         for child in func_node.children(&mut cursor) {
             if child.kind() == "arguments" {
-                // Inside arguments, look for a call node (function name + params)
+                // Inside arguments, look for a call node (function name + params).
+                // For guarded functions, descend through binary_operator first.
                 let mut inner = child.walk();
                 for inner_child in child.children(&mut inner) {
                     if inner_child.kind() == "call" {
-                        // The call has arguments containing the parameters
-                        if let Some(args) = inner_child.child(1) {
-                            if args.kind() == "arguments" {
-                                let mut args_cursor = args.walk();
-                                for arg in args.children(&mut args_cursor) {
-                                    if arg.kind() == "identifier" {
-                                        self.add_ref_from_node(arg, RefType::Definition);
-                                    }
-                                }
+                        self.extract_elixir_param_idents_from_call(inner_child);
+                    } else if inner_child.kind() == "binary_operator" {
+                        // Guard clause `LHS when RHS`: function signature lives
+                        // on the left of the binary_operator.
+                        let mut bin = inner_child.walk();
+                        for bin_child in inner_child.children(&mut bin) {
+                            if bin_child.kind() == "call" {
+                                self.extract_elixir_param_idents_from_call(bin_child);
+                                // The function-call form is the LHS; the RHS
+                                // is the guard expression itself, which is
+                                // not a parameter source.
+                                break;
                             }
                         }
                     }
@@ -1679,6 +1698,22 @@ impl<'a> DfgBuilder<'a> {
         }
 
         Ok(())
+    }
+
+    /// Helper: given an Elixir `call` node representing the function head
+    /// (`foo(x, y)`), extract each `arguments`-level identifier as a
+    /// parameter definition.
+    fn extract_elixir_param_idents_from_call(&mut self, call_node: Node) {
+        if let Some(args) = call_node.child(1) {
+            if args.kind() == "arguments" {
+                let mut args_cursor = args.walk();
+                for arg in args.children(&mut args_cursor) {
+                    if arg.kind() == "identifier" {
+                        self.add_ref_from_node(arg, RefType::Definition);
+                    }
+                }
+            }
+        }
     }
 
     // =====================================================================
