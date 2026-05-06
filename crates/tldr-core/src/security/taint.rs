@@ -4756,7 +4756,155 @@ pub fn detect_sources_ast(
         }
     }
 
+    // verification-pipeline-completeness-v1 (P11.BUG-AGG-13): Java Spring
+    // annotation source pass. Method parameters annotated with
+    // `@RequestParam` / `@PathVariable` / `@ModelAttribute` /
+    // `@RequestBody` / `@RequestHeader` are HTTP-bound entry points; they
+    // weren't covered by the existing `member_patterns` machinery (which
+    // matches `request.getParameter` style member access — the legacy
+    // servlet API). Spring controllers don't reference `request.*`
+    // explicitly, so without this pass `tldr taint` was blind to every
+    // Spring-MVC controller.
+    if language == Language::Java {
+        sources.extend(detect_spring_annotation_sources(root, source, line_filter));
+    }
+
     sources
+}
+
+/// Detect Spring web annotation taint sources on Java method parameters.
+///
+/// Walks `formal_parameter` nodes in the AST, inspects their `modifiers`
+/// child for any of the recognised Spring annotations, and emits one
+/// `TaintSource` per matching parameter (binding the parameter's
+/// identifier as the tainted variable name and its source line).
+///
+/// Recognised annotations and their `TaintSourceType` mapping:
+///
+/// | Annotation         | TaintSourceType |
+/// |--------------------|-----------------|
+/// | `@RequestParam`    | HttpParam       |
+/// | `@PathVariable`    | HttpParam       |
+/// | `@RequestHeader`   | HttpParam       |
+/// | `@ModelAttribute`  | HttpParam       |
+/// | `@RequestBody`     | HttpBody        |
+///
+/// FQN forms (`@org.springframework.web.bind.annotation.RequestParam`)
+/// are matched by tail-identifier comparison so any import shape works.
+fn detect_spring_annotation_sources(
+    root: &tree_sitter::Node,
+    source: &[u8],
+    line_filter: Option<u32>,
+) -> Vec<TaintSource> {
+    let mut out = Vec::new();
+    let descendants = walk_descendants(*root);
+    for node in &descendants {
+        if node.kind() != "formal_parameter" {
+            continue;
+        }
+        let line = node.start_position().row as u32 + 1;
+        if let Some(filter) = line_filter {
+            if line != filter {
+                continue;
+            }
+        }
+
+        // Find the annotation tail-name and the parameter identifier.
+        let annot = match find_first_spring_annotation(node, source) {
+            Some(a) => a,
+            None => continue,
+        };
+        let var_name = match formal_parameter_identifier(node, source) {
+            Some(v) => v,
+            None => continue,
+        };
+
+        let source_type = match annot.as_str() {
+            "RequestBody" => TaintSourceType::HttpBody,
+            "RequestParam" | "PathVariable" | "RequestHeader" | "ModelAttribute" => {
+                TaintSourceType::HttpParam
+            }
+            _ => continue,
+        };
+
+        let statement = std::str::from_utf8(source)
+            .unwrap_or("")
+            .lines()
+            .nth((line - 1) as usize)
+            .map(|s| s.to_string());
+
+        out.push(TaintSource {
+            var: var_name,
+            line,
+            source_type,
+            statement,
+        });
+    }
+    out
+}
+
+/// Spring annotations recognised as Java taint sources by
+/// `detect_spring_annotation_sources`. FQN forms are matched by
+/// tail-identifier comparison so `@RequestParam`,
+/// `@org.springframework.web.bind.annotation.RequestParam`, and any
+/// other intermediate qualifier shape all hit the same entry.
+const SPRING_ANNOT_NAMES: &[&str] = &[
+    "RequestParam",
+    "PathVariable",
+    "RequestHeader",
+    "ModelAttribute",
+    "RequestBody",
+];
+
+/// Walk a `formal_parameter` node looking for a Spring web annotation
+/// in its `modifiers` subtree. Returns the tail identifier of the
+/// matching annotation (e.g. `RequestParam` for `@RequestParam` or
+/// `@org.springframework.web.bind.annotation.RequestParam`).
+fn find_first_spring_annotation(param: &tree_sitter::Node, source: &[u8]) -> Option<String> {
+    fn descend(node: &tree_sitter::Node, source: &[u8], out: &mut Option<String>) {
+        if out.is_some() {
+            return;
+        }
+        let kind = node.kind();
+        if kind == "marker_annotation" || kind == "annotation" {
+            let text = node_text(node, source);
+            let trimmed = text.trim_start_matches('@');
+            let head = trimmed
+                .split(|c: char| c == '(' || c.is_whitespace())
+                .next()
+                .unwrap_or("");
+            let last = head.rsplit('.').next().unwrap_or("").to_string();
+            if SPRING_ANNOT_NAMES.contains(&last.as_str()) {
+                *out = Some(last);
+                return;
+            }
+        }
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            descend(&child, source, out);
+            if out.is_some() {
+                return;
+            }
+        }
+    }
+
+    let mut found: Option<String> = None;
+    descend(param, source, &mut found);
+    found
+}
+
+/// Extract the parameter identifier (variable name) from a Java
+/// `formal_parameter` node. Tree-sitter-java places the identifier as
+/// the last `identifier` child of the parameter.
+fn formal_parameter_identifier(param: &tree_sitter::Node, source: &[u8]) -> Option<String> {
+    let mut cursor = param.walk();
+    let mut last_ident: Option<String> = None;
+    for child in param.children(&mut cursor) {
+        if child.kind() == "identifier" {
+            last_ident = Some(node_text(&child, source).to_string());
+        }
+    }
+    last_ident
 }
 
 /// Detect taint sinks using AST nodes from a parsed tree.

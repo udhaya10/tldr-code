@@ -779,6 +779,19 @@ pub struct InvariantsSummary {
 
     /// Count by invariant kind
     pub by_kind: HashMap<String, u32>,
+
+    /// Number of test files the recogniser classified as tests for the
+    /// language under analysis (verification-pipeline-completeness-v1
+    /// P11.BUG-AGG-3 — previously the invariants command was
+    /// Python-only and silently reported 0 for every non-Python tree).
+    #[serde(default)]
+    pub test_files_scanned: u32,
+
+    /// Number of test functions detected across `test_files_scanned`
+    /// (counted via per-language AST recognisers in
+    /// `contracts::test_recognizer`).
+    #[serde(default)]
+    pub test_functions_scanned: u32,
 }
 
 /// Full report from the invariants command.

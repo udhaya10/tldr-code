@@ -1,5 +1,108 @@
 # Changelog
 
+## verification-pipeline-completeness-v1 — internal milestone
+
+NOT a published release. Closes 3 verification-pipeline bugs from the
+phase-11 audit (1 HIGH + 2 MED). The `invariants` subcommand no
+longer panics when `--lang` is supplied; the `specs` and `invariants`
+commands now recognise test functions across 10 languages instead
+of Python only; and `tldr taint` now sees Spring-MVC controllers
+on Java. Tag: `verification-pipeline-completeness-v1`. Manifest stays
+at 0.3.0.
+
+### Fixed
+
+- `crates/tldr-cli/src/commands/contracts/invariants.rs` — invariants
+  subcommand defined a local `--lang` arg as `Option<String>`, but the
+  global `--lang/-l` flag declared on `Cli` (in `main.rs`) is
+  `Option<Language>`. clap stores the value once under the long-name
+  key, and accessing `lang` triggered a clap downcast panic
+  (`Mismatch between definition and access of \`lang\``,
+  `clap_builder::parser::error::Error`) whenever a user supplied
+  `tldr invariants <file> --from-tests <tests> --lang <X>`. Fixed by
+  retyping the local arg as `Option<Language>` so it agrees with the
+  global definition. (P11.BUG-AGG-2, MED)
+
+- `crates/tldr-cli/src/commands/contracts/test_recognizer.rs` (NEW),
+  `crates/tldr-cli/src/commands/contracts/specs.rs`,
+  `crates/tldr-cli/src/commands/contracts/invariants.rs`,
+  `crates/tldr-cli/src/commands/contracts/types.rs` — `tldr specs
+  --from-tests` and `tldr invariants --from-tests` previously
+  hard-coded the Python pytest convention (`test_*.py` files
+  containing `def test_*`), so test trees in JavaScript / TypeScript
+  / Java / Kotlin / PHP / Swift / Ruby / Go / Scala / Elixir / Lua
+  all reported `test_files_scanned = 0` and produced empty reports
+  even when the trees clearly contained `it/describe`, `@Test`,
+  `func TestXxx`, etc. Fixed by adding a per-language test-file
+  recogniser keyed off `Language::from_path` plus a per-language AST
+  walker that counts test functions according to the language's
+  framework convention:
+    - Python: `def test_*` (pytest) or methods inside `class Test*`.
+    - JavaScript / TypeScript: top-level `it(...)` / `test(...)`
+      identifier calls (Mocha / Jest / Jasmine; also `fit` / `xit`).
+    - Java / Kotlin: methods annotated with `@Test` (matched by
+      tail-identifier so FQN forms like
+      `@org.junit.jupiter.api.Test` work).
+    - PHP: `public function test*` inside any class declaration
+      (PHPUnit).
+    - Swift: `func test*()` methods (XCTest).
+    - Ruby: `def test_*` (Minitest) or `it`/`specify` blocks
+      (RSpec).
+    - Go: top-level `func TestXxx(...)` declarations.
+    - Scala: top-level `test("...")` calls (Munit / ScalaTest
+      FunSuite).
+    - Elixir: `test "..." do ... end` macro calls (ExUnit).
+    - Lua / Luau: top-level `it(...)` / `test(...)` calls (busted).
+  The `specs` walker now dispatches per detected language; Python
+  retains the existing pytest-aware spec extractor, while other
+  languages report `(test_files_scanned, test_functions_scanned)`
+  through the recogniser. The `invariants` walker still performs
+  observation-based inference on Python (the only language with a
+  pytest assertion extractor today), but its summary now also
+  reports `test_files_scanned` / `test_functions_scanned` populated
+  by the same recogniser so the pipeline stops silently dropping
+  non-Python test trees. Languages without a single dominant test
+  framework (Rust / C / C++ / C# / OCaml) fall back to a
+  filename-only `contains("test")` heuristic with a function count
+  of zero — strictly better than the previous all-zero behaviour
+  and trivially extensible when a framework adapter lands.
+  (P11.BUG-AGG-3, HIGH)
+
+- `crates/tldr-core/src/security/taint.rs:detect_sources_ast` —
+  `tldr taint` had no taint sources for any Spring-annotated method
+  parameter, so every Spring-MVC controller (e.g. spring-petclinic's
+  `OwnerController.processFindForm`) reported empty `sources` /
+  `sinks` / `flows`. The existing Java AST source bank only matched
+  servlet-style member access (`request.getParameter`, etc.), which
+  Spring controllers don't use. Fixed by adding a Java-specific
+  Spring-annotation source pass that walks every `formal_parameter`
+  AST node and emits a `TaintSource` whenever a parameter carries
+  one of the Spring web annotations:
+    - `@RequestParam` -> `HttpParam`
+    - `@PathVariable` -> `HttpParam`
+    - `@RequestHeader` -> `HttpParam`
+    - `@ModelAttribute` -> `HttpParam`
+    - `@RequestBody` -> `HttpBody`
+  The annotation match is by tail-identifier so any qualifier shape
+  (`@RequestParam`, `@org.springframework.web.bind.annotation.RequestParam`,
+  etc.) is recognised. Existing Java taint sinks (SQL injection,
+  deserialization, SSRF) are untouched — the new pass is additive
+  and gated to `Language::Java`. (P11.BUG-AGG-13, MED)
+
+### Tests
+
+- `crates/tldr-cli/tests/verification_pipeline_completeness_v1.rs`
+  (NEW) — 7 integration tests covering all 3 bugs:
+    - `test_invariants_lang_flag_no_panic` — invariants with
+      `--lang python` returns `rc != 101` (no clap panic).
+    - `test_specs_recognizes_javascript_describe_it` /
+      `_java_test_annotation` / `_php_phpunit` /
+      `_swift_xctest` / `_go_testing` — synthetic test files in
+      each language report `test_files_scanned >= 1`.
+    - `test_taint_recognizes_spring_request_param` — synthetic
+      Spring `@RestController` with `@RequestParam` reports at
+      least one taint source.
+
 ## explain-cross-command-consistency-v1 — internal milestone
 
 NOT a published release. Closes 2 cross-command consistency bugs

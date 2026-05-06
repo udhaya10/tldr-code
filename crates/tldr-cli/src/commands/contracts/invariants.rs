@@ -32,6 +32,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use clap::Args;
 use tldr_core::walker::walk_project;
+use tldr_core::Language;
 use tree_sitter::{Node, Parser};
 use tree_sitter_python::LANGUAGE as PYTHON_LANGUAGE;
 
@@ -94,9 +95,15 @@ pub struct InvariantsArgs {
     #[arg(long, default_value = "1")]
     pub min_obs: u32,
 
-    /// Language override (auto-detected if not specified)
+    /// Language override (auto-detected if not specified).
+    ///
+    /// MUST stay typed as `Option<Language>` to match the global
+    /// `--lang` / `-l` flag declared on `Cli` in `main.rs`. clap stores the
+    /// value once under the long-name key; if the local arg's type diverges
+    /// from the global type, accessing `lang` triggers a type-id downcast
+    /// panic in `clap_builder::parser::error::Error`. (P11.BUG-AGG-2)
     #[arg(long, short = 'l')]
-    pub lang: Option<String>,
+    pub lang: Option<Language>,
 }
 
 impl InvariantsArgs {
@@ -224,8 +231,15 @@ pub fn run_invariants(
     function_filter: Option<&str>,
     min_obs: u32,
 ) -> ContractsResult<InvariantsReport> {
-    // Collect observations from test files
+    // Collect observations from test files (Python only — observations
+    // are extracted via the existing pytest-aware AST walker).
     let observations = collect_observations(test_path, function_filter)?;
+
+    // verification-pipeline-completeness-v1 (P11.BUG-AGG-3): also run
+    // the per-language test-file recogniser so the report's summary
+    // reflects test files / functions even for non-Python trees. The
+    // recogniser is shared with `tldr specs` (see contracts::test_recognizer).
+    let (test_files_scanned, test_functions_scanned) = scan_test_recognizer(test_path);
 
     // Group observations by function
     let mut by_function: HashMap<String, Vec<Observation>> = HashMap::new();
@@ -286,8 +300,48 @@ pub fn run_invariants(
             total_observations,
             total_invariants,
             by_kind,
+            test_files_scanned,
+            test_functions_scanned,
         },
     })
+}
+
+/// Walk the test path (file or directory) and tally per-language test
+/// files / functions via the shared recogniser. Used to populate the
+/// `InvariantsSummary` counts (P11.BUG-AGG-3).
+fn scan_test_recognizer(test_path: &Path) -> (u32, u32) {
+    use super::test_recognizer;
+
+    let mut files = 0u32;
+    let mut functions = 0u32;
+
+    let mut tally = |path: &Path| {
+        let language = match test_recognizer::detect_language(path) {
+            Some(l) => l,
+            None => return,
+        };
+        let source = match std::fs::read_to_string(path) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let info = test_recognizer::recognize(path, &source, language);
+        if info.is_test_file {
+            files += 1;
+            functions += info.test_function_count;
+        }
+    };
+
+    if test_path.is_file() {
+        tally(test_path);
+    } else {
+        for entry in
+            walk_project(test_path).filter(|e| e.file_type().map(|ft| ft.is_file()).unwrap_or(false))
+        {
+            tally(entry.path());
+        }
+    }
+
+    (files, functions)
 }
 
 /// Collect observations from test files.

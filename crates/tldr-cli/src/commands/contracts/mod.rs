@@ -116,6 +116,11 @@ pub use specs::SpecsArgs;
 // Phase 8: Re-export InvariantsArgs for CLI integration
 pub use invariants::InvariantsArgs;
 
+// verification-pipeline-completeness-v1 (P11.BUG-AGG-3): per-language test
+// framework recognisers shared by `specs --from-tests` and
+// `invariants --from-tests`.
+pub mod test_recognizer;
+
 // Phase 9: Re-export VerifyArgs for CLI integration
 pub use verify::VerifyArgs;
 

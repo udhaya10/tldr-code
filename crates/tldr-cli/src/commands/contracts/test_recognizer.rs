@@ -1,0 +1,589 @@
+//! Per-language test framework recognizers.
+//!
+//! Closes phase-11 BUG-AGG-3 (HIGH): `tldr specs --from-tests` and
+//! `tldr invariants --from-tests` previously hard-coded Python `test_*`
+//! pytest-style discovery, so JavaScript/Java/PHP/Swift/Go/Kotlin/Scala/
+//! Ruby/Elixir/Lua test directories returned `test_files_scanned = 0`
+//! despite containing real test functions.
+//!
+//! Each recognizer answers two questions per file:
+//!
+//! 1. **Is this a test file?** (per the language's discovery convention)
+//! 2. **How many test functions does it contain?** (counted via tree-sitter
+//!    AST walks rather than text-level heuristics, so comments and string
+//!    literals can't false-match.)
+//!
+//! Languages handled:
+//!
+//! | Language    | Convention                                                 |
+//! |-------------|------------------------------------------------------------|
+//! | Python      | `def test_*` (pytest) or methods inside `class Test*`      |
+//! | JavaScript  | `it(...)` / `test(...)` calls (Mocha/Jest/Jasmine)         |
+//! | TypeScript  | `it(...)` / `test(...)` calls                              |
+//! | Java        | Methods annotated with `@Test`                             |
+//! | Kotlin      | Methods annotated with `@Test`                             |
+//! | PHP         | `public function test*` inside class whose name ends `Test`|
+//! | Swift       | `func test*()` inside class extending `XCTestCase`         |
+//! | Ruby        | `def test_*` (Minitest) or `it/describe` blocks (RSpec)    |
+//! | Go          | Top-level `func TestXxx(t *testing.T)`                     |
+//! | Scala       | `test("...")` calls (Munit/ScalaTest FunSuite)             |
+//! | Elixir      | `test "..." do ... end` blocks (ExUnit)                    |
+//! | Lua / Luau  | `it(...)` / `describe(...)` blocks (busted)                |
+//! | C / C++ /   | (No widely standard test framework — fall back to file     |
+//! | Rust / C#   |  count when name suggests test, function count = 0; the    |
+//! | OCaml       |  framework adapter can be wired later.)                    |
+//!
+//! For languages without a clear convention, the recognizer treats files
+//! whose name contains `test` (case-insensitive) as test files but reports
+//! `0` functions — strictly better than the previous behaviour where the
+//! file count itself was always `0` for non-Python.
+
+use std::path::Path;
+
+use tldr_core::ast::ParserPool;
+use tldr_core::Language;
+use tree_sitter::{Node, Tree};
+
+/// Result of inspecting a single candidate file for test functions.
+#[derive(Debug, Clone, Default)]
+pub struct TestFileInfo {
+    /// True if this file participates in a test suite (i.e. should bump
+    /// `test_files_scanned`).
+    pub is_test_file: bool,
+    /// Number of test functions detected by walking the AST.
+    pub test_function_count: u32,
+}
+
+/// Public entry point: classify a candidate file and count its tests.
+///
+/// `language` is the language the caller has already detected for the
+/// file (typically via `Language::from_path` in `run_specs` /
+/// `collect_observations`). Returns a default zero-info value if the
+/// file is not parseable in this language.
+pub fn recognize(path: &Path, source: &str, language: Language) -> TestFileInfo {
+    if !is_candidate_test_file(path, language) {
+        return TestFileInfo::default();
+    }
+
+    // Empty or whitespace-only files: nothing to count.
+    if source.trim().is_empty() {
+        return TestFileInfo {
+            is_test_file: true,
+            test_function_count: 0,
+        };
+    }
+
+    let pool = ParserPool::new();
+    let tree = match pool.parse(source, language).ok() {
+        Some(t) => t,
+        None => {
+            return TestFileInfo {
+                is_test_file: true,
+                test_function_count: 0,
+            };
+        }
+    };
+
+    let count = count_test_functions(&tree, source.as_bytes(), language);
+
+    TestFileInfo {
+        is_test_file: true,
+        test_function_count: count,
+    }
+}
+
+/// Decide whether `path` matches the language's test-file naming convention.
+///
+/// Each language has its own convention; we centralise them here so
+/// `run_specs` can early-skip non-tests cheaply (without parsing).
+fn is_candidate_test_file(path: &Path, language: Language) -> bool {
+    let file_name = match path.file_name().and_then(|n| n.to_str()) {
+        Some(n) => n,
+        None => return false,
+    };
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(file_name);
+    let lower = file_name.to_ascii_lowercase();
+
+    match language {
+        // Python: `test_*.py` (pytest) or `*_test.py` (unittest-style).
+        Language::Python => {
+            file_name.starts_with("test_") && file_name.ends_with(".py")
+                || file_name.ends_with("_test.py")
+        }
+        // JavaScript / TypeScript: Jest/Mocha conventions.
+        // `*.test.js` / `*.spec.js` (and tsx/jsx variants), or any file
+        // inside a directory literally named `__tests__`.
+        Language::JavaScript | Language::TypeScript => {
+            let in_tests_dir = path
+                .components()
+                .any(|c| c.as_os_str() == "__tests__" || c.as_os_str() == "test"
+                    || c.as_os_str() == "tests" || c.as_os_str() == "spec");
+            let has_test_marker = stem.ends_with(".test")
+                || stem.ends_with(".spec")
+                || stem.ends_with("_test")
+                || stem.ends_with("_spec")
+                || stem.ends_with("Test")
+                || stem.ends_with("Spec");
+            (has_test_marker || in_tests_dir)
+                && (lower.ends_with(".js")
+                    || lower.ends_with(".jsx")
+                    || lower.ends_with(".mjs")
+                    || lower.ends_with(".cjs")
+                    || lower.ends_with(".ts")
+                    || lower.ends_with(".tsx"))
+        }
+        // Java: Maven/Gradle convention — files under `src/test/java` are
+        // tests, or any class whose name ends with `Test`/`Tests`.
+        Language::Java => {
+            if !lower.ends_with(".java") {
+                return false;
+            }
+            stem.ends_with("Test")
+                || stem.ends_with("Tests")
+                || stem.ends_with("IT")
+                || stem.ends_with("ITCase")
+                || path.components().any(|c| c.as_os_str() == "test")
+        }
+        // Kotlin: same convention as Java.
+        Language::Kotlin => {
+            (lower.ends_with(".kt") || lower.ends_with(".kts"))
+                && (stem.ends_with("Test")
+                    || stem.ends_with("Tests")
+                    || path.components().any(|c| c.as_os_str() == "test"))
+        }
+        // PHP: PHPUnit convention — class FooTest in FooTest.php.
+        Language::Php => lower.ends_with(".php") && (stem.ends_with("Test") || stem.ends_with("Tests")),
+        // Swift: XCTest convention — files named `*Tests.swift`.
+        Language::Swift => {
+            lower.ends_with(".swift")
+                && (stem.ends_with("Tests") || stem.ends_with("Test") || stem.ends_with("Spec"))
+        }
+        // Ruby: Minitest `test_*.rb` / `*_test.rb`; RSpec `*_spec.rb`.
+        Language::Ruby => {
+            lower.ends_with(".rb")
+                && (file_name.starts_with("test_")
+                    || stem.ends_with("_test")
+                    || stem.ends_with("_spec"))
+        }
+        // Go: convention is `*_test.go`.
+        Language::Go => lower.ends_with("_test.go"),
+        // Scala: Munit / ScalaTest convention — `*Suite.scala`/`*Spec.scala`/`*Test.scala`.
+        Language::Scala => {
+            lower.ends_with(".scala")
+                && (stem.ends_with("Test")
+                    || stem.ends_with("Tests")
+                    || stem.ends_with("Spec")
+                    || stem.ends_with("Suite"))
+        }
+        // Elixir: ExUnit convention — `*_test.exs`.
+        Language::Elixir => {
+            (lower.ends_with(".exs") || lower.ends_with(".ex"))
+                && (stem.ends_with("_test") || file_name.starts_with("test_"))
+        }
+        // Lua / Luau: busted convention — `*_spec.lua`/`*_test.lua`.
+        Language::Lua | Language::Luau => {
+            (lower.ends_with(".lua") || lower.ends_with(".luau"))
+                && (stem.ends_with("_spec")
+                    || stem.ends_with("_test")
+                    || file_name.starts_with("test_"))
+        }
+        // Languages without a single dominant convention. Fall back to the
+        // weak heuristic of "filename contains 'test'" so directories laid
+        // out as `tests/` still count their files (a clear improvement
+        // over the previous all-zero behaviour). The function-count walker
+        // still returns 0 for these — wiring grammar-specific recognisers
+        // is left as TODO.
+        Language::Rust | Language::C | Language::Cpp | Language::CSharp | Language::Ocaml => {
+            lower.contains("test") || lower.contains("spec")
+        }
+    }
+}
+
+/// AST-walk a parsed test file and count test functions per language convention.
+fn count_test_functions(tree: &Tree, source: &[u8], language: Language) -> u32 {
+    let root = tree.root_node();
+    let mut count = 0u32;
+    walk_count(&root, source, language, &mut count);
+    count
+}
+
+fn walk_count(node: &Node, source: &[u8], language: Language, count: &mut u32) {
+    if matches_test_function(node, source, language) {
+        *count += 1;
+        // Don't recurse into a function body — nested calls inside a
+        // matched test function shouldn't be double-counted (e.g. an
+        // `it(...)` inside a `describe(...)` block both match the JS
+        // recogniser; only the leaf `it` counts).
+        return;
+    }
+
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        walk_count(&child, source, language, count);
+    }
+}
+
+/// Per-language predicate: is this AST node a test function declaration?
+fn matches_test_function(node: &Node, source: &[u8], language: Language) -> bool {
+    match language {
+        Language::Python => python_is_test_function(node, source),
+        Language::JavaScript | Language::TypeScript => js_is_test_call(node, source),
+        Language::Java | Language::Kotlin => jvm_has_test_annotation(node, source),
+        Language::Php => php_is_test_method(node, source),
+        Language::Swift => swift_is_test_method(node, source),
+        Language::Ruby => ruby_is_test_def_or_block(node, source),
+        Language::Go => go_is_top_level_test_function(node, source),
+        Language::Scala => scala_is_test_call(node, source),
+        Language::Elixir => elixir_is_test_macro(node, source),
+        Language::Lua | Language::Luau => lua_is_test_call(node, source),
+        Language::Rust | Language::C | Language::Cpp | Language::CSharp | Language::Ocaml => false,
+    }
+}
+
+// -- Python: `def test_*` -----------------------------------------------------
+fn python_is_test_function(node: &Node, source: &[u8]) -> bool {
+    if node.kind() != "function_definition" {
+        return false;
+    }
+    let name = node
+        .child_by_field_name("name")
+        .map(|n| node_text(n, source))
+        .unwrap_or_default();
+    name.starts_with("test_")
+}
+
+// -- JS/TS: `it(...)` / `test(...)` -------------------------------------------
+fn js_is_test_call(node: &Node, source: &[u8]) -> bool {
+    // tree-sitter-typescript / -javascript both expose `call_expression`
+    // with a `function` child that's an identifier for top-level calls.
+    if node.kind() != "call_expression" {
+        return false;
+    }
+    let func_node = match node.child_by_field_name("function") {
+        Some(n) => n,
+        None => return false,
+    };
+    // We only want unqualified identifiers (`it("...")`, `test("...")`),
+    // not member calls like `obj.it(...)` which are unrelated.
+    if func_node.kind() != "identifier" {
+        return false;
+    }
+    let name = node_text(func_node, source);
+    matches!(name.as_str(), "it" | "test" | "fit" | "xit" | "xtest")
+}
+
+// -- Java/Kotlin: methods with @Test annotation -------------------------------
+fn jvm_has_test_annotation(node: &Node, source: &[u8]) -> bool {
+    // Java tree-sitter: `method_declaration` with a sibling `modifiers`
+    // child containing `marker_annotation` / `annotation` whose name is
+    // `Test`. Kotlin (kotlin-ng): `function_declaration` with a `modifiers`
+    // child containing `annotation` -> `user_type` -> `type_identifier`
+    // text "Test".
+    let kind = node.kind();
+    if kind != "method_declaration" && kind != "function_declaration" {
+        return false;
+    }
+
+    // Walk this node's modifier subtree looking for an annotation whose
+    // last identifier component is "Test". Spans both Java and Kotlin AST
+    // shapes, since both use roughly the same node names.
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if child.kind() == "modifiers" {
+            if subtree_contains_annotation_named(&child, source, "Test") {
+                return true;
+            }
+        } else if child.kind() == "annotation" || child.kind() == "marker_annotation" {
+            if annotation_has_name(&child, source, "Test") {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn subtree_contains_annotation_named(node: &Node, source: &[u8], target: &str) -> bool {
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        let kind = child.kind();
+        if (kind == "annotation" || kind == "marker_annotation")
+            && annotation_has_name(&child, source, target)
+        {
+            return true;
+        }
+        if subtree_contains_annotation_named(&child, source, target) {
+            return true;
+        }
+    }
+    false
+}
+
+/// True if `annotation_node` has its tail identifier equal to `target`
+/// (e.g. `@Test`, `@org.junit.Test`, `@org.junit.jupiter.api.Test`).
+fn annotation_has_name(annotation_node: &Node, source: &[u8], target: &str) -> bool {
+    let text = node_text(*annotation_node, source);
+    // Strip leading `@` and any argument list, then compare the tail
+    // identifier (after the last `.`).
+    let trimmed = text.trim_start_matches('@');
+    let head = trimmed.split(|c: char| c == '(' || c.is_whitespace()).next().unwrap_or("");
+    let last = head.rsplit('.').next().unwrap_or("");
+    last == target
+}
+
+// -- PHP: PHPUnit `public function test*` -------------------------------------
+fn php_is_test_method(node: &Node, source: &[u8]) -> bool {
+    if node.kind() != "method_declaration" {
+        return false;
+    }
+    let name = node
+        .child_by_field_name("name")
+        .map(|n| node_text(n, source))
+        .unwrap_or_default();
+    name.starts_with("test")
+}
+
+// -- Swift: `func test*()` ----------------------------------------------------
+fn swift_is_test_method(node: &Node, source: &[u8]) -> bool {
+    // tree-sitter-swift uses `function_declaration` (top-level) and
+    // `protocol_function_declaration` (inside class body); we accept any
+    // declaration whose `name` child starts with "test".
+    let kind = node.kind();
+    if !(kind == "function_declaration" || kind == "protocol_function_declaration") {
+        return false;
+    }
+    // Swift grammar exposes the method name as the first `simple_identifier`
+    // child after the `func` keyword. Walk children to find it.
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if child.kind() == "simple_identifier" {
+            return node_text(child, source).starts_with("test");
+        }
+    }
+    false
+}
+
+// -- Ruby: `def test_*` (Minitest) or `it/describe` blocks (RSpec) -----------
+fn ruby_is_test_def_or_block(node: &Node, source: &[u8]) -> bool {
+    match node.kind() {
+        "method" => {
+            // Minitest: `def test_<name>`.
+            let name = node
+                .child_by_field_name("name")
+                .map(|n| node_text(n, source))
+                .unwrap_or_default();
+            name.starts_with("test_")
+        }
+        "call" => {
+            // RSpec: `it "..." do ... end` / `specify "..." do ... end`.
+            let method = node
+                .child_by_field_name("method")
+                .map(|n| node_text(n, source))
+                .unwrap_or_default();
+            matches!(method.as_str(), "it" | "specify")
+        }
+        _ => false,
+    }
+}
+
+// -- Go: top-level `func TestXxx(t *testing.T)` -------------------------------
+fn go_is_top_level_test_function(node: &Node, source: &[u8]) -> bool {
+    if node.kind() != "function_declaration" {
+        return false;
+    }
+    let name = node
+        .child_by_field_name("name")
+        .map(|n| node_text(n, source))
+        .unwrap_or_default();
+    if !name.starts_with("Test") {
+        return false;
+    }
+    // Filter out `Test` exactly (no following uppercase). The Go testing
+    // convention is `TestXxx` where `X` is upper.
+    let after = name.strip_prefix("Test").unwrap_or("");
+    let starts_upper = after.chars().next().map(|c| c.is_ascii_uppercase()).unwrap_or(false);
+    starts_upper
+}
+
+// -- Scala: `test("...") { ... }` calls ---------------------------------------
+fn scala_is_test_call(node: &Node, source: &[u8]) -> bool {
+    // tree-sitter-scala uses `call_expression`; the function child is a
+    // `simple_identifier`/`identifier` named "test". We also accept the
+    // FunSuite naming convention where a class extends `FunSuite` and
+    // calls `test(...)` at class scope. Pattern-matching just the call
+    // shape is sufficient for the common case.
+    if node.kind() != "call_expression" {
+        return false;
+    }
+    let func_node = match node.child_by_field_name("function") {
+        Some(n) => n,
+        None => return false,
+    };
+    let name = node_text(func_node, source);
+    matches!(name.as_str(), "test")
+}
+
+// -- Elixir: `test "..." do ... end` ------------------------------------------
+fn elixir_is_test_macro(node: &Node, source: &[u8]) -> bool {
+    // tree-sitter-elixir parses macros as `call` nodes; the head is the
+    // `target` child (an `identifier`), and the body is a `do_block`.
+    if node.kind() != "call" {
+        return false;
+    }
+    let target = match node.child_by_field_name("target") {
+        Some(n) => n,
+        None => return false,
+    };
+    node_text(target, source) == "test"
+}
+
+// -- Lua/Luau: `it(...)` / `describe(...)` (busted) ---------------------------
+fn lua_is_test_call(node: &Node, source: &[u8]) -> bool {
+    // tree-sitter-lua / -luau represent calls as `function_call`. The
+    // function name lives in the `name` field (an `identifier`).
+    if node.kind() != "function_call" && node.kind() != "function_call_statement" {
+        return false;
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if child.kind() == "identifier" {
+            return matches!(node_text(child, source).as_str(), "it" | "test");
+        }
+    }
+    false
+}
+
+// -- Helpers ------------------------------------------------------------------
+fn node_text(node: Node, source: &[u8]) -> String {
+    let start = node.start_byte();
+    let end = node.end_byte();
+    if end <= source.len() {
+        std::str::from_utf8(&source[start..end])
+            .unwrap_or("")
+            .to_string()
+    } else {
+        String::new()
+    }
+}
+
+/// Detect language for a candidate test file. Returns `None` if the
+/// extension isn't supported.
+pub fn detect_language(path: &Path) -> Option<Language> {
+    Language::from_path(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::tempdir;
+
+    fn write(dir: &Path, name: &str, body: &str) -> std::path::PathBuf {
+        let p = dir.join(name);
+        if let Some(parent) = p.parent() {
+            fs::create_dir_all(parent).ok();
+        }
+        fs::write(&p, body).unwrap();
+        p
+    }
+
+    #[test]
+    fn python_test_function_counted() {
+        let tmp = tempdir().unwrap();
+        let p = write(
+            tmp.path(),
+            "test_x.py",
+            "def test_one():\n    pass\n\ndef test_two():\n    pass\n",
+        );
+        let src = fs::read_to_string(&p).unwrap();
+        let info = recognize(&p, &src, Language::Python);
+        assert!(info.is_test_file);
+        assert_eq!(info.test_function_count, 2);
+    }
+
+    #[test]
+    fn javascript_describe_it_counted() {
+        let tmp = tempdir().unwrap();
+        let p = write(
+            tmp.path(),
+            "foo.test.js",
+            "describe('s', () => { it('a', () => {}); it('b', () => {}); });",
+        );
+        let src = fs::read_to_string(&p).unwrap();
+        let info = recognize(&p, &src, Language::JavaScript);
+        assert!(info.is_test_file);
+        assert_eq!(info.test_function_count, 2);
+    }
+
+    #[test]
+    fn java_test_annotation_counted() {
+        let tmp = tempdir().unwrap();
+        let p = write(
+            tmp.path(),
+            "FooTest.java",
+            "import org.junit.Test;\nclass FooTest {\n  @Test public void shouldFoo() {}\n  @Test public void shouldBar() {}\n}\n",
+        );
+        let src = fs::read_to_string(&p).unwrap();
+        let info = recognize(&p, &src, Language::Java);
+        assert!(info.is_test_file);
+        assert_eq!(info.test_function_count, 2);
+    }
+
+    #[test]
+    fn php_phpunit_counted() {
+        let tmp = tempdir().unwrap();
+        let p = write(
+            tmp.path(),
+            "FooTest.php",
+            "<?php\nclass FooTest {\n  public function testBar() {}\n  public function testBaz() {}\n}\n",
+        );
+        let src = fs::read_to_string(&p).unwrap();
+        let info = recognize(&p, &src, Language::Php);
+        assert!(info.is_test_file);
+        assert_eq!(info.test_function_count, 2);
+    }
+
+    #[test]
+    fn swift_xctest_counted() {
+        let tmp = tempdir().unwrap();
+        let p = write(
+            tmp.path(),
+            "FooTests.swift",
+            "import XCTest\nclass FooTests: XCTestCase {\n  func testBar() {}\n  func testBaz() {}\n}\n",
+        );
+        let src = fs::read_to_string(&p).unwrap();
+        let info = recognize(&p, &src, Language::Swift);
+        assert!(info.is_test_file);
+        assert!(info.test_function_count >= 2);
+    }
+
+    #[test]
+    fn go_testing_counted() {
+        let tmp = tempdir().unwrap();
+        let p = write(
+            tmp.path(),
+            "foo_test.go",
+            "package foo\nimport \"testing\"\nfunc TestFoo(t *testing.T) {}\nfunc TestBar(t *testing.T) {}\nfunc helper() {}\n",
+        );
+        let src = fs::read_to_string(&p).unwrap();
+        let info = recognize(&p, &src, Language::Go);
+        assert!(info.is_test_file);
+        assert_eq!(info.test_function_count, 2);
+    }
+
+    #[test]
+    fn ruby_minitest_counted() {
+        let tmp = tempdir().unwrap();
+        let p = write(
+            tmp.path(),
+            "foo_test.rb",
+            "class FooTest\n  def test_one; end\n  def test_two; end\nend\n",
+        );
+        let src = fs::read_to_string(&p).unwrap();
+        let info = recognize(&p, &src, Language::Ruby);
+        assert!(info.is_test_file);
+        assert_eq!(info.test_function_count, 2);
+    }
+}

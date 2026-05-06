@@ -25,6 +25,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use clap::Args;
 use tldr_core::walker::walk_project;
+use tldr_core::Language;
 use tree_sitter::{Node, Parser, Tree};
 use tree_sitter_python::LANGUAGE as PYTHON_LANGUAGE;
 
@@ -143,30 +144,79 @@ pub fn run_specs(test_path: &Path, function_filter: Option<&str>) -> ContractsRe
     let mut test_files_scanned = 0u32;
 
     if test_path.is_file() {
-        // Single file
-        let file_report = extract_from_test_file(test_path)?;
-        test_files_scanned = 1;
-        test_functions_scanned = file_report.test_functions_scanned;
-        merge_specs(&mut all_specs, file_report.functions);
+        // Single file: dispatch on language. Python keeps the full
+        // pytest-aware extraction path (which also yields specs); other
+        // supported languages fall through to the AST recogniser, which
+        // returns counts only.
+        let lang = super::test_recognizer::detect_language(test_path);
+        if matches!(lang, Some(Language::Python)) {
+            let file_report = extract_from_test_file(test_path)?;
+            test_files_scanned = 1;
+            test_functions_scanned = file_report.test_functions_scanned;
+            merge_specs(&mut all_specs, file_report.functions);
+        } else if let Some(language) = lang {
+            // Read + recognise without aborting on read failures.
+            if let Ok(source) = std::fs::read_to_string(test_path) {
+                let info = super::test_recognizer::recognize(test_path, &source, language);
+                if info.is_test_file {
+                    test_files_scanned = 1;
+                    test_functions_scanned = info.test_function_count;
+                }
+            }
+        }
     } else {
-        // Directory: scan all test_*.py files
-        for entry in walk_project(test_path).filter(|e| {
-            e.path().is_file()
-                && e.file_name()
-                    .to_str()
-                    .is_some_and(|n| n.starts_with("test_") && n.ends_with(".py"))
-        }) {
+        // Directory: walk every source file the walker yields and dispatch
+        // per detected language. Python still gets the full pytest
+        // extractor; other supported languages get the AST recogniser
+        // which returns `(is_test_file, test_function_count)`.
+        //
+        // verification-pipeline-completeness-v1 (P11.BUG-AGG-3): closes
+        // the previous Python-only walk that always reported
+        // `test_files_scanned = 0` on JS/Java/PHP/Swift/Go/etc test trees.
+        for entry in
+            walk_project(test_path).filter(|e| e.path().is_file())
+        {
             let file_path = entry.path();
-            match extract_from_test_file(file_path) {
-                Ok(file_report) => {
-                    test_files_scanned += 1;
-                    test_functions_scanned += file_report.test_functions_scanned;
-                    merge_specs(&mut all_specs, file_report.functions);
+            let language = match super::test_recognizer::detect_language(file_path) {
+                Some(l) => l,
+                None => continue,
+            };
+
+            if matches!(language, Language::Python) {
+                // Preserve the existing Python `test_*.py` /
+                // `Test*` class convention so we don't over-scan
+                // non-test Python files.
+                let name = match file_path.file_name().and_then(|n| n.to_str()) {
+                    Some(n) => n,
+                    None => continue,
+                };
+                if !((name.starts_with("test_") && name.ends_with(".py"))
+                    || name.ends_with("_test.py"))
+                {
+                    continue;
                 }
-                Err(e) => {
-                    // Log but continue on parse errors
-                    eprintln!("Warning: Failed to parse {}: {}", file_path.display(), e);
+                match extract_from_test_file(file_path) {
+                    Ok(file_report) => {
+                        test_files_scanned += 1;
+                        test_functions_scanned += file_report.test_functions_scanned;
+                        merge_specs(&mut all_specs, file_report.functions);
+                    }
+                    Err(e) => {
+                        eprintln!("Warning: Failed to parse {}: {}", file_path.display(), e);
+                    }
                 }
+                continue;
+            }
+
+            // Non-Python: use the language-specific test recogniser.
+            let source = match std::fs::read_to_string(file_path) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            let info = super::test_recognizer::recognize(file_path, &source, language);
+            if info.is_test_file {
+                test_files_scanned += 1;
+                test_functions_scanned += info.test_function_count;
             }
         }
     }
