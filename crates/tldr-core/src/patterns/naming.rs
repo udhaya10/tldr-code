@@ -67,7 +67,69 @@ pub fn signals_to_pattern(signals: &PatternSignals) -> Option<NamingPattern> {
     })
 }
 
-/// Detect the majority naming convention from a list of names
+/// Specificity score for naming-case tie-breaking.
+///
+/// naming-majority-determinism-v1: when two cases tie on count, prefer
+/// the *concrete* convention (snake_case, camelCase, PascalCase,
+/// UPPER_SNAKE_CASE) over the *degenerate* single-word forms
+/// (`LowerAlpha`, `UpperAlpha`). Reason: degenerate variants are a
+/// SUBSET of concrete conventions; when both forms exist in the same
+/// category, the concrete majority is the natural target convention.
+/// A class-name set `[UserService(Pascal), E1(UpperAlpha)]` reports
+/// majority `PascalCase`, with `E1` (`UpperAlpha`) compatible-but-not-
+/// identical via [`is_compatible`].
+fn naming_case_specificity(case: NamingCase) -> u32 {
+    match case {
+        // Concrete conventions (highest specificity).
+        NamingCase::SnakeCase => 4,
+        NamingCase::CamelCase => 4,
+        NamingCase::PascalCase => 4,
+        NamingCase::UpperSnakeCase => 4,
+        // Degenerate single-word forms (lower specificity).
+        NamingCase::LowerAlpha => 2,
+        NamingCase::UpperAlpha => 2,
+        // Unknown is filtered out before this is called.
+        NamingCase::Unknown => 0,
+    }
+}
+
+/// Stable secondary tie-break order for naming cases.
+///
+/// naming-majority-determinism-v1: when count AND specificity tie,
+/// pick by a fixed enum-variant order so identical inputs always
+/// produce identical outputs. Lower key = preferred.
+fn naming_case_sort_key(case: NamingCase) -> u32 {
+    match case {
+        NamingCase::SnakeCase => 0,
+        NamingCase::CamelCase => 1,
+        NamingCase::PascalCase => 2,
+        NamingCase::UpperSnakeCase => 3,
+        NamingCase::LowerAlpha => 4,
+        NamingCase::UpperAlpha => 5,
+        NamingCase::Unknown => 99,
+    }
+}
+
+/// Detect the majority naming convention from a list of names.
+///
+/// naming-majority-determinism-v1: replaces a non-deterministic
+/// `HashMap<NamingCase, usize>` + `max_by_key(count)` reduction with
+/// a deterministic tie-break ordering. The bug surfaced as a
+/// regression from `language-coverage-fixes-v1` (commit ef5f6cf):
+/// when a class-name set tied 1×`PascalCase` + 1×`UpperAlpha`, the
+/// HashMap iteration order non-deterministically chose `UpperAlpha`
+/// in roughly half of runs, producing a spurious self-violation entry
+/// `{name:"UserService", expected:"pascal_case", actual:"pascal_case"}`
+/// once `UpperAlpha` was collapsed to `PascalCase` by
+/// [`naming_case_to_convention`]. The flake had ~33% pass rate on
+/// the `test_n4_patterns_naming_no_single_word_violations` test.
+///
+/// The fix sorts tied variants by:
+/// 1. Count (descending) — primary criterion.
+/// 2. Specificity (descending) — concrete conventions win over
+///    degenerate single-word forms.
+/// 3. `naming_case_sort_key` (ascending) — fully stable secondary
+///    tie-break.
 fn detect_majority_convention(names: &[(String, NamingCase, String, u32)]) -> NamingCase {
     if names.is_empty() {
         return NamingCase::Unknown;
@@ -82,7 +144,17 @@ fn detect_majority_convention(names: &[(String, NamingCase, String, u32)]) -> Na
 
     counts
         .into_iter()
-        .max_by_key(|(_, count)| *count)
+        // Sort key: (count, specificity, Reverse(sort_key)).
+        // `max_by_key` picks the lexicographically-largest tuple, so
+        // higher count wins, then higher specificity, then LOWER
+        // sort_key (via `Reverse`) wins.
+        .max_by_key(|(case, count)| {
+            (
+                *count,
+                naming_case_specificity(*case),
+                std::cmp::Reverse(naming_case_sort_key(*case)),
+            )
+        })
         .map(|(case, _)| case)
         .unwrap_or(NamingCase::Unknown)
 }

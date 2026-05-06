@@ -1,5 +1,97 @@
 # Changelog
 
+## naming-majority-determinism-v1 — internal milestone
+
+NOT a published release. Fixes a non-determinism regression in
+`tldr patterns` introduced by `language-coverage-fixes-v1`
+(commit ef5f6cf, P4.BUG-N4). The phase-4 milestone added the new
+`NamingCase::LowerAlpha` and `NamingCase::UpperAlpha` variants for
+single-word degenerate identifiers and the `is_compatible` predicate
+that treats them as compatible with their concrete siblings. The
+follow-on bug: `patterns::naming::detect_majority_convention` used a
+`HashMap<NamingCase, usize>` reduced via `max_by_key(count)`, which is
+non-deterministic on COUNT TIES. When a class-name set contained
+1×`PascalCase` (`UserService`) + 1×`UpperAlpha` (`E1`), the chosen
+"majority" varied run-to-run; in roughly two out of three runs
+`UpperAlpha` won, then `is_compatible(PascalCase, UpperAlpha) = false`
+turned `UserService` into a violation, which `naming_case_to_convention`
+then collapsed to a visibly nonsensical
+`{name:"UserService", expected:"pascal_case", actual:"pascal_case"}`
+self-violation. The flake had ~33% pass rate on
+`language_coverage_fixes_v1::test_n4_patterns_naming_no_single_word_violations`.
+The fix replaces the unstable reduction with a deterministic
+tie-break: (count desc, specificity desc, sort_key asc), where
+concrete conventions outrank degenerate single-word forms and a
+fixed enum-variant order resolves all remaining ties.
+
+### Changed
+
+- `crates/tldr-core/src/patterns/naming.rs:71-167` —
+  `detect_majority_convention` now sorts tied variants by a 3-tuple
+  `(count, specificity, Reverse(sort_key))` instead of count alone.
+  Two new helpers added: `naming_case_specificity` (concrete = 4,
+  degenerate = 2, Unknown = 0) and `naming_case_sort_key` (stable
+  enum-order: SnakeCase 0, CamelCase 1, PascalCase 2, UpperSnakeCase
+  3, LowerAlpha 4, UpperAlpha 5, Unknown 99). The `HashMap` is
+  retained as a count-accumulator (its iteration order no longer
+  affects output because the `max_by_key` tuple is total-ordered).
+
+### Architectural note
+
+The `language-coverage-fixes-v1` (P4.BUG-N4) fix added a new
+classification axis (concrete vs. degenerate) but only wired it
+through `is_compatible` (the violation-filter) and
+`naming_case_to_convention` (the JSON-output mapping). The
+*majority-detection* step (`detect_majority_convention`) was left
+on its pre-N4 logic — count-only — which created a latent
+non-determinism the moment two variants in the new axis could tie.
+The fix completes the wiring: concrete conventions now win
+tie-breaks against their degenerate siblings, restoring the
+invariant that "what `is_compatible` treats as a degenerate fallback
+of X" can never become the reported majority when a real X is
+present in the same count tier. The secondary `sort_key` covers the
+remaining cases (concrete-vs-concrete or degenerate-vs-degenerate
+ties) so `tldr patterns` is now bit-for-bit deterministic across
+repeated runs on the same input — a contract independently verified
+by `test_patterns_output_deterministic_across_repeats`.
+
+### Retained
+
+- All `language-coverage-fixes-v1` (P4.BUG-N4) production code:
+  `signals::detect_naming_case` returning `LowerAlpha`/`UpperAlpha`,
+  `is_compatible` ruling them compatible with adjacent concrete
+  conventions, `naming_case_to_convention` collapsing them to
+  `SnakeCase`/`PascalCase` for JSON-stable output.
+- All `naming-classifier-test-followup-v1` test realignments in
+  `schema_cleanup_v1::bug10_patterns_naming_violations_have_line`.
+- The 4-tuple `(name, case, file, line)` BUG-10 schema-cleanup-v1
+  contract.
+
+### Quantification
+
+| Suite | Before | After |
+| --- | --- | --- |
+| `language_coverage_fixes_v1::test_n4_*` (3 consecutive runs) | flaky (~1/3 passes per run) | 5/5 GREEN × 3/3 |
+| `naming_majority_determinism_v1` (new) | n/a | 2/2 GREEN |
+| `vuln_migration_v1_red` (master regression) | 168/168 | 168/168 |
+| `schema_cleanup_v1` | 10/11 | 10/11 (bug12 unrelated, pre-existing) |
+| `tldr-core::patterns::naming` (unit tests) | 5/5 | 5/5 |
+
+### Standing rules upheld
+
+- One atomic commit, one CHANGELOG entry, one local annotated tag
+- `Cargo.lock` not staged (explicit-add list only: 3 files)
+- No push, no `cargo publish`, no version bump (manifest stays at 0.3.0)
+- No `#[allow(...)]` suppression, no test weakening, no scope cuts —
+  the regression is fixed at the root cause (HashMap iteration
+  non-determinism), not by retrying flaky tests or pinning hash
+  seeds
+- No `git stash`, no destructive git
+- 168/168 master regression preserved
+- Binary reinstalled to `~/.cargo/bin/tldr` and `~/.local/bin/tldr`,
+  ad-hoc codesigned, semantic feature count = 3 (similar / semantic
+  / embed)
+
 ## naming-classifier-test-followup-v1 — internal milestone
 
 NOT a published release. Aligns one stale test left red by
