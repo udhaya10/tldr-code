@@ -401,6 +401,51 @@ fn get_node_name<'a>(node: Node<'a>, source: &'a [u8], lang: Language) -> Option
                     return Some(node_text(pat, source).to_string());
                 }
             }
+            // language-adapters-completeness-v1 (BUG-AGG12-9): the
+            // synthetic class node for an OCaml file is a
+            // `module_definition` (e.g. `module Make (V) = struct ... end`
+            // in dune's dag.ml). The grammar does not expose a `name`
+            // field on `module_definition`; the name lives on the
+            // first `module_name` child of the inner `module_binding`.
+            // P11's BUG-AGG-8 fix only addressed the function-level
+            // extractor (`value_definition` / `let_binding`); module
+            // wrappers remained nameless, surfacing as empty strings in
+            // every interface report for files that wrap their content
+            // in a functor or named module.
+            if node.kind() == "module_definition" {
+                let mut cursor = node.walk();
+                for child in node.children(&mut cursor) {
+                    if child.kind() == "module_binding" {
+                        let mut bind_cursor = child.walk();
+                        for bind_child in child.children(&mut bind_cursor) {
+                            if bind_child.kind() == "module_name" {
+                                return Some(node_text(bind_child, source).to_string());
+                            }
+                        }
+                    }
+                }
+            }
+            // `type t = { ... }` and similar — the type name is the
+            // first `type_constructor` (or fallback identifier) child.
+            if node.kind() == "type_definition" {
+                let mut cursor = node.walk();
+                for child in node.children(&mut cursor) {
+                    if child.kind() == "type_binding" {
+                        let mut bind_cursor = child.walk();
+                        for bind_child in child.children(&mut bind_cursor) {
+                            if matches!(
+                                bind_child.kind(),
+                                "type_constructor" | "type_constructor_path"
+                            ) {
+                                return Some(node_text(bind_child, source).to_string());
+                            }
+                        }
+                    }
+                    if matches!(child.kind(), "type_constructor" | "type_constructor_path") {
+                        return Some(node_text(child, source).to_string());
+                    }
+                }
+            }
         }
         Language::Lua | Language::Luau => {
             // Try the "name" field first (already done above), then check child nodes

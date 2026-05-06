@@ -1433,6 +1433,23 @@ fn index_elixir_module(index: &mut HashMap<String, PathBuf>, file_path: &Path, r
         }
     }
 
+    // language-adapters-completeness-v1 (BUG-AGG12-8): always derive
+    // the canonical Elixir module name from the relative path, not
+    // only when the path begins with `lib/` or `test/`. Users
+    // commonly run `tldr deps lib` (or another sub-dir of a Mix
+    // project) so the relative path strips the `lib/` prefix
+    // entirely. Without this fallback, every `alias My.Module` in
+    // the corpus failed to resolve and the deps report read
+    // `total_internal_deps: 0` despite hundreds of valid aliases.
+    let module_name = stem_str
+        .split('/')
+        .map(|part| part.split('_').map(capitalize_first).collect::<String>())
+        .collect::<Vec<_>>()
+        .join(".");
+    if !module_name.is_empty() {
+        index.entry(module_name).or_insert_with(|| fp.clone());
+    }
+
     if let Some(name) = stem.file_name() {
         let name_str = name.to_string_lossy();
         index

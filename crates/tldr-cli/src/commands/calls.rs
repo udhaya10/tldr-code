@@ -226,11 +226,35 @@ impl CallsArgs {
         }
         let shown_edges = edges.len();
 
-        // Build unique node set from truncated edges
+        // Build unique node set from truncated edges AND from every
+        // defined function in the project. The original derivation was
+        // edges-only, which under-reported the call graph for files like
+        // OCaml functor bodies (`module Make (V) = struct ... end`)
+        // whose let-bindings make external calls (`Format.fprintf`, …)
+        // that don't resolve to in-project targets. Phase-12 audit
+        // (BUG-AGG12-4) caught dag.ml reporting nodes=2 even though
+        // `tldr structure dag.ml` finds 19 functions. Including defined
+        // funcs as graph nodes (zero-out-degree where appropriate) gives
+        // every language a faithful node count: the call graph now
+        // exposes both call relationships AND the function inventory.
         let mut node_set = std::collections::BTreeSet::new();
         for edge in &edges {
             node_set.insert(format!("{}:{}", edge.src_file.display(), edge.src_func));
             node_set.insert(format!("{}:{}", edge.dst_file.display(), edge.dst_func));
+        }
+        for (file_path, file_ir) in &ir.files {
+            // FileIR paths are already normalized to forward-slash
+            // relative form; strip the canonicalized root just in case
+            // the FileIR happens to be absolute (defensive).
+            let rel = file_path.strip_prefix(&root).unwrap_or(file_path);
+            for func in &file_ir.funcs {
+                let qualified = if let Some(class) = &func.class_name {
+                    format!("{}.{}", class, func.name)
+                } else {
+                    func.name.clone()
+                };
+                node_set.insert(format!("{}:{}", rel.display(), qualified));
+            }
         }
         let nodes: Vec<String> = node_set.into_iter().collect();
 

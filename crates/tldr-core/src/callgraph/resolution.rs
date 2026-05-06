@@ -1616,17 +1616,45 @@ fn resolve_global_fuzzy_match(
             None => false,
         });
     }
-    if candidates.len() != 1 {
+    if candidates.len() == 1 {
+        let entry = candidates[0];
+        return Some(ResolvedTarget {
+            file: entry.file_path.clone(),
+            name: bare_target.to_string(),
+            line: Some(entry.line),
+            is_method: true,
+            class_name: entry.class_name.clone(),
+        });
+    }
+    if !candidates.is_empty() {
         return None;
     }
-    let entry = candidates[0];
-    Some(ResolvedTarget {
-        file: entry.file_path.clone(),
-        name: bare_target.to_string(),
-        line: Some(entry.line),
-        is_method: true,
-        class_name: entry.class_name.clone(),
-    })
+
+    // language-adapters-completeness-v1 (BUG-AGG12-7): CommonJS
+    // method-on-object assignments register as plain `FuncDef::function`
+    // entries (not methods), so the method-only filter above misses
+    // them. When no method matched and no receiver type was supplied,
+    // fall back to a unique function-level match by bare name. This is
+    // what lets `app.init()` in express/lib/express.js resolve to the
+    // `app.init = function init() { ... }` definition in
+    // express/lib/application.js.
+    if type_filter.is_none() {
+        let func_candidates: Vec<_> = func_index
+            .find_by_name(bare_target)
+            .filter(|e| !e.is_method)
+            .collect();
+        if func_candidates.len() == 1 {
+            let entry = func_candidates[0];
+            return Some(ResolvedTarget {
+                file: entry.file_path.clone(),
+                name: bare_target.to_string(),
+                line: Some(entry.line),
+                is_method: false,
+                class_name: entry.class_name.clone(),
+            });
+        }
+    }
+    None
 }
 
 fn resolve_type_aware_fallback(

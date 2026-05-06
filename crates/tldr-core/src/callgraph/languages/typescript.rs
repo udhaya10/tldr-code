@@ -329,6 +329,109 @@ impl TypeScriptHandler {
         None
     }
 
+    /// Test whether an `assignment_expression` is a top-level statement
+    /// in the program (i.e. its enclosing structure is
+    /// `program > expression_statement > assignment_expression`).
+    ///
+    /// language-adapters-completeness-v1 (BUG-AGG12-7): the
+    /// CommonJS-method pattern is only a *definition* when it lives at
+    /// module scope. Assignments nested inside a function body
+    /// (`function foo() { obj.method = function inner() {} }`) are local
+    /// behavior — surfacing them as additional call-graph definitions
+    /// would double-count calls under both the outer function and the
+    /// inner assignment.
+    fn is_top_level_assignment(node: &Node) -> bool {
+        let Some(parent) = node.parent() else {
+            return false;
+        };
+        if parent.kind() != "expression_statement" {
+            return false;
+        }
+        match parent.parent().map(|p| p.kind()) {
+            Some("program") => true,
+            // Module-level wrappers in TS files may add namespace
+            // declarations around top-level statements; treat those as
+            // module-scope too.
+            Some("module") | Some("internal_module") | Some("statement_block") => {
+                // statement_block can be the body of a function — only
+                // accept it when its parent is `program` (i.e. an IIFE
+                // pattern is intentionally still local).
+                false
+            }
+            _ => false,
+        }
+    }
+
+    /// Extract the function name from an `assignment_expression` whose
+    /// right-hand side is a function-like expression. Returns the name
+    /// the assigned function should be discoverable under for call-graph
+    /// resolution purposes.
+    ///
+    /// Handles these CommonJS / prototype-style patterns:
+    /// - `app.init = function init() { ... }` → `"init"` (named function preferred)
+    /// - `app.init = function() { ... }`      → `"init"` (property name fallback)
+    /// - `Foo.prototype.bar = function() {}`  → `"bar"`
+    /// - `obj.method = (x) => { ... }`        → `"method"`
+    /// - `handler = function() { ... }`       → `"handler"` (LHS identifier)
+    ///
+    /// Returns `None` when the RHS isn't a function-like expression or
+    /// no name can be extracted.
+    ///
+    /// language-adapters-completeness-v1 (BUG-AGG12-7): without this
+    /// extractor, the TS/JS handler skipped `obj.prop = function ...`
+    /// assignments entirely; Express-style codebases reported zero
+    /// resolved callers for every `app.method()` site.
+    fn extract_assignment_function_name(node: &Node, source: &[u8]) -> Option<String> {
+        let left = node.child_by_field_name("left")?;
+        let right = node.child_by_field_name("right")?;
+
+        // RHS must be a function-like expression.
+        if !matches!(
+            right.kind(),
+            "function_expression" | "function" | "arrow_function" | "generator_function"
+        ) {
+            return None;
+        }
+
+        // Prefer the named function expression's own name (preserves
+        // the most specific identifier). E.g. `app.init = function init()`
+        // — we use `init` rather than the LHS property which happens to
+        // also be `init`. For the more general
+        // `Express.application.method = function specific()` pattern,
+        // the named-function form is what call sites actually
+        // reference recursively.
+        if let Some(name_node) = right.child_by_field_name("name") {
+            let text = get_node_text(&name_node, source).to_string();
+            if !text.is_empty() {
+                return Some(text);
+            }
+        }
+
+        // Fall back to the LHS to recover the property/identifier name.
+        match left.kind() {
+            "identifier" => Some(get_node_text(&left, source).to_string()),
+            "member_expression" => {
+                // app.init / Foo.prototype.bar — final property is the
+                // method name.
+                if let Some(prop) = left.child_by_field_name("property") {
+                    return Some(get_node_text(&prop, source).to_string());
+                }
+                // Field-name lookup failed; pick the last
+                // property_identifier child as a defensive fallback.
+                let mut last_prop: Option<String> = None;
+                for i in 0..left.child_count() {
+                    if let Some(child) = left.child(i) {
+                        if child.kind() == "property_identifier" {
+                            last_prop = Some(get_node_text(&child, source).to_string());
+                        }
+                    }
+                }
+                last_prop
+            }
+            _ => None,
+        }
+    }
+
     /// Collect all function, class, and arrow function definitions.
     fn collect_definitions(
         &self,
@@ -387,6 +490,25 @@ impl TypeScriptHandler {
                 "method_definition" => {
                     if let Some(name_node) = node.child_by_field_name("name") {
                         functions.insert(get_node_text(&name_node, source).to_string());
+                    }
+                }
+                "assignment_expression" => {
+                    // language-adapters-completeness-v1 (BUG-AGG12-7):
+                    // CommonJS method-on-object pattern is ubiquitous in
+                    // Express-style JS code:
+                    //   app.init = function init() { ... }
+                    //   Foo.prototype.bar = function() { ... }
+                    //   handler = () => { ... }
+                    // Without this branch, the assigned function name
+                    // never reaches `defined_funcs`, so call sites like
+                    // `app.init()` route to `resolve_method_or_attr_call`
+                    // and silently fail to resolve in-project.
+                    if Self::is_top_level_assignment(&node) {
+                        if let Some(name) =
+                            Self::extract_assignment_function_name(&node, source)
+                        {
+                            functions.insert(name);
+                        }
                     }
                 }
                 "export_statement" => {
@@ -511,16 +633,43 @@ impl TypeScriptHandler {
                                             None,
                                         ));
                                     } else if let Some(obj) = obj_name {
-                                        let target = format!("{}.{}", obj, method);
-                                        calls.push(CallSite::new(
-                                            caller.to_string(),
-                                            target,
-                                            CallType::Attr,
-                                            Some(line),
-                                            None,
-                                            Some(obj),
-                                            None,
-                                        ));
+                                        // language-adapters-completeness-v1
+                                        // (BUG-AGG12-7): when the method
+                                        // name resolves to a CommonJS
+                                        // method-on-object definition in
+                                        // this file (`app.init = function
+                                        // init() { ... }`), classify the
+                                        // call as Intra with bare-name
+                                        // target so the resolver indexes
+                                        // it like a `this.method()` call.
+                                        // Without this, the call routes
+                                        // to `resolve_method_or_attr_call`
+                                        // and silently drops because the
+                                        // receiver `app` is just a plain
+                                        // object literal, not a class
+                                        // instance with a known type.
+                                        if defined_funcs.contains(&method) {
+                                            calls.push(CallSite::new(
+                                                caller.to_string(),
+                                                method.clone(),
+                                                CallType::Intra,
+                                                Some(line),
+                                                None,
+                                                Some(obj),
+                                                None,
+                                            ));
+                                        } else {
+                                            let target = format!("{}.{}", obj, method);
+                                            calls.push(CallSite::new(
+                                                caller.to_string(),
+                                                target,
+                                                CallType::Attr,
+                                                Some(line),
+                                                None,
+                                                Some(obj),
+                                                None,
+                                            ));
+                                        }
                                     }
                                 }
                             }
@@ -787,6 +936,49 @@ impl TypeScriptHandler {
             ));
         }
         if let Some(body) = node.child_by_field_name("body") {
+            calls.extend(self.extract_calls_from_node(
+                &body,
+                source,
+                defined_funcs,
+                defined_classes,
+                &caller_name,
+            ));
+        }
+
+        Some((caller_name, calls))
+    }
+
+    /// Extract calls from the body of a CommonJS / prototype-style
+    /// function assignment such as `app.init = function init() { ... }`.
+    ///
+    /// language-adapters-completeness-v1 (BUG-AGG12-7).
+    fn extract_calls_for_assignment_expression(
+        &self,
+        node: &Node,
+        source: &[u8],
+        defined_funcs: &HashSet<String>,
+        defined_classes: &HashSet<String>,
+    ) -> Option<(String, Vec<CallSite>)> {
+        let caller_name = Self::extract_assignment_function_name(node, source)?;
+        let right = node.child_by_field_name("right")?;
+        if !matches!(
+            right.kind(),
+            "function_expression" | "function" | "arrow_function" | "generator_function"
+        ) {
+            return None;
+        }
+
+        let mut calls = Vec::new();
+        if let Some(params) = right.child_by_field_name("parameters") {
+            calls.extend(self.extract_calls_from_params(
+                &params,
+                source,
+                defined_funcs,
+                defined_classes,
+                &caller_name,
+            ));
+        }
+        if let Some(body) = right.child_by_field_name("body") {
             calls.extend(self.extract_calls_from_node(
                 &body,
                 source,
@@ -1085,6 +1277,30 @@ impl TypeScriptHandler {
             ) {
                 continue;
             }
+            // language-adapters-completeness-v1 (BUG-AGG12-7): skip
+            // expression statements that wrap a CommonJS function
+            // assignment (`app.init = function init() { ... }`). Those
+            // calls are now attributed to the assigned function (caller
+            // = `init`) by `extract_calls_for_assignment_expression`,
+            // so including them again here would double-count every
+            // line of the assigned function under `<module>`.
+            if child.kind() == "expression_statement" {
+                if let Some(inner) = child.named_child(0) {
+                    if inner.kind() == "assignment_expression" {
+                        if let Some(right) = inner.child_by_field_name("right") {
+                            if matches!(
+                                right.kind(),
+                                "function_expression"
+                                    | "function"
+                                    | "arrow_function"
+                                    | "generator_function"
+                            ) {
+                                continue;
+                            }
+                        }
+                    }
+                }
+            }
             module_calls.extend(self.extract_calls_from_node(
                 &child,
                 source,
@@ -1375,6 +1591,30 @@ impl CallGraphLanguageSupport for TypeScriptHandler {
                         insert_calls_if_any(&mut calls_by_func, caller_name, calls);
                     }
                 }
+                "assignment_expression" => {
+                    // language-adapters-completeness-v1 (BUG-AGG12-7):
+                    // CommonJS pattern `app.method = function () { ... }`.
+                    // Walk the function body to capture every call made
+                    // FROM the assigned function so the call graph
+                    // includes both the assignment as a definition AND
+                    // the calls it makes.
+                    //
+                    // Limit to top-level assignment statements so we
+                    // don't double-attribute calls when the pattern
+                    // appears inside an enclosing function body.
+                    if Self::is_top_level_assignment(&node) {
+                        if let Some((caller_name, calls)) = self
+                            .extract_calls_for_assignment_expression(
+                                &node,
+                                source_bytes,
+                                &defined_funcs,
+                                &defined_classes,
+                            )
+                        {
+                            insert_calls_if_any(&mut calls_by_func, caller_name, calls);
+                        }
+                    }
+                }
                 "export_statement" => {
                     for (caller_name, calls) in self.extract_calls_for_export_statement(
                         &node,
@@ -1455,6 +1695,24 @@ impl CallGraphLanguageSupport for TypeScriptHandler {
                 }
                 "lexical_declaration" | "variable_declaration" => {
                     self.extract_variable_arrow_function_defs(&node, source_bytes, &mut funcs);
+                }
+                "assignment_expression" => {
+                    // language-adapters-completeness-v1 (BUG-AGG12-7):
+                    // mirror `collect_definitions` — recognize CommonJS
+                    // method-on-object assignments (`obj.method = function
+                    // name() { ... }`) so the FuncIndex contains the
+                    // assigned function. Without this entry,
+                    // cross-file/in-file resolution of `app.method()`
+                    // call sites silently fails.
+                    if Self::is_top_level_assignment(&node) {
+                        if let Some(name) =
+                            Self::extract_assignment_function_name(&node, source_bytes)
+                        {
+                            let line = node.start_position().row as u32 + 1;
+                            let end_line = node.end_position().row as u32 + 1;
+                            funcs.push(FuncDef::function(name, line, end_line));
+                        }
+                    }
                 }
                 "export_statement" => {
                     self.extract_exported_definitions(

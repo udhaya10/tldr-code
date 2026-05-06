@@ -1,5 +1,136 @@
 # Changelog
 
+## language-adapters-completeness-v1 — internal milestone
+
+NOT a published release. Third milestone shipped under the
+`no-synthetic-fixtures-v1` test architecture. Closes the four
+remaining P12-audit bugs covering language-adapter coverage gaps
+in JS/TS callgraph (CommonJS method-on-object), OCaml functor
+body call-graph node enumeration, OCaml interface module/functor
+wrapper naming, and Elixir mix-project deps + slice. All four
+bugs reproduced live on the HEAD release binary against
+`/tmp/repos/<corpus>` before any fix:
+
+| Bug ID         | Pre-fix repro                                                              | Pre-fix result            | Post-fix result          |
+|----------------|----------------------------------------------------------------------------|---------------------------|--------------------------|
+| P12.AGG12-4    | `tldr calls /tmp/repos/ocaml-dune/src/dag` `.nodes \| length`              | 2                         | 24 (matches structure)   |
+| P12.AGG12-7    | `tldr impact init /tmp/repos/express` callers count across CommonJS dunes  | 0 across init/handle/...  | 1+ for init, handle, ... |
+| P12.AGG12-8    | `tldr deps /tmp/repos/elixir-plug/lib` `.stats.total_internal_deps`        | 0                         | 18                       |
+| P12.AGG12-9    | `tldr interface /tmp/repos/ocaml-dune/src/dag/dag.ml` `.classes[0].name`   | `""`                      | `"Make"`                 |
+
+Tag: `language-adapters-completeness-v1`. Manifest stays at 0.3.0.
+
+### Fixed
+
+- `crates/tldr-core/src/callgraph/languages/typescript.rs`:
+  the JS/TS call-graph handler now recognises CommonJS
+  method-on-object assignments (`app.init = function init() {
+  ... }`, `Foo.prototype.bar = () => {}`, `handler = function()
+  {}`) at module scope. `collect_definitions` and
+  `extract_definitions` register the assigned function under its
+  callable name (preferring the named function expression's own
+  name, falling back to the LHS member-expression's
+  property/identifier). `extract_calls_from_node` classifies
+  `obj.method()` call sites as `CallType::Intra` with a
+  bare-name target when the method matches a defined CommonJS
+  function in the same file (mirroring `this.method()` handling).
+  A new `extract_calls_for_assignment_expression` walks the
+  assigned function's body so calls FROM the function are
+  attributed to the assigned name, not to `<module>` (the
+  module-level collector now skips top-level
+  `expression_statement > assignment_expression > function_*`
+  patterns to avoid double-counting). Top-level gating via
+  `is_top_level_assignment` keeps nested `obj.method = function
+  ...` patterns inside enclosing function bodies as local
+  behavior — they don't surface as additional definitions.
+  Phase-12 baseline reported zero callers for every Express
+  CommonJS method on `tldr impact <method> /tmp/repos/express`;
+  post-fix `init` shows 1 caller (createApplication), with
+  `defaultConfiguration`, `handle`, `render` also resolving
+  cross-file. (P12.BUG-AGG12-7)
+
+- `crates/tldr-core/src/callgraph/resolution.rs`:
+  `resolve_global_fuzzy_match` now falls back to a unique
+  function-level match by bare name when the method-only filter
+  finds nothing AND no receiver type was supplied. This is
+  required for the CommonJS pattern: assigned functions register
+  as `FuncDef::function` (not method), so the prior method-only
+  filter dropped them silently. Without this fallback, even with
+  the new TS extractor populating the func index, a cross-file
+  `app.init()` site couldn't resolve to `init` in
+  application.js. (P12.BUG-AGG12-7 — resolver arm)
+
+- `crates/tldr-cli/src/commands/calls.rs`: the call-graph output
+  now derives nodes from BOTH resolved edges AND every defined
+  function in `ir.files`, not edges alone. Pre-fix dag.ml
+  reported `nodes=2` while `tldr structure dag.ml` enumerated 24
+  functions: every let-binding inside the `module Make (Value)
+  () : ... = struct ... end` functor body emits external calls
+  (`Format.fprintf`, `IC.add_edge_or_detect_cycle`, `Id.gen`,
+  ...) that don't resolve to in-project targets, so they
+  contributed zero edges and zero nodes. The fix surfaces every
+  `FuncDef` (qualified by `class_name` when present) as a graph
+  node regardless of edge participation. Multi-language audit:
+  ocaml-dune/src/dag now reports nodes=24 (= structure func
+  count); larger directories (ocaml-dune/src/rpc nodes=250 vs
+  286 funcs, ocaml-dune/src/source nodes=403 vs 456) gain
+  proportionally. (P12.BUG-AGG12-4)
+
+- `crates/tldr-core/src/analysis/deps.rs`: `index_elixir_module`
+  now ALWAYS derives the canonical Elixir module name from the
+  full relative path, not only when the path begins with `lib/`
+  or `test/`. Users routinely run `tldr deps lib` (or another
+  Mix-project sub-dir) so the relative path strips `lib/`
+  entirely; the previous indexer skipped capitalization for
+  those calls and every `alias My.Module` in the corpus failed
+  to resolve. Plug under `tldr deps /tmp/repos/elixir-plug/lib`
+  jumps from 0 → 18 internal_deps; under `tldr deps
+  /tmp/repos/elixir-plug` (full repo) 0 → 83. (P12.BUG-AGG12-8)
+
+- `crates/tldr-cli/src/commands/patterns/interface.rs`:
+  `get_node_name` now handles the OCaml `module_definition` and
+  `type_definition` node kinds. P11's BUG-AGG-8 fix only walked
+  `value_definition` / `let_binding`, so files whose synthetic
+  class node is a `module_definition` (e.g. dune's
+  `dag.ml: module Make (V) = struct ... end`) reported
+  `classes[0].name = ""`. The new branch reads the first
+  `module_name` child of the inner `module_binding` for
+  modules/functors and the first `type_constructor` for type
+  aliases. Multi-file audit: dag.ml = "Make", io_buffer.ml = "t"
+  (P11 regression check holds), clflags.ml =
+  "on_missing_dune_project_file" (was empty). (P12.BUG-AGG12-9)
+
+### Tests
+
+- `crates/tldr-cli/tests/language_adapters_completeness_v1.rs`:
+  8 real-repo gated tests covering all four bugs. Each test
+  short-circuits when `/tmp/repos/<repo>` is absent (no
+  TempDir/inline-source synthetic fixtures, per the
+  `no-synthetic-fixtures-v1` rule). Tests:
+  `test_calls_ocaml_functor_body_resolved` (≥10 nodes),
+  `test_calls_ocaml_functor_baseline_consistent` (calls.nodes ≥
+  structure_funcs), `test_impact_js_commonjs_method_assignment`
+  (≥1 caller across init/handle/render/defaultConfiguration),
+  `test_explain_js_commonjs_callers` (cross-command
+  consistency), `test_deps_elixir_resolves_alias` (≥10),
+  `test_slice_elixir_returns_lines` (≥1 line for assign/316),
+  `test_interface_ocaml_module_name_populated` (dag.ml = "Make"),
+  `test_interface_ocaml_io_buffer_unchanged` (P11 regression
+  check).
+
+### Mini-audit
+
+Mini-audit on touched commands across 5+ real repos confirms 0
+regressions vs Phase-12 baseline. `calls`, `impact`, `explain`,
+`deps`, `slice`, `chop`, `interface` exercised on express,
+ocaml-dune, elixir-plug, lua-lsp, ts-dom-gen, ripgrep with
+healthy non-zero outputs. Pre-existing failures unchanged
+(`elixir_method_infos_v1` expects a `methods` key not present in
+output schema; `med_cleanup_bundle_v1::m14_smells_notes_deep_only_analyzers`
+expects stderr text the determinism milestone moved to
+`SmellsReport.warnings`). Neither failure is in the four
+required milestone test files.
+
 ## verification-and-metrics-completeness-v1 — internal milestone
 
 NOT a published release. Second milestone shipped under the
