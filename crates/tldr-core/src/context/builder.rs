@@ -240,6 +240,63 @@ fn find_function_in_graph(
     project: &Path,
     file_filter: Option<&Path>,
 ) -> TldrResult<(PathBuf, String)> {
+    // context-file-func-cross-lang-and-cpp-qualified-v1
+    // (P14.AGG13-5 generalization): when the caller supplied an
+    // explicit file path (typically via the `<file>:<func>` shorthand
+    // or `--file`), we already KNOW which file to inspect. Extract
+    // that file directly BEFORE falling back to the call-graph or
+    // tree-walking scan. This covers two cross-language failure
+    // modes that share a root cause:
+    //
+    //   - OCaml `path/.../vendor/x.ml:fn`: the project tree-walker
+    //     skips `vendor/` (DEFAULT_SKIP_DIRS), so `scan_project_for_function`
+    //     never visits the file even though the user pointed us at it.
+    //   - TypeScript `src/build/x.ts:fn`: the walker skips `build/`
+    //     (build sink), with the same outcome.
+    //
+    // Direct extraction is bounded (single file), respects the
+    // existing `find_function_info` matcher, and only runs when the
+    // caller has actually pinned a file — so it has no effect on the
+    // unrestricted `tldr context fn` flow.
+    if let Some(filter) = file_filter {
+        let abs = if filter.is_absolute() {
+            filter.to_path_buf()
+        } else {
+            project.join(filter)
+        };
+        if abs.is_file() {
+            if let Ok(module_info) = extract_file(&abs, Some(project)) {
+                if find_function_info(&module_info, func_name).is_some() {
+                    // Return a project-relative path when possible so
+                    // downstream consumers (caching, file-extract) can
+                    // canonicalise consistently with the rest of the
+                    // graph. Absolute path is fine too — `extract_file`
+                    // accepts both.
+                    let rel = abs.strip_prefix(project).unwrap_or(&abs).to_path_buf();
+                    return Ok((rel, func_name.to_string()));
+                }
+                // Class-method form: ClassName.method
+                if let Some(dot_idx) = func_name.find('.') {
+                    let class_name = &func_name[..dot_idx];
+                    let method_name = &func_name[dot_idx + 1..];
+                    for class in &module_info.classes {
+                        if class.name == class_name {
+                            for method in &class.methods {
+                                if method.name == method_name {
+                                    let rel = abs
+                                        .strip_prefix(project)
+                                        .unwrap_or(&abs)
+                                        .to_path_buf();
+                                    return Ok((rel, func_name.to_string()));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // language-adapter-fixes-v1 (P13.AGG13-5): the call graph stores
     // project-relative paths (`lib/application.js`) but `file_filter`
     // arrives as an absolute path (the user typed
@@ -400,6 +457,39 @@ fn scan_project_for_function(
                     }
                 }
             }
+            // context-file-func-cross-lang-and-cpp-qualified-v1
+            // (P14.AGG14-3): also accept the C++ `Class::method`
+            // qualified form when scanning, so that
+            // `tldr context Class::method --file foo.cpp` resolves
+            // the same way the per-function commands do.
+            if func_name.contains("::") {
+                let parts: Vec<&str> = func_name.split("::").collect();
+                if parts.len() >= 2 {
+                    let class_name = parts[0];
+                    let method_name = *parts.last().unwrap();
+                    for class in &module_info.classes {
+                        if class.name == class_name {
+                            for method in &class.methods {
+                                if method.name == method_name {
+                                    return Ok(Some((file_path, func_name.to_string())));
+                                }
+                            }
+                        }
+                    }
+                    for func in &module_info.functions {
+                        if func.name == method_name {
+                            return Ok(Some((file_path, func_name.to_string())));
+                        }
+                    }
+                    for class in &module_info.classes {
+                        for method in &class.methods {
+                            if method.name == method_name {
+                                return Ok(Some((file_path, func_name.to_string())));
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -532,6 +622,54 @@ fn find_function_info<'a>(
             for class in &module_info.classes {
                 for method in &class.methods {
                     if method.name == last {
+                        return Some(method);
+                    }
+                }
+            }
+        }
+    }
+
+    // context-file-func-cross-lang-and-cpp-qualified-v1 (P14.AGG14-3):
+    // Accept C++ `Class::method` qualified names. The C++ extractor
+    // currently stores the rightmost identifier (`Parse`) for both
+    // inline class methods and out-of-class `void XMLDocument::Parse`
+    // definitions, so we look for the bare last segment in either
+    // top-level functions OR in any class's methods. When the parent
+    // class scope IS present (inline definitions), we additionally
+    // prefer the matching class scope so disambiguation is preserved.
+    if func_name.contains("::") {
+        let parts: Vec<&str> = func_name.split("::").collect();
+        if parts.len() >= 2 {
+            let class_name = parts[0];
+            let method_name = *parts.last().unwrap();
+            // Prefer the matching class scope when present (inline
+            // definitions live in the same translation unit as the
+            // class body — typical for header files).
+            for class in &module_info.classes {
+                if class.name == class_name {
+                    for method in &class.methods {
+                        if method.name == method_name {
+                            return Some(method);
+                        }
+                    }
+                }
+            }
+            // Fall back to bare last-segment match against top-level
+            // functions (covers `void Class::method() {...}`
+            // out-of-class definitions in `.cpp` files where the class
+            // body lives in a separate `.h`).
+            for func in &module_info.functions {
+                if func.name == method_name {
+                    return Some(func);
+                }
+            }
+            // And bare last-segment match in any class body — handles
+            // mixed cases where the class node IS in the file but
+            // doesn't match `class_name` exactly (e.g. anonymous
+            // namespaces, nested classes).
+            for class in &module_info.classes {
+                for method in &class.methods {
+                    if method.name == method_name {
                         return Some(method);
                     }
                 }

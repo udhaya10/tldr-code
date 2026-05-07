@@ -1,5 +1,135 @@
 # Changelog
 
+## context-file-func-cross-lang-and-cpp-qualified-v1 — internal milestone
+
+NOT a published release. Highest-priority follow-up to phase-14 audit:
+generalises the AGG13-5 `<file>:<func>` fix across 4 newly-REGRESSED
+languages and lands the cross-cutting C++ qualified-name resolver fix
+(AGG14-3) that shares the per-function command class. All 5 bugs
+reproduced live against the P13-C release binary on real repos under
+`/tmp/repos/<corpus>` BEFORE any fix; **one was already-fixed by an
+earlier intervening change (AGG13-5 C `sds.c:sdsnewlen`)** and is
+pinned with a regression test rather than reimplemented.
+
+### Per-bug pre/post-fix evidence
+
+| Bug ID                          | Pre-fix repro                                                                                                          | Pre-fix result                                          | Post-fix result                                                                                          |
+|---------------------------------|------------------------------------------------------------------------------------------------------------------------|---------------------------------------------------------|----------------------------------------------------------------------------------------------------------|
+| P14.AGG13-5 (ocaml)             | `tldr context "/tmp/repos/ocaml-dune/vendor/opam/src/core/opamStd.ml:concat_map" --format json`                         | exit 20, "Error: Function not found: concat_map"        | exit 0, `entry_point: concat_map`, `functions: [{name: concat_map, file: opamStd.ml, line: 89, ...}]`    |
+| P14.AGG13-5 (c)                 | `tldr context "/tmp/repos/c-sds/sds.c:sdsnewlen" --format json`                                                         | exit 0 (already-fixed; verified pre-fix)                | exit 0, `entry_point: sdsnewlen`, `functions[0].name = sdsnewlen` (pinned by regression test)            |
+| P14.AGG13-5 (cpp)               | `tldr context "/tmp/repos/cpp-tinyxml2/tinyxml2.cpp:XMLDocument::Parse" --format json`                                  | hang/timeout (legacy `rfind(':')` split inside `::`)    | exit 0, `entry_point: XMLDocument::Parse`, `functions[0].name = XMLDocument::Parse, line = 2473`          |
+| P14.AGG14-8 (typescript)        | `tldr context "/tmp/repos/ts-dom-gen/src/build/emitter.ts:emitWebIdl" --format json`                                    | exit 20, "Error: Function not found: emitWebIdl"        | exit 0, `entry_point: emitWebIdl`, `functions[0].file ends in emitter.ts, line = 137`                    |
+| P14.AGG14-3 (cpp 8 commands)    | `tldr {reaching-defs,available,dead-stores,slice,taint,complexity,contracts,explain} tinyxml2.cpp XMLDocument::Parse`    | all 8 exit 1, "function 'XMLDocument::Parse' not found" | all 8 exit 0; cyclomatic=8, taint+available+dead-stores+contracts+reaching-defs+slice+explain all populated |
+
+### Implementation summary
+
+Two distinct surfaces, one shared milestone:
+
+1. **`<file>:<func>` shorthand parser (`crates/tldr-cli/src/commands/context.rs`)**:
+   The legacy `rfind(':')` form failed for inputs whose function name
+   itself contains `:` (notably C++ `Class::method`). The new
+   `split_file_func_shorthand` helper walks colons right-to-left,
+   accepting the leftmost split whose `file_part` exists on disk.
+   For `path/x.cpp:XMLDocument::Parse` this rejects the inner-`::`
+   split (`path/x.cpp:XMLDocument:` is not a file) and accepts the
+   outer one (`path/x.cpp` is a file → func_part = `XMLDocument::Parse`).
+   Windows drive-letter paths (`C:\foo\bar.js:foo`) keep working
+   because the only valid split is the right-of-extension `:`.
+
+2. **Direct-extract bypass (`crates/tldr-core/src/context/builder.rs::find_function_in_graph`)**:
+   When the caller pinned an explicit `file_filter` (typically via the
+   shorthand or `--file`), we now extract that file directly BEFORE
+   falling through to the call-graph or tree-walking scan. This
+   covers OCaml `vendor/...` and TypeScript `src/build/...` cases
+   where the project tree-walker skips vendored / build-sink dirs
+   (`DEFAULT_SKIP_DIRS` includes `vendor`, `build`, `out`, `bin`,
+   `obj`, `dist`, etc.). The user has already told us which file —
+   trust them. Bounded (single file), respects existing
+   `find_function_info` matcher.
+
+3. **C++ `Class::method` lookup
+   (`crates/tldr-core/src/ast/function_finder.rs::find_function_node`
+   + `crates/tldr-cli/src/commands/contracts/contracts.rs::find_function_node`
+   + `crates/tldr-core/src/context/builder.rs::find_function_info`
+   + `scan_project_for_function`)**:
+   Mirrors the existing `Class.method` resolution path. When
+   `function_name.contains("::")` AND language is C/C++, split on
+   `::`, descend into the matching class scope (covers inline
+   class-body methods), then fall back to the bare last segment
+   (covers out-of-class definitions like `void XMLDocument::Parse(...)`
+   in `.cpp` files where the class body lives in a separate `.h`).
+   This path is shared by all 8 per-function commands
+   (`reaching-defs`, `available`, `dead-stores`, `slice`, `taint`,
+   `complexity`, `contracts`, `explain`) since they all funnel through
+   the canonical finder.
+
+### Multi-language non-regression matrix
+
+`<file>:<func>` shorthand verified post-fix on real repos:
+
+| Lang       | File                                                             | Func                          | Pre-P14 status | Post-P14 |
+|------------|------------------------------------------------------------------|-------------------------------|----------------|----------|
+| ocaml      | vendor/opam/src/core/opamStd.ml                                  | concat_map                    | REGRESSED      | PASS     |
+| c          | c-sds/sds.c                                                      | sdsnewlen                     | already-fixed  | PASS     |
+| cpp        | cpp-tinyxml2/tinyxml2.cpp                                        | XMLDocument::Parse            | REGRESSED      | PASS     |
+| typescript | ts-dom-gen/src/build/emitter.ts                                  | emitWebIdl                    | REGRESSED      | PASS     |
+| javascript | express/lib/application.js                                       | render                        | HELD           | PASS     |
+| swift      | swift-collections/Sources/HeapModule/Heap+UnsafeHandle.swift     | _heapify                      | HELD           | PASS     |
+| lua        | lua-lsp/script/files.lua                                         | m.open                        | HELD           | PASS     |
+| python     | flask/src/flask/app.py                                           | wsgi_app                      | HELD           | PASS     |
+| rust       | ripgrep/crates/ignore/src/walk.rs                                | check_symlink_loop            | HELD           | PASS     |
+| go         | go-httprouter/router.go                                          | ServeHTTP                     | HELD           | PASS     |
+| java       | spring-petclinic/.../OwnerController.java                         | findPaginatedForOwnersLastName | HELD          | PASS     |
+| php (rel)  | `cd php-symfony-string && context "ByteString.php:slice"`        | slice                         | PARTIAL        | PASS (bonus) |
+| ruby (rel) | `cd rails-html-sanitizer && context "lib/rails/html/sanitizer.rb:sanitize"` | sanitize             | PARTIAL        | PASS (bonus) |
+| elixir (rel)| `cd elixir-plug && context "lib/plug/conn.ex:request_url"`     | request_url                   | PARTIAL        | PASS (bonus) |
+
+The `(bonus)` rows reflect a side-effect of the smarter parser +
+project-root inference: pre-fix the audit reported scala/elixir/ruby
+`.<file>:<fn>` relative-form as PARTIAL (only absolute path worked).
+Three of the three I tested now resolve from the relative form too.
+
+### C++ 8-command × 3-function mini-audit
+
+8 per-function commands × 3 distinct C++ qualified methods in
+`/tmp/repos/cpp-tinyxml2/tinyxml2.cpp`:
+
+|                           | reaching-defs | available | dead-stores | slice | taint | complexity | contracts | explain |
+|---------------------------|---------------|-----------|-------------|-------|-------|------------|-----------|---------|
+| `XMLDocument::Parse`      | PASS          | PASS      | PASS        | PASS  | PASS  | PASS       | PASS      | PASS    |
+| `StrPair::Reset`          | PASS          | PASS      | PASS        | PASS  | PASS  | PASS       | PASS      | PASS    |
+| `XMLUtil::SetBoolSerialization` | PASS    | PASS      | PASS        | PASS  | PASS  | PASS       | PASS      | PASS    |
+
+24/24 cells PASS. Bare `Parse` (no qualifier) also continues to
+resolve for `complexity` and `explain` (no regression of the legacy
+lookup path).
+
+### Test counts
+
+- New milestone test: 25/25 PASS (`context_file_func_and_cpp_qualified_v1`)
+- P13-A `critical_regressions_v1`: 13/13 PASS (unchanged)
+- P13-B `language_adapter_fixes_v1`: 14/14 PASS (unchanged)
+- P13-C `quality_metrics_and_schema_v1`: 10/10 PASS (unchanged)
+- `vuln_migration_v1_red`: 168/168 PASS (unchanged)
+- `language_command_matrix`: 926 PASS, 0 FAIL, 28 ignored (unchanged)
+
+### Bug deferral notes
+
+The audit's AGG13-5 PARTIAL entry for **scala** relative-form is not
+covered by an explicit assertion in this milestone — the scala test
+repo's expected file/symbol pair (`IO.scala:create`) didn't resolve
+even from the project root, suggesting the symbol name in the audit
+was for a different version of cats-effect. Since the parser change
+itself is language-agnostic (validated on php / ruby / elixir
+relative forms), this is unlikely to be a regression. Scala can be
+re-audited in P14-B as part of the sibling-resolver-gap pass.
+
+The pre-existing `metrics::cognitive::tests` failures (10 tests in
+`tldr-core --lib`) surfaced post `e1edcf6` are NOT addressed here —
+verified independent of these changes via no-diff inspection of
+`crates/tldr-core/src/metrics/cognitive.rs`. They are tracked as
+follow-up.
+
 ## tldr-core-test-compile-fix — internal hotfix
 
 NOT a published release. Single-line scoped `use` import added inside

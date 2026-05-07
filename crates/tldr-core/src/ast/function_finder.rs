@@ -91,6 +91,54 @@ pub fn find_function_node<'a>(
         }
     }
 
+    // context-file-func-cross-lang-and-cpp-qualified-v1 (P14.AGG14-3):
+    // Accept C++ `Class::method` qualified names so that the 8 per-function
+    // commands (`reaching-defs`, `available`, `dead-stores`, `slice`,
+    // `taint`, `complexity`, `contracts`, `explain`) can resolve a function
+    // by its fully-qualified out-of-class definition. The C++ extractor
+    // stores the bare last segment (`Parse`) for both inline class methods
+    // and out-of-class definitions, so first try a direct match on the
+    // qualified form (in case the extractor returned a qualified name —
+    // see `find_function_node_in_subtree` C/C++ branch below), then
+    // descend into the class scope (covers inline definitions inside the
+    // class body), and finally fall back to the bare last segment so a
+    // call like `XMLDocument::Parse` still resolves to the out-of-class
+    // `void XMLDocument::Parse(...)` definition.
+    if function_name.contains("::")
+        && matches!(language, Language::C | Language::Cpp)
+    {
+        // Try the full qualified form first — handles the (rare) case
+        // where the extractor returned the qualified text verbatim.
+        if let Some(found) = find_function_node_in_subtree(root, function_name, language, source)
+        {
+            return Some(found);
+        }
+        let parts: Vec<&str> = function_name.split("::").collect();
+        if parts.len() >= 2 {
+            // class scope resolution: e.g. XMLDocument::Parse
+            let class_name = parts[0];
+            let remainder = parts[1..].join("::");
+            if let Some(class_node) = find_class_node(root, class_name, language, source) {
+                let scope = class_node
+                    .child_by_field_name("body")
+                    .unwrap_or(class_node);
+                if let Some(found) =
+                    find_function_node_in_subtree(scope, &remainder, language, source)
+                {
+                    return Some(found);
+                }
+            }
+            // Graceful fallback: bare last segment (e.g. `Parse`).
+            // This is what tinyxml2.cpp's out-of-class definitions are
+            // stored as in the AST — `void XMLDocument::Parse() {...}`
+            // appears as `function_definition` with declarator
+            // `qualified_identifier`, and our extractor returns the
+            // rightmost identifier (`Parse`) for both lookup and storage.
+            let last = *parts.last().unwrap();
+            return find_function_node_in_subtree(root, last, language, source);
+        }
+    }
+
     find_function_node_in_subtree(root, function_name, language, source)
 }
 

@@ -1032,6 +1032,31 @@ fn find_function_node<'a>(
             return find_function_recursive(root, last, source, config, 0);
         }
     }
+    // context-file-func-cross-lang-and-cpp-qualified-v1 (P14.AGG14-3):
+    // Accept C++ `Class::method` qualified form. The C++ extractor
+    // stores the bare last segment for both inline class methods and
+    // out-of-class definitions (`void XMLDocument::Parse(...) {...}`),
+    // so we descend into the matching class scope first and fall back
+    // to a bare-name search using the rightmost `::`-separated segment.
+    if function_name.contains("::") {
+        let parts: Vec<&str> = function_name.split("::").collect();
+        if parts.len() >= 2 {
+            let class_name = parts[0];
+            let remainder = parts[1..].join("::");
+            if let Some(class_node) = find_class_node_contracts(root, class_name, source) {
+                let scope = class_node
+                    .child_by_field_name("body")
+                    .unwrap_or(class_node);
+                if let Some(found) =
+                    find_function_recursive(scope, &remainder, source, config, 0)
+                {
+                    return Some(found);
+                }
+            }
+            let last = *parts.last().unwrap();
+            return find_function_recursive(root, last, source, config, 0);
+        }
+    }
     // Recursive search through the entire AST
     find_function_recursive(root, function_name, source, config, 0)
 }

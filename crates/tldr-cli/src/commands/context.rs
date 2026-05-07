@@ -66,37 +66,30 @@ impl ContextArgs {
 
         let mut project_path = self.effective_project();
 
-        // language-adapter-fixes-v1 (P13.AGG13-5): accept the
-        // `<file>:<func>` shorthand so users can disambiguate common
-        // function names without typing `--file` separately. The shape
-        // mirrors `tldr explain <file> <func>` and `tldr resources
-        // <file> <func>`. We split on the LAST `:` so paths with
-        // Windows drive letters (`C:\foo\bar.js:foo`) still resolve
-        // file=`C:\foo\bar.js` / func=`foo`. If the file half does not
-        // exist on disk, fall back to the legacy bare-name behaviour
-        // so genuine names containing `:` (e.g. C++ `Class::method`,
-        // Rust `mod::fn`) still parse.
+        // language-adapter-fixes-v1 (P13.AGG13-5) /
+        // context-file-func-cross-lang-and-cpp-qualified-v1 (P14.AGG13-5,
+        // AGG14-8): accept the `<file>:<func>` shorthand so users can
+        // disambiguate common function names without typing `--file`
+        // separately. The shape mirrors `tldr explain <file> <func>` and
+        // `tldr resources <file> <func>`.
         //
-        // When the shorthand resolves and the user did not supply an
-        // explicit project path (positional or `--project`), infer the
-        // project root from the file's enclosing directory — walking up
-        // until we find a likely repo marker (`.git`, package manifest,
-        // etc.) or fall back to the file's parent. This mirrors what a
-        // user manually types: `cd /tmp/repos/express && tldr context
-        // render`.
-        let (entry, derived_file): (String, Option<PathBuf>) = match self.entry.rfind(':') {
-            Some(idx) if idx > 0 && idx + 1 < self.entry.len() => {
-                let file_part = &self.entry[..idx];
-                let func_part = &self.entry[idx + 1..];
-                let candidate = PathBuf::from(file_part);
-                if candidate.is_file() && !func_part.is_empty() {
-                    (func_part.to_string(), Some(candidate))
-                } else {
-                    (self.entry.clone(), None)
-                }
-            }
-            _ => (self.entry.clone(), None),
-        };
+        // We walk colons RIGHT-TO-LEFT and pick the leftmost split whose
+        // file_part exists on disk. The legacy single-rfind form failed
+        // for C++ qualified names because
+        // `path/x.cpp:XMLDocument::Parse`'s last `:` lands inside `::`,
+        // leaving file_part = `path/x.cpp:XMLDocument:` which is not a
+        // file. Walking colons backward fixes this: the second-to-last
+        // colon yields file_part = `path/x.cpp` (valid file) and
+        // func_part = `XMLDocument::Parse` — the form the per-function
+        // lookup now accepts (P14.AGG14-3 in `find_function_node`).
+        // Windows drive letters (`C:\foo\bar.js:foo`) keep working
+        // because the leftmost split where `C:\foo\bar.js` is a file
+        // wins (the earlier `C:` split returns a non-file).
+        let (entry, derived_file): (String, Option<PathBuf>) =
+            match split_file_func_shorthand(&self.entry) {
+                Some((file, func)) => (func, Some(file)),
+                None => (self.entry.clone(), None),
+            };
 
         // The user-supplied --file (if any) wins over the derived form so
         // explicit flags always take precedence over inferred shorthands.
@@ -173,6 +166,53 @@ impl ContextArgs {
         }
 
         Ok(())
+    }
+}
+
+/// Parse the `<file>:<func>` shorthand argument into a `(file_path,
+/// func_name)` pair, walking colons right-to-left to find the leftmost
+/// split point whose file_part exists on disk.
+///
+/// context-file-func-cross-lang-and-cpp-qualified-v1
+/// (P14.AGG13-5 / AGG14-3): the legacy `rfind(':')` form failed for
+/// names that themselves contain `:` (notably C++ `Class::method`).
+/// For input `path/x.cpp:XMLDocument::Parse` we now try the rightmost
+/// colon first (file_part = `path/x.cpp:XMLDocument:`, not a file →
+/// reject), then the next colon (file_part = `path/x.cpp`, valid →
+/// accept) and emit func_part = `XMLDocument::Parse`. This keeps
+/// Windows drive-letter paths working (`C:\foo\bar.js:foo` returns the
+/// `C:\foo\bar.js` split because the earlier `C:` split is not a file).
+///
+/// Returns `None` when no split is valid; callers fall back to the
+/// bare-name interpretation for genuine names containing `:` like
+/// `Module::Sub::fn` invoked without a file prefix.
+fn split_file_func_shorthand(entry: &str) -> Option<(PathBuf, String)> {
+    let mut idx = entry.rfind(':')?;
+    loop {
+        if idx == 0 || idx + 1 >= entry.len() {
+            // Search further-left colons (idx==0 means leading ':').
+            match entry[..idx].rfind(':') {
+                Some(prev) => {
+                    idx = prev;
+                    continue;
+                }
+                None => return None,
+            }
+        }
+        let file_part = &entry[..idx];
+        let func_part = &entry[idx + 1..];
+        // func_part starts with `:` => we landed inside a `::` group;
+        // the next iteration will move further left, but the candidate
+        // file_part is also invalid as a file in that case (ends with
+        // `:`), so a single `is_file()` check correctly rejects it.
+        let candidate = PathBuf::from(file_part);
+        if candidate.is_file() && !func_part.is_empty() && !func_part.starts_with(':') {
+            return Some((candidate, func_part.to_string()));
+        }
+        match entry[..idx].rfind(':') {
+            Some(prev) => idx = prev,
+            None => return None,
+        }
     }
 }
 
