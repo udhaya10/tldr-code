@@ -283,18 +283,70 @@ fn collect_source_files(path: &Path, language: Language) -> ContractsResult<Vec<
 }
 
 /// Find test directories by convention.
+///
+/// critical-regressions-v1 (P13.AGG13-7): extends discovery to include
+/// Maven/Gradle (`src/test/java`, `src/test/kotlin`, `src/test/scala`,
+/// `src/test/groovy`) and MSBuild (`*Tests/`, `*.Tests/`, `Src/*Tests/`)
+/// layouts. Previously only top-level `tests/`, `test/` were probed, so
+/// `tldr verify` on a Spring/Maven project reported `error: "No test
+/// directory found"` despite `src/test/java` clearly existing.
 fn find_test_dirs(project_path: &Path) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
 
-    // Check common test directory names
-    for name in &["tests", "test"] {
+    // Check common test directory names (top-level).
+    for name in &["tests", "test", "Tests", "Test", "spec", "specs", "__tests__"] {
         let dir = project_path.join(name);
         if dir.is_dir() {
             candidates.push(dir);
         }
     }
 
-    // Check for test_*.py files in the project root
+    // Maven / Gradle / sbt layouts: `src/test/<lang>`.
+    let src_test = project_path.join("src").join("test");
+    if src_test.is_dir() {
+        candidates.push(src_test.clone());
+        // Also add language-scoped subdirs explicitly (java/kotlin/scala/groovy/resources)
+        // so downstream walkers stop at language roots when src/test/ contains
+        // non-source folders too.
+        for lang_sub in &["java", "kotlin", "scala", "groovy", "resources"] {
+            let sub = src_test.join(lang_sub);
+            if sub.is_dir() && !candidates.iter().any(|p| p == &sub) {
+                candidates.push(sub);
+            }
+        }
+    }
+
+    // MSBuild C# layout: project sibling `*Tests` or `*.Tests` directories
+    // at top-level or under `Src/`/`src/` (case-insensitive on macOS, exact
+    // on linux — read both forms).
+    for parent in &[project_path.to_path_buf(), project_path.join("src"), project_path.join("Src")]
+    {
+        if !parent.is_dir() {
+            continue;
+        }
+        if let Ok(entries) = std::fs::read_dir(parent) {
+            for entry in entries.filter_map(|e| e.ok()) {
+                let path = entry.path();
+                if !path.is_dir() {
+                    continue;
+                }
+                let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                    continue;
+                };
+                if name.ends_with("Tests")
+                    || name.ends_with(".Tests")
+                    || name.ends_with("Test")
+                    || name.ends_with(".Test")
+                {
+                    if !candidates.iter().any(|p| p == &path) {
+                        candidates.push(path);
+                    }
+                }
+            }
+        }
+    }
+
+    // Check for test_*.py files in the project root (legacy pytest layout).
     if let Ok(entries) = std::fs::read_dir(project_path) {
         for entry in entries.filter_map(|e| e.ok()) {
             let path = entry.path();

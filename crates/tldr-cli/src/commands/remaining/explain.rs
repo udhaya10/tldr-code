@@ -1401,6 +1401,16 @@ fn enrich_with_project_graph(
         Err(_) => return,
     };
 
+    // critical-regressions-v1 (P13.AGG13-2): when the user supplies a Swift
+    // file that defines the function in an `extension Heap { ... }` (or a
+    // nested type's extension), the Swift call-graph builder may attribute
+    // the target's `dst_file` to the FIRST file it processed for that
+    // class (e.g. `Heap.swift`), not the file where the method actually
+    // lives (`Heap+UnsafeHandle.swift`). The strict `paths_equivalent`
+    // filter then drops every real caller. Confirm whether the function
+    // truly lives in the user-supplied file by AST scan; if so, accept
+    // callers from any homonym target.
+    let function_defined_in_file = function_is_defined_in_file(file, function, language);
     // Callers: use the same path `tldr impact` uses so the results agree.
     if let Ok(impact) = impact_analysis_with_ast_fallback(
         &graph,
@@ -1413,8 +1423,10 @@ fn enrich_with_project_graph(
         for tree in impact.targets.values() {
             // Only enrich when the target's file matches our subject file —
             // explain is per-function-per-file, so cross-file callers of a
-            // homonym in a different file should not be merged in.
-            if !paths_equivalent(&tree.file, file) {
+            // homonym in a different file should not be merged in. The
+            // `function_defined_in_file` escape hatch covers the Swift
+            // extension case described above.
+            if !paths_equivalent(&tree.file, file) && !function_defined_in_file {
                 continue;
             }
             for caller in &tree.callers {
@@ -1501,39 +1513,119 @@ fn enrich_with_references(
     let mut file_funcs_cache: HashMap<std::path::PathBuf, Vec<(String, u32, u32)>> = HashMap::new();
 
     for r in &report_refs.references {
-        let ref_path = &r.file;
-        let funcs = file_funcs_cache.entry(ref_path.clone()).or_insert_with(|| {
-            collect_functions_with_bounds(ref_path)
-        });
-        // Find enclosing function whose [line_start..=line_end] contains r.line.
-        let enclosing = funcs
-            .iter()
-            .find(|(_, start, end)| {
-                let line = r.line as u32;
-                line >= *start && (*end == 0 || line <= *end)
-            })
-            .map(|(name, _, _)| name.clone());
-
-        let caller_name = match enclosing {
-            Some(n) => n,
-            // Fall back to "<module>" for top-level call sites, mirroring
-            // call-graph entry-point semantics.
-            None => "<module>".to_string(),
-        };
-        let caller_file = ref_path.display().to_string();
-
-        // Skip self-reference: call inside the target function in the
-        // target file (the AST hit at the definition or recursive call).
-        if explain_names_match(&caller_name, function) && paths_equivalent(ref_path, file) {
-            continue;
-        }
-        if caller_already_present(&report.callers, &caller_name, &caller_file) {
-            continue;
-        }
-        report
-            .callers
-            .push(CallInfo::new(caller_name, caller_file, r.line as u32));
+        push_caller_from_reference(report, file, function, r, &mut file_funcs_cache);
     }
+
+    // critical-regressions-v1 (P13.AGG13-12): Lua's cross-module-alias call
+    // graph does not always resolve `<alias>.<method>(...)` to the
+    // matching `function m.<method>` definition (the `m.reset` case
+    // happened to resolve via the call-graph but `m.open` did not — see
+    // audit cell). Augment by querying references for the bare method
+    // name and accepting only Call hits whose context contains `\.<method>(`,
+    // i.e. truly a method invocation through an alias. This is per-language
+    // because other languages' references are already covered by the
+    // primary call-graph path.
+    if matches!(language, Language::Lua | Language::Luau) {
+        if let Some(bare) = function.split('.').next_back() {
+            if bare != function && !bare.is_empty() {
+                let mut bare_options = ReferencesOptions::new();
+                bare_options.kinds = Some(vec![ReferenceKind::Call]);
+                bare_options.language = Some(language.as_str().to_string());
+                bare_options.limit = Some(500);
+                if let Ok(bare_refs) = find_references(bare, &project_root, &bare_options) {
+                    let dot_pat = format!(".{}(", bare);
+                    let space_pat = format!(".{} (", bare);
+                    for r in &bare_refs.references {
+                        // Filter: context must look like `<receiver>.<bare>(`
+                        // — not a bare `bare(...)` call. Avoid promoting
+                        // genuine homonym references on unrelated scopes.
+                        if !r.context.contains(&dot_pat) && !r.context.contains(&space_pat) {
+                            continue;
+                        }
+                        push_caller_from_reference(
+                            report,
+                            file,
+                            function,
+                            r,
+                            &mut file_funcs_cache,
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Helper used by both the primary references walk and the Lua bare-name
+/// enrichment to convert a single `Reference` into a caller entry on
+/// `report.callers`.
+fn push_caller_from_reference(
+    report: &mut ExplainReport,
+    file: &std::path::Path,
+    function: &str,
+    r: &tldr_core::analysis::references::Reference,
+    file_funcs_cache: &mut std::collections::HashMap<std::path::PathBuf, Vec<(String, u32, u32)>>,
+) {
+    let ref_path = &r.file;
+    let funcs = file_funcs_cache
+        .entry(ref_path.clone())
+        .or_insert_with(|| collect_functions_with_bounds(ref_path));
+    let enclosing = funcs
+        .iter()
+        .find(|(_, start, end)| {
+            let line = r.line as u32;
+            line >= *start && (*end == 0 || line <= *end)
+        })
+        .map(|(name, _, _)| name.clone());
+
+    let caller_name = match enclosing {
+        Some(n) => n,
+        None => "<module>".to_string(),
+    };
+    let caller_file = ref_path.display().to_string();
+
+    if explain_names_match(&caller_name, function) && paths_equivalent(ref_path, file) {
+        return;
+    }
+    if caller_already_present(&report.callers, &caller_name, &caller_file) {
+        return;
+    }
+    report
+        .callers
+        .push(CallInfo::new(caller_name, caller_file, r.line as u32));
+}
+
+/// critical-regressions-v1 (P13.AGG13-2): does `file` define a function whose
+/// (bare or class-qualified) name matches `function`? Used by
+/// `enrich_with_project_graph` to confirm a Swift extension's actual
+/// owning file when impact's `tree.file` points at a sibling extension.
+fn function_is_defined_in_file(
+    file: &std::path::Path,
+    function: &str,
+    _language: Language,
+) -> bool {
+    let module = match tldr_core::extract_file(file, None) {
+        Ok(m) => m,
+        Err(_) => return false,
+    };
+    let target_tail = explain_last_segment(function);
+    for f in &module.functions {
+        if f.name == function || f.name == target_tail {
+            return true;
+        }
+    }
+    for class in &module.classes {
+        for m in &class.methods {
+            if m.name == function || m.name == target_tail {
+                return true;
+            }
+            let qualified = format!("{}.{}", class.name, m.name);
+            if qualified == function || explain_last_segment(&qualified) == target_tail {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Collect `(function_name, line_start, line_end)` triples for every

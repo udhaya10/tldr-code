@@ -1,5 +1,106 @@
 # Changelog
 
+## critical-regressions-v1 — internal milestone
+
+NOT a published release. First milestone in P13 cleanup, addressing the
+four highest-severity regressions surfaced by the phase-13 audit. All
+four bugs were reproduced live against the release binary on real repos
+under `/tmp/repos/<corpus>` BEFORE any fix:
+
+| Bug ID         | Pre-fix repro                                                                                          | Pre-fix result                              | Post-fix result                                            |
+|----------------|--------------------------------------------------------------------------------------------------------|---------------------------------------------|------------------------------------------------------------|
+| P13.AGG13-1    | `tldr specs --from-tests /tmp/repos/go-httprouter/router_test.go`                                       | `total_specs: 0` / `scanned: 13`            | `total_specs: 6` / `scanned: 13`                            |
+| P13.AGG13-1    | `tldr specs --from-tests /tmp/repos/php-symfony-string/Tests/UnicodeStringTest.php`                     | `total_specs: 0` / `scanned: 2`             | `total_specs: 2` / `scanned: 2`                             |
+| P13.AGG13-1    | `tldr specs --from-tests /tmp/repos/php-symfony-string/Tests` (whole dir)                               | `total_specs: 0` / `scanned: 38`            | `total_specs: 34` / `scanned: 38`                           |
+| P13.AGG13-2    | `tldr explain /tmp/repos/swift-collections/Sources/HeapModule/Heap+UnsafeHandle.swift Heap._heapify`    | `callers: []`                               | `callers: [{name: "Heap.heapify", file: "...UnsafeHandle.swift"}]` |
+| P13.AGG13-7    | `tldr verify /tmp/repos/spring-petclinic` → `sub_results.specs.error`                                   | `"No test directory found"`                 | `null`; `items_found: 5`                                    |
+| P13.AGG13-12   | `tldr explain /tmp/repos/lua-lsp/script/files.lua m.open` callers count                                 | 0                                           | 18 (incl. provider.lua:281, check_worker.lua:251 from audit)|
+
+Multi-language non-regression check (kotlin/csharp/ruby/python — the
+languages P12-B fixed): all four still produce ≥1 spec on the same
+real-repo test files post-AGG13-1 fix.
+
+Mini-audit on touched commands across 5 repos (`flask`, `express`,
+`ripgrep`, `ocaml-dune`, `scala-cats-effect`, `spring-petclinic`):
+`verify` no longer reports `No test directory found` errors; `specs`
+and `explain` produce sensible output across the corpus with no new
+crashes.
+
+Tag: `critical-regressions-v1`. Manifest stays at 0.3.0.
+
+### Fixed
+
+- `crates/tldr-cli/src/commands/contracts/specs.rs`: P13.AGG13-1 — the
+  generic assertion-call walker introduced in P12.AGG12-2 missed two
+  major classes of test patterns. Fixed:
+  1. **PHP call-shape coverage**: tree-sitter-php emits assertion
+     calls under `member_call_expression` (`$this->assertSame(...)`),
+     `function_call_expression` (`add(2,3)` inside an assert),
+     `scoped_call_expression` (`self::assertEquals(...)`), and
+     `nullsafe_member_call_expression`. None of these matched the
+     pre-fix `is_call` predicate, so PHPUnit tests reported
+     `total_specs: 0` even with 38 scanned test functions. Both
+     `walk_for_assertion_calls` and `looks_like_call` now include the
+     four PHP shapes.
+  2. **Go `if t.Errorf` idiom**: Go tests have no `assertEquals`-style
+     helper. The convention is `if cond { t.Errorf(...) }`. The
+     generic walker only classified call expressions whose tail
+     matched a known assertion name, so Go tests emitted 0 specs.
+     New `try_extract_go_if_t_assertion` recognises the
+     `if_statement` whose consequence contains a call to a known
+     `*testing.T` failure method (`Error`, `Errorf`, `Fatal`,
+     `Fatalf`, `Fail`, `FailNow`, `Log`, `Logf`, `Skip`, `Skipf`,
+     `Skipped`) and promotes the FUT call inside the condition to a
+     `go_if_assertion` property spec.
+
+- `crates/tldr-cli/src/commands/remaining/explain.rs`: P13.AGG13-2 —
+  Swift methods defined inside `extension Heap { ... }` (or nested
+  `extension Heap._UnsafeHandle { ... }`) were dropped from the
+  caller list because the Swift call-graph builder attributes the
+  `dst_file` of the resolved target to the FIRST file that declared
+  the homonym `class_declaration` for the same type. The strict
+  `paths_equivalent(&tree.file, file)` filter in
+  `enrich_with_project_graph` then rejected every real caller for
+  the user-supplied file. New helper `function_is_defined_in_file`
+  AST-confirms the function lives in the user's file; when so, the
+  homonym-target filter is bypassed so callers (e.g.
+  `Heap.heapify` for `Heap._heapify`) surface correctly. The
+  filter remains for the no-definition case to prevent cross-file
+  homonym pollution.
+
+- `crates/tldr-cli/src/commands/remaining/explain.rs`: P13.AGG13-12 —
+  Lua's cross-module-alias call-graph resolver inconsistently
+  resolves `<alias>.<method>(...)` calls to the matching
+  `function m.<method>` definition (`m.reset` happens to resolve via
+  the call-graph, `m.open` does not). New per-language enrichment in
+  `enrich_with_references`: when language is Lua/Luau and the
+  requested function has a `<receiver>.<X>` shape, also query
+  references for the bare name `X` and accept Call hits whose
+  context contains `\.<X>(` (i.e. an alias-prefixed invocation).
+  Refactored the per-reference push logic out into
+  `push_caller_from_reference` so both the primary and the
+  bare-name walks share dedup and self-reference suppression.
+
+- `crates/tldr-cli/src/commands/contracts/verify.rs`: P13.AGG13-7 —
+  `find_test_dirs` only probed top-level `tests/` and `test/` and
+  the legacy `test_*.py` pytest convention. Maven, Gradle, sbt, and
+  MSBuild C# layouts were all undetected. Extended discovery to
+  cover:
+  * `Tests`, `Test`, `spec`, `specs`, `__tests__` (top-level
+    JS/Ruby/etc. conventions).
+  * `src/test/` and `src/test/{java,kotlin,scala,groovy,resources}`
+    (Maven / Gradle / sbt).
+  * `*Tests/`, `*.Tests/`, `*Test/`, `*.Test/` directories at
+    project root, under `src/`, and under `Src/` (MSBuild C#).
+
+### Added
+
+- `crates/tldr-cli/tests/critical_regressions_v1.rs`: 13 tests
+  covering all four bugs above plus cross-language non-regression
+  guards for the kotlin/csharp/ruby/python paths P12-B fixed.
+  All tests gate on `/tmp/repos/<repo>` existence per
+  no-synthetic-fixtures-v1.
+
 ## ux-and-explain-completeness-v1 — internal milestone
 
 NOT a published release. Final P12 milestone shipped under the

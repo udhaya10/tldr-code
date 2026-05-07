@@ -1327,6 +1327,17 @@ fn walk_for_assertion_calls(
     test_func_name: &str,
     specs: &mut HashMap<String, FunctionSpecs>,
 ) {
+    // critical-regressions-v1 (P13.AGG13-1): Go tests use the
+    // `if condition { t.Errorf/Fatal/Fail(...) }` idiom rather than a
+    // dedicated `assertEquals`-shaped helper. Detect that shape and
+    // promote the FUT call inside the condition to a property spec.
+    if matches!(language, Language::Go) && node.kind() == "if_statement" {
+        if try_extract_go_if_t_assertion(&node, source, test_func_name, specs) {
+            // Still recurse: nested if/loop bodies may contain more
+            // assertions or further FUT calls we need to harvest.
+        }
+    }
+
     let kind = node.kind();
     let is_call = matches!(
         kind,
@@ -1337,6 +1348,15 @@ fn walk_for_assertion_calls(
             | "call"
             | "function_call"
             | "function_call_statement"
+            // critical-regressions-v1 (P13.AGG13-1): PHP tree-sitter exposes
+            // assertion calls under multiple call-shaped node kinds.
+            // Without these, `$this->assertSame(...)`, `self::assertEquals(...)`,
+            // and `Foo::staticAssert(...)` all fall through and PHPUnit
+            // tests yield 0 specs even though `test_functions_scanned > 0`.
+            | "member_call_expression"
+            | "function_call_expression"
+            | "scoped_call_expression"
+            | "nullsafe_member_call_expression"
     );
     if is_call {
         if let Some(callee_text) = generic_callee_name(&node, source) {
@@ -1358,6 +1378,128 @@ fn walk_for_assertion_calls(
     for child in node.children(&mut cursor) {
         walk_for_assertion_calls(child, source, language, test_func_name, specs);
     }
+}
+
+/// critical-regressions-v1 (P13.AGG13-1): handle Go's `if cond { t.Errorf(...) }`
+/// idiom. The Go testing package has no `assertEquals`-style helper; tests
+/// branch on a condition and call `t.Error(f)` / `t.Fatal(f)` / `t.Fail(...)`
+/// when the condition is met. Promote the condition's contained call to a
+/// property spec so downstream `tldr specs` reports something useful instead
+/// of `total_specs: 0` for files with hundreds of `t.Errorf` sites.
+///
+/// Returns true when a spec was extracted (currently informational; caller
+/// continues recursing regardless).
+fn try_extract_go_if_t_assertion(
+    if_node: &Node,
+    source: &[u8],
+    test_func_name: &str,
+    specs: &mut HashMap<String, FunctionSpecs>,
+) -> bool {
+    // tree-sitter-go exposes `if_statement` with named fields:
+    //   `condition` (the boolean expression)
+    //   `consequence` (the block executed when true)
+    //   `alternative` (else branch, optional)
+    let cond_node = match if_node.child_by_field_name("condition") {
+        Some(c) => c,
+        None => return false,
+    };
+    let consequence = match if_node.child_by_field_name("consequence") {
+        Some(c) => c,
+        None => return false,
+    };
+
+    // Look for a `t.<Errorf|Error|Fatal|Fatalf|Fail|FailNow|Log|Logf>(...)` call
+    // inside the consequence block. If present, this is a Go test assertion
+    // shaped as `if !condition { t.Errorf(...) }`.
+    let has_t_assertion = subtree_contains_go_test_failure_call(&consequence, source);
+    if !has_t_assertion {
+        return false;
+    }
+
+    // Locate the FUT-shaped call inside the condition expression. Common
+    // shapes:
+    //   if !reflect.DeepEqual(got, want) { ... }   -> FUT is reflect.DeepEqual? no, FUT was the call
+    //                                                  that produced `got`. We can't recover that
+    //                                                  cheaply, so attribute the spec to the call
+    //                                                  that appears in the condition itself.
+    //   if got != want { ... }                     -> no call in condition; bail.
+    //   if foo() != 5 { ... }                       -> FUT is `foo`.
+    //   if err := f(x); err != nil { ... }         -> FUT is `f`.
+    let call_node = match first_callable_inside(cond_node) {
+        Some(c) => c,
+        None => return false,
+    };
+    let (fname, _inputs) = match generic_extract_call_info(call_node, source) {
+        Some(p) => p,
+        None => return false,
+    };
+    // Don't emit specs for the test failure call itself (e.g. when the
+    // condition is just a call to `t.Failed()`).
+    if is_known_assertion_callee(&fname) || is_go_t_failure_method(&fname) {
+        return false;
+    }
+
+    let line = if_node.start_position().row as u32 + 1;
+    let entry = specs
+        .entry(fname.clone())
+        .or_insert_with(|| FunctionSpecs {
+            function_name: fname.clone(),
+            summary: String::new(),
+            test_count: 0,
+            input_output_specs: vec![],
+            exception_specs: vec![],
+            property_specs: vec![],
+        });
+    entry.property_specs.push(PropertySpec {
+        function: fname,
+        property_type: "go_if_assertion".to_string(),
+        constraint: "condition guards t.Errorf/t.Fatal".to_string(),
+        test_function: test_func_name.to_string(),
+        line,
+        confidence: Confidence::Medium,
+    });
+    true
+}
+
+/// Returns true if any `call_expression` under `node` calls a Go testing
+/// failure method (`t.Errorf`, `t.Fatal`, `t.Fail`, `t.Log`, …).
+fn subtree_contains_go_test_failure_call(node: &Node, source: &[u8]) -> bool {
+    if node.kind() == "call_expression" {
+        if let Some(func) = node.child_by_field_name("function") {
+            let text = get_node_text(func, source);
+            // Accept either `<receiver>.<method>` selector form or a bare
+            // identifier (in case the test renamed `t` via a closure).
+            let tail = text.rsplit('.').next().unwrap_or(text);
+            if is_go_t_failure_method(tail) {
+                return true;
+            }
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if subtree_contains_go_test_failure_call(&child, source) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Recognise the well-known Go `*testing.T` failure-reporting methods.
+fn is_go_t_failure_method(name: &str) -> bool {
+    matches!(
+        name,
+        "Error"
+            | "Errorf"
+            | "Fatal"
+            | "Fatalf"
+            | "Fail"
+            | "FailNow"
+            | "Log"
+            | "Logf"
+            | "Skip"
+            | "Skipf"
+            | "Skipped"
+    )
 }
 
 /// Tail identifier of the callable expression.
@@ -1767,6 +1909,12 @@ fn looks_like_call(n: Node) -> bool {
             | "function_call"
             | "function_call_statement"
             | "macro_invocation"
+            // critical-regressions-v1 (P13.AGG13-1): PHP call shapes (see
+            // also `walk_for_assertion_calls`).
+            | "member_call_expression"
+            | "function_call_expression"
+            | "scoped_call_expression"
+            | "nullsafe_member_call_expression"
     )
 }
 
