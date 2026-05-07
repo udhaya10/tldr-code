@@ -1338,6 +1338,22 @@ fn walk_for_assertion_calls(
         }
     }
 
+    // language-specific-bugs-v1 (P14.AGG14-2): Java MockMvc fluent
+    // assertions —  `mockMvc.perform(get("/owners/new"))
+    //                       .andExpect(status().isOk())
+    //                       .andExpect(view().name(...))` — the conventional
+    // `assertEquals`-shaped helpers don't appear, so the assertion
+    // extractor previously yielded `total_specs = 0` for every Spring
+    // controller test. Promote each `andExpect(...)` to a property spec
+    // whose `function` is the HTTP-builder call inside the matching
+    // `perform(...)` (the MockMvc endpoint under test) and whose
+    // `constraint` text reflects the matcher kind (status/view/model/...).
+    if matches!(language, Language::Java)
+        && (node.kind() == "method_invocation" || node.kind() == "invocation_expression")
+    {
+        try_extract_java_mockmvc_assertion(&node, source, test_func_name, specs);
+    }
+
     let kind = node.kind();
     let is_call = matches!(
         kind,
@@ -1502,6 +1518,235 @@ fn is_go_t_failure_method(name: &str) -> bool {
     )
 }
 
+/// language-specific-bugs-v1 (P14.AGG14-2): handle Java Spring MockMvc
+/// fluent assertions of the form
+///   `mockMvc.perform(get("/owners/new")).andExpect(status().isOk())`
+///
+/// `node` is a `method_invocation`. We only fire when the callee tail is
+/// `andExpect` / `andExpectAll` / `andDo` (the MockMvc verbs). The
+/// receiver of the chain bottoms out at `mockMvc.perform(<endpointBuilder>)`
+/// — we walk down the receiver chain to find that `perform(...)` and
+/// extract the HTTP-method call inside its first argument (e.g. `get`,
+/// `post`, `put`, …) plus the URL literal — that's the FUT.
+///
+/// The first argument to `andExpect(...)` is a matcher chain like
+/// `status().isOk()` / `view().name(...)` / `model().attributeExists(...)`.
+/// We pull out a short tag (`status`, `view`, `model`, …) and the leaf
+/// matcher kind (`isOk`, `is3xxRedirection`, `name`, …) for the
+/// `constraint` so multiple `.andExpect(...)` calls in the same test body
+/// produce distinguishable property specs.
+///
+/// Each invocation pushes one property spec onto the FUT entry. The
+/// caller's recursion still walks into receivers, so each
+/// `andExpect(...)` in a chain produces its own spec.
+fn try_extract_java_mockmvc_assertion(
+    call: &Node,
+    source: &[u8],
+    test_func_name: &str,
+    specs: &mut HashMap<String, FunctionSpecs>,
+) -> bool {
+    // Tail identifier of this method_invocation.
+    let callee = match generic_callee_name(call, source) {
+        Some(c) => c,
+        None => return false,
+    };
+    let tail = callee
+        .rsplit('.')
+        .next()
+        .unwrap_or(&callee)
+        .split('<')
+        .next()
+        .unwrap_or(&callee)
+        .trim();
+    let is_mockmvc_verb = matches!(tail, "andExpect" | "andExpectAll" | "andDo");
+    if !is_mockmvc_verb {
+        return false;
+    }
+
+    // The receiver of `andExpect` is itself another `method_invocation`
+    // whose tail eventually reaches `mockMvc.perform(...)`. Walk down the
+    // chain via the `object` field until we find a `perform` call.
+    let perform_call = match find_mockmvc_perform_call(*call, source) {
+        Some(p) => p,
+        None => return false,
+    };
+
+    // Endpoint builder: the first positional argument to `perform(...)` is
+    // an HTTP-method call (`get`, `post`, `put`, `delete`, `patch`, …)
+    // whose first arg is the URL literal. Use the HTTP verb name as the
+    // FUT name and the URL literal as the lone input.
+    let perform_args = collect_call_args(perform_call);
+    let endpoint_call_node = perform_args
+        .first()
+        .copied()
+        .and_then(first_callable_inside);
+
+    let (fut_name, fut_inputs): (String, Vec<serde_json::Value>) =
+        match endpoint_call_node.and_then(|c| generic_extract_call_info(c, source)) {
+            Some(info) => info,
+            None => {
+                // Fallback: synthesize a placeholder so we still emit a spec.
+                ("mockMvcRequest".to_string(), Vec::new())
+            }
+        };
+
+    // Constraint text: classify the matcher chain inside `andExpect(...)`.
+    //   status().isOk()                -> "status:isOk"
+    //   status().is3xxRedirection()    -> "status:is3xxRedirection"
+    //   view().name("...")             -> "view:name"
+    //   model().attributeExists("..")  -> "model:attributeExists"
+    //   model().attributeHasErrors(..) -> "model:attributeHasErrors"
+    let exp_args = collect_call_args(*call);
+    let constraint = exp_args
+        .first()
+        .copied()
+        .map(|n| classify_mockmvc_matcher(n, source))
+        .unwrap_or_else(|| "expectation".to_string());
+
+    let line = call.start_position().row as u32 + 1;
+
+    let entry = specs.entry(fut_name.clone()).or_insert_with(|| FunctionSpecs {
+        function_name: fut_name.clone(),
+        summary: String::new(),
+        test_count: 0,
+        input_output_specs: vec![],
+        exception_specs: vec![],
+        property_specs: vec![],
+    });
+
+    // Avoid duplicates when the same test method is harvested twice (the
+    // caller recurses through receivers, so we can hit the same call node
+    // via different paths).
+    let already_present = entry
+        .property_specs
+        .iter()
+        .any(|p| p.line == line && p.constraint == constraint && p.test_function == test_func_name);
+    if !already_present {
+        // First-time observation: record an input/output spec for the
+        // endpoint call (so `total_specs` reflects coverage even when
+        // `andExpect` is the only assertion verb present).
+        if entry
+            .input_output_specs
+            .iter()
+            .all(|io| io.test_function != test_func_name)
+        {
+            entry.input_output_specs.push(InputOutputSpec {
+                function: fut_name.clone(),
+                inputs: fut_inputs.clone(),
+                output: serde_json::Value::Null,
+                test_function: test_func_name.to_string(),
+                line,
+                confidence: Confidence::Medium,
+            });
+        }
+        entry.property_specs.push(PropertySpec {
+            function: fut_name.clone(),
+            property_type: "mockmvc_expectation".to_string(),
+            constraint,
+            test_function: test_func_name.to_string(),
+            line,
+            confidence: Confidence::Medium,
+        });
+    }
+
+    true
+}
+
+/// Walk down the receiver chain of an `andExpect(...)` invocation looking
+/// for the corresponding `mockMvc.perform(...)` call. Returns the
+/// `method_invocation` node that represents `perform(...)`.
+fn find_mockmvc_perform_call<'a>(call: Node<'a>, source: &[u8]) -> Option<Node<'a>> {
+    // The Java tree-sitter grammar models
+    //   a.b.c(args)
+    // as `method_invocation { object: a.b, name: "c", arguments: ... }`,
+    // and chained calls `a.b().c().d()` as nested `method_invocation`s
+    // whose `object` field is the previous call.
+    let mut current = call;
+    let mut hops = 0usize;
+    // Conservative bound: real MockMvc chains rarely exceed ~6 verbs.
+    while hops < 32 {
+        let object = current
+            .child_by_field_name("object")
+            .or_else(|| current.child_by_field_name("expression"));
+        let object = match object {
+            Some(o) => o,
+            None => return None,
+        };
+        if matches!(
+            object.kind(),
+            "method_invocation" | "invocation_expression"
+        ) {
+            if let Some(name) = generic_callee_name(&object, source) {
+                let tail = name.rsplit('.').next().unwrap_or(&name);
+                if tail == "perform" {
+                    return Some(object);
+                }
+            }
+            current = object;
+            hops += 1;
+            continue;
+        }
+        return None;
+    }
+    None
+}
+
+/// Classify the matcher passed to `andExpect(...)` so each expectation
+/// produces a recognisable `constraint` string. `node` is the first
+/// argument expression of `andExpect(...)`. We walk inwards to find the
+/// outermost call whose receiver is one of the well-known MockMvc
+/// matcher entry points (`status`, `view`, `model`, `header`, …) and use
+/// its leaf method name plus the entry-point name as the constraint.
+fn classify_mockmvc_matcher(node: Node, source: &[u8]) -> String {
+    // Best-effort: look at the entire matcher text and pull out the first
+    // `<word>()` head plus the last `.<word>(`. Falls back to the raw
+    // text trimmed.
+    let text = std::str::from_utf8(&source[node.start_byte()..node.end_byte()]).unwrap_or("");
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return "expectation".to_string();
+    }
+
+    // Pull out the first identifier (entry point) and the last identifier
+    // before a `(` (leaf matcher).
+    let head: String = trimmed
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .collect();
+
+    // Find last `.<ident>(` occurrence.
+    let mut leaf: Option<&str> = None;
+    let bytes = trimmed.as_bytes();
+    for i in (0..bytes.len()).rev() {
+        if bytes[i] == b'(' && i > 0 {
+            // Walk backwards collecting an identifier.
+            let mut j = i;
+            while j > 0 {
+                let c = bytes[j - 1];
+                if c.is_ascii_alphanumeric() || c == b'_' {
+                    j -= 1;
+                } else {
+                    break;
+                }
+            }
+            if j < i {
+                let candidate = &trimmed[j..i];
+                if candidate != head {
+                    leaf = Some(candidate);
+                    break;
+                }
+            }
+        }
+    }
+
+    match (head.as_str(), leaf) {
+        ("", None) => "expectation".to_string(),
+        (h, None) => h.to_string(),
+        ("", Some(l)) => l.to_string(),
+        (h, Some(l)) => format!("{}:{}", h, l),
+    }
+}
+
 /// Tail identifier of the callable expression.
 fn generic_callee_name(call: &Node, source: &[u8]) -> Option<String> {
     if let Some(f) = call.child_by_field_name("function") {
@@ -1511,6 +1756,17 @@ fn generic_callee_name(call: &Node, source: &[u8]) -> Option<String> {
         return Some(get_node_text(f, source).to_string());
     }
     if let Some(f) = call.child_by_field_name("name") {
+        return Some(get_node_text(f, source).to_string());
+    }
+    // language-specific-bugs-v1 (P14.AGG14-9): tree-sitter-rust exposes
+    // the macro's identifier on a `macro` field of `macro_invocation`,
+    // not via the generic `name` / `function` fields. Without this
+    // lookup, `assert_eq!(...)` fell through to the first-identifier
+    // fallback below, which usually returned the right thing —  but
+    // only when the parser identified the leading bareword as an
+    // identifier child rather than as part of a path expression. Hit
+    // the field name directly for robustness.
+    if let Some(f) = call.child_by_field_name("macro") {
         return Some(get_node_text(f, source).to_string());
     }
     // Fall back to first identifier child.
@@ -1529,6 +1785,110 @@ fn generic_callee_name(call: &Node, source: &[u8]) -> Option<String> {
         }
     }
     None
+}
+
+/// language-specific-bugs-v1 (P14.AGG14-9): Rust-macro-aware argument
+/// collector. Walks the macro_invocation's `token_tree` skipping the
+/// outer parens, then groups top-level tokens by comma boundaries
+/// (respecting nested `()` / `[]` / `{}` so commas inside an inner
+/// argument list are not treated as separators). Each group's first
+/// "interesting" child becomes one positional arg; if a group contains
+/// a call_expression (or any callable shape), prefer that node so
+/// `first_callable_inside` / `generic_extract_call_info` work in the
+/// downstream classifier.
+///
+/// Note: tree-sitter-rust does NOT structure macro contents into
+/// expressions — `assert_eq!(add(2,3), 5)` parses to a token_tree of
+/// flat tokens `[add, (, 2, ,, 3, ), ,, 5]`. Real call_expression /
+/// method_call nodes are not nested inside, so we cannot find them via
+/// `looks_like_call`. Instead, we represent each comma-separated group
+/// by its FIRST identifier-shaped token (that's the function name when
+/// the arg is a function call) and return the group's first node so
+/// downstream `try_eval_literal` / `generic_extract_call_info` still
+/// produce a usable name + literal pair.
+fn collect_rust_macro_args<'a>(call: Node<'a>) -> Vec<Node<'a>> {
+    // Find the token_tree child of the macro_invocation.
+    let token_tree = {
+        let mut found = None;
+        let mut cursor = call.walk();
+        for child in call.children(&mut cursor) {
+            if child.kind() == "token_tree" {
+                found = Some(child);
+                break;
+            }
+        }
+        match found {
+            Some(t) => t,
+            None => return Vec::new(),
+        }
+    };
+
+    // Build a flat list of token_tree's direct children, splitting by
+    // top-level commas. Track paren depth so commas inside nested
+    // parens (e.g. `add(2, 3)`) are NOT treated as argument separators.
+    //
+    // tree-sitter-rust emits `(` and `)` as direct named children of
+    // `token_tree`; we use them to maintain depth without affecting
+    // the group's content (the matching outer parens of the macro
+    // boundary are at depth 0 -> 1 / 1 -> 0 transitions).
+    let mut groups: Vec<Vec<Node<'a>>> = vec![Vec::new()];
+    let mut depth = 0i32;
+    let mut cursor = token_tree.walk();
+    for child in token_tree.children(&mut cursor) {
+        let k = child.kind();
+        match k {
+            "(" | "[" | "{" => {
+                depth += 1;
+                // Skip the OUTERMOST `(` (the macro's opening paren) so
+                // it doesn't leak into the first group. Inner parens
+                // remain visible so `first_callable_inside` / text
+                // reconstruction can use them.
+                if depth == 1 {
+                    continue;
+                }
+                groups.last_mut().unwrap().push(child);
+            }
+            ")" | "]" | "}" => {
+                depth -= 1;
+                if depth == 0 {
+                    // Outermost `)` — skip.
+                    continue;
+                }
+                groups.last_mut().unwrap().push(child);
+            }
+            "," if depth == 1 => {
+                groups.push(Vec::new());
+            }
+            _ => {
+                groups.last_mut().unwrap().push(child);
+            }
+        }
+    }
+
+    // For each group, prefer the FIRST identifier-shaped token. When the
+    // arg is a function call (`add(2, 3)`), the first identifier is the
+    // call's function name and the downstream `generic_extract_call_info`
+    // uses just the name + the group's text region. When the arg is a
+    // literal (`5`), the first non-trivia token IS the literal —
+    // `try_eval_literal` will pick up `integer_literal` etc. unchanged.
+    groups
+        .into_iter()
+        .filter_map(|grp| {
+            if grp.is_empty() {
+                return None;
+            }
+            // Prefer an identifier (function-call head). Fallback to the
+            // first non-punctuation child (literal / unary expr / etc.).
+            for n in &grp {
+                if matches!(n.kind(), "identifier" | "scoped_identifier") {
+                    return Some(*n);
+                }
+            }
+            grp.into_iter().find(|n| {
+                !matches!(n.kind(), "(" | ")" | "[" | "]" | "{" | "}" | ",")
+            })
+        })
+        .collect()
 }
 
 /// Read positional arguments of a call node, ignoring punctuation and
@@ -1598,7 +1958,7 @@ fn collect_call_args<'a>(call: Node<'a>) -> Vec<Node<'a>> {
 fn classify_assertion_call(
     call: &Node,
     source: &[u8],
-    _language: Language,
+    language: Language,
     callee_tail: &str,
     test_func_name: &str,
     specs: &mut HashMap<String, FunctionSpecs>,
@@ -1679,23 +2039,62 @@ fn classify_assertion_call(
             | "expectThrows"
     );
 
-    let args = collect_call_args(*call);
+    // language-specific-bugs-v1 (P14.AGG14-9): Rust macro_invocation
+    // wraps assertion arguments in a `token_tree`, which tree-sitter does
+    // not structure into separate args — `collect_call_args` returns a
+    // jumble of tokens. Build a Rust-specific argument list by walking
+    // the token_tree looking for top-level expressions separated by
+    // commas. When the macro head is one of `assert_eq` / `assert_ne` /
+    // `assert` / `debug_assert*`, this gives back conventional positional
+    // args even when tree-sitter did not.
+    // language-specific-bugs-v1 (P14.AGG14-9): Rust macro arguments are
+    // flat tokens (the tree-sitter-rust grammar doesn't structure
+    // them into expressions), so we cannot rely on
+    // `collect_call_args` finding clean argument nodes. Take a
+    // structural approach: split the macro's `token_tree` body by
+    // top-level commas (respecting nested parens / braces), and return
+    // the first call-shaped descendant of each group as the
+    // representative arg. When a group has no call-shaped child, fall
+    // back to the group's first non-trivia child so downstream
+    // `try_eval_literal` can still pull the literal value off the leaf.
+    let args = if matches!(language, Language::Rust) && call.kind() == "macro_invocation" {
+        collect_rust_macro_args(*call)
+    } else {
+        collect_call_args(*call)
+    };
     if args.is_empty() {
         return;
     }
 
     if is_equality && args.len() >= 2 {
-        // Conventional order is (expected, actual). Pick the side that
-        // looks like a function call as the FUT call.
-        let (call_arg, value_arg) = match (
-            looks_like_call(args[1]),
-            looks_like_call(args[0]),
-        ) {
-            (true, _) => (args[1], args[0]),
-            (false, true) => (args[0], args[1]),
-            _ => return,
+        // language-specific-bugs-v1 (P14.AGG14-9): Rust macro args are
+        // flat token nodes (not call_expression structures), so
+        // `looks_like_call` returns false for both sides of
+        // `assert_eq!(add(2,3), 5)`. Recognize this case explicitly:
+        // when a side is a bare identifier whose immediate sibling token
+        // in the source is `(`, treat that identifier as the head of a
+        // (text-level) function call. Use the identifier's name as the
+        // FUT name and the OTHER side as the value/output.
+        let rust_macro = matches!(language, Language::Rust)
+            && call.kind() == "macro_invocation";
+        let (call_arg, value_arg) = if rust_macro {
+            let lhs_callish = is_rust_macro_call_token(args[0], source);
+            let rhs_callish = is_rust_macro_call_token(args[1], source);
+            match (rhs_callish, lhs_callish) {
+                (true, _) => (args[1], args[0]),
+                (false, true) => (args[0], args[1]),
+                _ => return,
+            }
+        } else {
+            match (looks_like_call(args[1]), looks_like_call(args[0])) {
+                (true, _) => (args[1], args[0]),
+                (false, true) => (args[0], args[1]),
+                _ => return,
+            }
         };
-        if let Some((fname, inputs)) = generic_extract_call_info(call_arg, source) {
+        if let Some((fname, inputs)) =
+            extract_call_info_for_lang(call_arg, source, language)
+        {
             let output = try_eval_literal(value_arg, source);
             let fs = ensure(specs, &fname);
             fs.input_output_specs.push(InputOutputSpec {
@@ -1711,7 +2110,17 @@ fn classify_assertion_call(
     }
 
     if is_inequality && args.len() >= 2 {
-        let call_arg = if looks_like_call(args[1]) {
+        let rust_macro = matches!(language, Language::Rust)
+            && call.kind() == "macro_invocation";
+        let call_arg = if rust_macro {
+            if is_rust_macro_call_token(args[1], source) {
+                args[1]
+            } else if is_rust_macro_call_token(args[0], source) {
+                args[0]
+            } else {
+                return;
+            }
+        } else if looks_like_call(args[1]) {
             args[1]
         } else if looks_like_call(args[0]) {
             args[0]
@@ -1723,7 +2132,7 @@ fn classify_assertion_call(
         } else {
             args[1]
         };
-        if let Some((fname, _inputs)) = generic_extract_call_info(call_arg, source) {
+        if let Some((fname, _inputs)) = extract_call_info_for_lang(call_arg, source, language) {
             let val = std::str::from_utf8(
                 &source[other.start_byte()..other.end_byte()],
             )
@@ -1896,6 +2305,62 @@ fn is_known_assertion_callee(name: &str) -> bool {
             | "shouldBe"
             | "shouldEqual"
     )
+}
+
+/// language-specific-bugs-v1 (P14.AGG14-9): true when `n` is a bareword
+/// inside a Rust macro_invocation that is immediately followed by an
+/// open paren in the source — i.e. the FUT identifier of a function
+/// call expressed as flat tokens. Used to detect `add` in
+/// `assert_eq!(add(2,3), 5)` where tree-sitter-rust represents the
+/// macro contents as a token_tree of flat tokens with no
+/// `call_expression` wrapper.
+fn is_rust_macro_call_token(n: Node, source: &[u8]) -> bool {
+    if !matches!(n.kind(), "identifier" | "scoped_identifier") {
+        return false;
+    }
+    let end = n.end_byte();
+    // Walk forward over whitespace looking for `(`.
+    let mut i = end;
+    while i < source.len() {
+        let b = source[i];
+        if b == b' ' || b == b'\t' || b == b'\n' || b == b'\r' {
+            i += 1;
+            continue;
+        }
+        return b == b'(';
+    }
+    false
+}
+
+/// language-specific-bugs-v1 (P14.AGG14-9): wrapper around
+/// `generic_extract_call_info` that handles the Rust-macro case where
+/// the "call" is an identifier with a flat-token argument list (no
+/// `call_expression` AST shape). Returns `(fname, inputs)` where
+/// `fname` is the identifier's text and `inputs` is a best-effort list
+/// of immediately-following positional literal values, terminated at
+/// the matching `)`.
+fn extract_call_info_for_lang(
+    node: Node,
+    source: &[u8],
+    language: Language,
+) -> Option<(String, Vec<serde_json::Value>)> {
+    if matches!(language, Language::Rust)
+        && matches!(node.kind(), "identifier" | "scoped_identifier")
+    {
+        let fname = std::str::from_utf8(&source[node.start_byte()..node.end_byte()])
+            .ok()?
+            .trim()
+            .to_string();
+        if fname.is_empty() {
+            return None;
+        }
+        // Best-effort: leave `inputs` empty for the macro-token path;
+        // emitting the FUT name + line is the user-facing minimum. A
+        // future improvement could text-parse the token range between
+        // `(` and the matching `)` into literals.
+        return Some((fname, Vec::new()));
+    }
+    generic_extract_call_info(node, source)
 }
 
 /// Best-effort: does `n` look like a function call we can extract a name from?

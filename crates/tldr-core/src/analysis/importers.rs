@@ -146,6 +146,30 @@ fn module_matches(import_module: &str, target: &str, language: Language) -> bool
             // Package path matching
             import_module == target || import_module.ends_with(&format!("/{}", target))
         }
+        // language-specific-bugs-v1 (P14.AGG14-11): Scala uses the same
+        // dotted-FQCN syntax as Java (`import cats.effect.IO`) plus a
+        // family of brace-, wildcard-, and rename-based selectors. The
+        // exact-match-only fallback meant a query for the package
+        // `cats.effect` against a file that imports
+        // `cats.effect.kernel.Async` returned 0 hits, even though the
+        // file is unambiguously inside the `cats.effect` subtree.
+        // Mirror Python's submodule-bidirectional rule so subpath
+        // queries succeed in both directions:
+        //   target = "cats.effect"            matches "cats.effect.kernel.Async"
+        //   target = "cats.effect.kernel.Async" matches "cats.effect"
+        //   target = "cats.effect.IO"         matches "cats.effect.IO"
+        Language::Scala | Language::Kotlin | Language::Java => {
+            if import_module == target {
+                return true;
+            }
+            if import_module.starts_with(&format!("{}.", target)) {
+                return true;
+            }
+            if target.starts_with(&format!("{}.", import_module)) {
+                return true;
+            }
+            false
+        }
         _ => import_module == target,
     }
 }

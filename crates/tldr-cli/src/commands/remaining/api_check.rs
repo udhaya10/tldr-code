@@ -2253,6 +2253,26 @@ fn check_regex_rule(
         return None;
     }
 
+    // language-specific-bugs-v1 (P14.AGG14-15): JV001
+    // (`string-comparison-with-double-equals`) flags `x == y` as a
+    // suspected reference-equality bug, which is correct for two String
+    // operands but a false positive for the canonical Java null check
+    // `if (x == null) { ... }`. The regex
+    // `(?:".*"|\b\w+\b)\s*==\s*(?:".*"|\b\w+\b)` matches `null` (a
+    // bareword) on either side because there is no syntactic null
+    // literal exclusion. Skip the finding when one side of the `==` /
+    // `!=` is the bare `null` keyword. Same idiom for C# (CS rules) is
+    // not currently affected — the C# rule list does not include a
+    // double-equals-string rule, so this guard is JV001-specific.
+    if rule.id == "JV001" {
+        // Conservative substring check: any line whose `==` / `!=` has
+        // `null` immediately on either side is a null-comparison
+        // idiom, not a string equality bug.
+        if line_has_null_comparison(line_text) {
+            return None;
+        }
+    }
+
     let column = regex.find(line_text).map(|m| m.start()).unwrap_or(0) as u32;
     Some(MisuseFinding {
         file: file.to_string(),
@@ -2264,6 +2284,63 @@ fn check_regex_rule(
         fix_suggestion: spec.fix_suggestion.to_string(),
         code_context: line_text.to_string(),
     })
+}
+
+/// language-specific-bugs-v1 (P14.AGG14-15): true when `line_text` contains
+/// a `==` or `!=` operator with the literal keyword `null` on at least
+/// one side. Used to suppress JV001 false positives on canonical Java
+/// null checks.
+fn line_has_null_comparison(line_text: &str) -> bool {
+    // Walk the line character by character, finding each `==` / `!=`
+    // occurrence (ignoring `===` which Java doesn't have but other langs
+    // do) and inspecting a small window on both sides for the bareword
+    // `null`. We check for word-boundary `null` rather than a raw
+    // substring so identifiers like `notnull` / `nullable` don't trigger.
+    let bytes = line_text.as_bytes();
+    let mut i = 0;
+    while i + 1 < bytes.len() {
+        let is_eq = bytes[i] == b'=' && bytes[i + 1] == b'=';
+        let is_neq = bytes[i] == b'!' && bytes[i + 1] == b'=';
+        if !is_eq && !is_neq {
+            i += 1;
+            continue;
+        }
+        // Skip `===` chains (defense in depth — should not appear in Java).
+        if is_eq && bytes.get(i + 2) == Some(&b'=') {
+            i += 3;
+            continue;
+        }
+        // Inspect ~16 chars to the left and right for word-boundary `null`.
+        let lo = i.saturating_sub(16);
+        let hi = (i + 2 + 16).min(bytes.len());
+        let left = std::str::from_utf8(&bytes[lo..i]).unwrap_or("");
+        let right = std::str::from_utf8(&bytes[i + 2..hi]).unwrap_or("");
+        if has_word_null(left) || has_word_null(right) {
+            return true;
+        }
+        i += 2;
+    }
+    false
+}
+
+/// True when `s` contains the bareword `null` with word boundaries
+/// (i.e. not preceded or followed by an alphanumeric / underscore).
+fn has_word_null(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    let mut i = 0usize;
+    while i + 4 <= bytes.len() {
+        if &bytes[i..i + 4] == b"null" {
+            let before_ok = i == 0
+                || !bytes[i - 1].is_ascii_alphanumeric() && bytes[i - 1] != b'_';
+            let after_ok = i + 4 == bytes.len()
+                || !bytes[i + 4].is_ascii_alphanumeric() && bytes[i + 4] != b'_';
+            if before_ok && after_ok {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    false
 }
 
 /// Check for requests without timeout

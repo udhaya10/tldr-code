@@ -847,11 +847,27 @@ fn extract_call_name(node: Node, source: &[u8]) -> Option<String> {
     if let Some(func) = node.child_by_field_name("function") {
         return Some(extract_name_from_expr(func, source));
     }
+    // language-specific-bugs-v1 (P14.AGG14-16): Java / Kotlin / C# /
+    // Scala / Swift / TS expose the callsite name through different
+    // field names than Python's `function`. Try each in turn so the
+    // multi-language call-kind acceptance above can extract a usable
+    // name for `tldr explain`'s callees enumeration.
+    for field in &["name", "method", "callee"] {
+        if let Some(name_node) = node.child_by_field_name(field) {
+            return Some(extract_name_from_expr(name_node, source));
+        }
+    }
 
     for child in node.children(&mut node.walk()) {
         match child.kind() {
-            "identifier" => return Some(node_text(child, source).to_string()),
-            "attribute" => return Some(extract_name_from_expr(child, source)),
+            "identifier" | "simple_identifier" => {
+                return Some(node_text(child, source).to_string())
+            }
+            "attribute"
+            | "field_access"
+            | "member_access_expression"
+            | "navigation_expression"
+            | "scoped_identifier" => return Some(extract_name_from_expr(child, source)),
             _ => continue,
         }
     }
@@ -997,7 +1013,30 @@ fn find_callees_recursive(
     local_functions: &HashSet<String>,
     callees: &mut Vec<CallInfo>,
 ) {
-    if node.kind() == "call" {
+    // language-specific-bugs-v1 (P14.AGG14-16): Java / Kotlin / C# tree-sitter
+    // grammars expose callsites as `method_invocation` /
+    // `invocation_expression` rather than the Python-shaped `call` node.
+    // The original `node.kind() == "call"` filter therefore returned
+    // `callees=[]` for every Java function in `tldr explain`, even when
+    // the same function call site was visible in `context` and reachable
+    // via the project call graph. Match the multi-language call-shaped
+    // nodes already accepted elsewhere in this crate (`looks_like_call`
+    // in `specs.rs` enumerates the same set).
+    let is_call = matches!(
+        node.kind(),
+        "call"
+            | "call_expression"
+            | "invocation_expression"
+            | "method_invocation"
+            | "function_call"
+            | "function_call_statement"
+            | "macro_invocation"
+            | "member_call_expression"
+            | "function_call_expression"
+            | "scoped_call_expression"
+            | "nullsafe_member_call_expression"
+    );
+    if is_call {
         if let Some(name) = extract_call_name(node, source) {
             // Get base name for local function check
             let base_name = name.split('.').next().unwrap_or(&name);
@@ -1380,6 +1419,161 @@ fn callee_already_present(
     })
 }
 
+/// language-specific-bugs-v1 (P14.AGG14-16): given a caller file and the
+/// caller-function name + target-function name, scan the file's source
+/// looking for a call site to `target_function` inside the body of
+/// `caller_function`. Returns the 1-indexed line of the first matching
+/// call site, or `None` if no match is found.
+///
+/// Implementation: read file -> parse with the file's language ->
+/// locate the function-shaped node whose name matches `caller_function`
+/// -> walk its descendants for any call-shaped node whose callee
+/// (extracted via `extract_call_name`) tail-matches `target_function`.
+fn locate_call_in_caller_file(
+    file: &std::path::Path,
+    caller_function: &str,
+    target_function: &str,
+) -> Option<u32> {
+    use std::fs;
+    let language = Language::from_path(file)?;
+    let source = fs::read_to_string(file).ok()?;
+    let func_kinds = get_function_node_kinds(language);
+    // Class node kinds — kept inline (a tiny static slice) to avoid
+    // pulling in `interface.rs::class_node_kinds`, which is not pub.
+    let class_kinds: &[&str] = &[
+        "class_definition",
+        "class_declaration",
+        "interface_declaration",
+        "struct_item",
+        "enum_item",
+        "trait_item",
+        "impl_item",
+        "class_specifier",
+        "struct_specifier",
+        "enum_declaration",
+        "record_declaration",
+        "object_declaration",
+        "object_definition",
+        "trait_definition",
+        "protocol_declaration",
+        "extension_declaration",
+        "module",
+    ];
+
+    let mut parser = get_parser(language).ok()?;
+    let tree = parser.parse(&source, None)?;
+    let source_bytes = source.as_bytes();
+
+    // Strip any class qualifier from `caller_function` for tail matching:
+    // `OwnerController.processFindForm` -> `processFindForm`.
+    let caller_tail = caller_function
+        .rsplit('.')
+        .next()
+        .unwrap_or(caller_function);
+    let target_tail = target_function
+        .rsplit('.')
+        .next()
+        .unwrap_or(target_function);
+
+    fn descend<'a>(
+        node: tree_sitter::Node<'a>,
+        source: &[u8],
+        func_kinds: &[&str],
+        class_kinds: &[&str],
+        caller_tail: &str,
+        target_tail: &str,
+        in_target_func: bool,
+    ) -> Option<u32> {
+        // When we enter a function node whose name matches caller_tail,
+        // turn on `in_target_func` for the descent.
+        let kind = node.kind();
+        let is_func_decl = func_kinds.contains(&kind);
+        let mut now_in = in_target_func;
+        if is_func_decl {
+            // Try to read this function's name. Reuse the same fallback
+            // logic as `find_callers_in_file`: prefer the `name` field,
+            // else the first identifier child.
+            let mut name: Option<String> = None;
+            if let Some(name_node) = node.child_by_field_name("name") {
+                name = Some(node_text(name_node, source).to_string());
+            } else {
+                for child in node.children(&mut node.walk()) {
+                    if matches!(child.kind(), "identifier" | "simple_identifier") {
+                        name = Some(node_text(child, source).to_string());
+                        break;
+                    }
+                }
+            }
+            if let Some(n) = name.as_deref() {
+                if explain_names_match(n, caller_tail) || n == caller_tail {
+                    now_in = true;
+                }
+            }
+        }
+
+        // While inside the caller function, look for any call node whose
+        // tail-name matches target_tail.
+        if now_in {
+            let is_call = matches!(
+                kind,
+                "call"
+                    | "call_expression"
+                    | "invocation_expression"
+                    | "method_invocation"
+                    | "function_call"
+                    | "function_call_statement"
+                    | "macro_invocation"
+                    | "member_call_expression"
+                    | "function_call_expression"
+                    | "scoped_call_expression"
+                    | "nullsafe_member_call_expression"
+            );
+            if is_call {
+                if let Some(callee) = extract_call_name(node, source) {
+                    let tail = callee.rsplit('.').next().unwrap_or(&callee);
+                    if tail == target_tail {
+                        return Some(node.start_position().row as u32 + 1);
+                    }
+                }
+            }
+        }
+
+        // Avoid descending into nested classes when we've already
+        // matched the outer caller — but DO descend into nested
+        // function definitions so closures/lambda bodies are searched.
+        if class_kinds.contains(&kind) && now_in && !is_func_decl {
+            // Don't descend into nested classes — they have their own
+            // method scope.
+            return None;
+        }
+
+        for child in node.children(&mut node.walk()) {
+            if let Some(line) = descend(
+                child,
+                source,
+                func_kinds,
+                class_kinds,
+                caller_tail,
+                target_tail,
+                now_in,
+            ) {
+                return Some(line);
+            }
+        }
+        None
+    }
+
+    descend(
+        tree.root_node(),
+        source_bytes,
+        func_kinds,
+        class_kinds,
+        caller_tail,
+        target_tail,
+        false,
+    )
+}
+
 /// Enrich `report.callers` and `report.callees` with cross-file results
 /// derived from the project-wide call graph (`build_project_call_graph` /
 /// `impact_analysis_with_ast_fallback`) — the same data source used by
@@ -1441,9 +1635,32 @@ fn enrich_with_project_graph(
                 if caller_already_present(&report.callers, &caller_name, &caller_file) {
                     continue;
                 }
+                // language-specific-bugs-v1 (P14.AGG14-16): the call-graph
+                // edge does not carry the source line of the callsite,
+                // so the original code unconditionally pushed
+                // `line: 0` — which made `tldr explain` agree with itself
+                // on a bogus value across every Java/Kotlin/CSharp
+                // caller. Resolve the line by scanning the caller file
+                // for a callsite to `function` inside the named caller
+                // function. Falls back to 0 only when no match is found.
+                //
+                // CallerTree's `file` is a project-relative path; resolve
+                // it against the project root so `locate_call_in_caller_file`
+                // can read the source.
+                let abs_caller_file = if caller.file.is_absolute() {
+                    caller.file.clone()
+                } else {
+                    project_root.join(&caller.file)
+                };
+                let line = locate_call_in_caller_file(
+                    &abs_caller_file,
+                    &caller_name,
+                    function,
+                )
+                .unwrap_or(0);
                 report
                     .callers
-                    .push(CallInfo::new(caller_name, caller_file, 0));
+                    .push(CallInfo::new(caller_name, caller_file, line));
             }
         }
     }
@@ -1467,9 +1684,15 @@ fn enrich_with_project_graph(
         if callee_already_present(&report.callees, &dst_name, &dst_file) {
             continue;
         }
+        // language-specific-bugs-v1 (P14.AGG14-16): same line-recovery
+        // approach as for callers. The call-graph edge does not carry
+        // the source line of the callsite, so look it up by AST scan.
+        // The caller here is `function` itself (the function we are
+        // explaining); its file is `file`.
+        let line = locate_call_in_caller_file(file, function, &dst_name).unwrap_or(0);
         report
             .callees
-            .push(CallInfo::new(dst_name, dst_file, 0));
+            .push(CallInfo::new(dst_name, dst_file, line));
     }
 
     // sibling-resolver-gaps-v1 (P14.AGG14-14): the Swift call-graph

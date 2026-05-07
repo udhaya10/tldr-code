@@ -143,7 +143,18 @@ impl ScannedFile {
 // File Discovery (Spec Section 14.4 Step 2)
 // =============================================================================
 
-/// Directories to always skip during file discovery.
+/// Directories to always skip during file discovery (regardless of
+/// the requested language).
+///
+/// language-specific-bugs-v1 (P14.AGG14-7): `build` and `dist` were
+/// previously listed here unconditionally, so a TypeScript repo that
+/// keeps its actual source under `src/build/` (e.g. ts-dom-gen, where
+/// `src/build/emitter.ts` is the entire implementation surface) would
+/// have every authored file silently excluded — `tldr calls` returned
+/// 0 nodes / 0 edges. For JS/TS specifically, defer the `build` /
+/// `dist` skip to [`should_skip_build_or_dist_for_lang`] so the walker
+/// only excludes them when the language convention treats them as
+/// generated output (Rust / Java / Kotlin / Go / Python builds).
 const SKIP_DIRECTORIES: &[&str] = &[
     ".git",
     "__pycache__",
@@ -156,8 +167,6 @@ const SKIP_DIRECTORIES: &[&str] = &[
     ".pytest_cache",
     ".ruff_cache",
     "target",     // Rust
-    "build",      // Various
-    "dist",       // Various
     ".next",      // Next.js
     ".nuxt",      // Nuxt.js
     "vendor",     // Go, PHP
@@ -171,6 +180,25 @@ const SKIP_DIRECTORIES: &[&str] = &[
     ".coverage",  // Python coverage
     "htmlcov",    // Python coverage
 ];
+
+/// language-specific-bugs-v1 (P14.AGG14-7): per-language gate for the
+/// `build` and `dist` directories. JS/TS projects routinely keep
+/// authored source under these names (`src/build/`, monorepo
+/// `packages/x/dist/`); other languages (Rust uses `target/`, Java uses
+/// `build/` for gradle output, Python uses `build/` for setup.py) treat
+/// them as build sinks. When the requested language is JavaScript or
+/// TypeScript, do NOT skip these dirs — defer to `.gitignore` if the
+/// project genuinely wants them excluded.
+fn should_skip_build_or_dist_for_lang(name: &str, language: &str) -> bool {
+    if !matches!(name, "build" | "dist" | "out" | "bin" | "obj") {
+        return false;
+    }
+    let is_js_ts = matches!(
+        language.to_lowercase().as_str(),
+        "javascript" | "typescript" | "js" | "ts" | "jsx" | "tsx"
+    );
+    !is_js_ts
+}
 
 fn resolve_scan_roots(root: &Path, config: &BuildConfig) -> Result<Vec<PathBuf>, BuildError> {
     if !config.use_workspace_config {
@@ -300,10 +328,11 @@ pub fn scan_project_files(
 
     for scan_root in scan_roots {
         // Walk the directory tree
+        let lang_for_filter = language.to_string();
         let walker = WalkDir::new(&scan_root)
             .follow_links(true) // Follow symlinks, but detect cycles
             .into_iter()
-            .filter_entry(|entry| {
+            .filter_entry(move |entry| {
                 // Skip hidden files/dirs and known ignored directories
                 let file_name = entry.file_name().to_string_lossy();
 
@@ -314,6 +343,16 @@ pub fn scan_project_files(
 
                 // Skip known ignored directories
                 if entry.file_type().is_dir() && should_skip_directory(&file_name) {
+                    return false;
+                }
+
+                // language-specific-bugs-v1 (P14.AGG14-7): per-language
+                // exclusion of `build`/`dist`/`out`/`bin`/`obj`. JS/TS
+                // projects keep authored source under these names and
+                // would otherwise have it silently excluded.
+                if entry.file_type().is_dir()
+                    && should_skip_build_or_dist_for_lang(&file_name, &lang_for_filter)
+                {
                     return false;
                 }
 

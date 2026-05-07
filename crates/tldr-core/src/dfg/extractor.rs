@@ -210,6 +210,20 @@ impl<'a> DfgBuilder<'a> {
     /// the last dotted segment (`C`). `import static a.b.C.method;`
     /// imports a static member; we capture the last segment as well.
     /// For other languages this is a no-op (the field stays empty).
+    ///
+    /// language-specific-bugs-v1 (P14.AGG14-12): also collect the names
+    /// of class-level fields declared in the same file. Java DI patterns
+    /// (`private final OwnerRepository owners; public OwnerController(
+    /// OwnerRepository owners) { this.owners = owners; }`) make `owners`
+    /// available to every method as a class field — but the per-method
+    /// reaching-defs analyzer only sees the method body, so the use of
+    /// `owners` looks like an undefined variable and was flagged
+    /// `severity: definite`. Treating class fields the same way as
+    /// imported type names (suppress them as not-a-use when they are
+    /// the receiver of a `method_invocation` / `field_access`) avoids
+    /// the false positive without losing precision: the field cannot be
+    /// unintentionally shadowed by a local of the same name without that
+    /// local also showing up as a definition.
     fn collect_imports(&mut self, root: Node) {
         if !matches!(self.language, Language::Java | Language::CSharp) {
             return;
@@ -228,8 +242,50 @@ impl<'a> DfgBuilder<'a> {
                 }
                 continue;
             }
-            // Don't descend into class/method bodies — imports are top-level.
-            if matches!(kind, "class_declaration" | "method_declaration") {
+            // language-specific-bugs-v1 (P14.AGG14-12): collect class
+            // field names. Java `field_declaration` carries one or more
+            // `variable_declarator { name: <ident>, ... }` children — pull
+            // every variable name into the same suppression set as
+            // imported types. C# `field_declaration` uses the same
+            // grammar layout in tree-sitter-c-sharp. Recurse INTO class
+            // bodies so we see the fields (the early-return below for
+            // class_declaration is now overridden for field collection).
+            if kind == "field_declaration" {
+                for declarator in node.children(&mut node.walk()) {
+                    if declarator.kind() != "variable_declarator" {
+                        continue;
+                    }
+                    if let Some(name_node) = declarator.child_by_field_name("name") {
+                        let name = name_node
+                            .utf8_text(self.source.as_bytes())
+                            .unwrap_or("")
+                            .trim()
+                            .to_string();
+                        if !name.is_empty() {
+                            self.imported_type_names.insert(name);
+                        }
+                    } else {
+                        // Fallback: first identifier child of the declarator.
+                        for inner in declarator.children(&mut declarator.walk()) {
+                            if inner.kind() == "identifier" {
+                                let name = inner
+                                    .utf8_text(self.source.as_bytes())
+                                    .unwrap_or("")
+                                    .trim()
+                                    .to_string();
+                                if !name.is_empty() {
+                                    self.imported_type_names.insert(name);
+                                }
+                                break;
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
+            // Don't descend into method bodies — fields are class-level
+            // declarations, never inside a method.
+            if matches!(kind, "method_declaration" | "constructor_declaration") {
                 continue;
             }
             for child in node.children(&mut node.walk()) {

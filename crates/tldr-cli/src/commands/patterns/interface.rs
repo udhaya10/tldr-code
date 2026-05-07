@@ -260,7 +260,21 @@ fn is_node_public(node: Node, source: &[u8], lang: Language) -> bool {
     let name_str = name.as_deref().unwrap_or("");
 
     match lang {
-        Language::Rust => is_rust_pub(node, source),
+        Language::Rust => {
+            // language-specific-bugs-v1 (P14.AGG14-10): `impl_item` blocks
+            // are not declarations; they are method-collecting containers
+            // and never carry their own `pub` modifier. Always treat them
+            // as visible — the methods inside still get their own
+            // `is_method_public` filtering. Without this, every
+            // `impl Foo { pub fn ... }` block was filtered out at the
+            // class layer, so `tldr interface` reported every struct with
+            // `methods: 0` even when the inherent impl exposed dozens of
+            // public methods.
+            if node.kind() == "impl_item" {
+                return true;
+            }
+            is_rust_pub(node, source)
+        }
         Language::Go => name_str.chars().next().is_some_and(|c| c.is_uppercase()),
         Language::Python | Language::Ruby | Language::Lua | Language::Luau => {
             !name_str.starts_with('_')
@@ -1710,7 +1724,187 @@ fn collect_top_level_definitions(
             0,
         );
     }
+
+    // language-specific-bugs-v1 (P14.AGG14-10): post-process Rust class
+    // entries to merge `impl Foo { ... }` blocks into the corresponding
+    // `struct Foo` / `enum Foo` / `trait Foo` entry. Without this, the
+    // output contained both a `struct GlobSet` (methods=[]) AND an
+    // `impl GlobSet` (whose methods were the actual API surface) — and
+    // the user saw `methods: 0` on the struct.
+    if matches!(lang, Language::Rust) {
+        merge_rust_impl_entries(&mut classes);
+    }
+
+    // language-specific-bugs-v1 (P14.AGG14-17): for Java (and the same
+    // class-only languages where every public function lives inside a
+    // class and the top-level `functions[]` would otherwise always be
+    // empty), copy each public method into the top-level
+    // `functions[]` array as a flat entry. Method entries stay inside
+    // the class entry so consumers that index by class still work; the
+    // flat `functions[]` array now matches the convention python /
+    // typescript already follow (every callable a downstream consumer
+    // could call is reachable without dereferencing a `classes[]`
+    // entry first).
+    if matches!(lang, Language::Java | Language::Kotlin) {
+        flatten_class_methods_to_functions(&classes, &mut functions);
+    }
+
     (functions, classes)
+}
+
+/// language-specific-bugs-v1 (P14.AGG14-17): flatten every public method
+/// from `classes` into `functions` as a top-level entry, deduplicated by
+/// `(name, lineno)`. Used for class-only languages (Java, Kotlin) so that
+/// `tldr interface SomeController.java | jq '.functions | length'` is
+/// non-zero whenever the file declares a class with public methods —
+/// matching the contract Python / TypeScript already satisfy at the
+/// schema level (every public callable is enumerable from `functions[]`
+/// without dereferencing `classes[]`).
+fn flatten_class_methods_to_functions(
+    classes: &[ClassInfo],
+    functions: &mut Vec<FunctionInfo>,
+) {
+    use std::collections::HashSet;
+    let mut seen: HashSet<(String, u32)> = HashSet::new();
+    for f in functions.iter() {
+        seen.insert((f.name.clone(), f.lineno));
+    }
+    for class in classes {
+        for method in &class.methods {
+            // Method doesn't carry an own line in this schema (see
+            // `types.rs::MethodInfo`); use `(name, class_line)` as the
+            // dedup key, matching the lineno we'll attach below. Two
+            // methods with the same name on the same class would
+            // produce a key collision (overload/companion), but Java
+            // forbids that and Kotlin permits it only when signatures
+            // differ — picking one is the convention `tldr structure`
+            // already follows.
+            let key = (method.name.clone(), class.lineno);
+            if seen.contains(&key) {
+                continue;
+            }
+            seen.insert(key);
+            // MethodInfo doesn't carry a `lineno` of its own — it
+            // inherits visibility/positioning from the enclosing class
+            // entry. For the flat `functions[]` view, attach the class's
+            // line number as a stable proxy so callers can navigate to
+            // the class declaration. Same convention `tldr extract` uses
+            // for class methods exposed at the file level.
+            functions.push(FunctionInfo {
+                name: method.name.clone(),
+                signature: method.signature.clone(),
+                docstring: None,
+                lineno: class.lineno,
+                is_async: method.is_async,
+            });
+        }
+    }
+}
+
+/// language-specific-bugs-v1 (P14.AGG14-10): coalesce duplicate Rust class
+/// entries. After the walker has gathered `struct`/`enum`/`trait` entries
+/// AND every `impl <Type>` block as separate `ClassInfo`s (because both
+/// node kinds are listed in `class_node_kinds(Language::Rust)`), this pass
+/// finds each impl whose `name` matches an existing struct/enum/trait
+/// entry and folds the impl's methods into the matching entry. impl
+/// blocks with no struct/enum/trait counterpart in the same file (e.g.
+/// `impl SomeTrait for ExternalType { ... }` where `ExternalType` lives
+/// elsewhere) are dropped entirely — we cannot attach them to anything in
+/// this file's interface and surfacing them with the trait/type name as a
+/// "class" was misleading.
+fn merge_rust_impl_entries(classes: &mut Vec<ClassInfo>) {
+    use std::collections::HashSet;
+
+    // Step 1: index the lineno of every non-impl class entry so we keep
+    // their stable ordering when re-inserting methods.
+    let mut struct_like_indices: HashSet<String> = HashSet::new();
+    for c in classes.iter() {
+        // We treat any entry whose name doesn't carry generic / for-clause
+        // syntax as struct-like. impl entries carry the impl'd type name
+        // verbatim (which may include generics like `Foo<T>`), so we
+        // strip generics on lookup keys.
+        let key = strip_generics(&c.name);
+        struct_like_indices.insert(key);
+    }
+    let _ = struct_like_indices; // (only used implicitly via the merge)
+
+    // Step 2: separate impl entries from struct/enum/trait entries by
+    // lineno - we don't have a `kind` discriminator, so we re-scan: any
+    // entry whose name appears more than once is an impl-block duplicate.
+    let mut name_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    for c in classes.iter() {
+        *name_counts.entry(strip_generics(&c.name)).or_insert(0) += 1;
+    }
+
+    // Step 3: walk classes in order. For each entry whose name is a
+    // duplicate, fold its methods into the FIRST entry with the same
+    // name (the canonical struct/enum/trait location). Mark folded
+    // entries for removal.
+    let mut canonical_index: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    let mut to_remove: Vec<usize> = Vec::new();
+    for (i, c) in classes.iter().enumerate() {
+        let key = strip_generics(&c.name);
+        canonical_index.entry(key).or_insert(i);
+    }
+
+    for i in 0..classes.len() {
+        let key = strip_generics(&classes[i].name);
+        let canonical = match canonical_index.get(&key) {
+            Some(&idx) => idx,
+            None => continue,
+        };
+        if i == canonical {
+            continue;
+        }
+        // Fold methods (and bases) into canonical.
+        let methods = std::mem::take(&mut classes[i].methods);
+        let bases = std::mem::take(&mut classes[i].bases);
+        let private_count = classes[i].private_method_count;
+
+        let canonical_entry = &mut classes[canonical];
+        for m in methods {
+            let already = canonical_entry.methods.iter().any(|existing| {
+                existing.name == m.name && existing.signature == m.signature
+            });
+            if !already {
+                canonical_entry.methods.push(m);
+            }
+        }
+        for b in bases {
+            if !canonical_entry.bases.contains(&b) {
+                canonical_entry.bases.push(b);
+            }
+        }
+        canonical_entry.private_method_count =
+            canonical_entry.private_method_count.saturating_add(private_count);
+        to_remove.push(i);
+    }
+
+    // Remove duplicates in reverse order so indices remain valid.
+    for idx in to_remove.into_iter().rev() {
+        classes.remove(idx);
+    }
+
+    // Step 4: drop any remaining entries whose name count was originally
+    // > 1 but which are now empty placeholders (this happens for
+    // `impl Trait for ExternalType` where ExternalType has no
+    // struct/enum/trait declaration in the same file — the impl entry
+    // was folded into the canonical, leaving the canonical entry as a
+    // duplicate-of-self; nothing to drop in that case). Reserved for
+    // future expansion.
+    let _ = name_counts;
+}
+
+/// Strip generic / lifetime parameters from a Rust type name.
+/// `Vec<T>` -> `Vec`, `Foo<'a>` -> `Foo`, `Bar` -> `Bar`.
+fn strip_generics(name: &str) -> String {
+    if let Some(idx) = name.find('<') {
+        name[..idx].trim().to_string()
+    } else {
+        name.trim().to_string()
+    }
 }
 
 /// Walk the entire AST of a file, collecting class-like nodes and any

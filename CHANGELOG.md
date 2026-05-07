@@ -1,5 +1,90 @@
 # Changelog
 
+## language-specific-bugs-v1 — internal milestone
+
+NOT a published release. Closes the **language-specific bugs** identified
+by the Phase-14 audit (per-language `AGGREGATE_REPORT.md`) that P14-A
+(cross-language resolver) and P14-B (sibling-resolver gaps) didn't touch.
+All bugs reproduced live against the P14-B release binary on real repos
+under `/tmp/repos/<corpus>` BEFORE any fix; misreported bugs (5b, 10) were
+verified against the actual JSON schema and pinned with regression tests
+rather than reimplemented.
+
+### Per-bug pre/post-fix evidence (file-redirect)
+
+| Bug ID    | Pre-fix repro                                                                                                                                  | Pre-fix result                                                                | Post-fix result                                                                                                  |
+|-----------|------------------------------------------------------------------------------------------------------------------------------------------------|-------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------|
+| AGG14-2   | `tldr specs --from-tests /tmp/repos/spring-petclinic/.../OwnerControllerTests.java`                                                            | `total_specs=0`, 13 `@Test` methods unread                                    | `total_specs=52`, 4 endpoints (`get`, `post`, `param`, `flashAttr`) populated from MockMvc fluent assertions     |
+| AGG14-7   | `tldr calls /tmp/repos/ts-dom-gen --format json`                                                                                               | `nodes=0, edges=0` (the lone `src/build/emitter.ts` skipped by walker)        | `nodes=112, edges=200` (`build/` dir no longer skipped for JS/TS scans)                                          |
+| AGG14-9   | `tldr specs --from-tests /tmp/repos/ripgrep/crates/globset/src/lib.rs`                                                                         | `total_specs=0, test_files_scanned=0` (path-only filter missed `lib.rs`)      | `total_specs=7, test_files_scanned=1, test_functions_scanned=6` (#[test] substring + macro-aware arg parser)    |
+| AGG14-10  | `tldr interface /tmp/repos/ripgrep/crates/globset/src/lib.rs --format json`                                                                    | 5 classes, every one with `methods: 0` (impl_item filtered by visibility)     | 15 class entries, 20 methods total (GlobSet=13, GlobSetBuilder=3, Candidate=2, Error=2)                         |
+| AGG14-11  | `tldr importers cats.effect /tmp/repos/scala-cats-effect --format json`                                                                        | `total=0` (exact-match-only on dotted FQCN)                                   | `total=6` for `cats.effect.kernel`, `total=1` for `cats.effect.IO` (Python-style submodule bidirectional match) |
+| AGG14-12  | `tldr reaching-defs /tmp/repos/spring-petclinic/.../OwnerController.java findPaginatedForOwnersLastName`                                       | `owners` (DI-injected `final` field) flagged `severity: definite` uninit     | `uninitialized: []` for `owners`; `field_declaration` walked alongside imports                                  |
+| AGG14-15  | `tldr api-check /tmp/repos/spring-petclinic/src/main/java --format json`                                                                       | 7 JV001 false positives on `if (x == null)` idioms                            | 0 JV001 findings (null-comparison guard with word-boundary `null` check)                                        |
+| AGG14-16  | `tldr explain /tmp/repos/spring-petclinic/.../OwnerController.java findPaginatedForOwnersLastName --format json`                              | `callees=[]`, `caller.line=0` for `processFindForm`                           | `callees=[of, findByLastNameStartingWith]`, `caller.line=104` (multi-language call kinds + AST line locator)    |
+| AGG14-17  | `tldr interface /tmp/repos/spring-petclinic/.../OwnerController.java --format json`                                                            | `classes=[OwnerController]` with 12 methods, top-level `functions: []` empty | `functions.length=12` (Java/Kotlin: class methods flattened to top-level for schema parity with python/ts)      |
+| AGG14-5b  | `tldr patterns /tmp/repos/scala-cats-effect --format json`                                                                                     | misreport — schema has no top-level `patterns: []` array; `metadata.patterns_after_filter=2` matches actual category count (`naming` + `import_patterns`) | already correct; no fix needed |
+| AGG14-18  | `tldr smells /tmp/repos/lua-lsp/script --format json`                                                                                          | misreport — schema field is `smell_type` (populated for every entry: `deep_nesting`, `long_method`, `long_parameter_list`); auditor's `kind` lookup returns null because no `kind` field exists | already correct; pinned with regression test on `smell_type` |
+
+### Implementation notes
+
+- **AGG14-2 (Java MockMvc)**: added `try_extract_java_mockmvc_assertion` in `specs.rs` — recognizes `andExpect`/`andExpectAll`/`andDo` as the assertion verb, walks the `object` field chain to find the matching `mockMvc.perform(get(...))`, extracts the HTTP-method call as the FUT, and emits property specs whose `constraint` is `<head>:<leaf>` (e.g. `status:isOk`, `view:name`, `model:attributeExists`). Recursion-safe via line+constraint dedup.
+- **AGG14-7 (TS call graph)**: split `SKIP_DIRECTORIES` in `callgraph/scanner.rs` — kept the unconditional list (`.git`, `node_modules`, `target`, etc.), added `should_skip_build_or_dist_for_lang` for `build`/`dist`/`out`/`bin`/`obj` so JS/TS scans no longer drop authored source under these dirs. Other languages still skip them by convention.
+- **AGG14-9 (Rust specs)**: relaxed `is_candidate_test_file(Language::Rust)` to accept any `.rs` path; gated parse on a fast `#[test]` substring precheck so directory walks remain cheap. Added `collect_rust_macro_args` (depth-tracked comma-split of `token_tree` children) and `is_rust_macro_call_token` / `extract_call_info_for_lang` so `assert_eq!(add(2,3), 5)` produces a clean `add` FUT entry even though tree-sitter-rust doesn't structure macro contents.
+- **AGG14-10 (Rust interface)**: in `is_node_public`, `impl_item` always returns `true` (impl blocks aren't declarations). Post-walk pass `merge_rust_impl_entries` folds each impl's methods into the matching `struct_item`/`enum_item`/`trait_item` entry by stripped-generic name, so `impl GlobSet { ... }` no longer surfaces as a separate class — its 13 methods land on `struct GlobSet`.
+- **AGG14-11 (Scala importers)**: extended `module_matches` for `Scala` / `Kotlin` / `Java` to accept Python-style submodule bidirectional matches (`target = "cats.effect"` matches `import_module = "cats.effect.kernel.X"`). Same FQCN convention all three JVM languages share.
+- **AGG14-12 (Java reaching-defs)**: `DfgBuilder::collect_imports` now also walks `field_declaration` nodes and inserts each `variable_declarator` name into the same `imported_type_names` suppression set used for imports. The existing `is_use_context` check then treats class-field receivers (`owners.findByLastNameStartingWith(...)`) as not-a-use.
+- **AGG14-15 (Java api-check JV001)**: post-match `line_has_null_comparison` guard with word-boundary `null` detection (16-byte windows on each side of every `==`/`!=`). Skips JV001 specifically; other rules unaffected.
+- **AGG14-16 (Java explain)**: `find_callees_recursive` now matches the multi-language call-kind set (`method_invocation`, `invocation_expression`, etc.) instead of Python's `call`-only filter. `extract_call_name` checks `name`/`method`/`callee` fields so the Java grammar's name field is reachable. New `locate_call_in_caller_file` helper does an AST scan in the caller file (resolving relative paths against `project_root`) to recover the line, replacing the hardcoded `line: 0`.
+- **AGG14-17 (Java interface)**: post-walk `flatten_class_methods_to_functions` for `Language::Java` and `Language::Kotlin` only — copies each public method into top-level `functions[]` (preserving the existing `classes[].methods` entries) so consumers no longer have to dereference `classes[]` to enumerate the file's public callables. Python and TypeScript already have free top-level functions; not flattened.
+- **AGG14-5b / AGG14-18 (misreports)**: pinned with regression tests asserting the actual schema invariants: scala patterns top-level keys are `[metadata, naming, import_patterns, constraints, conflicts]` (no `patterns: []` array exists at any language); lua smells use `smell_type` (always populated) and never had a `kind` field.
+
+### Multi-language non-regression matrix
+
+| Touched surface | Sample langs verified | Result |
+|---|---|---|
+| `specs --from-tests` | python (flask=26), js (express=5), java (spring-petclinic=127), go (httprouter=11), php (symfony-string=34), rust (ripgrep=546) | total ≥ 1 across all langs |
+| `interface` (flatten only Java/Kotlin) | python (flask=2 free fns), ts (emitter=5 free fns), rust (lib.rs=15 classes / 20 methods), go (router=17 free fns), java (OwnerController=12 flattened) | non-class-only langs unchanged |
+| `calls` | python (flask=300), js (express=214), rust (ripgrep=1916), go (httprouter=85), php (symfony-string=451), ts (ts-dom-gen=112) | nodes ≥ 1 across all langs |
+| `reaching-defs` (java/c# imports + fields) | java (OwnerController.processFindForm=0 uninit), java (OwnerController.findPaginatedForOwnersLastName=0 uninit) | no FPs introduced |
+| `api-check` JV001 | java (spring-petclinic) | 0 JV001 findings (was 7 FPs); other rules unchanged |
+| `explain` callees/callers | java (OwnerController.findPaginatedForOwnersLastName=2 callees, 1 caller@104) | line populated |
+| `importers` FQCN | scala (cats.effect=6, cats.effect.IO=1) | submodule bidirectional |
+
+### Mini-audit (file-redirect, 6 real repos per command)
+
+- `specs --from-tests`: flask / express / ripgrep / go-httprouter / php-symfony-string / spring-petclinic — each ≥ 1 spec, no parse failures
+- `interface`: app.py / lib.rs / OwnerController.java / emitter.ts / router.go — each populated
+- `calls`: flask / express / ripgrep / go-httprouter / php-symfony-string / ts-dom-gen — each ≥ 85 nodes
+- `importers`: scala-cats-effect — `cats.effect=6`, `cats.effect.IO=1`, `cats.effect.kernel=6`
+- `api-check`: spring-petclinic — JV001 down from 7 to 0; total findings down accordingly
+- `explain`: OwnerController.findPaginatedForOwnersLastName — callees=2, callers=1 with line=104
+- `reaching-defs`: OwnerController — `findPaginatedForOwnersLastName=0 uninit`, `processFindForm=0 uninit`
+- `smells`: lua-lsp/script — every entry carries non-null `smell_type`
+
+### Test counts
+
+- `language_specific_bugs_v1`: **14 passed; 0 failed; 0 ignored**
+- `sibling_resolver_gaps_v1` (P14-B): 25 passed; 0 failed
+- `context_file_func_and_cpp_qualified_v1` (P14-A): 13 passed; 0 failed
+- `quality_metrics_and_schema_v1` (P13-C): 19 passed; 0 failed
+- `language_adapter_fixes_v1` (P13-B): 10 passed; 0 failed
+- `critical_regressions_v1` (P13-A): 14 passed; 0 failed
+- `vuln_migration_v1_red`: 168 passed; 0 failed
+- `language_command_matrix`: 926 passed; 0 failed; 28 ignored
+
+### Files changed (source only — no Cargo.lock, no continuum/autonomous/*)
+
+- `crates/tldr-cli/src/commands/contracts/specs.rs` — AGG14-2 (Java MockMvc), AGG14-9 (Rust macro args)
+- `crates/tldr-cli/src/commands/contracts/test_recognizer.rs` — AGG14-9 (Rust .rs path acceptance)
+- `crates/tldr-core/src/callgraph/scanner.rs` — AGG14-7 (JS/TS build dir)
+- `crates/tldr-cli/src/commands/patterns/interface.rs` — AGG14-10 (Rust impl merge), AGG14-17 (Java method flatten)
+- `crates/tldr-core/src/analysis/importers.rs` — AGG14-11 (scala FQCN)
+- `crates/tldr-core/src/dfg/extractor.rs` — AGG14-12 (java field walk)
+- `crates/tldr-cli/src/commands/remaining/api_check.rs` — AGG14-15 (JV001 null guard)
+- `crates/tldr-cli/src/commands/remaining/explain.rs` — AGG14-16 (Java callees/line)
+- `crates/tldr-cli/tests/language_specific_bugs_v1.rs` — new test, 14 PASS
+
 ## sibling-resolver-gaps-v1 — internal milestone
 
 NOT a published release. Closes the **sibling-resolver gap pattern**

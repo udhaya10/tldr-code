@@ -67,6 +67,17 @@ pub fn recognize(path: &Path, source: &str, language: Language) -> TestFileInfo 
         return TestFileInfo::default();
     }
 
+    // language-specific-bugs-v1 (P14.AGG14-9): for Rust, every `.rs` is
+    // a path-level candidate so `tldr specs --from-tests` can cover
+    // inline `#[cfg(test)] mod tests { ... }` blocks inside production
+    // source files (e.g. ripgrep `crates/globset/src/lib.rs`). To keep
+    // directory walks cheap, gate on a fast `#[test]` substring check
+    // before parsing — any `.rs` without `#[test]` cannot contribute
+    // and parsing the entire file would just be wasted work.
+    if matches!(language, Language::Rust) && !source.contains("#[test]") {
+        return TestFileInfo::default();
+    }
+
     // Empty or whitespace-only files: nothing to count.
     if source.trim().is_empty() {
         return TestFileInfo {
@@ -195,13 +206,22 @@ fn is_candidate_test_file(path: &Path, language: Language) -> bool {
         // Rust: built-in `#[test]` framework — files under `tests/` are
         // integration tests, and any source file may contain `#[cfg(test)]`
         // mod blocks. Treat any `.rs` whose path contains `test` (a tests/
-        // directory or a *_test.rs filename) or `bench` as a candidate;
+        // directory or a *_test.rs filename), `bench`, OR contains a
+        // `#[test]` substring as a candidate;
         // matches_test_function then filters down to actual `#[test]` items.
+        //
+        // language-specific-bugs-v1 (P14.AGG14-9): the path-only filter
+        // missed the canonical Rust convention of inline
+        // `#[cfg(test)] mod tests { ... }` blocks inside a regular
+        // `lib.rs` / module file (every cargo crate has these). The
+        // additional substring check at recognise-time
+        // (`source.contains("#[test]")`) is cheap relative to parsing and
+        // turns single-file invocations like `tldr specs --from-tests
+        // crates/globset/src/lib.rs` into yielding the inline tests they
+        // contain. Directory walks accept any `.rs` here and still rely on
+        // `matches_test_function` for per-fn filtering.
         Language::Rust => {
             lower.ends_with(".rs")
-                && (path.components().any(|c| c.as_os_str() == "tests")
-                    || stem.contains("test")
-                    || stem.contains("bench"))
         }
         // C#: NUnit / xUnit / MSTest — files named `*Tests.cs` or under
         // a Tests directory. matches_test_function filters down to methods
