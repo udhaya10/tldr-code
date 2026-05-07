@@ -1289,8 +1289,32 @@ fn format_explain_text(report: &ExplainReport) -> String {
 /// directory so the call graph at least scans alongside files (which still
 /// surfaces same-directory callers / callees that the per-file walker
 /// misses).
+///
+/// explain-callers-cross-lang-v1 (P15.AGG15-1): canonicalize `file` first so
+/// the walk-up traverses real ancestor directories. Without canonicalization,
+/// a relative input like `lib/application.js` produces parent components
+/// `["lib", ""]`; the empty-path component then `join("package.json")`
+/// resolves against CWD as `package.json` and "exists", causing
+/// `explain_project_root` to return the empty path. `build_project_call_graph`
+/// invoked with an empty path then fails to discover any source files,
+/// leaving `report.callers` empty even though `tldr impact` (which receives
+/// an explicit path) returns the correct callers. Canonicalizing first
+/// converts the input to an absolute path so each ancestor directory is real.
 fn explain_project_root(file: &std::path::Path) -> std::path::PathBuf {
-    let parent = file
+    let absolute = file
+        .canonicalize()
+        .unwrap_or_else(|_| {
+            // Canonicalize failed (file may not exist on disk via this path).
+            // Best-effort absolute form: join CWD with the relative input.
+            if file.is_absolute() {
+                file.to_path_buf()
+            } else {
+                std::env::current_dir()
+                    .map(|cwd| cwd.join(file))
+                    .unwrap_or_else(|_| file.to_path_buf())
+            }
+        });
+    let parent = absolute
         .parent()
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| std::path::PathBuf::from("."));
@@ -1307,6 +1331,13 @@ fn explain_project_root(file: &std::path::Path) -> std::path::PathBuf {
     ];
     let mut cursor: Option<&std::path::Path> = Some(&parent);
     while let Some(dir) = cursor {
+        // Skip empty-path components: an empty PathBuf joins as a relative
+        // CWD-rooted path which can falsely "exist" for markers that live
+        // in CWD but not in the (non-existent) empty ancestor directory.
+        if dir.as_os_str().is_empty() {
+            cursor = dir.parent();
+            continue;
+        }
         for m in &markers {
             if dir.join(m).exists() {
                 return dir.to_path_buf();

@@ -1,5 +1,106 @@
 # Changelog
 
+## explain-callers-cross-lang-v1 — internal milestone
+
+NOT a published release. Closes **AGG15-1** from the Phase-15 audit: a
+cross-language regression where `tldr explain <relative-file> <fn>`
+returned `callers=[]` when invoked from inside the project root, even
+though `tldr impact` (which receives an explicit path argument)
+returned the correct caller list. The same root cause produced empty
+callers across **JavaScript** (express `render`: 23→0), **Ruby**
+(rails-html-sanitizer `sanitize`: 14→0), and **Swift**
+(swift-collections `Heap._heapify`: 1→0).
+
+### Root cause
+
+`explain_project_root` in `crates/tldr-cli/src/commands/remaining/explain.rs`
+walked up the file's `Path::parent` chain looking for project markers
+(`Cargo.toml`, `package.json`, `go.mod`, etc.). For an absolute file
+path the walk traversed real ancestor directories until a marker was
+found. For a *relative* file path like `lib/application.js`,
+`Path::parent` produced `["lib", ""]`; the empty-path component then
+joined the marker filename relative to **CWD** as `"package.json"` and
+falsely reported `exists() == true`. `explain_project_root` returned
+the empty `PathBuf`. `build_project_call_graph(Path::new(""), ...)`
+discovered no source files, the cross-file caller-enrichment branch
+short-circuited, and the per-file walker (which only handles Python
+`call` nodes) added nothing for JS/Ruby/Swift call kinds — so
+`report.callers` was empty.
+
+### Fix
+
+Canonicalize `file` first inside `explain_project_root`, falling back
+to `current_dir().join(file)` if canonicalization fails (e.g. file
+doesn't exist on disk). Skip empty-path components during the
+ancestor walk so they cannot collide with CWD when joining marker
+filenames. The walk now traverses real ancestor directories and
+returns the actual project root for both absolute and relative input
+paths.
+
+### Per-bug pre/post-fix evidence (file-redirect)
+
+| Bug ID            | Repro (cwd, args)                                                                                                       | Pre-fix             | Post-fix                                                                                                          |
+|-------------------|-------------------------------------------------------------------------------------------------------------------------|---------------------|-------------------------------------------------------------------------------------------------------------------|
+| AGG15-1 (js)      | `cd /tmp/repos/express && tldr explain lib/application.js render --format json`                                         | `callers.len=0`     | `callers.len=23`                                                                                                  |
+| AGG15-1 (ruby)    | `cd /tmp/repos/rails-html-sanitizer && tldr explain lib/rails/html/sanitizer.rb sanitize --format json`                  | `callers.len=0`     | `callers.len=14`                                                                                                  |
+| AGG15-1 (swift)   | `cd /tmp/repos/swift-collections && tldr explain Sources/HeapModule/Heap+UnsafeHandle.swift "Heap._heapify" --format json` | `callers.len=0`     | `callers.len=1` (`Heap.heapify`); P14-B AGG14-14 callee `.file` ending in `Heap+UnsafeHandle.swift` preserved |
+
+### Multi-language non-regression matrix
+
+| Check (P-prior)                                                                                          | Verdict |
+|----------------------------------------------------------------------------------------------------------|---------|
+| csharp impact `WriteToken` total caller_count == 2 (P14-B AGG14-4)                                       | HELD    |
+| java impact `findPaginatedForOwnersLastName` dedup, single target, caller_count=1 (P14-B AGG14-1)        | HELD    |
+| java explain `findPaginatedForOwnersLastName` callers non-empty AND caller.line > 0 (P14-C AGG14-16)     | HELD    |
+| lua explain `m.open` cross-module callers ≥ 18 (P13-A AGG13-12 + P14-B AGG14-13)                         | HELD    |
+| python explain `finalize_request` no-duplicate (name, file) caller pairs (P12-A)                         | HELD    |
+| swift `Heap._heapify` callees attribute to `Heap+UnsafeHandle.swift` (P14-B AGG14-14)                    | HELD    |
+
+### Mini-audit (touched command: `explain`) across 7 real repos
+
+All cells return `callers.len ≥ 1` after fix:
+
+| Repo / function                                         | Pre-fix callers | Post-fix callers |
+|---------------------------------------------------------|-----------------|------------------|
+| express `render`                                         | 0               | 23               |
+| flask `finalize_request`                                 | 2               | 2                |
+| ripgrep `check_symlink_loop`                             | 1               | 1                |
+| spring-petclinic `findPaginatedForOwnersLastName`        | 1               | 1                |
+| rails-html-sanitizer `sanitize`                          | 0               | 14               |
+| swift-collections `Heap._heapify`                        | 0               | 1                |
+| lua-lsp `m.open`                                         | 18              | 18               |
+
+### Tests added
+
+`crates/tldr-cli/tests/explain_callers_cross_lang_v1.rs` (8 tests, all
+real-repo gated under `/tmp/repos/<corpus>`, no synthetic fixtures):
+
+- `js_explain_render_relative_path_callers_present` (AGG15-1 js)
+- `ruby_explain_sanitize_relative_path_callers_present` (AGG15-1 ruby)
+- `swift_explain_heapify_relative_path_callers_and_callee_files` (AGG15-1 swift + AGG14-14 callee-file non-regression)
+- `csharp_impact_write_token_callers_two` (AGG14-4 non-regression)
+- `java_impact_dedup_holds` (AGG14-1 non-regression)
+- `java_explain_caller_line_populated` (AGG14-16 non-regression)
+- `lua_explain_m_open_cross_module_callers` (AGG13-12 non-regression)
+- `python_explain_no_duplicate_callers` (AGG12-1 non-regression)
+
+All assertions are `≥ 1`-style numeric thresholds the canonical
+real-repo material guarantees.
+
+### Validation
+
+```
+cargo test --release --features semantic -p tldr-cli --test explain_callers_cross_lang_v1   # 8/0
+cargo test --release --features semantic -p tldr-cli --test language_specific_bugs_v1       # 14/0
+cargo test --release --features semantic -p tldr-cli --test sibling_resolver_gaps_v1        # 19/0
+cargo test --release --features semantic -p tldr-cli --test context_file_func_and_cpp_qualified_v1   # 25/0
+cargo test --release --features semantic -p tldr-cli --test critical_regressions_v1         # 13/0
+cargo test --release --features semantic -p tldr-cli --test language_adapter_fixes_v1       # 14/0
+cargo test --release --features semantic -p tldr-cli --test quality_metrics_and_schema_v1   # 10/0
+cargo test --release --features semantic -p tldr-cli --test vuln_migration_v1_red           # 168/0
+cargo test --release --features semantic -p tldr-cli --test language_command_matrix         # 926/0 (28 ignored)
+```
+
 ## language-specific-bugs-v1 — internal milestone
 
 NOT a published release. Closes the **language-specific bugs** identified
