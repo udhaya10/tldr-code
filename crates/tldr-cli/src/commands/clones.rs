@@ -9,6 +9,7 @@ use anyhow::Result;
 use clap::Args;
 
 use tldr_core::analysis::{detect_clones, CloneType, ClonesOptions, NormalizationMode};
+use tldr_core::Language;
 
 use crate::output::{
     format_clones_dot, format_clones_sarif, format_clones_text, OutputFormat, OutputWriter,
@@ -77,7 +78,12 @@ pub struct ClonesArgs {
 
 impl ClonesArgs {
     /// Run the clones command
-    pub fn run(&self, format: OutputFormat, quiet: bool) -> Result<()> {
+    pub fn run(
+        &self,
+        format: OutputFormat,
+        quiet: bool,
+        global_lang: Option<Language>,
+    ) -> Result<()> {
         let writer = OutputWriter::new(format, quiet);
 
         writer.progress(&format!("Detecting clones in {}...", self.path.display()));
@@ -87,13 +93,25 @@ impl ClonesArgs {
 
         let type_filter = parse_type_filter(&self.type_filter);
 
+        // language-adapter-fixes-v1 (P13.AGG13-10): the global `-l/--lang`
+        // flag (defined in `Cli` and honoured by 30+ sibling commands) was
+        // silently ignored by `clones` because the dispatcher discarded
+        // `cli.lang` when invoking `Clones(args).run(...)`. Honour it here
+        // by mapping the parsed `Language` enum back to the wire-format
+        // string `ClonesOptions` already accepts. The local `--language`
+        // flag wins when both are set so existing scripts keep working.
+        let effective_language = self
+            .language
+            .clone()
+            .or_else(|| global_lang.map(|l| l.as_str().to_string()));
+
         let options = ClonesOptions {
             min_tokens: self.min_tokens,
             min_lines: self.min_lines,
             threshold: self.threshold,
             type_filter,
             normalization,
-            language: self.language.clone(),
+            language: effective_language,
             show_classes: self.show_classes,
             include_within_file: self.include_within_file,
             max_clones: self.max_clones,

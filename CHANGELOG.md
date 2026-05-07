@@ -1,5 +1,163 @@
 # Changelog
 
+## language-adapter-fixes-v1 — internal milestone
+
+NOT a published release. Second milestone in P13 cleanup, addressing four
+language-adapter / cross-command regressions surfaced by the phase-13
+audit and the P13-A follow-up. All four bugs were reproduced live against
+the release binary on real repos under `/tmp/repos/<corpus>` BEFORE any
+fix.
+
+Two additional audit cells (AGG13-13 JSON control characters,
+AGG13-16 similar/semantic stdout hygiene) were investigated and found to
+be **already fixed** by earlier P12 milestones — re-verified against the
+prompt's repro forms (`tldr extract … --format json | python3 -m json.tool`
+and `tldr similar … --format json | jq type`); both succeed unchanged.
+Skipped per the no-over-engineering rule.
+
+### Per-bug pre/post-fix evidence
+
+| Bug ID         | Pre-fix repro                                                                                          | Pre-fix result                                                              | Post-fix result                                                              |
+|----------------|--------------------------------------------------------------------------------------------------------|------------------------------------------------------------------------------|------------------------------------------------------------------------------|
+| P13.AGG13-3    | `tldr resources /tmp/repos/express/lib/application.js render --format json`                             | `Error: function 'render' not found in /private/tmp/repos/express/lib/application.js` | `function: "render"`, full resources analysis emitted                         |
+| P13.AGG13-3    | `tldr contracts /tmp/repos/express/lib/application.js render --format json`                             | `Error: function 'render' not found`                                         | `function: "render"`, preconditions/postconditions arrays present             |
+| P13.AGG13-3    | `tldr resources /tmp/repos/express/lib/application.js init --format json`                               | `Error: function 'init' not found`                                           | `function: "init"`, full resources analysis emitted                           |
+| P13.AGG13-4    | `tldr impact WriteToken /tmp/repos/csharp-newtonsoft-bson-full --format json`                            | `caller_count: 0` / `note: "Entry point - no callers found"`                  | `caller_count: 2` (WriteEnd at BsonDataWriter.cs:123, WriteTokenAsync at BsonBinaryWriter.Async.cs:65), matches `tldr explain` |
+| P13.AGG13-4    | `tldr impact WriteTokenInternal /tmp/repos/csharp-newtonsoft-bson-full`                                  | `caller_count: 0`                                                            | `caller_count: 3`                                                              |
+| P13.AGG13-5    | `tldr context /tmp/repos/express/lib/application.js:render --format json`                                 | `Error: Function not found: /tmp/repos/express/lib/application.js:render`    | `entry_point: "render"`, 6 functions in context                              |
+| P13.AGG13-5    | `tldr context /tmp/repos/express/lib/application.js:init --format json`                                   | `Error: Function not found`                                                  | `entry_point: "init"`, 10 functions                                            |
+| P13.AGG13-10   | `tldr clones /tmp/repos/luau-luau --lang luau --format json`                                              | `language: "cpp"`, 811 cpp/h files analysed                                  | `language: "luau"` — global `--lang` honoured                                |
+
+### Fixes
+
+**AGG13-3 (HIGH, P12 regression)** — `crates/tldr-cli/src/commands/patterns/resources.rs`
+and `crates/tldr-cli/src/commands/contracts/contracts.rs` both ship
+their own per-language AST resolver (`find_function_recursive`). After
+P12.AGG12-7 added CommonJS-method-assignment support to
+`commands/remaining/explain.rs::find_function_node`, the SIBLING
+resolvers in resources/contracts went unupdated and continued to miss
+`app.foo = function foo() {}` patterns. Mirrored the same three node
+shapes (`assignment_expression` with member_expression LHS,
+`assignment_expression` with identifier LHS, object literal `pair`) into
+both files. Also added `expression_statement` and `object` to
+contracts.rs's recurse-into list since the JS top-level wraps
+assignments inside `expression_statement` and resources.rs's resolver
+already walks every child unconditionally so it descended into
+`expression_statement` for free. Test coverage extended in
+`tests/language_adapter_fixes_v1.rs::agg13_3_*`.
+
+**AGG13-4 (MED)** — `crates/tldr-cli/src/commands/impact.rs` now mirrors
+`commands/remaining/explain.rs::enrich_with_references` (the P12.AGG12-1
+references-based fallback). For C# (and any other language whose
+call-graph builder under-reports field-typed receiver method calls), the
+impact report previously diverged from explain/references on the same
+function. The new `enrich_targets_with_references` helper queries
+`find_references(kinds=[Call])` for the target function, locates each
+call site's enclosing function via `extract_file` line ranges, and
+appends each unique `(caller_function, caller_file)` pair to the impact
+target's `callers` list (deduped against the existing call-graph
+results, with self-references filtered). The `Entry point` note is
+replaced with a clearer `caller_count derived from references
+enrichment` note when the enrichment surfaces previously-missing
+callers. Test coverage in `tests/language_adapter_fixes_v1.rs::agg13_4_*`.
+
+**AGG13-5 (MED)** — `crates/tldr-cli/src/commands/context.rs` now parses
+the `<file>:<func>` shorthand (split on the LAST `:` so paths
+containing `:` like Windows drive letters or C++ scope resolution still
+resolve). When the LHS is an existing file on disk, the RHS becomes the
+entry point and the LHS becomes an implicit `--file` filter. When no
+explicit project path was supplied, the project root is auto-derived by
+walking upward from the file's parent directory looking for common
+markers (`.git`, `package.json`, `Cargo.toml`, `go.mod`,
+`pyproject.toml`, `pom.xml`, `build.gradle*`, `*.csproj`/`*.sln`,
+`mix.exs`, `dune-project`, `Package.swift`). When no marker is found,
+falls back to the file's immediate parent. Strings that LOOK like
+file:func but whose LHS is not a real file fall through to the legacy
+bare-name path so `Class::method` and similar still parse.
+
+The shorthand exposed a long-standing gap in
+`crates/tldr-core/src/context/builder.rs::find_function_in_graph` and
+`scan_project_for_function`: both used `Path::ends_with(filter)` to
+match the `--file` filter, which fails when the call graph stores
+relative paths and the filter arrives as an absolute path.
+Canonicalised path comparison was added as a fallback (legacy
+ends-with-on-components match still tried first for unreachable file
+edge cases).
+
+Test coverage in `tests/language_adapter_fixes_v1.rs::agg13_5_*`,
+including the negative test that confirms a non-file colon string falls
+through.
+
+**AGG13-10 (MED)** — `crates/tldr-cli/src/main.rs` was discarding
+`cli.lang` when dispatching to `Command::Clones(args).run(...)` even
+though the `-l/--lang` flag is declared `global = true` on `Cli` and
+honoured by 30+ sibling commands. Added the third argument to
+`ClonesArgs::run`, then merged it into `ClonesOptions.language` via
+`Language::as_str()` mapping (the local `--language` flag still wins
+when both are set, preserving back-compat). Test coverage in
+`tests/language_adapter_fixes_v1.rs::agg13_10_*`.
+
+### Multi-language non-regression checks
+
+* AGG13-3 (resources/contracts CommonJS): re-tested the same commands on
+  python (flask), rust (ripgrep/globset), go (httprouter), and
+  spring-petclinic (Java). All produce well-formed JSON for top-level
+  functions, confirming the JS-only changes don't disturb other
+  languages' resolvers.
+* AGG13-5 (context shorthand): re-tested on python (flask), elixir
+  (plug), go (httprouter), and rust (ripgrep). Each produces
+  `entry_point` set to the function name and ≥1 function in the context
+  payload.
+* AGG13-10 (clones --lang): also tested with `--lang rust`,
+  `--lang javascript`, `--lang python` (each round-trips correctly), and
+  re-verified `--language` (back-compat) and bare invocation
+  (autodetect) both still work.
+
+### Mini-audit on touched commands
+
+Across 6 real repos (`flask`, `express`, `ripgrep`, `go-httprouter`,
+`elixir-plug`, `spring-petclinic`):
+
+| repo            | resources | contracts | impact | context (file:func) |
+|-----------------|-----------|-----------|--------|---------------------|
+| flask           | OK        | OK        | targets=1 | 1 function       |
+| express         | OK        | OK        | targets=4 | 6 functions      |
+| ripgrep         | OK        | OK        | targets=1 | 1 function       |
+| go-httprouter   | OK        | OK        | (n/a)†   | 5 functions      |
+| elixir-plug     | OK        | OK        | targets=1 | 1 function       |
+| spring-petclinic | OK       | OK        | targets=3 | 1 function       |
+
+† go-httprouter `Handle` resolved a different positional path during the
+mini-audit script run (test-script artefact, not a regression — the
+direct `tldr impact Handle /tmp/repos/go-httprouter` invocation works
+fine).
+
+Plus the explicit AGG13-4 csharp-newtonsoft-bson-full repo: WriteToken
+caller_count=2, WriteTokenInternal caller_count=3 (matches explain).
+Partial corpus (csharp-newtonsoft-bson) ReadElementAsync caller_count
+remains ≥2 — non-regression confirmed.
+
+### Test counts
+
+* `language_adapter_fixes_v1.rs`: 14/0/0 (new file; all gate on /tmp/repos)
+* `critical_regressions_v1.rs`: 13/0/0 (P13-A — unchanged GREEN)
+* `vuln_migration_v1_red`: 168/0/0 (unchanged GREEN)
+* `language_command_matrix`: 926/0/28 (unchanged GREEN)
+
+### Files changed
+
+* `crates/tldr-cli/src/commands/patterns/resources.rs` (+126 lines)
+* `crates/tldr-cli/src/commands/contracts/contracts.rs` (+93 lines)
+* `crates/tldr-cli/src/commands/impact.rs` (+177 lines)
+* `crates/tldr-cli/src/commands/context.rs` (+99 lines)
+* `crates/tldr-cli/src/commands/clones.rs` (+24 lines)
+* `crates/tldr-cli/src/main.rs` (+1 line)
+* `crates/tldr-core/src/context/builder.rs` (+40 lines)
+* `crates/tldr-cli/tests/language_adapter_fixes_v1.rs` (+395 lines, new)
+* `CHANGELOG.md` (this entry)
+
+Manifest stays at 0.3.0.
+
 ## critical-regressions-v1 — internal milestone
 
 NOT a published release. First milestone in P13 cleanup, addressing the

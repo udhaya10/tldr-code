@@ -240,11 +240,36 @@ fn find_function_in_graph(
     project: &Path,
     file_filter: Option<&Path>,
 ) -> TldrResult<(PathBuf, String)> {
-    // Helper: check if a file path matches the filter
+    // language-adapter-fixes-v1 (P13.AGG13-5): the call graph stores
+    // project-relative paths (`lib/application.js`) but `file_filter`
+    // arrives as an absolute path (the user typed
+    // `/tmp/repos/express/lib/application.js`). The legacy
+    // `file.ends_with(filter)` form requires the filter to be a *suffix*
+    // of the file's components — which is impossible when the filter is
+    // absolute and the file is relative. Compare via canonicalisation
+    // (resolving the relative path against `project`) so absolute vs.
+    // relative reconciles correctly. Fall back to the legacy
+    // suffix-on-components match for cases where canonicalize fails
+    // (broken symlinks, missing files).
     let file_matches = |file: &Path| -> bool {
         match file_filter {
             None => true,
-            Some(filter) => file.ends_with(filter),
+            Some(filter) => {
+                if file.ends_with(filter) {
+                    return true;
+                }
+                let abs_file = if file.is_relative() {
+                    project.join(file)
+                } else {
+                    file.to_path_buf()
+                };
+                let canon_file = abs_file.canonicalize().ok();
+                let canon_filter = filter.canonicalize().ok();
+                match (canon_file, canon_filter) {
+                    (Some(a), Some(b)) => a == b,
+                    _ => false,
+                }
+            }
         }
     };
 
@@ -342,7 +367,19 @@ fn scan_project_for_function(
         if let Some(filter) = file_filter {
             // Check if the file path (relative to project) ends with the filter
             let relative = file_path.strip_prefix(project).unwrap_or(&file_path);
-            if !relative.ends_with(filter) {
+            // language-adapter-fixes-v1 (P13.AGG13-5): also accept absolute
+            // filter paths (the `<file>:<func>` shorthand expands to an
+            // absolute file path). Compare canonicalised forms when the
+            // legacy suffix-on-components match misses.
+            let suffix_ok = relative.ends_with(filter) || file_path.ends_with(filter);
+            let abs_ok = if !suffix_ok {
+                let canon_file = file_path.canonicalize().ok();
+                let canon_filter = filter.canonicalize().ok();
+                matches!((canon_file, canon_filter), (Some(a), Some(b)) if a == b)
+            } else {
+                false
+            };
+            if !suffix_ok && !abs_ok {
                 continue;
             }
         }

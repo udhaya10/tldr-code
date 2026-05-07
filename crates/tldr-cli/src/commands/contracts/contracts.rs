@@ -1208,6 +1208,72 @@ fn find_function_recursive<'a>(
             }
         }
 
+        // language-adapter-fixes-v1 (P13.AGG13-3): JS/TS function-expression
+        // assignments. CommonJS / prototype patterns:
+        //   app.use = function() {}
+        //   Foo.prototype.bar = function() {}
+        //   handler = () => {}
+        // tree-sitter-javascript wraps the assignment in
+        // `expression_statement -> assignment_expression`. The function body is
+        // the right-hand side of the assignment_expression.
+        if child.kind() == "assignment_expression" {
+            if let (Some(left), Some(right)) = (
+                child.child_by_field_name("left"),
+                child.child_by_field_name("right"),
+            ) {
+                let target_name = match left.kind() {
+                    "identifier" => Some(get_node_text(left, source).to_string()),
+                    "member_expression" => left
+                        .child_by_field_name("property")
+                        .map(|p| get_node_text(p, source).to_string()),
+                    _ => None,
+                };
+                if let Some(name) = target_name {
+                    if name == function_name
+                        && matches!(
+                            right.kind(),
+                            "arrow_function"
+                                | "function"
+                                | "function_expression"
+                                | "generator_function"
+                        )
+                    {
+                        return Some(right);
+                    }
+                }
+            }
+        }
+
+        // language-adapter-fixes-v1 (P13.AGG13-3): JS/TS object literal pair —
+        //   { foo: function() {} } / { foo: () => {} }
+        if child.kind() == "pair" {
+            if let (Some(key), Some(value)) = (
+                child.child_by_field_name("key"),
+                child.child_by_field_name("value"),
+            ) {
+                let key_name = match key.kind() {
+                    "property_identifier" | "identifier" => {
+                        get_node_text(key, source).to_string()
+                    }
+                    "string" => get_node_text(key, source)
+                        .trim_matches(|c| c == '"' || c == '\'' || c == '`')
+                        .to_string(),
+                    _ => String::new(),
+                };
+                if key_name == function_name
+                    && matches!(
+                        value.kind(),
+                        "arrow_function"
+                            | "function"
+                            | "function_expression"
+                            | "generator_function"
+                    )
+                {
+                    return Some(value);
+                }
+            }
+        }
+
         // Search inside class/struct/impl containers
         if config.is_class(child.kind()) {
             if let Some(body) = child.child_by_field_name(config.class_body_field) {
@@ -1261,6 +1327,14 @@ fn find_function_recursive<'a>(
             || child.kind() == "preproc_elifdef"
             || child.kind() == "linkage_specification" // extern "C" { ... }
             || child.kind() == "namespace_definition"  // C++ namespace { ... }
+            // language-adapter-fixes-v1 (P13.AGG13-3): JS/TS wraps top-level
+            // CommonJS-style assignments (`app.foo = function(){}`) in
+            // `expression_statement -> assignment_expression`. The bare
+            // `assignment_expression` and `pair` cases are matched directly
+            // above; descend into `expression_statement` and `object` so the
+            // recursion reaches them.
+            || child.kind() == "expression_statement"
+            || child.kind() == "object"
         {
             if let Some(found) =
                 find_function_recursive(child, function_name, source, config, depth + 1)

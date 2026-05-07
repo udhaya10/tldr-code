@@ -3318,6 +3318,76 @@ fn find_function_recursive<'a>(
         }
     }
 
+    // language-adapter-fixes-v1 (P13.AGG13-3): JS/TS function-expression
+    // assignments — CommonJS / prototype patterns.
+    //   app.use = function() {}
+    //   Foo.prototype.bar = function() {}
+    //   handler = () => {}
+    // Mirrors the same case explain.rs handles in P12.AGG12-7. The callee
+    // function body lives on the right-hand side of an assignment_expression
+    // whose left-hand side is either an identifier or a member_expression.
+    if kind == "assignment_expression" {
+        if let (Some(left), Some(right)) = (
+            node.child_by_field_name("left"),
+            node.child_by_field_name("right"),
+        ) {
+            let target_name = match left.kind() {
+                "identifier" => Some(left.utf8_text(source).unwrap_or("").to_string()),
+                "member_expression" => left
+                    .child_by_field_name("property")
+                    .map(|p| p.utf8_text(source).unwrap_or("").to_string()),
+                _ => None,
+            };
+            if let Some(name) = target_name {
+                if name == function_name
+                    && matches!(
+                        right.kind(),
+                        "arrow_function"
+                            | "function"
+                            | "function_expression"
+                            | "generator_function"
+                    )
+                {
+                    return Some(right);
+                }
+            }
+        }
+    }
+
+    // language-adapter-fixes-v1 (P13.AGG13-3): JS/TS object literal pair —
+    //   { foo: function() {} } / { foo: () => {} }
+    // The function body is the value of a `pair` whose key is an identifier
+    // matching function_name.
+    if kind == "pair" {
+        if let (Some(key), Some(value)) = (
+            node.child_by_field_name("key"),
+            node.child_by_field_name("value"),
+        ) {
+            let key_name = match key.kind() {
+                "property_identifier" | "identifier" => {
+                    key.utf8_text(source).unwrap_or("").to_string()
+                }
+                "string" => key
+                    .utf8_text(source)
+                    .unwrap_or("")
+                    .trim_matches(|c| c == '"' || c == '\'' || c == '`')
+                    .to_string(),
+                _ => String::new(),
+            };
+            if key_name == function_name
+                && matches!(
+                    value.kind(),
+                    "arrow_function"
+                        | "function"
+                        | "function_expression"
+                        | "generator_function"
+                )
+            {
+                return Some(value);
+            }
+        }
+    }
+
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         if let Some(found) = find_function_recursive(child, function_name, source, patterns) {
@@ -3371,6 +3441,62 @@ fn collect_functions<'a>(
                             functions.push((var_name, value_node));
                         }
                     }
+                }
+            }
+        }
+    }
+
+    // language-adapter-fixes-v1 (P13.AGG13-3): JS/TS function-expression
+    // assignments — `app.foo = function(){}` and bare `handler = () => {}`.
+    if kind == "assignment_expression" {
+        if let (Some(left), Some(right)) = (
+            node.child_by_field_name("left"),
+            node.child_by_field_name("right"),
+        ) {
+            if matches!(
+                right.kind(),
+                "arrow_function" | "function" | "function_expression" | "generator_function"
+            ) {
+                let target_name = match left.kind() {
+                    "identifier" => Some(left.utf8_text(source).unwrap_or("").to_string()),
+                    "member_expression" => left
+                        .child_by_field_name("property")
+                        .map(|p| p.utf8_text(source).unwrap_or("").to_string()),
+                    _ => None,
+                };
+                if let Some(name) = target_name {
+                    if !name.is_empty() {
+                        functions.push((name, right));
+                    }
+                }
+            }
+        }
+    }
+
+    // language-adapter-fixes-v1 (P13.AGG13-3): JS/TS object literal pair —
+    //   { foo: function() {} } / { foo: () => {} }
+    if kind == "pair" {
+        if let (Some(key), Some(value)) = (
+            node.child_by_field_name("key"),
+            node.child_by_field_name("value"),
+        ) {
+            if matches!(
+                value.kind(),
+                "arrow_function" | "function" | "function_expression" | "generator_function"
+            ) {
+                let key_name = match key.kind() {
+                    "property_identifier" | "identifier" => {
+                        key.utf8_text(source).unwrap_or("").to_string()
+                    }
+                    "string" => key
+                        .utf8_text(source)
+                        .unwrap_or("")
+                        .trim_matches(|c| c == '"' || c == '\'' || c == '`')
+                        .to_string(),
+                    _ => String::new(),
+                };
+                if !key_name.is_empty() {
+                    functions.push((key_name, value));
                 }
             }
         }
