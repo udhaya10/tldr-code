@@ -234,6 +234,63 @@ pub fn get_relevant_context(
 /// extracted module actually contains the function definition. As a tertiary
 /// preference (still without verification) we deprioritise files under common
 /// test directories so the chosen location is the real implementation.
+/// Find the canonical `(file, func)` key in the call graph that
+/// corresponds to a `(file_filter, func_name)` pair, so that downstream
+/// BFS traversal hits the correct outgoing edges.
+///
+/// context-relative-and-ts-colon-v1 (P15.AGG15-2): the call graph stores
+/// edges with adapter-specific conventions for both file paths
+/// (project-relative vs. bare-filename) and function names (bare name
+/// vs. `Class.method`). The file_filter early-return path of
+/// `find_function_in_graph` previously returned `(rel_path, bare_name)`
+/// which often did not match the graph's actual edge key, causing BFS
+/// to find zero outgoing edges and collapse the result to the single
+/// entry point. This helper probes the graph for an edge whose source
+/// matches both the file (after canonicalisation) and the function
+/// (exact match or `<Class>.{func}` suffix), returning the graph's own
+/// key shape when found.
+///
+/// Returns `None` when no graph edge matches — callers fall back to
+/// the direct-extract key, which preserves correct behaviour for leaf
+/// functions and single-file projects where the graph has no outgoing
+/// edges to traverse anyway.
+fn find_call_graph_key(
+    call_graph: &ProjectCallGraph,
+    abs_file: &Path,
+    func_name: &str,
+    project: &Path,
+) -> Option<(PathBuf, String)> {
+    let canon_filter = abs_file.canonicalize().ok();
+    let file_matches = |edge_file: &Path| -> bool {
+        // Cheap suffix match first.
+        if abs_file.ends_with(edge_file) || edge_file.ends_with(abs_file) {
+            return true;
+        }
+        let abs_edge = if edge_file.is_relative() {
+            project.join(edge_file)
+        } else {
+            edge_file.to_path_buf()
+        };
+        let canon_edge = abs_edge.canonicalize().ok();
+        match (canon_edge, canon_filter.as_ref()) {
+            (Some(a), Some(b)) => &a == b,
+            _ => false,
+        }
+    };
+    let func_matches = |edge_func: &str| -> bool {
+        edge_func == func_name || edge_func.ends_with(&format!(".{}", func_name))
+    };
+    for edge in call_graph.edges() {
+        if file_matches(&edge.src_file) && func_matches(&edge.src_func) {
+            return Some((edge.src_file.clone(), edge.src_func.clone()));
+        }
+        if file_matches(&edge.dst_file) && func_matches(&edge.dst_func) {
+            return Some((edge.dst_file.clone(), edge.dst_func.clone()));
+        }
+    }
+    None
+}
+
 fn find_function_in_graph(
     call_graph: &ProjectCallGraph,
     func_name: &str,
@@ -266,7 +323,30 @@ fn find_function_in_graph(
         };
         if abs.is_file() {
             if let Ok(module_info) = extract_file(&abs, Some(project)) {
+                // context-relative-and-ts-colon-v1 (P15.AGG15-2): when the
+                // file_filter early-return matched, prefer the
+                // corresponding key from the call graph over the
+                // direct-extract key. The call graph stores edges with
+                // adapter-specific conventions (e.g. C# stores
+                // `BsonBinaryWriter.WriteToken` not bare `WriteToken`;
+                // some adapters store relative paths with leading
+                // directory components). Returning the
+                // `(rel, func_name)` direct-extract key works for
+                // resolution but breaks the downstream BFS callee
+                // traversal when the call graph uses a different key
+                // shape — BFS finds zero outgoing edges and the result
+                // collapses to the single entry point. By probing the
+                // call graph first and returning the matching graph key,
+                // BFS recovers full callee depth (regression cases:
+                // csharp 1→9 functions, js 1→6 functions). Falls back to
+                // direct-extract behaviour when no graph edge matches
+                // (covers leaf functions and single-file projects).
                 if find_function_info(&module_info, func_name).is_some() {
+                    if let Some(graph_key) =
+                        find_call_graph_key(call_graph, &abs, func_name, project)
+                    {
+                        return Ok(graph_key);
+                    }
                     // Return a project-relative path when possible so
                     // downstream consumers (caching, file-extract) can
                     // canonicalise consistently with the rest of the
@@ -283,6 +363,11 @@ fn find_function_in_graph(
                         if class.name == class_name {
                             for method in &class.methods {
                                 if method.name == method_name {
+                                    if let Some(graph_key) = find_call_graph_key(
+                                        call_graph, &abs, func_name, project,
+                                    ) {
+                                        return Ok(graph_key);
+                                    }
                                     let rel = abs
                                         .strip_prefix(project)
                                         .unwrap_or(&abs)

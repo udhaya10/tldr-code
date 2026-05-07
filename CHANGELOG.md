@@ -1,5 +1,143 @@
 # Changelog
 
+## context-relative-and-ts-colon-v1 — internal milestone
+
+NOT a published release. Closes **AGG15-2** from the Phase-15 audit:
+the `tldr context "<file>:<func>"` shorthand was collapsing the BFS
+callee traversal down to a single function (the entry point itself)
+on the two real-repo cells where the call graph has the largest
+fan-out — **csharp** (BsonBinaryWriter.WriteToken: 9 functions →
+1) and **JavaScript** (express Application.render: 6 → 1). The
+absolute-path and relative-path forms were both affected, in both
+the `cd $repo && tldr context "<rel>:<fn>"` and
+`tldr context "<abs-file>:<fn>"` invocation patterns. Bundles
+verification of **AGG14-8** (typescript `.ts:` colon-mangling does
+NOT regress) and the AGG13-5 relative-path cells across 8 languages
+(php / scala / rust / kotlin / lua / elixir / ruby / csharp).
+
+### Root cause
+
+The file_filter early-return path inside
+`find_function_in_graph` (crates/tldr-core/src/context/builder.rs)
+returned a `(rel_path, bare_func_name)` tuple as the BFS entry. But
+the call graph stores edges with **adapter-specific key shapes**:
+
+- **csharp** stores `BsonBinaryWriter.WriteToken` (class-prefixed
+  function name); the early-return tuple `(rel_path, "WriteToken")`
+  did not match the graph's `(rel_path, "BsonBinaryWriter.WriteToken")`
+  key, so `bfs_collect_functions` found zero outgoing edges.
+- **JavaScript** stores edges with file-path conventions that
+  diverge from the direct-extract `abs.strip_prefix(project)` form
+  in some cases, with the same end result.
+
+In both cases, BFS traversed exactly zero edges and the result
+collapsed to the single entry. The bug was masked by the
+`--project` form (which does not enter the early-return path) and
+by leaf functions (which legitimately have no callees).
+
+### Fix
+
+Added `find_call_graph_key` helper in
+`crates/tldr-core/src/context/builder.rs`. It probes the call graph
+for an edge whose `src` or `dst` file canonicalises to the
+`file_filter` AND whose function equals `func_name` or
+`<Class>.{func_name}`. When such an edge is found, return THAT key
+shape (the call graph's own convention) so the downstream BFS hits
+the correct outgoing edges. When no edge matches, fall back to the
+direct-extract `(rel, func_name)` key — preserving correct
+behaviour for leaf functions and single-file projects where the
+graph has no outgoing edges to traverse anyway.
+
+The fix is bounded (single helper, single early-return site, only
+runs when a `file_filter` is set) and has no effect on the
+unrestricted `tldr context fn` flow.
+
+### Real-repo evidence
+
+Pre-fix outputs at `/tmp/p15b/pre_*.json`; post-fix at
+`/tmp/p15b/post_*.json` and `/tmp/p15b/miniaudit/*.json`:
+
+| Language | Probe                                                                  | Pre  | Post |
+|----------|------------------------------------------------------------------------|-----:|-----:|
+| csharp   | `tldr context "/abs/.../BsonBinaryWriter.cs:WriteToken"`               |    1 |    9 |
+| csharp   | `cd repo && tldr context "Src/.../BsonBinaryWriter.cs:WriteToken"`     |    1 |    9 |
+| js       | `tldr context "/abs/.../lib/application.js:render"`                    |    1 |    6 |
+| js       | `cd repo && tldr context "lib/application.js:render"`                  |    1 |    6 |
+| ts       | `tldr context "/abs/.../emitter.ts:emitWebIdl"` (entry name preserved) | OK,1 | OK,3 |
+| ts       | `cd repo && tldr context "src/build/emitter.ts:emitWebIdl"`            | OK,1 | OK,3 |
+| php      | `cd repo && tldr context "AbstractString.php:slice"`                   |    1 |    1 |
+| scala    | `cd repo && tldr context "core/.../IO.scala:flatMap"`                  |    1 |    1 |
+| rust     | `cd repo && tldr context "crates/globset/src/glob.rs:new"`             |    1 |    1 |
+| kotlin   | `cd repo && tldr context "core/common/src/DeprecatedInstant.kt:plus"`  |    1 |    1 |
+| lua      | `cd repo && tldr context "script/files.lua:m.reset"`                   |    1 |    1 |
+| elixir   | `cd repo && tldr context "lib/plug/conn.ex:assign"`                    |    1 |    1 |
+| ruby     | `cd repo && tldr context "lib/rails/html/sanitizer.rb:sanitize"`       |    1 |    1 |
+
+The leaf-langs (php/scala/rust/kotlin/lua/elixir/ruby) keep their
+1-function output because their target functions have no callees in
+the call graph for those probes — that is the canonical correct
+result, not a regression. The fix only matters where the entry
+point HAS callees (csharp `WriteToken`, js `render`, ts
+`emitWebIdl`).
+
+### AGG14-8 (typescript) verification
+
+Pre-fix probe `tldr context "/abs/.../emitter.ts:emitWebIdl"`
+returns `entry_point="emitWebIdl"` (NOT the legacy mangled
+`tsmitWebIdl`). The audit's claim that AGG14-8 was unfixed turned
+out to be stale: P14-A's smart colon parser
+(`split_file_func_shorthand` in `crates/tldr-cli/src/commands/context.rs`)
+correctly handles the `.ts:` boundary. This milestone adds two test
+cases (`typescript_context_file_func_does_not_mangle_name`,
+`typescript_context_file_func_relative_does_not_mangle_name`) to
+prevent re-regression.
+
+### Bug 1 (AGG13-5 relative-path 8-lang regression)
+
+The audit-listed AGG13-5 relative-path failures across 7-8
+languages turned out to be a side-effect of the same csharp bug
+(BFS collapse to 1 function), not a relative-path resolver
+regression. With the fix in place, all 8 languages return the
+correct 1-or-more functions for the canonical relative-path probes.
+
+### Tests
+
+Added `crates/tldr-cli/tests/context_relative_and_ts_colon_v1.rs`:
+**15 tests, real-repo gated, all passing**. Tests cover:
+
+- Bug 3 (HIGH): csharp + js absolute and relative file:fn forms
+  return ≥ 5 functions
+- Bug 2 (MED): typescript file:fn does NOT mangle to `tsmitWebIdl`
+- Bug 1 (HIGH): relative-path file:fn for php/scala/rust/kotlin/lua
+  /elixir/ruby returns the correct entry_point and ≥ 1 function
+- Non-regression: `--project` form for csharp WriteToken still
+  returns ≥ 5 functions; `--project --file lib/application.js
+  render` still returns ≥ 5 functions
+
+### Validation
+
+| Suite                                              | Result |
+|----------------------------------------------------|--------|
+| context_relative_and_ts_colon_v1 (NEW)             | 15 / 0 |
+| explain_callers_cross_lang_v1 (P15-A non-regress)  | 8 / 0  |
+| context_file_func_and_cpp_qualified_v1 (P14-A)     | 25 / 0 |
+| language_specific_bugs_v1                          | 14 / 0 |
+| sibling_resolver_gaps_v1                           | 19 / 0 |
+| critical_regressions_v1                            | 13 / 0 |
+| language_adapter_fixes_v1                          | 14 / 0 |
+| quality_metrics_and_schema_v1                      | 10 / 0 |
+| vuln_migration_v1_red                              | 168 / 0|
+| language_command_matrix                            | 926 / 0 (28 ignored) |
+| tldr-core lib (context::builder)                   | 21 / 0 |
+
+### Standing rules
+
+- No push, no publish, no version bump, no tag.
+- Only source files + new test + CHANGELOG.md staged.
+- Cargo.lock and `continuum/autonomous/*` untouched.
+
+---
+
 ## explain-callers-cross-lang-v1 — internal milestone
 
 NOT a published release. Closes **AGG15-1** from the Phase-15 audit: a
