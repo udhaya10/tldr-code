@@ -1,5 +1,21 @@
 # Changelog
 
+## tldr-core-test-compile-fix — internal hotfix
+
+NOT a published release. Single-line scoped `use` import added inside
+`test_extract_from_tree_matches_extract_file` so the test resolves
+`parse_file` (the free function in `crate::ast::parser`) instead of the
+module-scope import `parse_file_with_lang`. The compile error was
+introduced on 2026-04-21 (commit `d64dead`) and had been silently
+blocking `cargo test -p tldr-core --lib` ever since. Only the test
+module was affected — `tldr-cli` integration tests continued to run
+throughout. Discovered by P13-C worker; verified pre-existing via
+`git blame` and `git show HEAD:` before fix.
+
+After unblocking the test build, 10 pre-existing failures surfaced in
+`metrics::cognitive::tests` (else-if double-counting suite). Those
+failures are independent of this hotfix and are NOT addressed here.
+
 ## quality-metrics-and-schema-v1 — internal milestone
 
 NOT a published release. Third milestone in P13 cleanup, addressing

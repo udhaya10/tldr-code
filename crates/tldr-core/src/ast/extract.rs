@@ -7570,6 +7570,7 @@ def bar():
         let info_from_file = extract_file(file.path(), None).unwrap();
 
         // Extract using extract_from_tree (parse manually first)
+        use crate::ast::parser::parse_file;
         let (tree, source, language) = parse_file(file.path()).unwrap();
         let info_from_tree =
             extract_from_tree(&tree, &source, language, file.path(), None).unwrap();
