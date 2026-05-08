@@ -260,7 +260,7 @@ pub struct SmellFinding {
 }
 
 /// Report from smell detection
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct SmellsReport {
     /// All detected smells
     pub smells: Vec<SmellFinding>,
@@ -285,6 +285,36 @@ pub struct SmellsReport {
     /// backward-compatible.
     #[serde(default)]
     pub warnings: Vec<String>,
+}
+
+// residual-bugs-v1 (P15.AGG15-4): manual Serialize that mirrors
+// `summary.total_smells` to a top-level `total_smells` key. Audit P15
+// observed `tldr smells … --format json | jq '.total_smells'` returning
+// `null` while `.summary.total_smells` returned the correct count
+// across every supported language (rust/java/python/ts/scala/...).
+// Mirroring at the top level matches the CLI's documented contract and
+// keeps `total_*` consistent with `total_dead`/`total_findings`/etc on
+// peer commands. The `summary` block is preserved unchanged so existing
+// consumers that drill into `.summary.*` continue to work.
+impl Serialize for SmellsReport {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("SmellsReport", 8)?;
+        state.serialize_field("smells", &self.smells)?;
+        state.serialize_field("files_scanned", &self.files_scanned)?;
+        state.serialize_field("by_file", &self.by_file)?;
+        state.serialize_field("summary", &self.summary)?;
+        state.serialize_field("excluded_test_smells", &self.excluded_test_smells)?;
+        state.serialize_field("warnings", &self.warnings)?;
+        // Top-level mirror of `summary.total_smells` (P15.AGG15-4).
+        state.serialize_field("total_smells", &self.summary.total_smells)?;
+        // Top-level mirror of `summary.avg_smells_per_file` for symmetry.
+        state.serialize_field("avg_smells_per_file", &self.summary.avg_smells_per_file)?;
+        state.end()
+    }
 }
 
 /// Summary statistics for smell detection

@@ -44,7 +44,7 @@ use crate::TldrError;
 // =============================================================================
 
 /// LOC analysis report for a directory or file.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct LocReport {
     /// Summary totals across all files
     pub summary: LocSummary,
@@ -65,6 +65,39 @@ pub struct LocReport {
     pub by_directory: Option<Vec<DirectoryLocEntry>>,
     /// Warnings encountered during analysis
     pub warnings: Vec<String>,
+}
+
+// residual-bugs-v1 (P15.AGG15-4): manual Serialize that mirrors
+// `summary.total_files` / `summary.total_lines` / `summary.code_lines` to
+// top-level keys. Audit P15 observed `tldr loc … | jq '.total_files'`
+// returning `null` while `.summary.total_files` was correct, breaking
+// the same top-level-mirror pattern peer commands honour.
+impl Serialize for LocReport {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("LocReport", 8)?;
+        state.serialize_field("summary", &self.summary)?;
+        state.serialize_field("by_language", &self.by_language)?;
+        if let Some(ref by_file) = self.by_file {
+            state.serialize_field("by_file", by_file)?;
+        } else {
+            state.skip_field("by_file")?;
+        }
+        if let Some(ref by_dir) = self.by_directory {
+            state.serialize_field("by_directory", by_dir)?;
+        } else {
+            state.skip_field("by_directory")?;
+        }
+        state.serialize_field("warnings", &self.warnings)?;
+        // Top-level mirrors (P15.AGG15-4).
+        state.serialize_field("total_files", &self.summary.total_files)?;
+        state.serialize_field("total_lines", &self.summary.total_lines)?;
+        state.serialize_field("code_lines", &self.summary.code_lines)?;
+        state.end()
+    }
 }
 
 /// Summary totals for LOC analysis.

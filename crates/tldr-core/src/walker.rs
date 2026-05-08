@@ -101,6 +101,21 @@ pub const DEFAULT_EXCLUDE_DIRS: &[&str] = &[
 /// - `.doctrees/` is sphinx's internal cache, typically inside `_build/`.
 const GENERATED_DIR_SENTINELS: &[&str] = &["doxygen.css", "doxygen.svg"];
 
+/// JS/TS-friendly subset of [`DEFAULT_EXCLUDE_DIRS`]: directories that are
+/// build sinks for some languages (Rust `build/`, Java `dist/`) but commonly
+/// hold authored source for JS/TS (`src/build/emitter.ts` in ts-dom-gen,
+/// monorepo `packages/x/dist/index.ts`). When a [`ProjectWalker`] is
+/// configured with [`ProjectWalker::lang_hint`] set to JS or TS, these
+/// names are NOT auto-excluded — the walker defers to `.gitignore` instead.
+///
+/// residual-bugs-v1 (P15.AGG14-7-cascade): mirrors the per-language gate
+/// already in `crates/tldr-core/src/callgraph/scanner.rs`
+/// (`should_skip_build_or_dist_for_lang`). Without this gate `tldr dead`
+/// (which uses `ProjectWalker`) returned `functions_analyzed: 0` on
+/// ts-dom-gen even though `tldr calls` (which uses the scanner) returned
+/// 112 nodes / 200 edges from the same file (`src/build/emitter.ts`).
+const JS_TS_PRESERVED_DIRS: &[&str] = &["build", "dist", "out", "bin", "obj"];
+
 /// Builder for project walks.
 ///
 /// Produces an iterator of [`ignore::DirEntry`]s after applying:
@@ -111,12 +126,16 @@ const GENERATED_DIR_SENTINELS: &[&str] = &["doxygen.css", "doxygen.svg"];
 /// - `follow_links(false)` (always — critical for pnpm symlink forests)
 /// - optional max depth
 /// - optional extension allow-list
+/// - optional language hint that relaxes the JS/TS-friendly subset
+///   ([`JS_TS_PRESERVED_DIRS`]) when set to `Language::JavaScript` or
+///   `Language::TypeScript`
 pub struct ProjectWalker {
     root: PathBuf,
     respect_gitignore: bool,
     default_ignore: bool,
     max_depth: Option<usize>,
     extensions: Option<Vec<&'static str>>,
+    lang_hint: Option<crate::types::Language>,
 }
 
 impl ProjectWalker {
@@ -128,7 +147,26 @@ impl ProjectWalker {
             default_ignore: true,
             max_depth: None,
             extensions: None,
+            lang_hint: None,
         }
+    }
+
+    /// Tell the walker which language it is being run for. When set to
+    /// `Language::JavaScript` or `Language::TypeScript`, the walker stops
+    /// auto-excluding [`JS_TS_PRESERVED_DIRS`] (`build`, `dist`, `out`,
+    /// `bin`, `obj`) — JS/TS projects routinely keep authored source under
+    /// these names. For all other languages the hint is a no-op (the
+    /// default exclusion list applies).
+    ///
+    /// residual-bugs-v1 (P15.AGG14-7-cascade): without this hook, callers
+    /// that already know the language (e.g. `tldr dead --lang typescript`)
+    /// could not opt into the same per-language gate the call-graph
+    /// scanner already implements, leading to 0-result outputs on repos
+    /// like ts-dom-gen whose entire source surface lives at
+    /// `src/build/emitter.ts`.
+    pub fn lang_hint(mut self, lang: crate::types::Language) -> Self {
+        self.lang_hint = Some(lang);
+        self
     }
 
     /// Disable the [`DEFAULT_EXCLUDE_DIRS`] list.
@@ -170,6 +208,15 @@ impl ProjectWalker {
     pub fn iter(self) -> impl Iterator<Item = DirEntry> {
         let default_ignore = self.default_ignore;
         let extensions = self.extensions.clone();
+        // residual-bugs-v1 (P15.AGG14-7-cascade): when the caller passes
+        // a JS/TS language hint, the JS/TS-preserved subset of the
+        // default exclude list is treated as opt-in (deferred to
+        // `.gitignore`). Captured into a single bool so the closure
+        // below stays cheap.
+        let preserve_js_ts_dirs = matches!(
+            self.lang_hint,
+            Some(crate::types::Language::JavaScript) | Some(crate::types::Language::TypeScript)
+        );
 
         let mut builder = WalkBuilder::new(&self.root);
         builder
@@ -185,7 +232,7 @@ impl ProjectWalker {
         }
 
         if default_ignore {
-            builder.filter_entry(|entry| {
+            builder.filter_entry(move |entry| {
                 // Only filter directory entries by the exclude list; files
                 // named "node_modules" are fine to yield (edge case).
                 let is_dir = entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
@@ -193,7 +240,16 @@ impl ProjectWalker {
                     return true;
                 }
                 let name_excluded = match entry.file_name().to_str() {
-                    Some(name) => DEFAULT_EXCLUDE_DIRS.contains(&name),
+                    Some(name) => {
+                        if preserve_js_ts_dirs && JS_TS_PRESERVED_DIRS.contains(&name) {
+                            // JS/TS hint active and the directory name is
+                            // one of the names JS/TS callers commonly use
+                            // for authored source — defer to .gitignore.
+                            false
+                        } else {
+                            DEFAULT_EXCLUDE_DIRS.contains(&name)
+                        }
+                    }
                     None => false,
                 };
                 if name_excluded {

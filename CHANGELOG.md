@@ -1,5 +1,119 @@
 # Changelog
 
+## residual-bugs-v1 — internal milestone
+
+NOT a published release. Closes the residual bugs the Phase-15 audit
+flagged after P15-A (explain) and P15-B (context) landed. Five
+independent fixes plus regression test pinning:
+
+### Bugs addressed
+
+- **AGG15-3 cpp .h sibling resolver (verified preserved)** —
+  `tldr extract /tmp/repos/cpp-tinyxml2/tinyxml2.h` returns
+  `language=cpp` with 27 classes / 163 functions via the
+  sibling-aware widening from P14-B. The audit listed this as a P15
+  regression but inspection at HEAD showed the fix already landed.
+  Pinned by `cpp_h_sibling_resolves_to_cpp_with_classes` so
+  `from_path_with_siblings` cannot silently revert.
+
+- **AGG15-3 java importers bare-class-name (`Owner`)** —
+  `tldr importers Owner /tmp/repos/spring-petclinic` returned 0;
+  P14-C's prefix-bidirectional rule for Java/Scala/Kotlin only
+  matched when target was a strict prefix or suffix of the FQN.
+  Added a last-segment match for single-segment targets
+  (`!target.contains('.') && import_module.ends_with(".{target}")`)
+  in `crates/tldr-core/src/analysis/importers.rs`. Now resolves
+  `Owner` → `org.springframework.samples.petclinic.owner.Owner`.
+
+- **AGG14-11 scala importers (revisit)** — both `cats.effect.IO`
+  (1 hit via prefix rule) and `cats.effect.kernel` (6 hits) now
+  pinned; the audit's claim that IO returned 0 did not reproduce at
+  HEAD, but the test guards the prefix-bidirectional behaviour from
+  silent regression.
+
+- **AGG14-11 patterns schema (revisit)** — `tldr patterns` does NOT
+  emit a top-level `patterns` array on ANY language
+  (rust/python/java/scala/...); the canonical shape is
+  `{constraints, naming, import_patterns, metadata}`. The audit
+  interpreted this as a scala-only regression but the schema is
+  uniform across the matrix. Test
+  `patterns_schema_no_top_level_patterns_key_across_langs` pins the
+  contract across 4 languages so a future "fix" doesn't introduce a
+  phantom `patterns[]` field.
+
+- **AGG15-4 top-level summary key consistency** —
+  `tldr smells … | jq '.total_smells'` returned `null` on every
+  language (audit confirmed scala; my pre-fix sweep confirmed rust
+  / java / python / typescript / scala identically). Same for
+  `total_minutes` (debt), `total_files` (loc),
+  `total_findings` (api-check), `total_clones` (clones). Fix:
+  manual `Serialize` impls on `SmellsReport`, `DebtReport`,
+  `LocReport`, `ClonesReport`, and `APICheckReport` that mirror the
+  nested `summary.*` / `stats.*` fields to top-level keys. Existing
+  nested keys preserved for backward compatibility.
+
+- **AGG14-7 cascade ts dead** — `tldr dead /tmp/repos/ts-dom-gen`
+  returned `functions_analyzed: 0` despite `tldr calls` reporting
+  112 nodes / 200 edges. Root cause: `tldr dead` uses
+  `crates/tldr-core/src/walker.rs::ProjectWalker`, whose
+  `DEFAULT_EXCLUDE_DIRS` unconditionally listed
+  `build`/`dist`/`out`/`bin`/`obj` — silently dropping
+  `src/build/emitter.ts`, where the entire authored TypeScript
+  surface lives. The call-graph scanner already had the
+  per-language gate from P14-C
+  (`should_skip_build_or_dist_for_lang`), but the walker didn't.
+  Fix: added `ProjectWalker::lang_hint(language)` that, when set
+  to `Language::JavaScript` or `Language::TypeScript`, defers those
+  five names to `.gitignore` instead of auto-excluding them. The
+  dead command now passes `language` through to the walker. Other
+  languages (Rust uses `target/`, Python uses `build/` for setup.py,
+  Java uses `build/` for gradle output) are unaffected — the gate
+  matches the scanner's prior decision exactly.
+
+### Verification
+
+Pre-fix (audit repros):
+```
+tldr extract /tmp/repos/cpp-tinyxml2/tinyxml2.h         # already cpp/27 classes (already-fixed)
+tldr importers Owner /tmp/repos/spring-petclinic        # total: 0 → 1
+tldr importers cats.effect.IO scala-cats-effect         # 1 (preserved)
+tldr importers cats.effect.kernel scala-cats-effect     # 6 (preserved)
+tldr patterns scala-cats-effect | jq 'has("patterns")'  # false (canonical)
+tldr smells scala-cats-effect | jq '.total_smells'      # null → 97
+tldr dead /tmp/repos/ts-dom-gen | jq '.functions_analyzed' # 0 → 6
+```
+
+Multi-lang non-regression sweep (all pass):
+- Bug 4 mirrors equal nested across rust / java / python / typescript
+  / scala / cpp on smells; rust / java / python / scala on debt; rust
+  / java / python on loc; python / java / typescript on api-check;
+  rust / python / scala on clones.
+- Bug 5 lang-hint does NOT shrink the walker for non-JS/TS langs:
+  ripgrep dead = 2739 functions, flask = 201, petclinic = 341.
+- Bug 2 java FQN target still resolves
+  (`org.springframework.samples.petclinic.owner.Owner` → 1).
+
+### Test added
+
+- `crates/tldr-cli/tests/residual_bugs_v1.rs` — 14 tests, all pass.
+  Real-repo gated per `no-synthetic-fixtures-v1`.
+
+### Validation
+
+```
+cargo test --release --features semantic -p tldr-cli --test residual_bugs_v1                          # 14/14
+cargo test --release --features semantic -p tldr-cli --test context_relative_and_ts_colon_v1         # 25/25
+cargo test --release --features semantic -p tldr-cli --test explain_callers_cross_lang_v1            # 15/15
+cargo test --release --features semantic -p tldr-cli --test context_file_func_and_cpp_qualified_v1   # 13/13
+cargo test --release --features semantic -p tldr-cli --test sibling_resolver_gaps_v1                 # 8/8
+cargo test --release --features semantic -p tldr-cli --test language_specific_bugs_v1                # 14/14
+cargo test --release --features semantic -p tldr-cli --test critical_regressions_v1                  # 14/14
+cargo test --release --features semantic -p tldr-cli --test language_adapter_fixes_v1                # 10/10
+cargo test --release --features semantic -p tldr-cli --test quality_metrics_and_schema_v1            # 19/19
+cargo test --release --features semantic -p tldr-cli --test vuln_migration_v1_red                    # 168/168
+cargo test --release --features semantic -p tldr-cli --test language_command_matrix                  # 926 passed / 28 ignored
+```
+
 ## context-relative-and-ts-colon-v1 — internal milestone
 
 NOT a published release. Closes **AGG15-2** from the Phase-15 audit:

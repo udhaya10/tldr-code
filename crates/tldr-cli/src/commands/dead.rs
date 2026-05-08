@@ -280,7 +280,15 @@ fn collect_module_infos(
         // sibling extensions (`.tsx` ↔ `.jsx`) participate together.
         let extensions: &[&str] = language.scan_extensions();
         let mut file_count: usize = 0;
-        let mut walker = ProjectWalker::new(path);
+        // residual-bugs-v1 (P15.AGG14-7-cascade): pass the resolved
+        // language to the walker so JS/TS source under `src/build/` or
+        // `packages/x/dist/` is preserved (mirrors the per-language gate
+        // in `crates/tldr-core/src/callgraph/scanner.rs`). Without this
+        // hint, `tldr dead /tmp/repos/ts-dom-gen` returned
+        // `functions_analyzed: 0` because the walker silently skipped
+        // `src/build/`, where the entire authored TypeScript surface
+        // lives.
+        let mut walker = ProjectWalker::new(path).lang_hint(language);
         if no_default_ignore {
             walker = walker.no_default_ignore();
         }
@@ -367,7 +375,15 @@ pub(crate) fn collect_module_infos_with_refcounts(
         // sibling extensions (`.tsx` ↔ `.jsx`) participate together.
         let extensions: &[&str] = language.scan_extensions();
         let mut file_count: usize = 0;
-        let mut walker = ProjectWalker::new(path);
+        // residual-bugs-v1 (P15.AGG14-7-cascade): pass the resolved
+        // language to the walker so JS/TS source under `src/build/` or
+        // `packages/x/dist/` is preserved (mirrors the per-language gate
+        // in `crates/tldr-core/src/callgraph/scanner.rs`). Without this
+        // hint, `tldr dead /tmp/repos/ts-dom-gen` returned
+        // `functions_analyzed: 0` because the walker silently skipped
+        // `src/build/`, where the entire authored TypeScript surface
+        // lives.
+        let mut walker = ProjectWalker::new(path).lang_hint(language);
         if no_default_ignore {
             walker = walker.no_default_ignore();
         }

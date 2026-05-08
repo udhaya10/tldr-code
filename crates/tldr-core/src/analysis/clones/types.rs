@@ -17,7 +17,7 @@ use crate::types::Language;
 // =============================================================================
 
 /// Complete clone detection report
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct ClonesReport {
     /// Root path analyzed
     pub root: PathBuf,
@@ -37,6 +37,36 @@ pub struct ClonesReport {
 
     /// Configuration used
     pub config: CloneConfig,
+}
+
+// residual-bugs-v1 (P15.AGG15-4): manual Serialize that mirrors
+// `stats.clones_found` and `stats.files_analyzed` to top-level keys
+// `total_clones` and `files_analyzed`. Audit P15 found `tldr clones …
+// | jq '.total_clones'` returning `null` while `.stats.clones_found`
+// was correct. The existing nested keys remain unchanged for backward
+// compatibility.
+impl Serialize for ClonesReport {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("ClonesReport", 8)?;
+        state.serialize_field("root", &self.root)?;
+        state.serialize_field("language", &self.language)?;
+        state.serialize_field("clone_pairs", &self.clone_pairs)?;
+        if !self.clone_classes.is_empty() {
+            state.serialize_field("clone_classes", &self.clone_classes)?;
+        } else {
+            state.skip_field("clone_classes")?;
+        }
+        state.serialize_field("stats", &self.stats)?;
+        state.serialize_field("config", &self.config)?;
+        // Top-level mirrors (P15.AGG15-4).
+        state.serialize_field("total_clones", &self.stats.clones_found)?;
+        state.serialize_field("files_analyzed", &self.stats.files_analyzed)?;
+        state.end()
+    }
 }
 
 impl Default for ClonesReport {

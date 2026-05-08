@@ -1348,7 +1348,7 @@ pub struct APICheckSummary {
 }
 
 /// API check report.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct APICheckReport {
     /// Findings
     pub findings: Vec<MisuseFinding>,
@@ -1356,6 +1356,29 @@ pub struct APICheckReport {
     pub summary: APICheckSummary,
     /// Number of rules applied
     pub rules_applied: u32,
+}
+
+// residual-bugs-v1 (P15.AGG15-4): manual Serialize that mirrors
+// `summary.total_findings` and `summary.files_scanned` to top-level
+// keys `total_findings` and `files_scanned`. Audit P15 observed
+// `tldr api-check … | jq '.total_findings'` returning `null` despite
+// `.summary.total_findings` being correct, breaking the documented
+// top-level-mirror pattern that peer commands honour.
+impl Serialize for APICheckReport {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("APICheckReport", 5)?;
+        state.serialize_field("findings", &self.findings)?;
+        state.serialize_field("summary", &self.summary)?;
+        state.serialize_field("rules_applied", &self.rules_applied)?;
+        // Top-level mirrors (P15.AGG15-4).
+        state.serialize_field("total_findings", &self.summary.total_findings)?;
+        state.serialize_field("files_scanned", &self.summary.files_scanned)?;
+        state.end()
+    }
 }
 
 impl APICheckReport {

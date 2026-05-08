@@ -158,6 +158,17 @@ fn module_matches(import_module: &str, target: &str, language: Language) -> bool
         //   target = "cats.effect"            matches "cats.effect.kernel.Async"
         //   target = "cats.effect.kernel.Async" matches "cats.effect"
         //   target = "cats.effect.IO"         matches "cats.effect.IO"
+        //
+        // residual-bugs-v1 (P15.AGG15-3): callers also pass a bare class
+        // name without the FQN package (`tldr importers Owner ...` for
+        // spring-petclinic). The previous prefix-only rules failed
+        // because `Owner` neither equals nor is a strict prefix/suffix
+        // of `org.springframework.samples.petclinic.owner.Owner`. Add
+        // a final last-segment match so a class-name query resolves
+        // every FQN whose terminal segment matches. This mirrors Go's
+        // `ends_with("/{}")` rule but for dotted package paths. Only
+        // applied when the target itself is a single segment (no dot)
+        // — an FQN target falls through the prefix rules above.
         Language::Scala | Language::Kotlin | Language::Java => {
             if import_module == target {
                 return true;
@@ -166,6 +177,9 @@ fn module_matches(import_module: &str, target: &str, language: Language) -> bool
                 return true;
             }
             if target.starts_with(&format!("{}.", import_module)) {
+                return true;
+            }
+            if !target.contains('.') && import_module.ends_with(&format!(".{}", target)) {
                 return true;
             }
             false

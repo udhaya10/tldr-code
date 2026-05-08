@@ -257,7 +257,7 @@ pub struct DebtSummary {
 }
 
 /// Complete debt analysis report
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct DebtReport {
     /// All issues sorted by debt_minutes descending
     pub issues: Vec<DebtIssue>,
@@ -271,6 +271,30 @@ pub struct DebtReport {
     /// can confirm the flag was honoured. `null` when no language was
     /// pinned and autodetection didn't pick one.
     pub language: Option<String>,
+}
+
+// residual-bugs-v1 (P15.AGG15-4): manual Serialize that mirrors
+// `summary.total_minutes` / `summary.total_hours` to top-level keys
+// `total_minutes` and `total_hours`. Same rationale as SmellsReport —
+// `tldr debt | jq '.total_minutes'` returned `null` while
+// `.summary.total_minutes` was correct, breaking the top-level mirror
+// pattern that peer commands ship (`total_dead`, `total_findings`).
+impl Serialize for DebtReport {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("DebtReport", 6)?;
+        state.serialize_field("issues", &self.issues)?;
+        state.serialize_field("top_files", &self.top_files)?;
+        state.serialize_field("summary", &self.summary)?;
+        state.serialize_field("language", &self.language)?;
+        // Top-level mirrors (P15.AGG15-4).
+        state.serialize_field("total_minutes", &self.summary.total_minutes)?;
+        state.serialize_field("total_hours", &self.summary.total_hours)?;
+        state.end()
+    }
 }
 
 impl DebtReport {
