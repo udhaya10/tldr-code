@@ -169,6 +169,19 @@ fn module_matches(import_module: &str, target: &str, language: Language) -> bool
         // `ends_with("/{}")` rule but for dotted package paths. Only
         // applied when the target itself is a single segment (no dot)
         // — an FQN target falls through the prefix rules above.
+        //
+        // non-judgment-call-bugs-v1 (P17.AGG17-1): the reverse-prefix
+        // rule (`target.starts_with("{}.", import_module)`) was too
+        // aggressive when `import_module` is a single top-level segment.
+        // For example, `import cats._` extracts as module=`cats`; an
+        // `importers cats.effect.IO` query would then match because
+        // `cats.effect.IO` starts with `cats.`. But Scala wildcard
+        // imports are *not* transitive — `import cats._` only exposes
+        // `cats`'s direct members, not `cats.effect.IO`. Restrict the
+        // reverse-prefix rule to multi-segment `import_module` values
+        // (`cats.effect`, `cats.effect.kernel`, …) which represent
+        // genuine sub-package imports. Top-level wildcards still match
+        // exact target queries via the `import_module == target` rule.
         Language::Scala | Language::Kotlin | Language::Java => {
             if import_module == target {
                 return true;
@@ -176,7 +189,9 @@ fn module_matches(import_module: &str, target: &str, language: Language) -> bool
             if import_module.starts_with(&format!("{}.", target)) {
                 return true;
             }
-            if target.starts_with(&format!("{}.", import_module)) {
+            if import_module.contains('.')
+                && target.starts_with(&format!("{}.", import_module))
+            {
                 return true;
             }
             if !target.contains('.') && import_module.ends_with(&format!(".{}", target)) {
@@ -218,6 +233,29 @@ fn find_import_line(
             }
             Language::Go => {
                 if trimmed.contains("import") && trimmed.contains(module) {
+                    return (i as u32 + 1, trimmed.to_string());
+                }
+            }
+            // non-judgment-call-bugs-v1 (P17.AGG17-1): for Scala / Kotlin
+            // / Java / Rust, lines starting with `package` (Scala/Kotlin/
+            // Java) or `mod`/`pub mod` (Rust) are *declarations*, not
+            // imports. Previously this branch returned the first line
+            // whose substring matched `module`, which falsely surfaced
+            // package-declaration lines (`package cats.effect.kernel`)
+            // as the import statement when an unrelated wildcard import
+            // matched the query. Require the line to look like an
+            // import statement (`import …` / `use …`) before reporting it.
+            Language::Scala | Language::Kotlin | Language::Java => {
+                if (trimmed.starts_with("import ") || trimmed.starts_with("import\t"))
+                    && trimmed.contains(module)
+                {
+                    return (i as u32 + 1, trimmed.to_string());
+                }
+            }
+            Language::Rust => {
+                if (trimmed.starts_with("use ") || trimmed.starts_with("pub use "))
+                    && trimmed.contains(module)
+                {
                     return (i as u32 + 1, trimmed.to_string());
                 }
             }

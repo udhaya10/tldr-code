@@ -74,6 +74,18 @@ fn resolve_fn_bounds(
 /// bounds, or a `ParseError` with a clear message if bounds can't be
 /// determined. Replaces the prior pattern of hardcoding `start: 1, end:
 /// u32::MAX`, which produced misleading "lines 1-4294967295" messages.
+///
+/// non-judgment-call-bugs-v1 (P17.AGG17-6): when the line is *within*
+/// the resolved function bounds (e.g. line 440 inside parseImpl@297-460
+/// in kotlin-datetime/DateTimePeriod.kt), the previous code still
+/// emitted "line N is outside function" because it was called
+/// unconditionally on empty slices. Slices can be empty for reasons
+/// other than the line being outside the function — most commonly,
+/// the PDG builder has no statement node anchored to that exact line
+/// (line is a brace, comment, blank, or part of a multi-line expression
+/// the PDG attributes to a neighbouring line). Emit a `ParseError`
+/// with a more accurate message in that case so chop and explain
+/// agree on bounds.
 fn line_outside_with_bounds(
     line: u32,
     function: &str,
@@ -81,12 +93,26 @@ fn line_outside_with_bounds(
     language: Language,
 ) -> ContractsError {
     match resolve_fn_bounds(source_or_path, function, language) {
-        Some((start, end)) => ContractsError::LineOutsideFunction {
-            line,
-            function: function.to_string(),
-            start,
-            end,
-        },
+        Some((start, end)) => {
+            if line >= start && line <= end {
+                ContractsError::ParseError {
+                    file: PathBuf::from(source_or_path),
+                    message: format!(
+                        "line {} is within function '{}' (lines {}-{}) but no PDG node \
+                         is anchored there (likely a brace, comment, or part of a \
+                         multi-line statement attributed to a neighbouring line)",
+                        line, function, start, end
+                    ),
+                }
+            } else {
+                ContractsError::LineOutsideFunction {
+                    line,
+                    function: function.to_string(),
+                    start,
+                    end,
+                }
+            }
+        }
         None => ContractsError::ParseError {
             file: PathBuf::from(source_or_path),
             message: format!(

@@ -874,10 +874,30 @@ fn extract_call_name(node: Node, source: &[u8]) -> Option<String> {
     None
 }
 
-/// Extract a dotted name from an expression
+/// Extract a dotted name from an expression.
+///
+/// non-judgment-call-bugs-v1 (P17.AGG17-2): the previous fallback
+/// (`_ => node_text(node, source).to_string()`) returned the *full
+/// source text* for any non-identifier, non-Python-attribute node.
+/// For TypeScript member-call chains like
+/// `arr.flatMap(...).concat(...)` the call-expression's `function`
+/// field is a `member_expression` whose `object` is itself a
+/// `call_expression` — emitting `node_text(member_expression)`
+/// produced multi-line strings (with embedded `\n` and full argument
+/// source) as `callees[].name`. P17 flagged 54/270 callees
+/// corrupted in `tldr explain emitter.ts emitWebIdl`.
+///
+/// Fix: explicitly handle the property-access node kinds emitted by
+/// every multi-language tree-sitter grammar we accept and extract
+/// just the rightmost property identifier (`property` /
+/// `field` / `name` field, or the last `identifier` child).
+/// `tldr context` already produced clean identifiers — this aligns
+/// `tldr explain` with the same canonicalisation.
 fn extract_name_from_expr(node: Node, source: &[u8]) -> String {
     match node.kind() {
-        "identifier" => node_text(node, source).to_string(),
+        "identifier" | "simple_identifier" | "shorthand_property_identifier" => {
+            node_text(node, source).to_string()
+        }
         "attribute" => {
             let mut parts = Vec::new();
             let mut current = node;
@@ -904,8 +924,93 @@ fn extract_name_from_expr(node: Node, source: &[u8]) -> String {
             parts.reverse();
             parts.join(".")
         }
-        _ => node_text(node, source).to_string(),
+        // TypeScript / JavaScript: `obj.method` — emit just the
+        // property name. Chained calls (`a.b().c`) reach here with
+        // `object` itself a `call_expression`; we no longer emit the
+        // full source, only the trailing property.
+        "member_expression" => {
+            if let Some(prop) = node.child_by_field_name("property") {
+                return node_text(prop, source).to_string();
+            }
+            extract_trailing_identifier(node, source)
+        }
+        // Java / C# / PHP: `obj.method`
+        "field_access" | "member_access_expression" => {
+            for field in &["name", "field"] {
+                if let Some(prop) = node.child_by_field_name(field) {
+                    return node_text(prop, source).to_string();
+                }
+            }
+            extract_trailing_identifier(node, source)
+        }
+        // Kotlin / Swift: `obj.method` (member access on a navigation
+        // expression).
+        "navigation_expression" => {
+            if let Some(suffix) = node.child_by_field_name("suffix") {
+                return extract_trailing_identifier(suffix, source);
+            }
+            extract_trailing_identifier(node, source)
+        }
+        // Go: `pkg.Symbol`
+        "selector_expression" => {
+            if let Some(field) = node.child_by_field_name("field") {
+                return node_text(field, source).to_string();
+            }
+            extract_trailing_identifier(node, source)
+        }
+        // Rust: `mod::path::item` — emit just the trailing path segment
+        "scoped_identifier" | "scoped_call_expression" => {
+            if let Some(name) = node.child_by_field_name("name") {
+                return node_text(name, source).to_string();
+            }
+            extract_trailing_identifier(node, source)
+        }
+        // Rust: `recv.method`
+        "field_expression" => {
+            if let Some(field) = node.child_by_field_name("field") {
+                return node_text(field, source).to_string();
+            }
+            extract_trailing_identifier(node, source)
+        }
+        // Anything else: walk the subtree and grab the last identifier
+        // we find. This is still better than emitting the full source
+        // text and matches the behaviour of `tldr context` for
+        // unfamiliar grammar shapes.
+        _ => extract_trailing_identifier(node, source),
     }
+}
+
+/// Walk a subtree and return the rightmost identifier-like leaf token,
+/// or — as an absolute last resort — the node's source text *up to the
+/// first whitespace or `(` character* so we never emit the multi-line
+/// argument list that produced AGG17-2.
+fn extract_trailing_identifier(node: Node, source: &[u8]) -> String {
+    fn walk<'a>(node: Node<'a>, found: &mut Option<Node<'a>>) {
+        for child in node.children(&mut node.walk()) {
+            match child.kind() {
+                "identifier"
+                | "simple_identifier"
+                | "shorthand_property_identifier"
+                | "property_identifier"
+                | "field_identifier"
+                | "type_identifier" => {
+                    *found = Some(child);
+                }
+                _ => walk(child, found),
+            }
+        }
+    }
+    let mut last_id: Option<Node> = None;
+    walk(node, &mut last_id);
+    if let Some(n) = last_id {
+        return node_text(n, source).to_string();
+    }
+    // Fallback: clip the raw source so we never emit multi-line text.
+    let raw = node_text(node, source);
+    let cut = raw
+        .find(|c: char| c.is_whitespace() || c == '(' || c == '<')
+        .unwrap_or(raw.len());
+    raw[..cut].to_string()
 }
 
 // =============================================================================

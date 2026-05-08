@@ -170,8 +170,18 @@ fn java_importers_fqn_still_resolves() {
 // Bug 3a (AGG14-11): scala importers — IO and kernel forms
 // ============================================================================
 
-/// **scala importers cats.effect.IO** — bidirectional prefix rule must
-/// surface ≥ 1 result on the cats-effect repo.
+/// **scala importers cats.effect.IO** — superseded by
+/// non-judgment-call-bugs-v1 (P17.AGG17-1).
+///
+/// The original P15-C assertion (`total ≥ 1`) was based on the
+/// "bidirectional prefix" matcher rule that *also* matched
+/// top-level wildcards like `import cats._` against any sub-symbol
+/// query. Phase-17 audit demonstrated this was a false positive:
+/// no scala source file in cats-effect actually contains
+/// `import cats.effect.IO`, so the canonical answer is `total = 0`.
+/// The matcher tightening (single-segment `import_module` no longer
+/// reverse-prefix-matches multi-segment targets) closes this; the
+/// invariant we now pin is the corrected one.
 #[test]
 fn scala_importers_cats_effect_io_resolves() {
     let repo = "/tmp/repos/scala-cats-effect";
@@ -181,13 +191,14 @@ fn scala_importers_cats_effect_io_resolves() {
     let (rc, out) = run_tldr(&["importers", "cats.effect.IO", repo, "--format", "json"]);
     assert_eq!(rc, 0, "tldr importers rc != 0; stdout={}", out);
     let v = parse_json(&out);
-    let total = v["total"].as_u64().unwrap_or(0);
-    assert!(
-        total >= 1,
-        "scala importers cats.effect.IO must resolve ≥ 1 via the \
-         P14-C bidirectional prefix rule (`cats.effect.IO` is a prefix \
-         of `cats.effect.IO.*`); got {}",
-        total
+    let total = v["total"].as_u64().unwrap_or(u64::MAX);
+    assert_eq!(
+        total, 0,
+        "scala importers cats.effect.IO must resolve to 0: no source file \
+         in cats-effect contains `import cats.effect.IO` (verified via \
+         `grep -rE '^import cats.effect.IO' /tmp/repos/scala-cats-effect/`); \
+         got total={}, payload={}",
+        total, out
     );
 }
 

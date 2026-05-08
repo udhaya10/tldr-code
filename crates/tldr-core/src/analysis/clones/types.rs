@@ -45,13 +45,32 @@ pub struct ClonesReport {
 // | jq '.total_clones'` returning `null` while `.stats.clones_found`
 // was correct. The existing nested keys remain unchanged for backward
 // compatibility.
+//
+// non-judgment-call-bugs-v1 (P17.AGG17-5): every other quality/metric
+// command (smells, api-check, loc, debt, halstead, …) carries a
+// top-level `summary` object; `clones` was the lone exception, using
+// `stats{}` instead. Add a `summary` mirror that exposes the same
+// counts in the canonical shape so downstream consumers can treat
+// every metric command uniformly. The existing `stats` and the
+// flat top-level mirrors remain unchanged for backward compatibility.
+#[derive(Serialize)]
+struct ClonesSummary {
+    total_clones: usize,
+    files_analyzed: usize,
+    total_tokens: usize,
+    type1_count: usize,
+    type2_count: usize,
+    type3_count: usize,
+    detection_time_ms: u64,
+}
+
 impl Serialize for ClonesReport {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
     {
         use serde::ser::SerializeStruct;
-        let mut state = serializer.serialize_struct("ClonesReport", 8)?;
+        let mut state = serializer.serialize_struct("ClonesReport", 9)?;
         state.serialize_field("root", &self.root)?;
         state.serialize_field("language", &self.language)?;
         state.serialize_field("clone_pairs", &self.clone_pairs)?;
@@ -65,6 +84,17 @@ impl Serialize for ClonesReport {
         // Top-level mirrors (P15.AGG15-4).
         state.serialize_field("total_clones", &self.stats.clones_found)?;
         state.serialize_field("files_analyzed", &self.stats.files_analyzed)?;
+        // Schema-consistency `summary` mirror (P17.AGG17-5).
+        let summary = ClonesSummary {
+            total_clones: self.stats.clones_found,
+            files_analyzed: self.stats.files_analyzed,
+            total_tokens: self.stats.total_tokens,
+            type1_count: self.stats.type1_count,
+            type2_count: self.stats.type2_count,
+            type3_count: self.stats.type3_count,
+            detection_time_ms: self.stats.detection_time_ms,
+        };
+        state.serialize_field("summary", &summary)?;
         state.end()
     }
 }

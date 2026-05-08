@@ -1462,6 +1462,167 @@ pub fn find_cross_calls(caller: &ModuleInfo, callee: &ModuleInfo) -> CrossCalls 
 }
 
 // =============================================================================
+// Project Call-Graph Augmentation (P17.AGG17-3)
+// =============================================================================
+
+/// Augment the AST-derived cross-call counts (`a_to_b` / `b_to_a`) with
+/// any cross-file edges visible in the project call graph between the
+/// two specific files.
+///
+/// This is best-effort: if call-graph construction fails for any reason
+/// (unsupported language, parse error, IO error), the function is a
+/// no-op so the original AST-derived counts are preserved.
+fn augment_with_project_call_graph(
+    user_path_a: &Path,
+    user_path_b: &Path,
+    a_to_b: &mut CrossCalls,
+    b_to_a: &mut CrossCalls,
+    lang_hint: Option<TldrLanguage>,
+) {
+    // Resolve the project root as the deepest common ancestor of the
+    // two file paths. Fall back to the parent of path_a if no common
+    // ancestor can be derived (e.g. one of the paths is just a basename).
+    let canon_a = std::fs::canonicalize(user_path_a).unwrap_or_else(|_| user_path_a.to_path_buf());
+    let canon_b = std::fs::canonicalize(user_path_b).unwrap_or_else(|_| user_path_b.to_path_buf());
+    let root = match common_ancestor(&canon_a, &canon_b) {
+        Some(r) => r,
+        None => return,
+    };
+
+    // Detect language from path_a if not supplied; bail if both fail.
+    let language = match lang_hint
+        .or_else(|| TldrLanguage::from_path(&canon_a))
+        .or_else(|| TldrLanguage::from_path(&canon_b))
+    {
+        Some(l) => l,
+        None => return,
+    };
+
+    // Build the project call graph rooted at the common ancestor. This
+    // is the same routine `tldr calls` uses, so the augmentation is by
+    // construction consistent with what `tldr calls` reports.
+    let graph = match tldr_core::build_project_call_graph(&root, language, None, true) {
+        Ok(g) => g,
+        Err(_) => return,
+    };
+
+    // file_a_basename / file_b_basename used to suffix-match the edge
+    // paths against the user-supplied paths. The project call graph
+    // emits paths relative to the project root (e.g. `app.py`,
+    // `sansio/app.py`); the user-supplied paths are typically absolute
+    // or relative to cwd. Suffix-matching on the trailing relative
+    // path lets us identify the right edges without hard-coding a
+    // canonicalisation rule.
+    let suffix_a = relative_suffix(&canon_a, &root);
+    let suffix_b = relative_suffix(&canon_b, &root);
+
+    // Avoid double-counting calls already recorded by the AST walker.
+    // The AST walker keys cross-calls on (caller_func, callee_name,
+    // line); the call graph emits (src_func, dst_func, src_file,
+    // dst_file). Deduplicate by `(caller, callee, line)` triplet,
+    // treating absent line numbers as 0.
+    let existing_a_to_b: HashSet<(String, String)> = a_to_b
+        .calls
+        .iter()
+        .map(|c| (c.caller.clone(), c.callee.clone()))
+        .collect();
+    let existing_b_to_a: HashSet<(String, String)> = b_to_a
+        .calls
+        .iter()
+        .map(|c| (c.caller.clone(), c.callee.clone()))
+        .collect();
+
+    for edge in graph.edges() {
+        let src = edge.src_file.to_string_lossy();
+        let dst = edge.dst_file.to_string_lossy();
+
+        let src_is_a = path_matches(&src, &suffix_a);
+        let src_is_b = path_matches(&src, &suffix_b);
+        let dst_is_a = path_matches(&dst, &suffix_a);
+        let dst_is_b = path_matches(&dst, &suffix_b);
+
+        if src_is_a && dst_is_b {
+            let caller = edge.src_func.clone();
+            let callee = edge.dst_func.clone();
+            if !existing_a_to_b.contains(&(caller.clone(), callee.clone())) {
+                a_to_b.calls.push(CrossCall {
+                    caller,
+                    callee,
+                    line: 0,
+                });
+                a_to_b.count = a_to_b.count.saturating_add(1);
+            }
+        } else if src_is_b && dst_is_a {
+            let caller = edge.src_func.clone();
+            let callee = edge.dst_func.clone();
+            if !existing_b_to_a.contains(&(caller.clone(), callee.clone())) {
+                b_to_a.calls.push(CrossCall {
+                    caller,
+                    callee,
+                    line: 0,
+                });
+                b_to_a.count = b_to_a.count.saturating_add(1);
+            }
+        }
+    }
+}
+
+/// Find the deepest directory ancestor common to both paths. Returns
+/// `None` if no common ancestor exists.
+fn common_ancestor(a: &Path, b: &Path) -> Option<PathBuf> {
+    let comps_a: Vec<_> = a.components().collect();
+    let comps_b: Vec<_> = b.components().collect();
+    let mut common = PathBuf::new();
+    for (ca, cb) in comps_a.iter().zip(comps_b.iter()) {
+        if ca == cb {
+            common.push(ca.as_os_str());
+        } else {
+            break;
+        }
+    }
+    if common.as_os_str().is_empty() {
+        return None;
+    }
+    // If `common` happens to be a file (rare; both paths identical),
+    // step up to its parent.
+    if common.is_file() {
+        return common.parent().map(|p| p.to_path_buf());
+    }
+    Some(common)
+}
+
+/// Compute the path of `file` relative to `root` as a forward-slash
+/// string suitable for suffix-matching against project call graph
+/// `src_file` / `dst_file` strings.
+fn relative_suffix(file: &Path, root: &Path) -> String {
+    file.strip_prefix(root)
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_else(|_| {
+            file.file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default()
+        })
+}
+
+/// Check whether a project-call-graph edge path matches the requested
+/// file. Both forms are normalised to forward-slash and *must* be
+/// exactly equal — the call-graph is rooted at the same common-ancestor
+/// directory we used to derive the suffixes, so any mismatch means a
+/// different file.
+///
+/// Earlier prototypes used a suffix-based match
+/// (`edge_norm.ends_with("/{}", suffix)`), but that conflated
+/// `flask/app.py` with `flask/sansio/app.py` (every basename match
+/// triggered) — a P17.AGG17-3 false positive that inflated the cross
+/// call count by 35+ intra-file edges. Strict equality avoids that.
+fn path_matches(edge_path: &str, suffix: &str) -> bool {
+    if suffix.is_empty() {
+        return false;
+    }
+    edge_path.replace('\\', "/") == suffix
+}
+
+// =============================================================================
 // Coupling Score Computation
 // =============================================================================
 
@@ -1735,8 +1896,29 @@ fn run_pair_mode(args: &CouplingArgs, format: OutputFormat) -> Result<()> {
     }
 
     // Find cross-module calls
-    let a_to_b = find_cross_calls(&info_a, &info_b);
-    let b_to_a = find_cross_calls(&info_b, &info_a);
+    let mut a_to_b = find_cross_calls(&info_a, &info_b);
+    let mut b_to_a = find_cross_calls(&info_b, &info_a);
+
+    // non-judgment-call-bugs-v1 (P17.AGG17-3): the AST walker above
+    // resolves a call as cross-module only when the callee name is
+    // both `imports.contains_key`d AND in the callee module's
+    // `defined_names`. That misses cases where a class in module A
+    // inherits from a class in module B and invokes inherited methods
+    // via `super().method()` or `self.inherited_method()` — the
+    // method name is never imported and never defined in module A,
+    // so `find_cross_calls` returns 0 even though the project call
+    // graph (consumed by `tldr calls`) clearly shows the cross-file
+    // edges. Augment the AST result by consulting the project call
+    // graph for edges between the two specific files. This restores
+    // parity with `tldr calls` for inheritance-driven coupling
+    // (Flask → sansio.App, OwnerController → Owner, etc.).
+    augment_with_project_call_graph(
+        &args.path_a,
+        path_b_ref,
+        &mut a_to_b,
+        &mut b_to_a,
+        args.lang,
+    );
 
     // Compute coupling score
     let total_calls = a_to_b.count.saturating_add(b_to_a.count);

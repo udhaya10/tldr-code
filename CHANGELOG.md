@@ -1,5 +1,141 @@
 # Changelog
 
+## non-judgment-call-bugs-v1 — internal milestone
+
+NOT a published release. Closes the 6 non-judgment-call bugs flagged
+by the phase-17 final-review aggregate (`/tmp/audit_phase17/AGGREGATE_REPORT.md`).
+The 7th P17 bug (AGG17-7 ts resources name-heuristic) is judgment-call
+and is deferred. Six independent fixes:
+
+### Bugs addressed
+
+- **AGG17-1 scala importers (`package` declaration false positive)** —
+  `tldr importers cats.effect.IO /tmp/repos/scala-cats-effect` returned
+  `total = 1` with the matched line being `package cats.effect.kernel`
+  at Resource.scala:17 (the file's *own* package declaration, conflated
+  with an unrelated `import cats._` wildcard). The matcher's
+  reverse-prefix rule (`target.starts_with("{}.", import_module)`) was
+  too aggressive: a top-level `import cats._` extracts as
+  `module = "cats"` and falsely matches the multi-segment target
+  `cats.effect.IO`. Two-part fix in
+  `crates/tldr-core/src/analysis/importers.rs`:
+  - `module_matches` for Scala/Kotlin/Java now requires
+    `import_module` to itself contain a `.` (i.e., be a multi-segment
+    package path) before the reverse-prefix rule fires. Single-segment
+    top-level wildcards no longer match arbitrary FQN queries.
+  - `find_import_line` now requires the reported line to start with
+    `import` (Scala/Kotlin/Java) or `use` (Rust) so package declarations
+    are never reported as the import statement.
+  - The pre-existing `scala_importers_cats_effect_io_resolves` test in
+    residual-bugs-v1 was asserting the buggy behaviour (`total ≥ 1`);
+    updated to the corrected expectation (`total == 0`, since no
+    source file in cats-effect contains `import cats.effect.IO`).
+
+- **AGG17-4 lua halstead `aggregate` field (verified absent)** —
+  the audit characterised `aggregate: {}` as an empty stub. Inspection
+  at HEAD `c62a02b` shows the halstead JSON output for both file and
+  directory invocations carries no `aggregate` key (canonical shape is
+  `summary{}` only). Pinned by `agg17_4_lua_halstead_aggregate_consistent`
+  and `agg17_4_non_regression_halstead_summary_other_langs` so a future
+  schema-drift cannot reintroduce an empty stub. **No code change was
+  necessary.**
+
+- **AGG17-5 scala/all clones missing `summary` key** — `tldr clones`
+  emitted `stats{}` only; every other quality/metric command (smells,
+  debt, loc, api-check, halstead, …) carries a top-level `summary{}`
+  mirror. Fixed by extending the manual `Serialize` impl on
+  `ClonesReport` in
+  `crates/tldr-core/src/analysis/clones/types.rs` to emit a `summary`
+  object with `total_clones`, `files_analyzed`, `total_tokens`,
+  `type{1,2,3}_count`, and `detection_time_ms`. The existing nested
+  `stats{}` and the flat `total_clones` / `files_analyzed` mirrors are
+  preserved for backward compatibility.
+
+- **AGG17-6 kotlin chop boundary inconsistency** —
+  `tldr chop DateTimePeriod.kt parseImpl 305 440` previously reported
+  `"line 440 is outside function 'parseImpl' (lines 297-460)"` even
+  though 440 ∈ [297,460]. Root cause: the helper
+  `line_outside_with_bounds` was called unconditionally on empty
+  slices, but slices can be empty when the PDG has no statement node
+  anchored to that line (brace, blank, multi-line statement
+  attributed to a neighbouring line). Fixed in
+  `crates/tldr-cli/src/commands/contracts/chop.rs`:
+  `line_outside_with_bounds` now distinguishes within-bounds (emits a
+  clearer "line N is within function … but no PDG node is anchored
+  there" parse error) from out-of-bounds (preserves the original
+  diagnostic). The fix is language-agnostic — the same code path
+  serves all chop callers (kotlin, java, python, …).
+
+- **AGG17-2 typescript `explain` callee corruption** —
+  `tldr explain emitter.ts emitWebIdl` surfaced 54/270 callees with
+  multi-line source text as `name` (e.g. chained method-call
+  expressions like `arr.flatMap(...).concat`). Root cause: the
+  fallback in `extract_name_from_expr`
+  (`crates/tldr-cli/src/commands/remaining/explain.rs`) returned the
+  full source text for any non-identifier, non-Python-attribute node.
+  For TypeScript `member_expression`, Java/C# `field_access` /
+  `member_access_expression`, Kotlin `navigation_expression`, Go
+  `selector_expression`, Rust `scoped_identifier` /
+  `field_expression`, the canonical answer is the trailing
+  property identifier (which is what `tldr context` already emits).
+  Fix:
+  - Added explicit arms for every multi-language member-access node
+    kind, extracting just the rightmost property name.
+  - Added an `extract_trailing_identifier` last-resort that walks the
+    subtree for the rightmost identifier; if no identifier exists, it
+    clips the raw source up to the first whitespace/`(`/`<` so the
+    output is *always* a single-line token.
+  - Verified across ts/js callees: 54 → 0 corrupted on the canonical
+    repro; ≥ 50 callees still surfaced.
+
+- **AGG17-3 python coupling drops cross-module call edges** —
+  `tldr coupling flask/app.py flask/sansio/app.py` returned
+  `total_calls = 0` even though `tldr calls` showed 8+ cross-file
+  edges (Flask inherits from App in `sansio.app`; calls go through
+  `super().method()` and inherited `self.method`). Root cause: the
+  AST-based `find_cross_calls` only credits a call when the callee
+  name is both `imports.contains_key`d AND in `defined_names`, which
+  misses inherited / `super().*` dispatch entirely. Fix in
+  `crates/tldr-cli/src/commands/patterns/coupling.rs`: a new
+  `augment_with_project_call_graph` runs after AST `find_cross_calls`
+  in pair mode, building a project call graph rooted at the deepest
+  common ancestor of the two paths and crediting any edges between
+  the two specific files (matched by exact normalised path equality
+  to avoid `app.py` ↔ `sansio/app.py` basename conflation). The
+  augmentation is best-effort — if call-graph construction fails the
+  AST-derived counts are preserved unchanged.
+
+### Multi-language non-regression matrix
+
+| Bug | Verified on |
+|-----|-------------|
+| AGG17-1 (scala importers package-decl FP) | `cats.effect.IO`=0 / `cats.effect`≥1 (scala); `Owner`≥1 (java); kotlin importers run clean |
+| AGG17-4 (halstead aggregate consistency) | python/rust/java halstead all carry summary, no empty `aggregate` stub |
+| AGG17-5 (clones summary key) | scala/java/python/rust/c clones all emit `summary{total_clones,…}` |
+| AGG17-6 (chop boundary) | kotlin within-bounds → no "outside function"; python within-bounds chop succeeds; python outside-bounds still reports "outside function" |
+| AGG17-2 (explain callee corruption) | ts emitWebIdl: 54 → 0 corrupted; js application.js render: 0 corrupted; swift main.swift: 0 corrupted |
+| AGG17-3 (python coupling cross-module) | flask app↔sansio/app `total_calls=8` (≥1, augmented); java OwnerController×Owner P13-A AGG13-6 still ≥5; express coupling bounded (no intra-file double-count) |
+
+### Mini-audit (5+ real repos per touched command)
+
+- **importers**: scala-cats-effect / spring-petclinic / ripgrep / flask /
+  ts-dom-gen — all exit 0, totals plausible.
+- **clones**: scala-cats-effect / spring-petclinic / ripgrep / flask /
+  c-sds — all carry `summary{}` with `total_clones`.
+- **chop**: kotlin-datetime / flask — within-bounds and outside-bounds
+  both produce the correct diagnostic class.
+- **explain**: ts-dom-gen / express / swift-collections — all callees
+  clean (no newlines, no oversized parenthesised source).
+- **coupling**: flask / spring-petclinic / express / ripgrep / go-httprouter
+  / swift-collections — all exit 0 with bounded counts; AGG13-6 holds.
+
+### Tests added
+
+`crates/tldr-cli/tests/non_judgment_call_bugs_v1.rs` — 16 tests, all
+real-repo gated per `no-synthetic-fixtures-v1`. Covers each bug's
+positive case, negative non-regression case, and at least one
+cross-language consistency check per bug family.
+
 ## residual-bugs-v1 — internal milestone
 
 NOT a published release. Closes the residual bugs the Phase-15 audit
