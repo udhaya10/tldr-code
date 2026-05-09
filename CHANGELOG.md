@@ -1,5 +1,124 @@
 # Changelog
 
+## resources-ast-gate-v1 — internal milestone
+
+NOT a published release. Closes the 7th and final phase-17 final-review
+bug — AGG17-7 (`/tmp/audit_phase17/AGGREGATE_REPORT.md`), deferred from
+the prior milestone as judgment-call. Decision: apply **Option B —
+AST gate**.
+
+### Bug addressed
+
+- **AGG17-7 ts/js resources over-flag generic variable names** —
+  `tldr resources /tmp/repos/ts-dom-gen/src/build/emitter.ts emitWebIdl`
+  previously flagged `const event = webidl.events?.get(i.name)?.get(eName);`
+  (a chained Map lookup) as a leaked resource of type `request`. Root
+  cause: the TS/JS resource detector matched any RHS call ending in
+  one of the creator aliases (`get`, `post`, `connect`, `request`, …),
+  which combined with a generic LHS variable name (`event`, `request`,
+  `response`, `data`) yielded a high false-positive rate over real
+  codebases. The detector had no AST-level confirmation that the
+  variable was actually a resource handle.
+
+### Fix (`crates/tldr-cli/src/commands/patterns/resources.rs`)
+
+For TypeScript / JavaScript only, when the LHS variable name is in the
+*ambiguous set* `{event, request, response, data}`, the resource is
+registered ONLY IF the function body also contains some
+`<var_name>.<cleanup_method>(…)` call, where `<cleanup_method>` is one
+of `close`, `destroy`, `end`, `abort`, `disconnect`, `release`,
+`unref`, `removeListener`, `removeAllListeners`, `removeEventListener`,
+`unsubscribe`, `cancel`. High-precision names (`file`, `conn`,
+`socket`, `stream`, `server`, `db`, `client`, `handle`, …) are NOT
+subject to the gate — their name alone is a strong enough hint.
+
+Implementation: a new `collect_ts_js_cleanup_vars` walker pre-computes
+the set of variable names receiving a cleanup call, run once per
+function at the top of `ResourceDetector::detect_with_patterns`. The
+existing `check_assignment_multilang` TS/JS branch consults this set
+via a new `ts_js_should_skip_ambiguous` helper before pushing a
+detected resource.
+
+### Pre-fix evidence (HEAD `f53dda9`)
+
+```text
+$ tldr resources /tmp/repos/ts-dom-gen/src/build/emitter.ts emitWebIdl
+{
+  "resources": [{ "name": "event", "resource_type": "request",
+                  "line": 363, "closed": false }],
+  "leaks":     [{ "resource": "event", "line": 363, "paths": null }],
+  "summary":   { "resources_detected": 1, "leaks_found": 1, ... }
+}
+```
+
+The flagged variable is the chained Map lookup
+`webidl.events?.get(i.name)?.get(eName)` — definitively NOT a resource.
+
+### Post-fix evidence
+
+```text
+$ tldr resources /tmp/repos/ts-dom-gen/src/build/emitter.ts emitWebIdl
+{
+  "resources": [],
+  "leaks":     [],
+  "summary":   { "resources_detected": 0, "leaks_found": 0, ... }
+}
+```
+
+### Multi-language non-regression (mini-audit, 6 real repos)
+
+| repo / file | language | resources flagged |
+|---|---|---|
+| `express/lib/application.js`        | js  | `View`, `server` (unchanged from baseline) |
+| `flask/src/flask/app.py`            | py  | `[]` (unchanged) |
+| `c-sds/sds.c`                       | c   | `[]` (unchanged) |
+| `cpp-tinyxml2/tinyxml2.cpp`         | cpp | `str`, `attrib`, `err`, `fp` (unchanged) |
+| `ripgrep/crates/grep/src/lib.rs`    | rs  | `[]` (unchanged) |
+| `ts-dom-gen/src/build/emitter.ts`   | ts  | `[]` (was `[event]` — fixed) |
+
+High-precision names (`server`, `fp`, `str`, …) continue to be flagged
+exactly as before; only the targeted TS/JS ambiguous-name set is
+narrowed.
+
+### Test (`crates/tldr-cli/tests/resources_ast_gate_v1.rs`)
+
+5 tests — real-repo gated where possible:
+
+1. `agg17_7_ts_dom_gen_event_map_lookup_not_flagged` — the actual bug,
+   gated on `/tmp/repos/ts-dom-gen`.
+2. `agg17_7_positive_ambiguous_name_with_cleanup_still_flags` —
+   `const request = http.request(...); request.abort();` (canonical
+   Node.js stdlib idiom) MUST still flag.
+3. `agg17_7_non_regression_express_server_still_flags` — gated on
+   `/tmp/repos/express`; `var server = http.createServer(...)` keeps
+   flagging.
+4. `agg17_7_non_regression_python_open_still_flags` — Python
+   `f = open(...)` not affected by the TS/JS gate.
+5. `agg17_7_ts_data_without_cleanup_not_flagged` — boundary: `data`
+   from `.get(...)` without cleanup is skipped.
+
+### Tests passing (this milestone + 12 prior)
+
+```text
+resources_ast_gate_v1                    5/0/0
+non_judgment_call_bugs_v1               25/0/0
+residual_bugs_v1                        15/0/0
+context_relative_and_ts_colon_v1        13/0/0
+explain_callers_cross_lang_v1            8/0/0
+context_file_func_and_cpp_qualified_v1  14/0/0
+sibling_resolver_gaps_v1                14/0/0
+language_specific_bugs_v1               16/0/0
+critical_regressions_v1                 10/0/0
+language_adapter_fixes_v1               14/0/0
+quality_metrics_and_schema_v1            5/0/0
+vuln_migration_v1_red                  168/0/0
+language_command_matrix                926/0/28
+```
+
+Total 1247 passing, 0 failing, 28 ignored (matrix expected).
+
+Manifest stays `0.3.0`. NOT pushed.
+
 ## non-judgment-call-bugs-v1 — internal milestone
 
 NOT a published release. Closes the 6 non-judgment-call bugs flagged

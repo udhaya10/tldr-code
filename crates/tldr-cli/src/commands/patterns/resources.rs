@@ -1173,10 +1173,75 @@ struct DetectedResource {
     in_context_manager: bool,
 }
 
+// =============================================================================
+// AGG17-7 (resources-ast-gate-v1): TS/JS ambiguous-name AST gate
+// =============================================================================
+//
+// Variable names that are too generic in TS/JS — without an AST cleanup-context
+// match they routinely false-positive on Map.get / Array.find / object lookups
+// (e.g. `const event = events.get(id)`, `const data = config.data`). For these
+// names we require a confirming cleanup-method call on the same variable inside
+// the function body before flagging it as a managed resource.
+const TS_JS_AMBIGUOUS_NAMES: &[&str] = &["event", "request", "response", "data"];
+
+/// Cleanup-style methods whose presence on `<var>.<method>(...)` confirms that
+/// `var` is a real resource handle (rather than a Map lookup or plain object).
+const TS_JS_CLEANUP_METHODS: &[&str] = &[
+    "close",
+    "destroy",
+    "end",
+    "abort",
+    "disconnect",
+    "release",
+    "unref",
+    "removeListener",
+    "removeAllListeners",
+    "removeEventListener",
+    "unsubscribe",
+    "cancel",
+];
+
+/// Walk a TS/JS function body and collect variable names that have a
+/// cleanup-style method invoked on them (e.g. `event.close()` →
+/// `{"event"}`). Used by the ambiguous-name AST gate.
+fn collect_ts_js_cleanup_vars(func_node: Node, source: &[u8]) -> HashSet<String> {
+    let mut out: HashSet<String> = HashSet::new();
+    fn visit(node: Node, source: &[u8], out: &mut HashSet<String>) {
+        // Look for call_expression whose function is a member_expression
+        // ending in one of TS_JS_CLEANUP_METHODS, with object = identifier.
+        if node.kind() == "call_expression" {
+            if let Some(func) = node.child_by_field_name("function") {
+                if func.kind() == "member_expression" {
+                    let object = func.child_by_field_name("object");
+                    let property = func.child_by_field_name("property");
+                    if let (Some(obj), Some(prop)) = (object, property) {
+                        if obj.kind() == "identifier" {
+                            let prop_text = node_text(prop, source);
+                            if TS_JS_CLEANUP_METHODS.contains(&prop_text) {
+                                out.insert(node_text(obj, source).to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            visit(child, source, out);
+        }
+    }
+    visit(func_node, source, &mut out);
+    out
+}
+
 /// Resource detector for finding must-close resources.
 pub struct ResourceDetector {
     resources: Vec<DetectedResource>,
     context_manager_vars: HashSet<String>,
+    /// AGG17-7: TS/JS variables observed to receive a cleanup-method call
+    /// (`<var>.close()`, `.destroy()`, `.removeListener()`, etc.). Used to gate
+    /// ambiguous-name resource flagging — see `TS_JS_AMBIGUOUS_NAMES`.
+    ts_js_cleanup_vars: HashSet<String>,
     lang: Language,
 }
 
@@ -1185,6 +1250,7 @@ impl ResourceDetector {
         Self {
             resources: Vec::new(),
             context_manager_vars: HashSet::new(),
+            ts_js_cleanup_vars: HashSet::new(),
             lang: Language::Python,
         }
     }
@@ -1193,8 +1259,22 @@ impl ResourceDetector {
         Self {
             resources: Vec::new(),
             context_manager_vars: HashSet::new(),
+            ts_js_cleanup_vars: HashSet::new(),
             lang,
         }
+    }
+
+    /// AGG17-7: For TS/JS, return true if `var_name` is in the ambiguous set
+    /// AND has no cleanup-method call observed in the current function — i.e.
+    /// it should be SKIPPED rather than flagged as a resource.
+    fn ts_js_should_skip_ambiguous(&self, var_name: &str) -> bool {
+        if !matches!(self.lang, Language::TypeScript | Language::JavaScript) {
+            return false;
+        }
+        if !TS_JS_AMBIGUOUS_NAMES.contains(&var_name) {
+            return false;
+        }
+        !self.ts_js_cleanup_vars.contains(var_name)
     }
 
     /// Detect resources in a function (legacy Python-only).
@@ -1219,6 +1299,12 @@ impl ResourceDetector {
         let patterns = get_resource_patterns(self.lang);
         self.resources.clear();
         self.context_manager_vars.clear();
+        self.ts_js_cleanup_vars.clear();
+        // AGG17-7: precompute cleanup-method receivers for TS/JS so we can
+        // gate the ambiguous-name set (event/request/response/data).
+        if matches!(self.lang, Language::TypeScript | Language::JavaScript) {
+            self.ts_js_cleanup_vars = collect_ts_js_cleanup_vars(func_node, source);
+        }
         self.visit_node_multilang(func_node, source, false, &patterns);
 
         self.resources
@@ -1590,6 +1676,11 @@ impl ResourceDetector {
                                 if let Some(resource_type) = self
                                     .get_resource_type_from_call_multilang(value, source, patterns)
                                 {
+                                    // AGG17-7: ambiguous TS/JS names need a
+                                    // confirming cleanup-method call to be flagged.
+                                    if self.ts_js_should_skip_ambiguous(&var_name) {
+                                        continue;
+                                    }
                                     self.resources.push(DetectedResource {
                                         name: var_name,
                                         resource_type,
@@ -1609,6 +1700,11 @@ impl ResourceDetector {
                             if let Some(resource_type) =
                                 self.get_resource_type_from_call_multilang(right, source, patterns)
                             {
+                                // AGG17-7: ambiguous TS/JS names need a
+                                // confirming cleanup-method call to be flagged.
+                                if self.ts_js_should_skip_ambiguous(&var_name) {
+                                    return;
+                                }
                                 self.resources.push(DetectedResource {
                                     name: var_name,
                                     resource_type,
