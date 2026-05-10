@@ -12,8 +12,9 @@
 //! - Break/continue to label: +1 (not applicable in Python)
 //!
 //! Important deviations from cyclomatic complexity:
-//! - `else` adds +1 base increment with no nesting penalty (per SonarSource spec)
-//! - `elif` adds +1 (distinct from else)
+//! - `else` adds +0 (linear flow per SonarSource Cognitive Complexity v1.4)
+//! - `else if` adds +1 total (the inner `if`, NOT +2)
+//! - `elif` adds +1 (Python's distinct `elif_clause`)
 //! - Nesting increases cognitive load exponentially
 //!
 //! # References
@@ -685,7 +686,9 @@ impl<'a> CognitiveCalculator<'a> {
 
     /// Check if a node kind increases nesting level
     fn increases_nesting(&self, kind: &str) -> bool {
-        matches!(
+        // Language-agnostic control-flow node kinds. These have the
+        // `_statement` / `_clause` suffix and are unambiguous across grammars.
+        let generic = matches!(
             kind,
             "if_statement"
                 | "for_statement"
@@ -701,26 +704,39 @@ impl<'a> CognitiveCalculator<'a> {
                 | "catch_clause"
                 | "except_clause"
                 | "except_handler"
-                // verification-and-metrics-completeness-v1 (P12.AGG12-10):
-                // Ruby tree-sitter grammar exposes control-flow nodes
-                // without the `_statement` suffix used by Python/JS/Java.
-                // Without these arms `tldr cognitive` reported `0` for
-                // every Ruby function regardless of branch density. The
-                // `*_modifier` forms cover the trailing-conditional
-                // shorthand (`return X if cond` / `return X unless cond`).
-                | "if"
-                | "unless"
-                | "while"
-                | "until"
-                | "for"
-                | "case"
-                | "begin"
-                | "rescue"
-                | "if_modifier"
-                | "unless_modifier"
-                | "while_modifier"
-                | "until_modifier"
-        )
+        );
+
+        if generic {
+            return true;
+        }
+
+        // cognitive-else-counting-fix-v1: Ruby tree-sitter grammar exposes
+        // control-flow nodes without the `_statement` suffix used by
+        // Python/JS/Java (e.g. bare `"if"`, `"while"`, `"case"`). These bare
+        // keyword names ALSO appear as token-kind leaves in Python/JS/TS/C/
+        // Rust trees (the literal `if` / `for` / `while` keyword inside an
+        // `if_statement` / `for_statement`). Matching them unconditionally
+        // double-counted every control structure in non-Ruby code. Gate the
+        // Ruby cognates on `Language::Ruby` so they only fire for actual
+        // Ruby ASTs.
+        if matches!(self.language, Language::Ruby) {
+            return matches!(
+                kind,
+                "if" | "unless"
+                    | "while"
+                    | "until"
+                    | "for"
+                    | "case"
+                    | "begin"
+                    | "rescue"
+                    | "if_modifier"
+                    | "unless_modifier"
+                    | "while_modifier"
+                    | "until_modifier"
+            );
+        }
+
+        false
     }
 
     /// Count cognitive complexity increment for a node
@@ -758,18 +774,24 @@ impl<'a> CognitiveCalculator<'a> {
             "match_statement" | "switch_statement" => Some((1, "switch")),
             // ternary adds +1 (no nesting penalty per SonarQube - chains are flat)
             "conditional_expression" | "ternary_expression" => Some((1, "?:")),
-            // P12.AGG12-10: Ruby AST kinds. `if`/`unless` are SonarSource
-            // "if" cognates; `while`/`until` are loops; `for` is a loop;
-            // `case` is a switch; `begin` is the equivalent of `try`;
-            // `rescue` is the catch clause; the *_modifier suffix variants
-            // are the trailing-conditional shorthand and count exactly the
-            // same as their statement form.
-            "if" => Some((1, "if")),
-            "unless" => Some((1, "if")), // Ruby `unless` is just inverted `if`
-            "while" | "until" => Some((1, "while")),
-            "for" => Some((1, "for")),
-            "case" => Some((1, "switch")),
-            "rescue" => Some((1, "catch")),
+            // P12.AGG12-10 + cognitive-else-counting-fix-v1: Ruby AST kinds.
+            // `if`/`unless` are SonarSource "if" cognates; `while`/`until` are
+            // loops; `for` is a loop; `case` is a switch; `begin` is the
+            // equivalent of `try`; `rescue` is the catch clause; the
+            // *_modifier suffix variants are the trailing-conditional
+            // shorthand and count exactly the same as their statement form.
+            //
+            // CRITICAL: gate on Language::Ruby. In Python/JS/TS/C/Rust ASTs
+            // the literal `if`/`for`/`while` keyword appears as a token-kind
+            // child of `if_statement` / `for_statement` etc. Matching them
+            // unconditionally double-counted every control structure (e.g.
+            // a single `if x: ...` scored 3 instead of 1).
+            "if" if matches!(self.language, Language::Ruby) => Some((1, "if")),
+            "unless" if matches!(self.language, Language::Ruby) => Some((1, "if")),
+            "while" | "until" if matches!(self.language, Language::Ruby) => Some((1, "while")),
+            "for" if matches!(self.language, Language::Ruby) => Some((1, "for")),
+            "case" if matches!(self.language, Language::Ruby) => Some((1, "switch")),
+            "rescue" if matches!(self.language, Language::Ruby) => Some((1, "catch")),
             "if_modifier" => Some((1, "if")),
             "unless_modifier" => Some((1, "if")),
             "while_modifier" | "until_modifier" => Some((1, "while")),
@@ -894,12 +916,18 @@ impl<'a> CognitiveCalculator<'a> {
             "except_clause" | "catch_clause" | "except_handler" => self.cyclomatic += 1,
             "case_clause" | "match_arm" | "switch_case" => self.cyclomatic += 1,
             "conditional_expression" | "ternary_expression" => self.cyclomatic += 1,
-            // Ruby AST kinds (P12.AGG12-10).
-            "if" | "unless" | "if_modifier" | "unless_modifier" => self.cyclomatic += 1,
-            "while" | "until" | "while_modifier" | "until_modifier" => self.cyclomatic += 1,
-            "for" => self.cyclomatic += 1,
-            "rescue" => self.cyclomatic += 1,
-            "when" => self.cyclomatic += 1, // case-arm cognate
+            // Ruby AST kinds (P12.AGG12-10 + cognitive-else-counting-fix-v1).
+            // Gate bare-keyword cognates on Language::Ruby — in other
+            // grammars these are literal-token leaves of statement nodes and
+            // would double-count cyclomatic complexity. The `*_modifier`
+            // forms are Ruby-only by construction so are safe.
+            "if" | "unless" if matches!(self.language, Language::Ruby) => self.cyclomatic += 1,
+            "while" | "until" if matches!(self.language, Language::Ruby) => self.cyclomatic += 1,
+            "for" if matches!(self.language, Language::Ruby) => self.cyclomatic += 1,
+            "rescue" if matches!(self.language, Language::Ruby) => self.cyclomatic += 1,
+            "if_modifier" | "unless_modifier" => self.cyclomatic += 1,
+            "while_modifier" | "until_modifier" => self.cyclomatic += 1,
+            "when" if matches!(self.language, Language::Ruby) => self.cyclomatic += 1, // case-arm cognate
             "boolean_operator" | "binary_expression" => {
                 if self.get_logical_operator(node).is_some() {
                     self.cyclomatic += 1;
