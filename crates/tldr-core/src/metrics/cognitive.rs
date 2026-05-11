@@ -427,6 +427,17 @@ fn find_all_functions(
         }
     }
 
+    // p19-secondary-fixes-v1 (BUG-P19-03): OCaml's
+    // `get_function_node_kinds` lists BOTH `value_definition` (the outer
+    // wrapper) and `let_binding` (the inner definition). The walker
+    // matches both and emits the same function twice with identical
+    // (name, line). Dedup by (name, line) preserving first-seen entry.
+    if matches!(language, Language::Ocaml) {
+        let mut seen: std::collections::HashSet<(String, u32)> =
+            std::collections::HashSet::new();
+        functions.retain(|f| seen.insert((f.name.clone(), f.line)));
+    }
+
     Ok(functions)
 }
 

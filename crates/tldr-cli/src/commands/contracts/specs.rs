@@ -2155,9 +2155,53 @@ fn classify_assertion_call(
         // First arg is the boolean expression; if it's a call_expression,
         // take its name. Otherwise emit a generic property on the contained
         // call when present.
-        let call_arg = first_callable_inside(args[0]);
+        let mut call_arg = first_callable_inside(args[0]);
+
+        // p19-secondary-fixes-v1 (BUG-P19-09): for Rust macros
+        // (`assert!(call(...))` / `assert!(!call(...))` /
+        // `assert!(receiver.method(...))`), the macro body is a flat
+        // `token_tree` so `first_callable_inside` finds no call_expression
+        // wrapper. Detect the inline-call shape by walking the macro's
+        // entire `token_tree` looking for an identifier (or
+        // scoped/field expression) immediately followed by `(` in the
+        // source, then promote it to a synthetic "call". We walk from
+        // the macro_invocation root (not from `args[0]` alone, since
+        // the relevant identifier may be a SIBLING token in the
+        // token_tree, not a descendant of the first-arg node).
+        if call_arg.is_none()
+            && matches!(language, Language::Rust)
+            && call.kind() == "macro_invocation"
+        {
+            call_arg = find_rust_macro_inline_call(*call, source);
+        }
+
         if let Some(c) = call_arg {
-            if let Some((fname, _)) = generic_extract_call_info(c, source) {
+            // For the rust macro case the synthetic call shape is the
+            // inner identifier — extract the name from the source bytes
+            // directly so we record the function-under-test even when
+            // tree-sitter didn't structure it.
+            let fname_inputs = if matches!(language, Language::Rust)
+                && call.kind() == "macro_invocation"
+                && !looks_like_call(c)
+            {
+                Some((
+                    std::str::from_utf8(&source[c.start_byte()..c.end_byte()])
+                        .unwrap_or("")
+                        .trim()
+                        .rsplit('.')
+                        .next()
+                        .unwrap_or("")
+                        .rsplit("::")
+                        .next()
+                        .unwrap_or("")
+                        .to_string(),
+                    Vec::<serde_json::Value>::new(),
+                ))
+                .filter(|(n, _)| !n.is_empty())
+            } else {
+                generic_extract_call_info(c, source)
+            };
+            if let Some((fname, _)) = fname_inputs {
                 let fs = ensure(specs, &fname);
                 fs.property_specs.push(PropertySpec {
                     function: fname,
@@ -2396,6 +2440,53 @@ fn first_callable_inside(n: Node) -> Option<Node> {
         }
     }
     None
+}
+
+/// p19-secondary-fixes-v1 (BUG-P19-09): Rust macro body tokens are flat
+/// (no call_expression wrapper). Find the first identifier (possibly
+/// part of a `receiver.method` field access, or `Class::method` scoped
+/// identifier) that is immediately followed by `(` in the source —
+/// i.e. an inline function call in the macro arguments. Returns the
+/// identifier node (or its containing expression) so the caller can
+/// pull the function-under-test name from its byte range.
+fn find_rust_macro_inline_call<'a>(root: Node<'a>, source: &[u8]) -> Option<Node<'a>> {
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        let kind = node.kind();
+        // Direct shapes the rust grammar DOES expose inside macros: scoped
+        // identifiers and field accesses; either may be the function side
+        // of an inline call when followed by `(`.
+        if matches!(
+            kind,
+            "identifier" | "scoped_identifier" | "field_expression"
+        ) && is_followed_by_open_paren(node, source)
+        {
+            return Some(node);
+        }
+        let mut cursor = node.walk();
+        if cursor.goto_first_child() {
+            loop {
+                stack.push(cursor.node());
+                if !cursor.goto_next_sibling() {
+                    break;
+                }
+            }
+        }
+    }
+    None
+}
+
+fn is_followed_by_open_paren(node: Node, source: &[u8]) -> bool {
+    let mut i = node.end_byte();
+    while i < source.len() {
+        let b = source[i];
+        if b == b' ' || b == b'\t' || b == b'\n' || b == b'\r' {
+            i += 1;
+            continue;
+        }
+        return b == b'(';
+    }
+    false
 }
 
 /// Guess an exception type from the assertion call. Looks for type-shaped

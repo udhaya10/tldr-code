@@ -113,6 +113,22 @@ pub fn find_function_node<'a>(
         {
             return Some(found);
         }
+
+        // p19-secondary-fixes-v1 (BUG-P19-04): cpp `XMLClass::ParseDeep`
+        // overloads were previously all routed to the first `ParseDeep`
+        // function in the file (XMLNode's). For out-of-class
+        // definitions like `char* XMLText::ParseDeep(...)` the
+        // declarator is a `qualified_identifier` whose full text is
+        // `XMLText::ParseDeep`. Walk the file's `function_definition`
+        // nodes and match by full qualified-identifier text BEFORE
+        // falling back to the bare-name search. This disambiguates the
+        // 7 ParseDeep overloads in tinyxml2.cpp.
+        if let Some(found) =
+            find_cpp_qualified_function_definition(root, function_name, source)
+        {
+            return Some(found);
+        }
+
         let parts: Vec<&str> = function_name.split("::").collect();
         if parts.len() >= 2 {
             // class scope resolution: e.g. XMLDocument::Parse
@@ -140,6 +156,71 @@ pub fn find_function_node<'a>(
     }
 
     find_function_node_in_subtree(root, function_name, language, source)
+}
+
+/// p19-secondary-fixes-v1 (BUG-P19-04): find a C/C++ `function_definition`
+/// whose `declarator` carries the exact qualified name `Class::method`
+/// (e.g. `XMLText::ParseDeep`). The 7 `ParseDeep` overloads in
+/// tinyxml2.cpp all share the same bare name, so the bare-name search
+/// can only return the first; this resolver matches the full qualified
+/// text to disambiguate.
+fn find_cpp_qualified_function_definition<'a>(
+    root: Node<'a>,
+    qualified_name: &str,
+    source: &str,
+) -> Option<Node<'a>> {
+    // BFS / pre-order traversal so that the FIRST matching definition in
+    // source order is returned (matters when a name has multiple
+    // overloads like `XMLDocument::Parse(xml, nBytes)` followed by
+    // `XMLDocument::Parse()` — bare-name fallback historically returned
+    // the first overload, and we preserve that behavior for callers
+    // whose `Class::method` is not arity-specific).
+    let mut queue: std::collections::VecDeque<Node> =
+        std::collections::VecDeque::new();
+    queue.push_back(root);
+    while let Some(node) = queue.pop_front() {
+        if node.kind() == "function_definition" {
+            if let Some(declarator) = node.child_by_field_name("declarator") {
+                if let Some(inner) = peel_to_function_declarator(declarator) {
+                    if let Some(decl_name) = inner.child_by_field_name("declarator") {
+                        if decl_name.kind() == "qualified_identifier" {
+                            let text = decl_name
+                                .utf8_text(source.as_bytes())
+                                .unwrap_or("")
+                                .trim();
+                            if text == qualified_name {
+                                return Some(node);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let mut cursor = node.walk();
+        if cursor.goto_first_child() {
+            loop {
+                queue.push_back(cursor.node());
+                if !cursor.goto_next_sibling() {
+                    break;
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Peel through pointer / reference / parenthesized declarator wrappers
+/// to expose the inner `function_declarator`. Returns None if no
+/// `function_declarator` is reachable.
+fn peel_to_function_declarator(node: Node) -> Option<Node> {
+    match node.kind() {
+        "function_declarator" => Some(node),
+        "pointer_declarator" | "reference_declarator" | "parenthesized_declarator" => {
+            let inner = node.child_by_field_name("declarator")?;
+            peel_to_function_declarator(inner)
+        }
+        _ => None,
+    }
 }
 
 /// Internal: original bare-name function lookup. Splitting this out lets

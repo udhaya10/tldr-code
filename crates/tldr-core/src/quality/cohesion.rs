@@ -358,7 +358,7 @@ fn analyze_file_cohesion(
     options: &CohesionOptions,
 ) -> TldrResult<Vec<ClassCohesion>> {
     let source = std::fs::read_to_string(file_path)?;
-    let language = Language::from_path(file_path).ok_or_else(|| {
+    let mut language = Language::from_path(file_path).ok_or_else(|| {
         TldrError::UnsupportedLanguage(
             file_path
                 .extension()
@@ -367,6 +367,26 @@ fn analyze_file_cohesion(
                 .to_string(),
         )
     })?;
+    // p19-secondary-fixes-v1 (BUG-P19-08): `Language::from_path` maps
+    // `.h` → C. Headers in mixed C++ codebases (tinyxml2.h, Boost,
+    // Folly, …) carry the C++ class declarations; cohesion run with
+    // `language = C` then dispatches to a `_ => vec![]` arm and emits
+    // `classes_analyzed = 0`. When the source contains a `class` /
+    // `namespace` keyword, promote to C++ so the new cpp class
+    // extractor runs and the count agrees with the
+    // `structure --lang cpp` / `interface` surfaces.
+    if matches!(language, Language::C)
+        && file_path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.eq_ignore_ascii_case("h") || e.eq_ignore_ascii_case("hpp"))
+            .unwrap_or(false)
+        && (source.contains("\nclass ")
+            || source.contains(" class ")
+            || source.contains("namespace "))
+    {
+        language = Language::Cpp;
+    }
 
     // Parse the file using the global parser pool
     let tree = parse(&source, language)?;
@@ -397,7 +417,156 @@ fn extract_classes(root: tree_sitter::Node, source: &str, language: Language) ->
         Language::CSharp => extract_csharp_classes(root, source),
         Language::Scala => extract_scala_classes(root, source),
         Language::Php => extract_php_classes(root, source),
+        // p19-secondary-fixes-v1 (BUG-P19-08): cpp `health` previously
+        // reported `classes_analyzed=0` while `structure` (after the
+        // BUG-P19-05 fix) and `interface` report ~26 for the same
+        // header. Add cpp class extraction so the three pipelines agree
+        // on the class count surface.
+        Language::Cpp => extract_cpp_classes_cohesion(root, source),
         _ => vec![], // Unsupported language
+    }
+}
+
+/// Extract C++ classes for cohesion analysis (BUG-P19-08).
+/// Mirrors the (class_specifier | struct_specifier) handling in
+/// `ast::extractor::extract_cpp_classes` including the macro-prefixed
+/// misparse recovery (e.g. `class TINYXML2_LIB XMLDocument`).
+fn extract_cpp_classes_cohesion(
+    root: tree_sitter::Node,
+    source: &str,
+) -> Vec<ClassInfo> {
+    let mut classes = Vec::new();
+    extract_cpp_classes_cohesion_recursive(root, source, &mut classes);
+    classes
+}
+
+fn extract_cpp_classes_cohesion_recursive(
+    node: tree_sitter::Node,
+    source: &str,
+    classes: &mut Vec<ClassInfo>,
+) {
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        match child.kind() {
+            "class_specifier" | "struct_specifier" => {
+                if let Some(info) = extract_cpp_class_info(&child, source) {
+                    classes.push(info);
+                }
+                if let Some(body) = child.child_by_field_name("body") {
+                    extract_cpp_classes_cohesion_recursive(body, source, classes);
+                }
+                continue;
+            }
+            "function_definition" | "declaration" => {
+                if let Some(info) = extract_cpp_macro_prefixed_class(&child, source) {
+                    classes.push(info);
+                    continue;
+                }
+            }
+            _ => {}
+        }
+        extract_cpp_classes_cohesion_recursive(child, source, classes);
+    }
+}
+
+fn extract_cpp_class_info(
+    node: &tree_sitter::Node,
+    source: &str,
+) -> Option<ClassInfo> {
+    let mut name: Option<String> = None;
+    if let Some(name_node) = node.child_by_field_name("name") {
+        let n = name_node.utf8_text(source.as_bytes()).ok()?.to_string();
+        if !n.is_empty() {
+            name = Some(n);
+        }
+    }
+    if name.is_none() {
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if child.kind() == "type_identifier" {
+                let n = child.utf8_text(source.as_bytes()).ok()?.to_string();
+                if !n.is_empty() {
+                    name = Some(n);
+                    break;
+                }
+            }
+        }
+    }
+    let name = name?;
+    let line = node.start_position().row + 1;
+    let body = node.child_by_field_name("body");
+    let methods = body
+        .map(|b| extract_cpp_methods(&b, source))
+        .unwrap_or_default();
+    Some(ClassInfo { name, line, methods })
+}
+
+fn extract_cpp_macro_prefixed_class(
+    node: &tree_sitter::Node,
+    source: &str,
+) -> Option<ClassInfo> {
+    let type_node = node.child_by_field_name("type")?;
+    if type_node.kind() != "class_specifier" && type_node.kind() != "struct_specifier" {
+        return None;
+    }
+    let declarator = node.child_by_field_name("declarator")?;
+    if declarator.kind() != "identifier" {
+        return None;
+    }
+    let name = declarator.utf8_text(source.as_bytes()).ok()?.to_string();
+    if name.is_empty() {
+        return None;
+    }
+    let line = node.start_position().row + 1;
+    // The body of a misparsed macro-class lives in a sibling
+    // `compound_statement` rather than a tree-sitter `body` field; pick
+    // the first such direct child if present.
+    let mut body_methods = Vec::new();
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if child.kind() == "compound_statement" || child.kind() == "field_declaration_list" {
+            body_methods = extract_cpp_methods(&child, source);
+            break;
+        }
+    }
+    Some(ClassInfo { name, line, methods: body_methods })
+}
+
+fn extract_cpp_methods(
+    body: &tree_sitter::Node,
+    source: &str,
+) -> Vec<MethodInfo> {
+    let mut methods = Vec::new();
+    let mut cursor = body.walk();
+    for child in body.children(&mut cursor) {
+        // Inline method definitions appear as `function_definition`
+        // inside `field_declaration_list`.
+        if child.kind() == "function_definition" {
+            if let Some(declarator) = child.child_by_field_name("declarator") {
+                if let Some(name) = extract_cpp_method_name(&declarator, source) {
+                    methods.push(MethodInfo {
+                        name,
+                        start_byte: child.start_byte(),
+                        end_byte: child.end_byte(),
+                    });
+                }
+            }
+        }
+    }
+    methods
+}
+
+fn extract_cpp_method_name(node: &tree_sitter::Node, source: &str) -> Option<String> {
+    match node.kind() {
+        "identifier" | "field_identifier" | "destructor_name" => {
+            Some(node.utf8_text(source.as_bytes()).ok()?.to_string())
+        }
+        "function_declarator" | "pointer_declarator" | "reference_declarator"
+        | "parenthesized_declarator" => {
+            let inner = node.child_by_field_name("declarator")?;
+            extract_cpp_method_name(&inner, source)
+        }
+        _ => None,
     }
 }
 

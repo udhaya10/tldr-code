@@ -3477,17 +3477,48 @@ fn match_definition(
             } else {
                 SymbolKind::Function
             };
-            let loc = Location::new(file.display().to_string(), f.line);
+            // p19-secondary-fixes-v1 (BUG-P19-06): `FuncDef`/`ClassDef`
+            // carry only the line number; locating the column of the
+            // symbol name on that source line gives `definition` a
+            // 1-indexed column instead of the default 0. Without this
+            // every cpp/rust/scala/swift definition reported column=0.
+            let col = locate_symbol_column(file, f.line, symbol);
+            let loc = match col {
+                Some(c) => Location::with_column(file.display().to_string(), f.line, c),
+                None => Location::new(file.display().to_string(), f.line),
+            };
             return Some((kind, loc));
         }
     }
     for c in classes {
         if c.name == symbol {
-            let loc = Location::new(file.display().to_string(), c.line);
+            let col = locate_symbol_column(file, c.line, symbol);
+            let loc = match col {
+                Some(col_v) => {
+                    Location::with_column(file.display().to_string(), c.line, col_v)
+                }
+                None => Location::new(file.display().to_string(), c.line),
+            };
             return Some((SymbolKind::Class, loc));
         }
     }
     None
+}
+
+/// Locate the 1-indexed column of `symbol` on line `line` (1-indexed) of
+/// `file`. Returns `None` if the file cannot be read or the symbol does
+/// not appear on that line. Used to populate the `column` field of
+/// `definition` results when the underlying `FuncDef`/`ClassDef` only
+/// carries the line.
+fn locate_symbol_column(file: &Path, line: u32, symbol: &str) -> Option<u32> {
+    let content = std::fs::read_to_string(file).ok()?;
+    let target_line = line.saturating_sub(1) as usize;
+    let line_text = content.lines().nth(target_line)?;
+    let byte_offset = line_text.find(symbol)?;
+    // Convert byte offset to 1-indexed column (UTF-8 aware: count chars
+    // up to byte_offset).
+    let col_chars = line_text[..byte_offset].chars().count();
+    Some(col_chars as u32 + 1)
 }
 
 /// Recursively search the AST for a definition

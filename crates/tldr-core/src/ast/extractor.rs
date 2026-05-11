@@ -192,7 +192,14 @@ fn extract_file_structure(
     root: &Path,
     language: Language,
 ) -> TldrResult<FileStructure> {
-    let (tree, source, _) = parse_file(path)?;
+    // p19-secondary-fixes-v1 (BUG-P19-05 + BUG-P19-08): honor the caller-
+    // supplied `language` over path-extension detection. Otherwise
+    // `tldr structure tinyxml2.h --lang cpp` re-detects `.h` as C and the
+    // resulting C-parsed tree misses all the C++ classes (the cpp class
+    // extractor walks a tree built by the C grammar, which has different
+    // node kinds — `class_specifier` is cpp-only, so the cpp extractor
+    // returned ~0 classes).
+    let (tree, source, _) = crate::ast::parser::parse_file_with_lang(path, Some(language))?;
 
     let relative_path = path.strip_prefix(root).unwrap_or(path).to_path_buf();
 
@@ -850,16 +857,107 @@ fn extract_cpp_classes(node: &Node, source: &str, classes: &mut Vec<String>) {
 
     for child in node.children(&mut cursor) {
         match child.kind() {
-            "class_specifier" | "struct_specifier" | "enum_specifier" => {
-                // Get the name field
-                if let Some(name_node) = child.child_by_field_name("name") {
-                    let name = get_node_text(&name_node, source);
+            // p19-secondary-fixes-v1 (BUG-P19-05): the `structure` cpp
+            // extractor previously emitted `enum_specifier` as a class. Fix
+            // is enum-vs-class separation. Enums are now captured in
+            // `extract_c_structs` (which is also used for cpp file-level
+            // structs/enums). Only emit real classes/structs here.
+            "class_specifier" | "struct_specifier" => {
+                // Prefer the grammar's `name` field; fall back to the first
+                // `type_identifier` child (tree-sitter-cpp does NOT always
+                // expose `name` as a field on `class_specifier`).
+                if let Some(name) = extract_cpp_class_name(&child, source) {
                     classes.push(name);
+                    // Recurse INTO the body to pick up nested classes.
+                    if let Some(body) = child.child_by_field_name("body") {
+                        extract_cpp_classes(&body, source, classes);
+                    }
+                    continue;
+                }
+            }
+            // p19-secondary-fixes-v1 (BUG-P19-05 + BUG-P19-08): tree-sitter-cpp
+            // misparses `class MACRO Name { ... };` as a `function_definition`
+            // whose `type` field is a `class_specifier` for `class MACRO`
+            // and whose `declarator` is the real class name. Recover that
+            // here so the dominant style in tinyxml2.h / Boost / Folly
+            // surfaces real classes in `structure` output (the `interface`
+            // command already handles this via the inheritance extractor —
+            // BUG-P19-08 is the resulting class-count drift between the
+            // two pipelines).
+            "function_definition" | "declaration" => {
+                if let Some(name) = extract_cpp_macro_misparse_class_name(&child, source) {
+                    classes.push(name);
+                    // p19-secondary-fixes-v1 (BUG-P19-05): recurse into the
+                    // misparsed body so inner classes (e.g. `class DynArray`
+                    // nested under tinyxml2's `class TINYXML2_LIB StrPair`)
+                    // are emitted too. Use the function_definition's body
+                    // (compound_statement) or the child class_specifier's
+                    // body, whichever is present.
+                    if let Some(body) = child.child_by_field_name("body") {
+                        extract_cpp_classes(&body, source, classes);
+                    } else {
+                        // Fallback: scan children for a `compound_statement`.
+                        let mut bcursor = child.walk();
+                        for c in child.children(&mut bcursor) {
+                            if c.kind() == "compound_statement"
+                                || c.kind() == "field_declaration_list"
+                            {
+                                extract_cpp_classes(&c, source, classes);
+                                break;
+                            }
+                        }
+                    }
+                    continue;
                 }
             }
             _ => {}
         }
         extract_cpp_classes(&child, source, classes);
+    }
+}
+
+/// Pull the class name from a `class_specifier` / `struct_specifier` node.
+/// Falls back to the first `type_identifier` child if `name` field is
+/// missing (the canonical tree-sitter-cpp shape varies by grammar
+/// version).
+fn extract_cpp_class_name(node: &Node, source: &str) -> Option<String> {
+    if let Some(name_node) = node.child_by_field_name("name") {
+        let name = get_node_text(&name_node, source);
+        if !name.is_empty() {
+            return Some(name);
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if child.kind() == "type_identifier" {
+            let name = get_node_text(&child, source);
+            if !name.is_empty() {
+                return Some(name);
+            }
+        }
+    }
+    None
+}
+
+/// Recover the real class name from the tree-sitter-cpp misparse of
+/// `class MACRO Name { ... };` as `function_definition` / `declaration`
+/// with the macro consumed by an inner `class_specifier` and the real
+/// name as the `declarator` identifier. Returns `None` for real
+/// function definitions / variable declarations.
+fn extract_cpp_macro_misparse_class_name(node: &Node, source: &str) -> Option<String> {
+    let type_node = node.child_by_field_name("type")?;
+    if type_node.kind() != "class_specifier" && type_node.kind() != "struct_specifier" {
+        return None;
+    }
+    let declarator = node.child_by_field_name("declarator")?;
+    if declarator.kind() != "identifier" {
+        return None;
+    }
+    let name = get_node_text(&declarator, source);
+    if name.is_empty() {
+        None
+    } else {
+        Some(name)
     }
 }
 

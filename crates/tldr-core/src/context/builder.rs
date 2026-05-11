@@ -881,7 +881,20 @@ fn build_signature(func_info: &FunctionInfo, language: Language) -> String {
     }
 }
 
-/// Get CFG metrics for a function
+/// Get CFG metrics for a function.
+///
+/// `blocks` is taken from CFG construction.
+///
+/// p19-secondary-fixes-v1 (BUG-P19-07): the `cyclomatic` value is
+/// computed via the canonical
+/// `metrics::complexity::analyze_complexity` (the same path
+/// `tldr complexity` uses), so the two surfaces agree. Previously the
+/// CFG-derived `cyclomatic_complexity` (E-N+2 form) disagreed with the
+/// decision-point counter, which caused
+/// `tldr complexity tinyxml2.cpp XMLDocument::Parse` (cyclomatic=8) to
+/// disagree with
+/// `tldr context XMLDocument::Parse /tmp/repos/cpp-tinyxml2` (=4) on the
+/// same function.
 fn get_cfg_metrics(
     file: &Path,
     func_name: &str,
@@ -894,10 +907,29 @@ fn get_cfg_metrics(
         func_name
     };
 
-    match get_cfg_context(file.to_str().unwrap_or(""), lookup_name, language) {
-        Ok(cfg) => (Some(cfg.blocks.len()), Some(cfg.cyclomatic_complexity)),
-        Err(_) => (None, None),
-    }
+    let blocks = match get_cfg_context(file.to_str().unwrap_or(""), lookup_name, language) {
+        Ok(cfg) => Some(cfg.blocks.len()),
+        Err(_) => None,
+    };
+
+    // Route cyclomatic through the canonical complexity calculator so
+    // `tldr context` and `tldr complexity` always agree on the same
+    // function. Use the original `func_name` (qualified or bare) — the
+    // complexity calculator supports both shapes via
+    // `find_function_node`.
+    let file_str = file.to_str().unwrap_or("");
+    let cyclomatic =
+        match crate::metrics::complexity::calculate_complexity(file_str, func_name, language) {
+            Ok(metrics) => Some(metrics.cyclomatic),
+            Err(_) => {
+                // Fallback: try with the bare lookup_name.
+                crate::metrics::complexity::calculate_complexity(file_str, lookup_name, language)
+                    .ok()
+                    .map(|m| m.cyclomatic)
+            }
+        };
+
+    (blocks, cyclomatic)
 }
 
 #[cfg(test)]
