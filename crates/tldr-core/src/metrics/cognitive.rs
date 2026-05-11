@@ -648,7 +648,7 @@ impl<'a> CognitiveCalculator<'a> {
         let line = node.start_position().row as u32 + 1;
 
         // Check if this is a nesting-increasing structure
-        let increases_nesting = self.increases_nesting(kind);
+        let increases_nesting = self.increases_nesting_node(node);
 
         if increases_nesting {
             self.current_nesting += 1;
@@ -736,7 +736,114 @@ impl<'a> CognitiveCalculator<'a> {
             );
         }
 
+        // pattern-match-arm-undercount-v1 (P19.BUG-01 family + BUG-P19-02):
+        // Rust / Scala / Kotlin / OCaml grammars expose control-flow nodes
+        // as `*_expression` (rather than `*_statement`). Without this branch
+        // the cognitive walker never enters those expressions as a nesting
+        // step, leaving `max_nesting=0` and `nesting_penalty=0` everywhere
+        // in the corpus (the dominant symptom of BUG-P19-02 on Rust).
+        match self.language {
+            Language::Rust => {
+                if matches!(
+                    kind,
+                    "if_expression"
+                        | "for_expression"
+                        | "while_expression"
+                        | "loop_expression"
+                        | "match_expression"
+                        | "closure_expression"
+                ) {
+                    return true;
+                }
+            }
+            Language::Scala => {
+                if matches!(
+                    kind,
+                    "if_expression"
+                        | "for_expression"
+                        | "while_expression"
+                        | "match_expression"
+                        | "try_expression"
+                        | "case_block"
+                ) {
+                    return true;
+                }
+            }
+            Language::Kotlin => {
+                if matches!(
+                    kind,
+                    "if_expression"
+                        | "when_expression"
+                        | "try_expression"
+                        | "do_while_statement"
+                ) {
+                    return true;
+                }
+            }
+            Language::Ocaml => {
+                if matches!(
+                    kind,
+                    "match_expression"
+                        | "function_expression"
+                        | "if_expression"
+                        | "for_expression"
+                        | "while_expression"
+                        | "try_expression"
+                ) {
+                    return true;
+                }
+            }
+            Language::Elixir => {
+                // Anonymous `fn` blocks contain `stab_clause` arms and
+                // dispatch like `case`/`cond`/`with`; treat as nesting.
+                if matches!(kind, "anonymous_function") {
+                    return true;
+                }
+                // `call` nodes for case/cond/with handled in node-aware
+                // wrapper `increases_nesting_node`.
+            }
+            _ => {}
+        }
+
         false
+    }
+
+    /// Node-aware nesting check. Wraps `increases_nesting(&str)` and adds
+    /// language-specific node-shape checks that need access to the node
+    /// (rather than just its kind), such as Elixir's case/cond/with
+    /// dispatch calls.
+    fn increases_nesting_node(&self, node: Node) -> bool {
+        if self.increases_nesting(node.kind()) {
+            return true;
+        }
+        if matches!(self.language, Language::Elixir)
+            && node.kind() == "call"
+            && self.is_elixir_dispatch_call(node)
+        {
+            return true;
+        }
+        false
+    }
+
+    /// Detect Elixir `case`/`cond`/`with` dispatch construct.
+    ///
+    /// The Elixir tree-sitter grammar models these as a `call` whose first
+    /// child is an `identifier` token containing the keyword. They wrap a
+    /// `do_block` whose direct children are `stab_clause` arms.
+    fn is_elixir_dispatch_call(&self, node: Node) -> bool {
+        let mut cursor = node.walk();
+        if !cursor.goto_first_child() {
+            return false;
+        }
+        let head = cursor.node();
+        if head.kind() != "identifier" {
+            return false;
+        }
+        let text = match head.utf8_text(self.source.as_bytes()) {
+            Ok(t) => t,
+            Err(_) => return false,
+        };
+        matches!(text, "case" | "cond" | "with")
     }
 
     /// Count cognitive complexity increment for a node
@@ -768,10 +875,54 @@ impl<'a> CognitiveCalculator<'a> {
             // for/while add +1 base + nesting
             "for_statement" | "for_in_statement" => Some((1, "for")),
             "while_statement" => Some((1, "while")),
+            // pattern-match-arm-undercount-v1: Rust/Scala/Kotlin/OCaml
+            // expose loops as `*_expression` rather than `*_statement`.
+            // Without these the loop construct itself is invisible to the
+            // cognitive walker on those languages.
+            "for_expression" | "while_expression" | "loop_expression"
+                if matches!(
+                    self.language,
+                    Language::Rust | Language::Scala | Language::Ocaml
+                ) =>
+            {
+                Some((1, "for"))
+            }
+            // Kotlin do-while
+            "do_while_statement" if matches!(self.language, Language::Kotlin) => {
+                Some((1, "while"))
+            }
             // catch/except add +1 base + nesting
             "except_clause" | "catch_clause" | "except_handler" => Some((1, "catch")),
+            // try_expression (scala/kotlin/ocaml) — credited so the catch
+            // arms underneath get nesting; cognitive +1 matches `try`.
+            "try_expression"
+                if matches!(
+                    self.language,
+                    Language::Scala | Language::Kotlin | Language::Ocaml
+                ) =>
+            {
+                Some((1, "try"))
+            }
             // switch/match add +1 base + nesting
             "match_statement" | "switch_statement" => Some((1, "switch")),
+            // pattern-match-arm-undercount-v1: Rust/Scala/OCaml/Kotlin
+            // expose match/when as `*_expression`. Credit the construct
+            // itself with +1 and let each non-catchall arm add +1 below.
+            "match_expression"
+                if matches!(
+                    self.language,
+                    Language::Rust | Language::Scala | Language::Ocaml
+                ) =>
+            {
+                Some((1, "match"))
+            }
+            "function_expression" if matches!(self.language, Language::Ocaml) => {
+                // OCaml `function | ...` form. Same dispatch as `match`.
+                Some((1, "match"))
+            }
+            "when_expression" if matches!(self.language, Language::Kotlin) => {
+                Some((1, "when"))
+            }
             // ternary adds +1 (no nesting penalty per SonarQube - chains are flat)
             "conditional_expression" | "ternary_expression" => Some((1, "?:")),
             // P12.AGG12-10 + cognitive-else-counting-fix-v1: Ruby AST kinds.
@@ -795,6 +946,52 @@ impl<'a> CognitiveCalculator<'a> {
             "if_modifier" => Some((1, "if")),
             "unless_modifier" => Some((1, "if")),
             "while_modifier" | "until_modifier" => Some((1, "while")),
+            // pattern-match-arm-undercount-v1 (P19.BUG-01 family):
+            // Per-arm credit for switch/match/when/case dispatch
+            // constructs across c/cpp/rust/scala/kotlin/ocaml/elixir.
+            // SonarSource v1.4 strictly credits the dispatch construct
+            // once; we extend with +1 per non-catchall arm so 5-arm
+            // matches in Rust/Scala/etc. surface a meaningful cognitive
+            // score (the pre-fix repro showed 8-arm `parse` cog=0 on
+            // Rust). Catchall arms (`_`, `default`, `else`) are excluded
+            // so an `if/else` cognate inside the dispatch remains
+            // linear-flow.
+            "case_statement"
+                if matches!(self.language, Language::C | Language::Cpp)
+                    && !is_default_case_statement(node) =>
+            {
+                Some((1, "case"))
+            }
+            "match_arm"
+                if matches!(self.language, Language::Rust)
+                    && !is_rust_wildcard_arm(node, self.source) =>
+            {
+                Some((1, "arm"))
+            }
+            "case_clause"
+                if matches!(self.language, Language::Scala)
+                    && !is_scala_wildcard_arm(node, self.source) =>
+            {
+                Some((1, "case"))
+            }
+            "when_entry"
+                if matches!(self.language, Language::Kotlin)
+                    && !is_kotlin_else_when_entry(node) =>
+            {
+                Some((1, "when"))
+            }
+            "match_case"
+                if matches!(self.language, Language::Ocaml)
+                    && !is_ocaml_wildcard_match_case(node, self.source) =>
+            {
+                Some((1, "arm"))
+            }
+            "stab_clause"
+                if matches!(self.language, Language::Elixir)
+                    && !is_elixir_catchall_stab_clause(node, self.source) =>
+            {
+                Some((1, "case"))
+            }
             _ => None,
         };
 
@@ -911,11 +1108,62 @@ impl<'a> CognitiveCalculator<'a> {
         let kind = node.kind();
 
         match kind {
-            "if_statement" | "elif_clause" => self.cyclomatic += 1,
+            "if_statement" | "if_expression" | "elif_clause" => self.cyclomatic += 1,
             "for_statement" | "for_in_statement" | "while_statement" => self.cyclomatic += 1,
             "except_clause" | "catch_clause" | "except_handler" => self.cyclomatic += 1,
             "case_clause" | "match_arm" | "switch_case" => self.cyclomatic += 1,
             "conditional_expression" | "ternary_expression" => self.cyclomatic += 1,
+            // pattern-match-arm-undercount-v1: cyclomatic +1 per non-catchall
+            // arm for c/cpp `case_statement`, kotlin `when_entry`, ocaml
+            // `match_case`, elixir `stab_clause`. (rust `match_arm` /
+            // scala `case_clause` already credited above.)
+            "case_statement"
+                if matches!(self.language, Language::C | Language::Cpp)
+                    && !is_default_case_statement(node) =>
+            {
+                self.cyclomatic += 1
+            }
+            "when_entry"
+                if matches!(self.language, Language::Kotlin)
+                    && !is_kotlin_else_when_entry(node) =>
+            {
+                self.cyclomatic += 1
+            }
+            "match_case"
+                if matches!(self.language, Language::Ocaml)
+                    && !is_ocaml_wildcard_match_case(node, self.source) =>
+            {
+                self.cyclomatic += 1
+            }
+            "stab_clause"
+                if matches!(self.language, Language::Elixir)
+                    && !is_elixir_catchall_stab_clause(node, self.source) =>
+            {
+                self.cyclomatic += 1
+            }
+            // Loop/match expressions on Rust/Scala/Kotlin/OCaml.
+            "for_expression" | "while_expression" | "loop_expression"
+                if matches!(
+                    self.language,
+                    Language::Rust | Language::Scala | Language::Ocaml
+                ) =>
+            {
+                self.cyclomatic += 1
+            }
+            "match_expression"
+                if matches!(
+                    self.language,
+                    Language::Rust | Language::Scala | Language::Ocaml
+                ) =>
+            {
+                self.cyclomatic += 1
+            }
+            "when_expression" if matches!(self.language, Language::Kotlin) => {
+                self.cyclomatic += 1
+            }
+            "do_while_statement" if matches!(self.language, Language::Kotlin) => {
+                self.cyclomatic += 1
+            }
             // Ruby AST kinds (P12.AGG12-10 + cognitive-else-counting-fix-v1).
             // Gate bare-keyword cognates on Language::Ruby — in other
             // grammars these are literal-token leaves of statement nodes and
@@ -971,6 +1219,155 @@ impl<'a> CognitiveCalculator<'a> {
 /// Check if a node kind represents a statement
 fn is_statement(kind: &str) -> bool {
     kind.ends_with("_statement") || kind.ends_with("_definition") || kind.ends_with("_declaration")
+}
+
+// pattern-match-arm-undercount-v1 (P19.BUG-01 family): helpers to detect
+// catchall arms in each grammar so the cognitive walker can credit
+// non-catchall arms only.
+
+/// C / C++: a `case_statement` whose first child is the `default` keyword
+/// is the catchall arm and is NOT credited.
+fn is_default_case_statement(node: Node) -> bool {
+    let mut cursor = node.walk();
+    if !cursor.goto_first_child() {
+        return false;
+    }
+    cursor.node().kind() == "default"
+}
+
+/// Rust: a `match_arm` whose `match_pattern` child is a wildcard `_` is
+/// the catchall arm and is NOT credited.
+fn is_rust_wildcard_arm(node: Node, source: &str) -> bool {
+    let mut cursor = node.walk();
+    if !cursor.goto_first_child() {
+        return false;
+    }
+    loop {
+        let child = cursor.node();
+        if child.kind() == "match_pattern" {
+            // A match_pattern containing a single wildcard `_` is the catchall.
+            let mut pcursor = child.walk();
+            if pcursor.goto_first_child() {
+                let inner = pcursor.node();
+                if inner.kind() == "_" {
+                    return true;
+                }
+                let text = inner.utf8_text(source.as_bytes()).unwrap_or("");
+                if text == "_" {
+                    return true;
+                }
+            }
+            return false;
+        }
+        if !cursor.goto_next_sibling() {
+            break;
+        }
+    }
+    false
+}
+
+/// Scala: a `case_clause` whose pattern is a single `wildcard` is the
+/// catchall arm and is NOT credited.
+fn is_scala_wildcard_arm(node: Node, source: &str) -> bool {
+    let mut cursor = node.walk();
+    if !cursor.goto_first_child() {
+        return false;
+    }
+    loop {
+        let child = cursor.node();
+        let kind = child.kind();
+        // Skip the leading `case` keyword.
+        if kind == "case" {
+            if !cursor.goto_next_sibling() {
+                return false;
+            }
+            continue;
+        }
+        if kind == "wildcard" {
+            return true;
+        }
+        // The first non-`case` named child is the pattern; if it is
+        // anything other than `wildcard`, this is a credited arm.
+        let text = child.utf8_text(source.as_bytes()).unwrap_or("");
+        return text == "_";
+    }
+    false
+}
+
+/// Kotlin: a `when_entry` whose first child is the `else` token is the
+/// catchall arm and is NOT credited.
+fn is_kotlin_else_when_entry(node: Node) -> bool {
+    let mut cursor = node.walk();
+    if !cursor.goto_first_child() {
+        return false;
+    }
+    loop {
+        let child = cursor.node();
+        let kind = child.kind();
+        if kind == "else" {
+            return true;
+        }
+        // The first significant child decides; arrows / numbers / etc. mean not-else.
+        if kind != "(" && kind != " " {
+            return false;
+        }
+        if !cursor.goto_next_sibling() {
+            break;
+        }
+    }
+    false
+}
+
+/// OCaml: a `match_case` whose first pattern child is a `value_pattern`
+/// containing only `_` is the catchall arm and is NOT credited.
+fn is_ocaml_wildcard_match_case(node: Node, source: &str) -> bool {
+    let mut cursor = node.walk();
+    if !cursor.goto_first_child() {
+        return false;
+    }
+    let first = cursor.node();
+    let kind = first.kind();
+    if kind == "value_pattern" {
+        let text = first.utf8_text(source.as_bytes()).unwrap_or("");
+        if text == "_" {
+            return true;
+        }
+    }
+    false
+}
+
+/// Elixir: a `stab_clause` whose `arguments` child is a single
+/// identifier `_` (or `true` in `cond`) is the catchall arm and is NOT
+/// credited.
+fn is_elixir_catchall_stab_clause(node: Node, source: &str) -> bool {
+    // Locate the `arguments` child.
+    let mut cursor = node.walk();
+    if !cursor.goto_first_child() {
+        return false;
+    }
+    loop {
+        let child = cursor.node();
+        if child.kind() == "arguments" {
+            // A single `identifier` child with text `_` is the catchall.
+            let mut acursor = child.walk();
+            if acursor.goto_first_child() {
+                let inner = acursor.node();
+                let text = inner.utf8_text(source.as_bytes()).unwrap_or("");
+                if inner.kind() == "identifier" && text == "_" {
+                    return true;
+                }
+                if inner.kind() == "boolean" && text == "true" {
+                    // `cond` catchall is conventionally `true ->`.
+                    return true;
+                }
+            }
+            return false;
+        }
+        if !cursor.goto_next_sibling() {
+            break;
+        }
+    }
+    false
 }
 
 /// Merge multiple cognitive reports into one.
