@@ -1,7 +1,21 @@
-//! Comprehensive tests for TLDR Daemon and Cache commands
+//! Comprehensive tests for TLDR Daemon and Cache commands.
 //!
-//! These tests define expected behavior from spec.md and should FAIL initially
-//! since no implementation exists yet. They drive the implementation.
+//! The CLI subcommands these tests cover (`daemon start/stop/status/query/notify/list`,
+//! `cache stats/clear`, `warm`, `stats`) are all implemented today; this suite locks
+//! down the user-facing contracts around them.
+//!
+//! Ignored tests in this file fall into three buckets — see the ignore reason on each:
+//!
+//! 1. **CI-unsafe daemon lifecycle**: tests that start a real long-lived daemon
+//!    process and register it in `~/.tldr/registry.json`. Safe to run manually
+//!    with `cargo test -- --ignored`; gated off by default to prevent leaked
+//!    processes and cross-test pollution. Tracked by issues #20, #34, #38, #64
+//!    and the broader contract test in #66.
+//! 2. **`$HOME` mutation**: the `stats` tests use brittle backup/restore around
+//!    the real `~/.tldr/stats.jsonl`. Enable once we have a stats-path env-var
+//!    override or test fixture.
+//! 3. **Optional feature gates**: e.g. semantic search needs a downloaded
+//!    fastembed model.
 //!
 //! Test categories:
 //! 1. Unit Tests - Types & Serialization
@@ -507,7 +521,6 @@ mod daemon_lifecycle {
     use super::*;
 
     #[test]
-    #[ignore = "daemon start command not yet implemented"]
     fn test_daemon_start_help() {
         let mut cmd = tldr_cmd();
         cmd.args(["daemon", "start", "--help"])
@@ -518,7 +531,7 @@ mod daemon_lifecycle {
     }
 
     #[test]
-    #[ignore = "daemon start command not yet implemented"]
+    #[ignore = "spawns a real daemon and writes to ~/.tldr/registry.json — see #20/#34/#38/#64; run manually with `cargo test -- --ignored`"]
     fn test_daemon_start_creates_socket() {
         let temp = TempDir::new().unwrap();
         let project_path = temp.path().to_str().unwrap();
@@ -541,7 +554,7 @@ mod daemon_lifecycle {
     }
 
     #[test]
-    #[ignore = "daemon start command not yet implemented"]
+    #[ignore = "spawns a real daemon and writes to ~/.tldr/registry.json — see #20/#34/#38/#64; run manually with `cargo test -- --ignored`"]
     fn test_daemon_start_creates_pid_file() {
         let temp = TempDir::new().unwrap();
         let project_path = temp.path().to_str().unwrap();
@@ -558,7 +571,7 @@ mod daemon_lifecycle {
     }
 
     #[test]
-    #[ignore = "daemon start command not yet implemented"]
+    #[ignore = "spawns a real daemon and writes to ~/.tldr/registry.json — see #20/#34/#38/#64; run manually with `cargo test -- --ignored`"]
     fn test_daemon_start_already_running_error() {
         let temp = TempDir::new().unwrap();
         let project_path = temp.path().to_str().unwrap();
@@ -581,7 +594,6 @@ mod daemon_lifecycle {
     }
 
     #[test]
-    #[ignore = "daemon stop command not yet implemented"]
     fn test_daemon_stop_help() {
         let mut cmd = tldr_cmd();
         cmd.args(["daemon", "stop", "--help"])
@@ -591,7 +603,7 @@ mod daemon_lifecycle {
     }
 
     #[test]
-    #[ignore = "daemon stop command not yet implemented"]
+    #[ignore = "spawns a real daemon and writes to ~/.tldr/registry.json — see #20/#34/#38/#64; run manually with `cargo test -- --ignored`"]
     fn test_daemon_stop_removes_socket() {
         let temp = TempDir::new().unwrap();
         let project_path = temp.path().to_str().unwrap();
@@ -613,7 +625,6 @@ mod daemon_lifecycle {
     }
 
     #[test]
-    #[ignore = "daemon stop command not yet implemented"]
     fn test_daemon_stop_not_running() {
         let temp = TempDir::new().unwrap();
         let project_path = temp.path().to_str().unwrap();
@@ -627,7 +638,6 @@ mod daemon_lifecycle {
     }
 
     #[test]
-    #[ignore = "daemon status command not yet implemented"]
     fn test_daemon_status_help() {
         let mut cmd = tldr_cmd();
         cmd.args(["daemon", "status", "--help"])
@@ -638,7 +648,7 @@ mod daemon_lifecycle {
     }
 
     #[test]
-    #[ignore = "daemon status command not yet implemented"]
+    #[ignore = "spawns a real daemon and writes to ~/.tldr/registry.json — see #20/#34/#38/#64; run manually with `cargo test -- --ignored`"]
     fn test_daemon_status_returns_uptime() {
         let temp = TempDir::new().unwrap();
         let project_path = temp.path().to_str().unwrap();
@@ -666,7 +676,6 @@ mod daemon_lifecycle {
     }
 
     #[test]
-    #[ignore = "daemon status command not yet implemented"]
     fn test_daemon_status_not_running() {
         let temp = TempDir::new().unwrap();
         let project_path = temp.path().to_str().unwrap();
@@ -679,7 +688,7 @@ mod daemon_lifecycle {
     }
 
     #[test]
-    #[ignore = "daemon status command not yet implemented"]
+    #[ignore = "spawns a real daemon and writes to ~/.tldr/registry.json — see #20/#34/#38/#64; run manually with `cargo test -- --ignored`"]
     fn test_daemon_status_json_output() {
         let temp = TempDir::new().unwrap();
         let project_path = temp.path().to_str().unwrap();
@@ -719,7 +728,6 @@ mod ipc_protocol {
     use super::*;
 
     #[test]
-    #[ignore = "daemon query command not yet implemented"]
     fn test_daemon_query_help() {
         let mut cmd = tldr_cmd();
         cmd.args(["daemon", "query", "--help"])
@@ -730,7 +738,7 @@ mod ipc_protocol {
     }
 
     #[test]
-    #[ignore = "daemon query command not yet implemented"]
+    #[ignore = "spawns a real daemon and writes to ~/.tldr/registry.json — see #20/#34/#38/#64; run manually with `cargo test -- --ignored`"]
     fn test_daemon_query_ping() {
         let temp = TempDir::new().unwrap();
         let project_path = temp.path().to_str().unwrap();
@@ -755,7 +763,7 @@ mod ipc_protocol {
     }
 
     #[test]
-    #[ignore = "daemon query command not yet implemented"]
+    #[ignore = "spawns a real daemon and writes to ~/.tldr/registry.json — see #20/#34/#38/#64; run manually with `cargo test -- --ignored`"]
     fn test_daemon_query_roundtrip() {
         let temp = TempDir::new().unwrap();
         let project_path = temp.path().to_str().unwrap();
@@ -794,7 +802,6 @@ mod ipc_protocol {
     }
 
     #[test]
-    #[ignore = "daemon notify command not yet implemented"]
     fn test_daemon_notify_help() {
         let mut cmd = tldr_cmd();
         cmd.args(["daemon", "notify", "--help"])
@@ -804,7 +811,7 @@ mod ipc_protocol {
     }
 
     #[test]
-    #[ignore = "daemon notify command not yet implemented"]
+    #[ignore = "spawns a real daemon and writes to ~/.tldr/registry.json — see #20/#34/#38/#64; run manually with `cargo test -- --ignored`"]
     fn test_daemon_notify_tracks_dirty_files() {
         let temp = TempDir::new().unwrap();
         let project_path = temp.path().to_str().unwrap();
@@ -839,7 +846,7 @@ mod ipc_protocol {
     }
 
     #[test]
-    #[ignore = "daemon notify command not yet implemented"]
+    #[ignore = "spawns a real daemon and writes to ~/.tldr/registry.json — see #20/#34/#38/#64; run manually with `cargo test -- --ignored`"]
     fn test_daemon_notify_triggers_reindex_at_threshold() {
         let temp = TempDir::new().unwrap();
         let project_path = temp.path().to_str().unwrap();
@@ -885,7 +892,6 @@ mod ipc_protocol {
     }
 
     #[test]
-    #[ignore = "daemon notify command not yet implemented"]
     fn test_daemon_notify_silent_when_not_running() {
         let temp = TempDir::new().unwrap();
         let test_file = temp.path().join("test.py");
@@ -937,7 +943,7 @@ mod cache_tests {
     }
 
     #[test]
-    #[ignore = "cache stats command not yet implemented"]
+    #[ignore = "spawns a real daemon and writes to ~/.tldr/registry.json — see #20/#34/#38/#64; run manually with `cargo test -- --ignored`"]
     fn test_cache_stats_after_queries() {
         let temp = TempDir::new().unwrap();
         let project_path = temp.path().to_str().unwrap();
@@ -1034,7 +1040,7 @@ mod cache_tests {
     }
 
     #[test]
-    #[ignore = "cache invalidation not yet implemented"]
+    #[ignore = "spawns a real daemon + relies on invalidation contract being externally observable — see #51, #59, #67; run manually with `cargo test -- --ignored`"]
     fn test_cache_invalidation_on_file_change() {
         let temp = TempDir::new().unwrap();
         let project_path = temp.path().to_str().unwrap();
@@ -1125,7 +1131,6 @@ mod warm_tests {
     use super::*;
 
     #[test]
-    #[ignore = "warm command not yet implemented"]
     fn test_warm_help() {
         let mut cmd = tldr_cmd();
         cmd.args(["warm", "--help"])
@@ -1136,7 +1141,6 @@ mod warm_tests {
     }
 
     #[test]
-    #[ignore = "warm command not yet implemented"]
     fn test_warm_foreground_builds_cache() {
         let temp = TempDir::new().unwrap();
 
@@ -1161,7 +1165,7 @@ mod warm_tests {
     }
 
     #[test]
-    #[ignore = "warm command not yet implemented"]
+    #[ignore = "spawns a background process and asserts on filesystem timing; flaky in CI — run manually with `cargo test -- --ignored`"]
     fn test_warm_background_spawns_task() {
         let temp = TempDir::new().unwrap();
         fs::write(temp.path().join("main.py"), "def main(): pass").unwrap();
@@ -1191,7 +1195,6 @@ mod warm_tests {
     }
 
     #[test]
-    #[ignore = "warm command not yet implemented"]
     fn test_warm_json_output() {
         let temp = TempDir::new().unwrap();
         fs::write(temp.path().join("main.py"), "def main(): pass").unwrap();
@@ -1217,7 +1220,6 @@ mod warm_tests {
     }
 
     #[test]
-    #[ignore = "warm command not yet implemented"]
     fn test_warm_auto_detect_languages() {
         let temp = TempDir::new().unwrap();
 
@@ -1233,7 +1235,6 @@ mod warm_tests {
     }
 
     #[test]
-    #[ignore = "warm command not yet implemented"]
     fn test_warm_creates_tldrignore() {
         let temp = TempDir::new().unwrap();
         fs::write(temp.path().join("main.py"), "def main(): pass").unwrap();
@@ -1260,7 +1261,6 @@ mod stats_tests {
     use super::*;
 
     #[test]
-    #[ignore = "stats command not yet implemented"]
     fn test_stats_help() {
         let mut cmd = tldr_cmd();
         cmd.args(["stats", "--help"])
@@ -1270,7 +1270,7 @@ mod stats_tests {
     }
 
     #[test]
-    #[ignore = "stats command not yet implemented"]
+    #[ignore = "reads global ~/.tldr/stats.jsonl with no path-injection hook; output depends on user state — needs a TLDR_STATS_PATH env override before activation"]
     fn test_stats_empty() {
         // Use a temporary directory to avoid affecting real stats
         let temp = TempDir::new().unwrap();
@@ -1288,7 +1288,7 @@ mod stats_tests {
     }
 
     #[test]
-    #[ignore = "stats command not yet implemented"]
+    #[ignore = "rewrites the real ~/.tldr/stats.jsonl with brittle backup/restore — risk of clobbering the user's stats if the test panics mid-run. Needs a TLDR_STATS_PATH env override before activation"]
     fn test_stats_formats_token_savings() {
         // Create a test stats file
         let tldr_dir = home_dir().join(".tldr");
@@ -1323,7 +1323,7 @@ mod stats_tests {
     }
 
     #[test]
-    #[ignore = "stats command not yet implemented"]
+    #[ignore = "rewrites the real ~/.tldr/stats.jsonl with brittle backup/restore — risk of clobbering the user's stats if the test panics mid-run. Needs a TLDR_STATS_PATH env override before activation"]
     fn test_stats_json_output() {
         let tldr_dir = home_dir().join(".tldr");
         fs::create_dir_all(&tldr_dir).ok();
@@ -1362,7 +1362,7 @@ mod stats_tests {
     }
 
     #[test]
-    #[ignore = "stats command not yet implemented"]
+    #[ignore = "rewrites the real ~/.tldr/stats.jsonl with brittle backup/restore — risk of clobbering the user's stats if the test panics mid-run. Needs a TLDR_STATS_PATH env override before activation"]
     fn test_stats_text_output() {
         let tldr_dir = home_dir().join(".tldr");
         fs::create_dir_all(&tldr_dir).ok();
@@ -1405,7 +1405,7 @@ mod edge_cases {
     use super::*;
 
     #[test]
-    #[ignore = "stale PID recovery not yet implemented"]
+    #[ignore = "placeholder body — does not actually create a stale PID file; needs to be rewritten against #52/#55 stale-PID recovery contract before activation"]
     fn test_stale_pid_file_recovery() {
         let temp = TempDir::new().unwrap();
         let project_path = temp.path().to_str().unwrap();
@@ -1433,7 +1433,7 @@ mod edge_cases {
     }
 
     #[test]
-    #[ignore = "stale socket cleanup not yet implemented"]
+    #[ignore = "placeholder body — creates a random unrelated file, not a stale socket at the daemon's computed path; needs to be rewritten against the real socket path contract before activation"]
     fn test_stale_socket_cleanup() {
         let temp = TempDir::new().unwrap();
         let project_path = temp.path().to_str().unwrap();
@@ -1458,7 +1458,7 @@ mod edge_cases {
     }
 
     #[test]
-    #[ignore = "concurrent daemon start not yet implemented"]
+    #[ignore = "spawns two real daemons and races on ~/.tldr/registry.json — covered more thoroughly by val006_daemon_startup_race_test; see #64; run manually with `cargo test -- --ignored`"]
     fn test_concurrent_daemon_start_fails() {
         let temp = TempDir::new().unwrap();
         let project_path = temp.path().to_str().unwrap();
@@ -1481,7 +1481,7 @@ mod edge_cases {
     }
 
     #[test]
-    #[ignore = "permission denied handling not yet implemented"]
+    #[ignore = "depends on /root being read-only — not portable across CI environments and macOS hosts; needs a portable unwritable-path fixture before activation"]
     fn test_permission_denied_socket() {
         // This test is platform-specific and may need adjustment
         // It verifies proper error handling when socket creation fails
@@ -1501,7 +1501,6 @@ mod edge_cases {
     }
 
     #[test]
-    #[ignore = "connection timeout not yet implemented"]
     fn test_daemon_connection_timeout() {
         let temp = TempDir::new().unwrap();
         let project_path = temp.path().to_str().unwrap();
@@ -1521,7 +1520,7 @@ mod edge_cases {
     }
 
     #[test]
-    #[ignore = "invalid command handling not yet implemented"]
+    #[ignore = "spawns a real daemon and writes to ~/.tldr/registry.json — see #20/#34/#38/#64; run manually with `cargo test -- --ignored`"]
     fn test_daemon_unknown_command() {
         let temp = TempDir::new().unwrap();
         let project_path = temp.path().to_str().unwrap();
@@ -1552,7 +1551,7 @@ mod edge_cases {
     }
 
     #[test]
-    #[ignore = "graceful shutdown not yet implemented"]
+    #[ignore = "spawns a real daemon; assertion body is also incomplete (no actual stats-persistence check). Needs both the daemon-spawn safety harness from #66 and a real stats-file invariant before activation"]
     fn test_daemon_graceful_shutdown_persists_stats() {
         let temp = TempDir::new().unwrap();
         let project_path = temp.path().to_str().unwrap();
@@ -1592,24 +1591,11 @@ mod edge_cases {
         // This assertion may need adjustment based on actual implementation
     }
 
-    #[test]
-    #[ignore = "idle timeout not yet implemented"]
-    fn test_daemon_idle_timeout() {
-        // This is a long-running test that verifies idle timeout behavior
-        // In practice, we'd use a short timeout for testing
-
-        let temp = TempDir::new().unwrap();
-        let _project_path = temp.path().to_str().unwrap();
-
-        // Start daemon with a very short idle timeout (would need config support)
-        // For now, this test documents the expected behavior
-
-        // Expected behavior:
-        // 1. Daemon starts
-        // 2. No queries for idle_timeout_secs
-        // 3. Daemon auto-shuts down
-        // 4. Status shows "not running"
-    }
+    // NOTE: Idle-timeout test removed (was an empty placeholder with no
+    // assertions). The daemon supports configurable `idle_timeout_secs`, but
+    // a proper test requires either a config override on the start command
+    // or a short-timeout test-only path — neither exists today. Tracked as a
+    // design TODO under the daemon observability work in issue #67.
 }
 
 // =============================================================================
@@ -1687,7 +1673,7 @@ mod hook_stats_tests {
     use super::*;
 
     #[test]
-    #[ignore = "track command not yet implemented"]
+    #[ignore = "spawns a real daemon and writes to ~/.tldr/registry.json — see #20/#34/#38/#64; run manually with `cargo test -- --ignored`"]
     fn test_daemon_track_hook_activity() {
         let temp = TempDir::new().unwrap();
         let project_path = temp.path().to_str().unwrap();
@@ -1720,7 +1706,7 @@ mod hook_stats_tests {
     }
 
     #[test]
-    #[ignore = "track flush not yet implemented"]
+    #[ignore = "spawns a real daemon and writes to ~/.tldr/registry.json — see #20/#34/#38/#64; run manually with `cargo test -- --ignored`"]
     fn test_track_flush_at_threshold() {
         let temp = TempDir::new().unwrap();
         let project_path = temp.path().to_str().unwrap();
@@ -1771,7 +1757,7 @@ mod semantic_tests {
     use super::*;
 
     #[test]
-    #[ignore = "semantic search not yet implemented"]
+    #[ignore = "requires the fastembed model to be downloaded and the `semantic` feature; spawns a real daemon. Run manually with `cargo test --features semantic -- --ignored` after `tldr embed`"]
     fn test_daemon_semantic_query() {
         let temp = TempDir::new().unwrap();
         let project_path = temp.path().to_str().unwrap();
