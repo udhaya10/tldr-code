@@ -517,6 +517,7 @@ impl TLDRDaemon {
             let mut status = self.status.write().await;
             *status = DaemonStatus::Ready;
         }
+        eprintln!("daemon_ready project={}", self.project.display());
 
         // One-line effective liveness policy (TLDR-d26): idle_timeout_secs
         // changed meaning from client-idle to project-presence-idle (epic
