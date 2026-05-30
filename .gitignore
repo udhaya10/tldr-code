@@ -65,3 +65,9 @@ tldr-test/
 # (recurrence broke v0.2.1's first cargo publish — must stay ignored)
 *.class
 META-INF/
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key
+.beads/proxieddb/
