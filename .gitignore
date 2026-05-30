@@ -15,6 +15,7 @@ build/
 
 # Build/cache artifacts
 .bugbot/
+.firecrawl/
 .fastembed_cache/
 .tldr/
 .tldrignore

@@ -2493,6 +2493,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "process_alive"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d882026f051f810bece627b431b5097f6c7aef71cfd1f2c35dd350085fe5157a"
+dependencies = [
+ "libc",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "profiling"
 version = "1.0.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3391,7 +3401,7 @@ dependencies = [
 
 [[package]]
 name = "tldr-cli"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -3408,7 +3418,9 @@ dependencies = [
  "libc",
  "line-numbers",
  "md5",
+ "paste",
  "predicates",
+ "process_alive",
  "proptest",
  "radix-heap",
  "regex",
@@ -3453,7 +3465,7 @@ dependencies = [
 
 [[package]]
 name = "tldr-core"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "bitvec",
@@ -3503,7 +3515,7 @@ dependencies = [
 
 [[package]]
 name = "tldr-daemon"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -3527,7 +3539,7 @@ dependencies = [
 
 [[package]]
 name = "tldr-mcp"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "serde",

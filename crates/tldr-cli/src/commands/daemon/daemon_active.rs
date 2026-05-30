@@ -111,36 +111,10 @@ pub fn remove_active() -> std::io::Result<()> {
     }
 }
 
-/// Best-effort liveness probe.
-///
-/// On Unix, sends signal 0 to `pid`. The signal-0 kernel path validates the
-/// target's existence and the caller's permission without actually
-/// delivering a signal:
-///   - `Ok` (return 0): process exists and we have permission.
-///   - `Err(EPERM)`: process exists but we don't have permission to signal
-///     it. Treat as alive — a different-uid daemon is still a daemon.
-///   - `Err(ESRCH)`: no such process — treat as dead.
-///
-/// On non-Unix platforms, returns `true` as a best-effort default; the
-/// status command's underlying `IpcStream::connect` will then surface a
-/// real failure if the daemon is not actually reachable.
-#[cfg(unix)]
+/// Best-effort liveness probe. Delegates to the shared cross-platform
+/// implementation in `daemon_registry`.
 fn is_pid_alive(pid: u32) -> bool {
-    // Signal 0: existence + permission check, no actual signal delivered.
-    let rc = unsafe { libc::kill(pid as i32, 0) };
-    if rc == 0 {
-        return true;
-    }
-    // EPERM means the process exists but is owned by another user.
-    matches!(
-        std::io::Error::last_os_error().raw_os_error(),
-        Some(libc::EPERM)
-    )
-}
-
-#[cfg(not(unix))]
-fn is_pid_alive(_pid: u32) -> bool {
-    true
+    super::daemon_registry::is_pid_alive(pid)
 }
 
 #[cfg(test)]

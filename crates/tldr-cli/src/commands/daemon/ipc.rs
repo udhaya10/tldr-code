@@ -45,45 +45,30 @@ pub const READ_TIMEOUT_SECS: u64 = 30;
 // Path/Port Computation
 // =============================================================================
 
-/// Compute the socket path for a project (Unix).
+/// Compute the socket path for a project.
 ///
 /// Path format: `{temp_dir}/tldr-{hash}.sock`
 /// Uses same hash as PID file for consistency.
+/// Used as the primary IPC path on Unix; available on all platforms for
+/// registry lookups and tests.
 ///
 /// # Security (TIGER-P3-01)
 ///
 /// The path is validated to ensure it stays within the temp directory
 /// and doesn't escape via symlinks or path traversal.
-#[cfg(unix)]
 pub fn compute_socket_path(project: &Path) -> PathBuf {
     let hash = compute_hash(project);
     let tmp_dir = std::env::temp_dir();
     tmp_dir.join(format!("tldr-{}.sock", hash))
 }
 
-/// Compute the TCP port for a project (Windows).
+/// Compute the TCP port for a project.
 ///
 /// Port range: 49152-59151 (dynamic/private port range)
 /// Uses hash to deterministically map project to port.
-#[cfg(windows)]
+/// Used as the primary IPC transport on Windows; available on all platforms
+/// for consistency.
 pub fn compute_tcp_port(project: &Path) -> u16 {
-    let hash = compute_hash(project);
-    let hash_int = u64::from_str_radix(&hash, 16).unwrap_or(0);
-    49152 + (hash_int % 10000) as u16
-}
-
-// For cross-platform code that needs socket path on all platforms
-#[cfg(not(unix))]
-pub fn compute_socket_path(project: &Path) -> PathBuf {
-    // On Windows, return a path that won't be used (TCP is used instead)
-    let hash = compute_hash(project);
-    let tmp_dir = std::env::temp_dir();
-    tmp_dir.join(format!("tldr-{}.sock", hash))
-}
-
-#[cfg(not(windows))]
-pub fn compute_tcp_port(project: &Path) -> u16 {
-    // On Unix, return a port that won't be used (Unix socket is used instead)
     let hash = compute_hash(project);
     let hash_int = u64::from_str_radix(&hash, 16).unwrap_or(0);
     49152 + (hash_int % 10000) as u16
@@ -140,7 +125,7 @@ pub fn validate_socket_path(socket_path: &Path) -> DaemonResult<()> {
 /// # Security (TIGER-P3-04)
 ///
 /// Rejects symlinks at socket path to prevent symlink attacks.
-#[cfg(unix)]
+/// Cross-platform: `std::fs::symlink_metadata` works on both Unix and Windows.
 pub fn check_not_symlink(path: &Path) -> DaemonResult<()> {
     if let Ok(metadata) = std::fs::symlink_metadata(path) {
         if metadata.file_type().is_symlink() {
@@ -152,17 +137,61 @@ pub fn check_not_symlink(path: &Path) -> DaemonResult<()> {
     Ok(())
 }
 
-#[cfg(not(unix))]
-pub fn check_not_symlink(path: &Path) -> DaemonResult<()> {
-    // Windows symlink check
-    if let Ok(metadata) = std::fs::symlink_metadata(path) {
-        if metadata.file_type().is_symlink() {
-            return Err(DaemonError::PermissionDenied {
-                path: path.to_path_buf(),
-            });
+// =============================================================================
+// Socket path resolution (registry-first)
+// =============================================================================
+
+/// Resolve a project's socket path, preferring the TMPDIR-independent daemon
+/// registry over the local TMPDIR-derived path.
+///
+/// The daemon binds its socket under *its own* `TMPDIR` (launchd inherits a
+/// different `TMPDIR` than interactive shells), so a client that recomputes the
+/// path from its own `TMPDIR` can diverge. The registry records the actual
+/// socket path, so we consult it first and fall back to `compute_socket_path`
+/// only when no live entry exists.
+///
+/// Returns `(path, from_registry)`.
+fn resolve_socket_path(project: &Path) -> (PathBuf, bool) {
+    match super::daemon_registry::find_entry(project) {
+        Some(entry) => (entry.socket, true),
+        None => (compute_socket_path(project), false),
+    }
+}
+
+/// A registry-sourced socket path is trusted only if its file name matches the
+/// deterministic `tldr-{hash}.sock` we would compute for this project. This
+/// binds the registry entry to the project and prevents a poisoned/corrupt
+/// registry from redirecting a connect or a *deletion* to an arbitrary file.
+fn registry_socket_name_matches(project: &Path, socket_path: &Path) -> bool {
+    compute_socket_path(project).file_name() == socket_path.file_name()
+}
+
+/// Resolve the socket path to delete during cleanup.
+///
+/// Unlike [`resolve_socket_path`] (which prunes dead entries via `find_entry`),
+/// cleanup runs *precisely* when the daemon is dead, so it must consult the
+/// registry WITHOUT pruning — otherwise a crashed cross-TMPDIR daemon's record
+/// is dropped before we can read its socket path, and its socket is orphaned
+/// (W6).
+///
+/// The registry-recorded path is honored only when (a) its filename matches
+/// this project's deterministic socket name (poison guard, see
+/// [`registry_socket_name_matches`]) and (b) the recorded PID is dead. A *live*
+/// PID falls back to the local path, which spares an in-use socket recorded
+/// under a *different* TMPDIR than this caller's (e.g. a re-registration swap).
+/// A same-TMPDIR live socket equals the local path and is still removed — but
+/// cleanup is teardown-only, so the meaningful guarantee is the cross-TMPDIR
+/// one. On a daemon's own-exit cleanup the recorded socket likewise equals
+/// `compute_socket_path(project)`, so the fallback removes the same path.
+fn resolve_socket_path_for_cleanup(project: &Path) -> PathBuf {
+    if let Some(entry) = super::daemon_registry::find_entry_unpruned(project) {
+        if registry_socket_name_matches(project, &entry.socket)
+            && !super::daemon_registry::is_pid_alive(entry.pid)
+        {
+            return entry.socket;
         }
     }
-    Ok(())
+    compute_socket_path(project)
 }
 
 // =============================================================================
@@ -309,7 +338,8 @@ impl IpcStream {
     /// Connect to a daemon for the given project.
     ///
     /// # Unix
-    /// Connects to Unix domain socket at `/tmp/tldr-{hash}.sock`
+    /// Resolves the socket path from the daemon registry first (TMPDIR-independent),
+    /// falling back to `{temp_dir}/tldr-{hash}.sock` when no registry entry exists.
     ///
     /// # Windows
     /// Connects to TCP localhost on a deterministic port.
@@ -326,17 +356,42 @@ impl IpcStream {
 
     #[cfg(unix)]
     async fn connect_unix(project: &Path) -> DaemonResult<Self> {
-        let socket_path = compute_socket_path(project);
+        // Resolve socket path via the daemon registry first (TMPDIR-independent;
+        // see `resolve_socket_path`). Fall back to the TMPDIR-derived path for
+        // the single-daemon / no-registry case.
+        let (socket_path, from_registry) = resolve_socket_path(project);
 
-        // Validate socket path security
-        validate_socket_path(&socket_path)?;
+        // Registry path came from our cache-dir registry file — skip
+        // TMPDIR-containment (the daemon's TMPDIR differs from ours) but
+        // verify the filename matches what we'd compute for this project.
+        if from_registry {
+            if !registry_socket_name_matches(project, &socket_path) {
+                return Err(DaemonError::PermissionDenied {
+                    path: socket_path.clone(),
+                });
+            }
+        } else {
+            // W1/W2: a registry miss silently re-introduces the original
+            // cross-TMPDIR bug if the daemon bound its socket under a different
+            // TMPDIR. Surface it under TLDR_DEBUG so the failure mode is
+            // diagnosable instead of a bare "not running".
+            if std::env::var_os("TLDR_DEBUG").is_some() {
+                eprintln!(
+                    "[tldr-debug] daemon registry miss for {}; falling back to \
+                     TMPDIR-derived socket {}",
+                    project.display(),
+                    socket_path.display()
+                );
+            }
+            validate_socket_path(&socket_path)?;
+        }
 
         // Check socket exists
         if !socket_path.exists() {
             return Err(DaemonError::NotRunning);
         }
 
-        // Check for symlink attack (TIGER-P3-04)
+        // Symlink check applies regardless of source (TIGER-P3-04)
         check_not_symlink(&socket_path)?;
 
         // Connect with timeout
@@ -533,16 +588,52 @@ pub async fn send_response(stream: &mut IpcStream, response: &DaemonResponse) ->
 /// Clean up the socket file for a project.
 ///
 /// Safe to call even if socket doesn't exist.
+///
+/// # W6 (cross-TMPDIR cleanup)
+///
+/// The socket is resolved via the daemon registry first, mirroring
+/// `connect_unix`. Computing the path from the *caller's* `TMPDIR` would
+/// no-op when the daemon bound its socket under a different `TMPDIR`, orphaning
+/// the real socket file. Callers (`stop.rs`) invoke this BEFORE `remove_entry`,
+/// so the registry entry is still live here.
+///
+/// Cleanup is best-effort: a registry path whose filename does not match this
+/// project's deterministic socket name (poisoned/corrupt registry) is NOT
+/// deleted — we fall back to the local TMPDIR-derived path. This also keeps the
+/// one `?`-propagating caller (`start.rs` stale-socket cleanup) from aborting
+/// startup over a bad registry entry.
 pub fn cleanup_socket(project: &Path) -> DaemonResult<()> {
-    let socket_path = compute_socket_path(project);
+    let socket_path = resolve_socket_path_for_cleanup(project);
+    cleanup_socket_at(&socket_path)
+}
 
+/// Remove the socket file at an explicit path. Use this when the caller has
+/// already resolved the path (e.g. via [`snapshot_socket_path`]) to avoid a
+/// second registry lookup that may see pruned state.
+pub fn cleanup_socket_at(socket_path: &Path) -> DaemonResult<()> {
     if socket_path.exists() {
-        // Safety check: don't remove symlinks
-        check_not_symlink(&socket_path)?;
-        std::fs::remove_file(&socket_path)?;
+        check_not_symlink(socket_path)?;
+        std::fs::remove_file(socket_path)?;
     }
-
     Ok(())
+}
+
+/// Snapshot the socket path from the unpruned registry BEFORE any operation
+/// that might trigger a pruning `read_registry()` call (e.g.
+/// `check_socket_alive`, `send_command`). The returned path is safe to pass
+/// to [`cleanup_socket_at`] later, even if the registry entry has been pruned
+/// in the meantime.
+///
+/// Unlike [`resolve_socket_path_for_cleanup`], this does NOT gate on
+/// `!is_pid_alive` — the caller knows it is about to kill the daemon, so
+/// the PID will be dead by the time cleanup runs.
+pub fn snapshot_socket_path(project: &Path) -> PathBuf {
+    if let Some(entry) = super::daemon_registry::find_entry_unpruned(project) {
+        if registry_socket_name_matches(project, &entry.socket) {
+            return entry.socket;
+        }
+    }
+    compute_socket_path(project)
 }
 
 /// Check if a socket exists and is connectable.
@@ -662,12 +753,118 @@ mod tests {
 
     #[test]
     fn test_cleanup_socket_nonexistent() {
-        let temp = TempDir::new().unwrap();
-        let project = temp.path().join("nonexistent");
+        use crate::commands::daemon::daemon_registry::test_support::with_registry_dir;
+        // Redirect the registry to a temp dir: cleanup_socket now reads the
+        // registry, and we must not touch the developer's real registry.
+        with_registry_dir(|dir| {
+            let project = dir.join("nonexistent");
 
-        // Should not error on nonexistent socket
-        let result = cleanup_socket(&project);
-        assert!(result.is_ok());
+            // Should not error on nonexistent socket
+            let result = cleanup_socket(&project);
+            assert!(result.is_ok());
+        });
+    }
+
+    /// W6: a crashed cross-TMPDIR daemon leaves its socket orphaned under its
+    /// own TMPDIR, with a DEAD PID in the registry. `cleanup_socket` must remove
+    /// that socket rather than no-op on the caller's (non-existent) local path.
+    /// The dead PID is the load-bearing detail: `find_entry` prunes dead entries,
+    /// so cleanup must use an unpruned lookup.
+    #[cfg(unix)]
+    #[test]
+    fn test_cleanup_socket_removes_dead_daemon_registry_path() {
+        use crate::commands::daemon::daemon_registry::{add_entry, test_support::with_registry_dir};
+        with_registry_dir(|dir| {
+            // A real, canonicalizable project dir.
+            let project = dir.join("proj");
+            std::fs::create_dir_all(&project).unwrap();
+
+            // Socket lives under `dir` (stand-in for the daemon's TMPDIR), not
+            // the system temp dir that `compute_socket_path` would yield. The
+            // filename still matches this project's deterministic socket name.
+            let sock_name = compute_socket_path(&project).file_name().unwrap().to_owned();
+            let sock = dir.join(&sock_name);
+            std::fs::write(&sock, b"").unwrap();
+            assert_ne!(
+                sock,
+                compute_socket_path(&project),
+                "test premise: registry socket must differ from local path"
+            );
+
+            // Spawn `true` and reap → PID is definitely dead (the real W6
+            // scenario: a crashed daemon's orphaned socket).
+            let mut child = std::process::Command::new("true")
+                .spawn()
+                .expect("spawn true");
+            let dead_pid = child.id();
+            let _ = child.wait();
+
+            add_entry(&project, dead_pid, &sock).expect("add");
+            assert!(sock.exists());
+
+            cleanup_socket(&project).expect("cleanup");
+            assert!(
+                !sock.exists(),
+                "orphaned socket of dead cross-TMPDIR daemon should be removed"
+            );
+        });
+    }
+
+    /// W3: `snapshot_socket_path` must return the registry-recorded path even
+    /// when the daemon is still alive. The caller (stop.rs) captures this before
+    /// sending shutdown — by the time `cleanup_socket_at` runs the PID is dead,
+    /// but the snapshot was taken while it was alive.
+    #[cfg(unix)]
+    #[test]
+    fn test_snapshot_socket_path_returns_registry_path_for_live_daemon() {
+        use crate::commands::daemon::daemon_registry::{add_entry, test_support::with_registry_dir};
+        with_registry_dir(|dir| {
+            let project = dir.join("proj-snap");
+            std::fs::create_dir_all(&project).unwrap();
+
+            let sock_name = compute_socket_path(&project).file_name().unwrap().to_owned();
+            let registry_sock = dir.join(&sock_name);
+
+            // Live PID (this test process) — simulates snapshotting before shutdown.
+            add_entry(&project, std::process::id(), &registry_sock).expect("add");
+
+            let snapped = snapshot_socket_path(&project);
+            assert_eq!(
+                snapped, registry_sock,
+                "snapshot must return the registry path even for a live daemon"
+            );
+            assert_ne!(
+                snapped,
+                compute_socket_path(&project),
+                "snapshot must NOT fall back to local TMPDIR when a registry entry exists"
+            );
+        });
+    }
+
+    /// W6 safety: a *live* daemon's registry socket must never be deleted by a
+    /// cleanup from a different session (e.g. after a project-key re-registration
+    /// swapped in a new live daemon). Cleanup falls back to the local path.
+    #[cfg(unix)]
+    #[test]
+    fn test_cleanup_socket_spares_live_daemon_registry_path() {
+        use crate::commands::daemon::daemon_registry::{add_entry, test_support::with_registry_dir};
+        with_registry_dir(|dir| {
+            let project = dir.join("proj-live");
+            std::fs::create_dir_all(&project).unwrap();
+
+            let sock_name = compute_socket_path(&project).file_name().unwrap().to_owned();
+            let sock = dir.join(&sock_name);
+            std::fs::write(&sock, b"").unwrap();
+
+            // Live PID (this test process) → cleanup must NOT touch the socket.
+            add_entry(&project, std::process::id(), &sock).expect("add");
+
+            cleanup_socket(&project).expect("cleanup");
+            assert!(
+                sock.exists(),
+                "a live daemon's socket must not be removed by cleanup"
+            );
+        });
     }
 
     #[cfg(unix)]
@@ -705,10 +902,18 @@ mod tests {
 
     #[tokio::test]
     async fn test_connect_nonexistent_daemon() {
+        use crate::commands::daemon::daemon_registry::test_support::REGISTRY_ENV_LOCK;
+        // connect resolves via the registry first; isolate it from the real one.
+        // `with_registry_dir` takes a sync closure, so hold the env override
+        // manually across the await. tokio::test is current-thread, so holding
+        // the !Send guard across `.await` is fine.
+        let _guard = REGISTRY_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let temp = TempDir::new().unwrap();
-        let project = temp.path();
+        std::env::set_var("TLDR_DAEMON_REGISTRY_DIR", temp.path());
+        let project = temp.path().join("nonexistent");
 
-        let result = IpcStream::connect(project).await;
+        let result = IpcStream::connect(&project).await;
+        std::env::remove_var("TLDR_DAEMON_REGISTRY_DIR");
         assert!(matches!(result, Err(DaemonError::NotRunning)));
     }
 
