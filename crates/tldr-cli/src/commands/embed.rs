@@ -9,6 +9,7 @@ use std::time::Instant;
 use anyhow::Result;
 use clap::Args;
 
+use tldr_core::config::{find_project_root, TldrConfig};
 use tldr_core::semantic::{
     chunk_code, CacheConfig, ChunkGranularity, ChunkOptions, EmbedReport, EmbeddedChunk, Embedder,
     EmbeddingCache, EmbeddingModel,
@@ -31,8 +32,8 @@ pub struct EmbedArgs {
     pub granularity: String,
 
     /// Embedding model: arctic-xs, arctic-s, arctic-m, arctic-m-long, arctic-l
-    #[arg(short, long, default_value = "arctic-m")]
-    pub model: String,
+    #[arg(short, long)]
+    pub model: Option<String>,
 
     /// Filter by language via file extensions (comma-separated, e.g., `--langs rs,py`).
     ///
@@ -63,8 +64,11 @@ impl EmbedArgs {
         let writer = OutputWriter::new(format, quiet);
         let start = Instant::now();
 
-        // Parse model
-        let model = parse_model(&self.model)?;
+        // Resolve model: CLI flag > config > built-in default
+        let project_root = find_project_root(&self.path);
+        let config = TldrConfig::resolve(project_root.as_deref());
+        let model = EmbeddingModel::resolve(self.model.as_deref(), &config)
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
 
         // Parse granularity
         let granularity = match self.granularity.as_str() {
@@ -78,11 +82,12 @@ impl EmbedArgs {
             }
         };
 
+        let model_name = self.model.as_deref().unwrap_or("arctic-m");
         writer.progress(&format!(
             "Embedding code in {} ({:?} granularity, {} model)...",
             self.path.display(),
             granularity,
-            self.model
+            model_name
         ));
 
         // Convert language filters
@@ -201,17 +206,3 @@ impl EmbedArgs {
     }
 }
 
-/// Parse model string into EmbeddingModel
-fn parse_model(model_str: &str) -> Result<EmbeddingModel> {
-    match model_str {
-        "arctic-xs" | "xs" => Ok(EmbeddingModel::ArcticXS),
-        "arctic-s" | "s" => Ok(EmbeddingModel::ArcticS),
-        "arctic-m" | "m" => Ok(EmbeddingModel::ArcticM),
-        "arctic-m-long" | "m-long" => Ok(EmbeddingModel::ArcticMLong),
-        "arctic-l" | "l" => Ok(EmbeddingModel::ArcticL),
-        _ => Err(anyhow::anyhow!(
-            "Invalid model '{}'. Options: arctic-xs, arctic-s, arctic-m, arctic-m-long, arctic-l",
-            model_str
-        )),
-    }
-}

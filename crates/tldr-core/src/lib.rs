@@ -35,6 +35,7 @@
 #![warn(missing_docs)]
 #![warn(rustdoc::missing_crate_level_docs)]
 
+pub mod config;
 pub mod error;
 pub mod git;
 pub mod types;
@@ -94,6 +95,7 @@ pub mod fix;
 pub mod wrappers;
 
 // Re-export main types for convenience
+pub use config::TldrConfig;
 pub use error::TldrError;
 pub use types::*;
 

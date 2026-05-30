@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::Args;
 
+use tldr_core::config::{find_project_root, TldrConfig};
 use tldr_core::semantic::{
     BuildOptions, CacheConfig, ChunkGranularity, EmbeddingModel, IndexSearchOptions, SemanticIndex,
 };
@@ -37,8 +38,8 @@ pub struct SimilarArgs {
     pub path: PathBuf,
 
     /// Embedding model: arctic-xs, arctic-s, arctic-m, arctic-m-long, arctic-l
-    #[arg(short, long, default_value = "arctic-m")]
-    pub model: String,
+    #[arg(short, long)]
+    pub model: Option<String>,
 
     /// Include self in results (by default, the query is excluded)
     #[arg(long)]
@@ -63,8 +64,11 @@ impl SimilarArgs {
     pub fn run(&self, format: OutputFormat, quiet: bool) -> Result<()> {
         let writer = OutputWriter::new(format, quiet);
 
-        // Parse model
-        let model = parse_model(&self.model)?;
+        // Resolve model: CLI flag > config > built-in default
+        let project_root = find_project_root(&self.path);
+        let config = TldrConfig::resolve(project_root.as_deref());
+        let model = EmbeddingModel::resolve(self.model.as_deref(), &config)
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
 
         // Canonicalize file path for matching
         let canonical_file = self
@@ -324,20 +328,6 @@ fn format_aggregated_similar_text(report: &AggregatedSimilarityReport) -> String
     output
 }
 
-/// Parse model string into EmbeddingModel
-fn parse_model(model_str: &str) -> Result<EmbeddingModel> {
-    match model_str {
-        "arctic-xs" | "xs" => Ok(EmbeddingModel::ArcticXS),
-        "arctic-s" | "s" => Ok(EmbeddingModel::ArcticS),
-        "arctic-m" | "m" => Ok(EmbeddingModel::ArcticM),
-        "arctic-m-long" | "m-long" => Ok(EmbeddingModel::ArcticMLong),
-        "arctic-l" | "l" => Ok(EmbeddingModel::ArcticL),
-        _ => Err(anyhow::anyhow!(
-            "Invalid model '{}'. Options: arctic-xs, arctic-s, arctic-m, arctic-m-long, arctic-l",
-            model_str
-        )),
-    }
-}
 
 /// Format similarity report for text output
 fn format_similar_text(report: &tldr_core::semantic::SimilarityReport) -> String {

@@ -53,18 +53,42 @@ bd close <id>         # Complete work
 
 ## Build & Test
 
-_Add your build and test commands here_
+```bash
+cargo build                          # Default build (no semantic search)
+cargo build --features semantic      # Build with embedding/semantic search
+cargo test -p tldr-core              # Core tests
+cargo test -p tldr-cli               # CLI tests
+cargo test --features semantic       # Full test suite including semantic
+```
+
+## Optional: Diagnostic Tools
+
+Some commands (`doctor`, `diagnostics`) require external language tools.
+After installing tldr, run `tldr doctor` to check which tools are available,
+then install for the languages you work with:
 
 ```bash
-# Example:
-# npm install
-# npm test
+tldr doctor                    # Check current tool availability
+tldr doctor --install rust     # Install Rust diagnostic tools (rustc, cargo)
+tldr doctor --install python   # Install Python tools (pyright, ruff, mypy)
+tldr doctor --install typescript  # Install TS tools (typescript-language-server, tsc)
+tldr doctor --install go       # Install Go tools (gopls, golangci-lint)
+tldr doctor --install java     # Install Java tools (checkstyle, spotbugs)
 ```
 
 ## Architecture Overview
 
-_Add a brief overview of your project architecture_
+Cargo workspace with four crates:
+- `tldr-core` — core analysis engine (AST, call graph, CFG, DFG, search, semantic)
+- `tldr-cli` — CLI binary (clap-based, ~50 subcommands)
+- `tldr-daemon` — background daemon (axum HTTP over Unix/TCP sockets)
+- `tldr-mcp` — MCP server (JSON-RPC 2.0 over stdio)
+
+Semantic search (`tldr-core/src/semantic/`) is behind `--features semantic` (pulls fastembed + ONNX Runtime).
 
 ## Conventions & Patterns
 
-_Add your project-specific conventions here_
+- Tree-sitter grammars are pinned to exact versions (`=X.Y.Z`)
+- Embedding model enum: `EmbeddingModel` in `tldr-core/src/semantic/types.rs`
+- Output formats: json (default), text, sarif, dot (command-specific)
+- `#[cfg(feature = "semantic")]` gates all embedding code
