@@ -308,16 +308,13 @@ impl Embedder {
             return Ok(Vec::new());
         }
 
-        // TLDR-blm perf: batch size controls fastembed's internal chunking, NOT
-        // progress display. Large batches amortize per-batch ONNX + tokenizer
-        // overhead; fastembed's own default is 256 (batches run sequentially, so
-        // tiny batches are pure overhead). The old code coupled this to
-        // `show_progress`, forcing Some(32) when progress was on — which made the
-        // full-corpus embed ~20x slower (27s -> 10min) for no benefit. Decoupled:
-        // always use the efficient default-sized batch. `show_progress` no longer
-        // affects throughput (caller handles progress messaging).
-        let _ = show_progress;
-        let batch_size = None; // -> fastembed DEFAULT_BATCH_SIZE (256)
+        // Batch size for fastembed's internal chunking. Restored to match main
+        // (Some(32) under progress): with fastembed's BatchLongest padding, code
+        // chunks are bimodal (many short funcs + a few ~512-token ones), so a
+        // large batch (256) pads ALL members to ~512 -> 8x memory + wasted compute
+        // and a major slowdown on real corpora. Smaller batches keep short-func
+        // batches short. (My earlier "always None=256" change was the regression.)
+        let batch_size = if show_progress { Some(32) } else { None };
 
         let results = self
             .model
