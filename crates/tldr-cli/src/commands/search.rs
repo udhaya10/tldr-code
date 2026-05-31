@@ -58,6 +58,12 @@ pub struct SmartSearchArgs {
 
     /// Hybrid mode: combine BM25 relevance with regex filtering.
     /// The positional query is used for BM25 ranking, this pattern for regex filtering.
+    // TLDR-AUDIT(TLDR-1a8): MISNOMER. In retrieval, "hybrid" means lexical+DENSE
+    // fusion (BM25 + embeddings). This flag is BM25 + a regex filter — no dense
+    // component at all. A real RRF hybrid exists in tldr-core (search/hybrid.rs,
+    // TLDR-4er) but isn't wired here, so the name collides with the thing it
+    // isn't. Rename to `--filter` (or similar), and reserve `--hybrid` for when
+    // the real dense fusion is wired in. See epic TLDR-blm.
     #[arg(long, conflicts_with = "regex")]
     pub hybrid: Option<String>,
 }

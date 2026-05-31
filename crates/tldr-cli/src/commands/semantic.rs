@@ -2,6 +2,12 @@
 //!
 //! Performs natural language search over code using dense embeddings.
 //! Builds an in-memory index and returns semantically similar code chunks.
+//
+// TLDR-AUDIT: This is the REAL, shipping semantic path — it drives the
+//   in-process `SemanticIndex` (fastembed/Arctic). It works. Do NOT confuse it
+//   with search/embedding_client.rs (dead HTTP stub, TLDR-cs5) or the unwired
+//   RRF fusion in search/hybrid.rs (TLDR-4er). When hybrid is completed, this
+//   command (and `tldr search`) is where the fused path should be wired in.
 
 use std::path::PathBuf;
 

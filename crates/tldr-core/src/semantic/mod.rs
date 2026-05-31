@@ -7,6 +7,19 @@
 //! - Similarity detection between code fragments
 //! - Embedding generation for downstream tools
 //!
+// TLDR-AUDIT(TLDR-6fm): ROOT CAUSE of the whole semantic-search epic. docs/
+//   ARCHITECTURE.md (v2.0) defines tldr as a 5-layer STATIC stack
+//   (AST -> CallGraph -> CFG -> DFG -> PDG). This module — embeddings, index,
+//   hybrid fusion — is NOT a documented layer, NOT in the data-flow diagram,
+//   NOT in the caching section. It exists only as scattered CLI/MCP glue. That
+//   non-adoption is *why* it rotted (FAISS-downgrade=7kf, dead stub=cs5, unwired
+//   hybrid=4er) while the 5 documented layers stayed clean and tested. The fix
+//   is not just patching the bugs: PROMOTE this to a first-class "Layer 6:
+//   Semantic/Retrieval" with the same rigor — own embedding+index+fusion here,
+//   document it in ARCHITECTURE.md, back it with in-process `usearch`. See epic
+//   TLDR-blm. (NOTE: `SemanticIndex` below is the REAL, working path — contrast
+//   search/embedding_client.rs, which is the dead HTTP stub.)
+//!
 //! # Architecture
 //!
 //! ```text

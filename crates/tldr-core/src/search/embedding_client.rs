@@ -6,6 +6,24 @@
 //! # Mitigation M8
 //! This client implements graceful degradation - if the embedding service
 //! is unavailable, hybrid search falls back to BM25-only mode.
+//
+// TLDR-AUDIT(TLDR-cs5): DEAD CODE — this entire module should be deleted.
+//   1. The HTTP embedding service it targets (localhost:8765) NEVER EXISTED,
+//      not even in the Python original (llm-tldr): that codebase embedded
+//      in-process via sentence-transformers (semantic.py:206) and has no
+//      FastAPI/Flask/8765 server anywhere. This file is a from-scratch
+//      architecture that was planned, stubbed, and abandoned mid-rewrite.
+//   2. It is referenced NOWHERE in the live CLI (grep: zero hits outside
+//      this crate's own tests). The shipping semantic path is the in-process
+//      `SemanticIndex` (semantic/index.rs), which uses fastembed/Arctic — a
+//      different model than the BGE-large-1024 this file assumes.
+//   3. `search()` below is a no-op stub that returns `Ok(Vec::new())`.
+//   This is NOT an LSP integration and NOT the MCP server — both use other
+//   transports (MCP=stdio JSON-RPC; diagnostics=subprocess). It is a 4th,
+//   orphaned subsystem. Reviving it would re-introduce a cross-language
+//   service dependency that violates ARCHITECTURE.md's "intentionally avoids
+//   LSP / external services for speed" principle. DELETE + repoint hybrid.rs
+//   at the in-process SemanticIndex. See epic TLDR-blm.
 
 use std::time::Duration;
 
@@ -188,20 +206,18 @@ impl EmbeddingClient {
             )));
         }
 
-        // In a real implementation, this would make an HTTP request
-        // For now, return empty results to allow compilation and testing
-        // The actual HTTP request would use reqwest or similar
-
-        // Placeholder: return empty results
-        // Real implementation would POST to {base_url}/search
+        // TLDR-AUDIT(TLDR-cs5): NO-OP STUB. This silently returns zero results,
+        // which is worse than failing: any caller that gets past is_available()
+        // believes the search succeeded and found nothing. The "TODO: implement
+        // HTTP request" was never done and should NOT be done — the service this
+        // would call never existed (see module header). The real, working path
+        // is SemanticIndex::search in semantic/index.rs. Delete, don't implement.
         let _request = SearchRequest {
             query: query.to_string(),
             top_k,
             project: project.to_string(),
         };
 
-        // TODO: Implement actual HTTP request
-        // For now, signal that service call would happen
         Ok(Vec::new())
     }
 

@@ -76,6 +76,11 @@ pub struct EmbeddedChunk {
     pub chunk: CodeChunk,
 
     /// Dense embedding vector (dimensions depend on model)
+    // TLDR-AUDIT(TLDR-8pt): Full f32, no quantization — ~3KB/vector, 357MB at the
+    // 100K index cap. Subsumed by TLDR-7kf: if `usearch` is adopted it owns vector
+    // storage and quantizes natively (ScalarKind::I8/BF16/B1x8), so this field's
+    // role shrinks to "transient input handed to index.add". Don't build a
+    // bespoke quantizer here — let the index do it. See epic TLDR-blm.
     pub embedding: Vec<f32>,
 }
 

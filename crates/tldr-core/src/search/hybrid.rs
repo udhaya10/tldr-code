@@ -13,6 +13,22 @@
 //!
 //! # Mitigation M8
 //! Gracefully degrades to BM25-only when embedding service is unavailable.
+//
+// TLDR-AUDIT(TLDR-4er): UNWIRED. The RRF fusion logic here is sound and modern
+//   (RRF is current best practice), but this module is the most advanced
+//   retrieval idea in the repo that NEVER RUNS:
+//     - `hybrid_search` is called NOWHERE in the live CLI (grep: zero hits
+//       outside this crate). `tldr search` does BM25/regex only; `tldr semantic`
+//       does dense-only. Neither fuses. So in production you get EITHER lexical
+//       OR dense, never both.
+//     - Its semantic input comes from `EmbeddingClient` (the dead stub, see
+//       TLDR-cs5), so even when constructed it ALWAYS hits the M8 fallback and
+//       degrades to bm25_only. The "graceful degradation" is actually the only
+//       mode that ever executes.
+//   FIX: repoint the semantic side at the in-process `SemanticIndex`
+//   (semantic/index.rs) instead of `EmbeddingClient`, then wire `hybrid_search`
+//   into the CLI so the fused path is reachable. Blocked on TLDR-cs5. See epic
+//   TLDR-blm (this is the highest-value completeness fix).
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -113,6 +129,11 @@ pub fn hybrid_search(
     let bm25_results = bm25_index.search(query, top_k * 2); // Get more for RRF
 
     // Try semantic search if client provided
+    // TLDR-AUDIT(TLDR-4er): `client.search` is the no-op stub (TLDR-cs5), so the
+    // `Ok(results)` arm yields an empty vec and the `Err` arm hits fallback —
+    // either way `semantic_results` is empty and fusion below reduces to BM25.
+    // Replace `EmbeddingClient` with the in-process `SemanticIndex` to make this
+    // branch actually contribute dense results.
     let (semantic_results, fallback_mode) = match embedding_client {
         Some(client) => {
             match client.search(query, &root.to_string_lossy(), top_k * 2) {

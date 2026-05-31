@@ -4,6 +4,20 @@
 //! re-computing embeddings for unchanged code. Key features:
 //!
 //! - JSON-based persistence for easy debugging and portability
+//
+// TLDR-AUDIT(TLDR-k4q): REGRESSION + wrong tool for the vectors. llm-tldr
+//   persisted a binary `.faiss` index (semantic.py:1072,1134); this rewrite
+//   stores embeddings as JSON — floats as ASCII text, the whole file parsed into
+//   RAM on every cold run. JSON is the worst format for dense f32 arrays.
+//   DIRECTION (see TLDR-7kf): once `usearch` owns the vectors, its binary
+//   `save`/mmap `view` REPLACES vector persistence entirely — delete the
+//   embedding-blob half of this cache. What remains is a small METADATA SIDECAR
+//   (key -> {path, lines, snippet, content_hash, file_mtime}) that usearch does
+//   NOT store. For that sidecar, JSON is actually fine: it's metadata-only (no
+//   float arrays) and the daemon parses it once into memory (matches the
+//   documented daemon-LRU caching model in ARCHITECTURE.md), so format has zero
+//   query-time cost. The invalidation logic below (content-hash + mtime) is good
+//   and should be preserved in the sidecar. See epic TLDR-blm.
 //! - File locking via `fs2` for concurrent access safety
 //! - TTL-based expiration checked on every read (P0 mitigation)
 //! - Content hash + function identity in cache key (P0 mitigation)
