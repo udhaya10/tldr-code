@@ -102,7 +102,7 @@ fs2 = { workspace = true }
 which = { workspace = true }
 
 [features]
-default = []
+default = ["semantic"]
 semantic = ["dep:fastembed"]
 # Experimental V2 call graph builder with parallel processing (Phase 14)
 experimental_callgraph = []
