@@ -421,9 +421,21 @@ fn enrich_single_chunk(
         (Vec::new(), Vec::new())
     };
 
+    // L3/L4 (CFG/DFG) are the EXPENSIVE layers: get_cfg_context / get_dfg_context
+    // each re-parse the WHOLE file per function, so a file with N functions is
+    // parsed ~2N times — quadratic, and the dominant index-build cost (TLDR-lwg
+    // perf). Gated so we can measure their recall contribution and run without
+    // the quadratic. Default ON to preserve behavior; set TLDR_ENRICH_FLOW=0 to
+    // skip them.
+    let flow_enrichment = std::env::var("TLDR_ENRICH_FLOW")
+        .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
+        .unwrap_or(true);
+
     // L3: CFG summary
     // C2: Always pass full file content, not chunk.content
-    let cfg_summary = if let Some(func_name) = &chunk.function_name {
+    let cfg_summary = if !flow_enrichment {
+        String::new()
+    } else if let Some(func_name) = &chunk.function_name {
         if let Some(source) = file_cache.file_sources.get(&chunk.file_path) {
             std::panic::catch_unwind(AssertUnwindSafe(|| {
                 build_cfg_summary_from_source(source, func_name, chunk.language)
@@ -442,7 +454,9 @@ fn enrich_single_chunk(
 
     // L4: DFG summary
     // C2: Always pass full file content, not chunk.content
-    let dfg_summary = if let Some(func_name) = &chunk.function_name {
+    let dfg_summary = if !flow_enrichment {
+        String::new()
+    } else if let Some(func_name) = &chunk.function_name {
         if let Some(source) = file_cache.file_sources.get(&chunk.file_path) {
             std::panic::catch_unwind(AssertUnwindSafe(|| {
                 build_dfg_summary_from_source(source, func_name, chunk.language)

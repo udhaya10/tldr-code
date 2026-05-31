@@ -118,3 +118,9 @@ pub use cache::EmbeddingCache;
 // Phase 6: Index
 pub mod index;
 pub use index::{BuildOptions, SearchOptions as IndexSearchOptions, SemanticIndex, MAX_INDEX_SIZE};
+
+// Enrichment: builds the structural "embedding text" (signature + callers/callees
+// + CFG/DFG summaries + deps) that the index embeds instead of raw source.
+// TLDR-lwg: this module was never declared, so it shipped uncompiled and unwired.
+pub mod enrichment;
+pub use enrichment::{build_embedding_text, enrich_chunks, EmbeddingUnit};

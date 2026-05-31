@@ -45,6 +45,7 @@ use std::time::Instant;
 use crate::semantic::cache::EmbeddingCache;
 use crate::semantic::chunker::chunk_code;
 use crate::semantic::embedder::Embedder;
+use crate::semantic::enrichment::{build_embedding_text, enrich_chunks};
 use crate::semantic::similarity::top_k_similar;
 use crate::semantic::types::{
     CacheConfig, ChunkGranularity, ChunkOptions, EmbeddedChunk, EmbeddingModel,
@@ -307,10 +308,38 @@ impl SemanticIndex {
             // Initialize embedder (loads 110MB ONNX model)
             let mut embedder = Embedder::new(options.model)?;
 
-            let texts: Vec<&str> = uncached_indices
-                .iter()
-                .map(|&i| chunk_result.chunks[i].content.as_str())
-                .collect();
+            // TLDR-lwg: optionally embed ENRICHED text (signature + callers/
+            // callees + CFG/DFG summaries + deps) instead of raw source.
+            //
+            // GATED OFF BY DEFAULT: the current `enrich_chunks` does an
+            // unconditional whole-project call-graph build plus per-chunk
+            // analysis that is pathologically slow at medium scale (28s -> 10+min,
+            // 10GB on tldr-core). Wiring it unconditionally broke `tldr semantic`.
+            // Opt in with TLDR_ENRICH=1 for experiments until the perf rework
+            // lands (TLDR-blm Phase 2); then promote this to a BuildOptions field.
+            let enrich = std::env::var("TLDR_ENRICH")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false);
+
+            // `units` returns 1:1 with chunks, so `units[i]` lines up with
+            // `chunk_result.chunks[i]`. Only built when enrichment is enabled.
+            let enriched_texts: Vec<String> = if enrich {
+                let units = enrich_chunks(&chunk_result.chunks, root);
+                uncached_indices
+                    .iter()
+                    .map(|&i| build_embedding_text(&units[i]))
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let texts: Vec<&str> = if enrich {
+                enriched_texts.iter().map(|s| s.as_str()).collect()
+            } else {
+                uncached_indices
+                    .iter()
+                    .map(|&i| chunk_result.chunks[i].content.as_str())
+                    .collect()
+            };
             let embeddings = embedder.embed_batch(texts, options.show_progress)?;
 
             for (idx, embedding) in uncached_indices.iter().zip(embeddings) {
@@ -384,8 +413,9 @@ impl SemanticIndex {
             self.embedder = Some(Embedder::new(self.model)?);
         }
 
-        // Embed query
-        let query_embedding = self.embedder.as_mut().unwrap().embed_text(query)?;
+        // Embed query — TLDR-dlk: use embed_query so the Arctic asymmetric query
+        // prefix is applied (documents were indexed without a prefix).
+        let query_embedding = self.embedder.as_mut().unwrap().embed_query(query)?;
 
         // Build candidates for top_k_similar
         let candidates: Vec<(usize, &[f32])> = self

@@ -106,10 +106,16 @@ fn main() {
 
     eprintln!("Building semantic index over {} ...", root.display());
     let build_start = Instant::now();
+    // show_progress: true is REQUIRED for batched embedding — embedder.rs ties
+    // batch_size to it (None when false), so false embeds the whole corpus in one
+    // unbatched call (17GB, minutes). Cache ON: the schema tag is recipe-honest
+    // (raw-v1/enriched-v1) and the query prefix never changes document vectors,
+    // so prefix A/B re-runs reuse cached docs and only re-embed the query.
     let mut index = SemanticIndex::build(
         &root,
         BuildOptions {
-            show_progress: false,
+            show_progress: true,
+            use_cache: true,
             ..Default::default()
         },
         Some(Default::default()),
@@ -124,6 +130,22 @@ fn main() {
         ..Default::default()
     };
 
+    // Only score gold cases whose expected file is actually in the indexed
+    // corpus, so the same harness can be pointed at a small subtree for fast
+    // iteration without counting out-of-scope targets as misses.
+    let corpus: Vec<String> = walkdir::WalkDir::new(&root)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().is_some_and(|x| x == "rs"))
+        .map(|e| norm(&e.path().to_string_lossy()))
+        .collect();
+    let in_corpus = |suffix: &str| corpus.iter().any(|p| p.ends_with(suffix));
+
+    let gold: Vec<_> = GOLD
+        .iter()
+        .filter(|(_, want_file, _)| in_corpus(&norm(want_file)))
+        .collect();
+
     let mut hits_at_5 = 0usize;
     let mut hits_at_10 = 0usize;
     let mut mrr_sum = 0.0f64;
@@ -134,7 +156,7 @@ fn main() {
     );
     println!("{}", "-".repeat(96));
 
-    for (query, want_file, want_fn) in GOLD {
+    for (query, want_file, want_fn) in &gold {
         let report = index.search(query, &opts).expect("search failed");
         let want_file_n = norm(want_file);
 
@@ -178,10 +200,11 @@ fn main() {
         }
     }
 
-    let n = GOLD.len() as f64;
+    let n = gold.len().max(1) as f64;
     println!("{}", "-".repeat(96));
-    println!("\nGold cases:  {}", GOLD.len());
-    println!("Recall@5:    {:.3}  ({}/{})", hits_at_5 as f64 / n, hits_at_5, GOLD.len());
-    println!("Recall@10:   {:.3}  ({}/{})", hits_at_10 as f64 / n, hits_at_10, GOLD.len());
+    println!("\nScope:       {}", root.display());
+    println!("Gold cases:  {} (of {} total; rest out of scope)", gold.len(), GOLD.len());
+    println!("Recall@5:    {:.3}  ({}/{})", hits_at_5 as f64 / n, hits_at_5, gold.len());
+    println!("Recall@10:   {:.3}  ({}/{})", hits_at_10 as f64 / n, hits_at_10, gold.len());
     println!("MRR:         {:.3}", mrr_sum / n);
 }

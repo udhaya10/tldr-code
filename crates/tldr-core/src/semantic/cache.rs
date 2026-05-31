@@ -69,6 +69,24 @@ use crate::TldrResult;
 /// P0 Mitigation (premortem 1.2): Include function identity in cache key,
 /// not just content hash. This prevents hash collisions when two functions
 /// have identical content but different names (copy-paste code).
+/// Version tag for the embedding-INPUT recipe (the text fed to the embedder),
+/// distinct from the model. Folded into the cache key so vectors produced under
+/// one recipe are never served under another. Reflects the actual recipe used:
+/// raw source vs enriched text (gated by TLDR_ENRICH in index.rs). TLDR-lwg.
+///
+/// TODO(TLDR-blm Phase 2): when enrichment is promoted from an env gate to a
+/// BuildOptions field, derive this from that field instead of re-reading env.
+fn embed_schema_version() -> &'static str {
+    let enrich = std::env::var("TLDR_ENRICH")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    if enrich {
+        "enriched-v1"
+    } else {
+        "raw-v1"
+    }
+}
+
 #[derive(Debug, Clone, Hash, PartialEq, Eq, Serialize, Deserialize)]
 struct CacheKey {
     /// MD5 hash of the code content
@@ -88,7 +106,12 @@ impl CacheKey {
             content_hash: chunk.content_hash.clone(),
             file_path: chunk.file_path.to_string_lossy().to_string(),
             function_name: chunk.function_name.clone(),
-            model: format!("{:?}", model),
+            // TLDR-lwg: the schema tag pins WHICH text was embedded under this
+            // content hash. The hash covers raw source; bumping the recipe (raw
+            // -> enriched) must invalidate old vectors, or stale raw-embedded
+            // entries get served as if enriched. Folded into `model` so no
+            // get/put signatures change.
+            model: format!("{:?}+{}", model, embed_schema_version()),
         }
     }
 

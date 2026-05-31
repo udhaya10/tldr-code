@@ -155,6 +155,25 @@ impl EmbeddingModel {
         }
     }
 
+    /// Query-side instruction prefix for retrieval.
+    ///
+    /// Snowflake Arctic Embed models are trained ASYMMETRICALLY: the search
+    /// query is prefixed with this instruction, while indexed documents/passages
+    /// are embedded with NO prefix. Prepending it to the query (only) is the
+    /// model's intended usage and measurably improves recall. fastembed does not
+    /// apply it automatically — it's the caller's responsibility. TLDR-dlk.
+    pub fn query_prefix(&self) -> &'static str {
+        // All current variants are Snowflake Arctic Embed v1, which share this
+        // query prefix (per the model card).
+        match self {
+            Self::ArcticXS
+            | Self::ArcticS
+            | Self::ArcticM
+            | Self::ArcticMLong
+            | Self::ArcticL => "Represent this sentence for searching relevant passages: ",
+        }
+    }
+
     /// Get the model name as used by fastembed
     ///
     /// Returns a string identifier for the model.
