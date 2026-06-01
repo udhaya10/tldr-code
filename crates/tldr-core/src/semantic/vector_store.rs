@@ -60,9 +60,13 @@ pub struct ChunkMeta {
     pub identity: String,
     /// Root-relative path (CWD/absolute-independent).
     pub file_rel_path: String,
+    /// Function/method name (`None` for file-level chunks).
     pub function_name: Option<String>,
+    /// Enclosing class/struct, if any.
     pub class_name: Option<String>,
+    /// 1-indexed start line.
     pub line_start: u32,
+    /// 1-indexed end line (inclusive).
     pub line_end: u32,
     /// Detects body changes; also anchors the lazy snippet read.
     pub content_hash: String,
@@ -72,8 +76,11 @@ pub struct ChunkMeta {
 /// cosine similarity ≈ `1 - distance`), and the chunk's sidecar metadata.
 #[derive(Debug, Clone)]
 pub struct SearchHit {
+    /// The matched chunk's stable u64 key.
     pub key: u64,
+    /// Cosine distance to the query (lower = closer; similarity ≈ 1 - distance).
     pub distance: f32,
+    /// The matched chunk's sidecar metadata.
     pub meta: ChunkMeta,
 }
 
@@ -132,14 +139,17 @@ impl VectorStore {
         self.index.size()
     }
 
+    /// Whether the store holds no vectors.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
+    /// The vector dimensionality (fixed per embedding model).
     pub fn dimensions(&self) -> usize {
         self.dimensions
     }
 
+    /// Whether `key` is present in the index.
     pub fn contains(&self, key: u64) -> bool {
         self.index.contains(key)
     }
@@ -231,8 +241,11 @@ const KEEP_GENS: u64 = 3;
 /// reconcile (§7.3) detect file↔dir/type swaps, not just content changes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FileKind {
+    /// A regular indexable source file.
     Regular,
+    /// A symbolic link.
     Symlink,
+    /// Anything else (directory, socket, …) — treated as a deletion on reconcile.
     Other,
 }
 
@@ -240,9 +253,13 @@ pub enum FileKind {
 /// `(mtime, size, file_type)` reconcile signal.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FileRecord {
+    /// Chunk keys belonging to this file (for O(1) per-file deltas).
     pub keys: std::collections::BTreeSet<u64>,
+    /// File mtime (seconds) at index time — reconcile signal.
     pub mtime: u64,
+    /// File size at index time — catches same-mtime edits.
     pub size: u64,
+    /// File kind at index time — detects file↔dir/type swaps.
     pub file_type: FileKind,
 }
 
@@ -252,19 +269,26 @@ pub struct FileRecord {
 /// boundaries, so a mismatch means the stored vectors can't be trusted.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ManifestId {
+    /// Embedding model identifier (e.g. `"ArcticL"`).
     pub embedding_model: String,
     /// Weights + tokenizer revision — a tokenizer bump invalidates vectors even
     /// under the same model name.
     pub model_revision: String,
+    /// Vector dimensionality.
     pub dimensions: u32,
+    /// Distance metric (`"cos"`).
     pub metric: String,
+    /// Scalar quantization (`"f32"` / `"i8"`).
     pub scalar_kind: String,
+    /// Search mode (`"exact"` vs `"hnsw"`).
     pub search_mode: String,
+    /// Embed-input recipe tag (`raw-v1` / `enriched-v1`).
     pub embed_schema: String,
     /// Digest of ChunkOptions (granularity/max_tokens/overlap/lang filter).
     pub chunk_params: String,
     /// Digest of the source-selection / ignore rules.
     pub walker_version: String,
+    /// Canonical project root the keys are relative to.
     pub root: String,
 }
 
@@ -715,6 +739,8 @@ impl VectorStore {
         use crate::semantic::cache::EmbeddingCache;
         use crate::semantic::chunker::chunk_code;
         use crate::semantic::embedder::Embedder;
+        use crate::semantic::enrichment::{build_embedding_text, enrich_chunks};
+        use crate::semantic::index::{BYTES_PER_CHUNK, MAX_INDEX_SIZE, MAX_MEMORY_BYTES};
         use crate::semantic::types::ChunkOptions;
 
         let languages = options.languages.as_ref().map(|langs| {
@@ -729,6 +755,21 @@ impl VectorStore {
             ..Default::default()
         };
         let chunks = chunk_code(root, &chunk_opts)?.chunks;
+
+        // P0 guards — shared with SemanticIndex::build (same limits, not copies).
+        if chunks.len() > MAX_INDEX_SIZE {
+            return Err(TldrError::IndexTooLarge {
+                count: chunks.len(),
+                max: MAX_INDEX_SIZE,
+            });
+        }
+        let estimated_memory = chunks.len() * BYTES_PER_CHUNK;
+        if estimated_memory > MAX_MEMORY_BYTES {
+            return Err(TldrError::MemoryLimitExceeded {
+                estimated_mb: estimated_memory / (1024 * 1024),
+                max_mb: MAX_MEMORY_BYTES / (1024 * 1024),
+            });
+        }
 
         let mut cache = if options.use_cache {
             cache_config.map(EmbeddingCache::open).transpose()?
@@ -750,10 +791,25 @@ impl VectorStore {
             }
         }
 
-        // Phase 2: embed the misses (raw content; enrichment default-off).
+        // Phase 2: embed the misses. Honor TLDR_ENRICH exactly like
+        // SemanticIndex::build, so the store embeds the SAME text the index does
+        // (else the vectors — and the cache keys' embed_schema tag — diverge).
         if !uncached.is_empty() {
             let mut embedder = Embedder::new(options.model)?;
-            let texts: Vec<&str> = uncached.iter().map(|&i| chunks[i].content.as_str()).collect();
+            let enrich = std::env::var("TLDR_ENRICH")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false);
+            let enriched_texts: Vec<String> = if enrich {
+                let units = enrich_chunks(&chunks, root);
+                uncached.iter().map(|&i| build_embedding_text(&units[i])).collect()
+            } else {
+                Vec::new()
+            };
+            let texts: Vec<&str> = if enrich {
+                enriched_texts.iter().map(|s| s.as_str()).collect()
+            } else {
+                uncached.iter().map(|&i| chunks[i].content.as_str()).collect()
+            };
             let embeddings = embedder.embed_batch(texts, options.show_progress)?;
             for (&i, embedding) in uncached.iter().zip(embeddings) {
                 if let Some(c) = cache.as_mut() {

@@ -66,10 +66,10 @@ pub const MAX_INDEX_SIZE: usize = 100_000;
 /// Estimated memory per chunk in bytes
 ///
 /// Calculation: 768 dims * 4 bytes per f32 + ~500 bytes metadata
-const BYTES_PER_CHUNK: usize = 768 * 4 + 500;
+pub(crate) const BYTES_PER_CHUNK: usize = 768 * 4 + 500;
 
 /// Maximum memory usage in bytes (500MB)
-const MAX_MEMORY_BYTES: usize = 500 * 1024 * 1024;
+pub(crate) const MAX_MEMORY_BYTES: usize = 500 * 1024 * 1024;
 
 // =============================================================================
 // Build Options
