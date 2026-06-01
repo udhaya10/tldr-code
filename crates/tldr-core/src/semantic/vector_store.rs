@@ -14,12 +14,13 @@
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use usearch::{Index, IndexOptions, MetricKind, ScalarKind};
 
 use crate::error::TldrError;
+use crate::semantic::types::CodeChunk;
 use crate::TldrResult;
 
 /// Map a usearch error (`cxx::Exception`, or anything `Display`) into `TldrError`.
@@ -517,6 +518,159 @@ fn gc_old_generations(dir: &Path, current_gen: u64) {
     }
 }
 
+// =============================================================================
+// Build path — chunk identity -> stable u64 key, and populate from embeddings
+// (design doc §4.1). The actual chunk_code + embed wiring lives in the index
+// build; this layer is the deterministic key scheme + store population.
+// =============================================================================
+
+/// Build the stable identity string for a chunk (design doc §4.1):
+/// `file_rel_path::class::function::ordinal`. `ordinal` disambiguates duplicate
+/// `(class, function)` names within one file. File-level chunks (no function)
+/// use `file_rel_path#file`.
+pub fn chunk_identity(
+    file_rel_path: &str,
+    class_name: Option<&str>,
+    function_name: Option<&str>,
+    ordinal: u32,
+) -> String {
+    match function_name {
+        Some(f) => format!(
+            "{}::{}::{}::{}",
+            file_rel_path,
+            class_name.unwrap_or(""),
+            f,
+            ordinal
+        ),
+        None => format!("{file_rel_path}#file"),
+    }
+}
+
+/// Hash an identity string into the stable u64 usearch key.
+pub fn identity_key(identity: &str) -> u64 {
+    let mut h = DefaultHasher::new();
+    identity.hash(&mut h);
+    h.finish()
+}
+
+/// Path relative to the build `root`. On a `strip_prefix` miss, fall back to the
+/// path as-is and normalize separators. (Hardening this miss to a canonical
+/// fallback + warning is tracked as TLDR-ss3.)
+fn root_relative(root: &Path, file_path: &Path) -> String {
+    file_path
+        .strip_prefix(root)
+        .unwrap_or(file_path)
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
+/// `(mtime_secs, size, kind)` for a path — the per-file reconcile signal.
+/// Best-effort: an un-stattable path yields `(0, 0, Other)`.
+fn stat_signal(path: &Path) -> (u64, u64, FileKind) {
+    match std::fs::symlink_metadata(path) {
+        Ok(md) => {
+            let ft = md.file_type();
+            let kind = if ft.is_symlink() {
+                FileKind::Symlink
+            } else if ft.is_file() {
+                FileKind::Regular
+            } else {
+                FileKind::Other
+            };
+            let mtime = md
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            (mtime, md.len(), kind)
+        }
+        Err(_) => (0, 0, FileKind::Other),
+    }
+}
+
+impl VectorStore {
+    /// Build a store from `chunks` and their aligned embedding `vectors` (so
+    /// `vectors[i]` embeds `chunks[i]`), rooted at `root`. Computes each chunk's
+    /// stable u64 key with per-file ordinal disambiguation, fills the sidecar and
+    /// the per-file records. This is the in-process populate; the caller supplies
+    /// chunking + embedding (and the content-addressed dedup via EmbeddingCache).
+    pub fn from_embedded(
+        chunks: &[CodeChunk],
+        vectors: &[Vec<f32>],
+        root: &Path,
+    ) -> TldrResult<Self> {
+        if chunks.len() != vectors.len() {
+            return Err(vs_err(
+                "build",
+                format!("chunks {} != vectors {}", chunks.len(), vectors.len()),
+            ));
+        }
+        let dimensions = match vectors.first() {
+            Some(v) if !v.is_empty() => v.len(),
+            _ => return Err(vs_err("build", "empty or zero-dimension vectors")),
+        };
+
+        let mut store = Self::new(dimensions, chunks.len())?;
+        // ordinal counter keyed by identity-without-ordinal.
+        let mut ordinals: HashMap<String, u32> = HashMap::new();
+        let mut file_keys: HashMap<String, std::collections::BTreeSet<u64>> = HashMap::new();
+        let mut file_abs: HashMap<String, PathBuf> = HashMap::new();
+
+        for (chunk, vector) in chunks.iter().zip(vectors.iter()) {
+            let file_rel = root_relative(root, &chunk.file_path);
+            let base = format!(
+                "{}::{}::{}",
+                file_rel,
+                chunk.class_name.as_deref().unwrap_or(""),
+                chunk.function_name.as_deref().unwrap_or("")
+            );
+            let ordinal = ordinals.entry(base).or_insert(0);
+            let identity = chunk_identity(
+                &file_rel,
+                chunk.class_name.as_deref(),
+                chunk.function_name.as_deref(),
+                *ordinal,
+            );
+            *ordinal += 1;
+            let key = identity_key(&identity);
+
+            store.add(
+                key,
+                vector,
+                ChunkMeta {
+                    identity,
+                    file_rel_path: file_rel.clone(),
+                    function_name: chunk.function_name.clone(),
+                    class_name: chunk.class_name.clone(),
+                    line_start: chunk.line_start,
+                    line_end: chunk.line_end,
+                    content_hash: chunk.content_hash.clone(),
+                },
+            )?;
+            file_keys.entry(file_rel.clone()).or_default().insert(key);
+            file_abs.entry(file_rel).or_insert_with(|| chunk.file_path.clone());
+        }
+
+        for (file_rel, keys) in file_keys {
+            let (mtime, size, file_type) = file_abs
+                .get(&file_rel)
+                .map(|p| stat_signal(p))
+                .unwrap_or((0, 0, FileKind::Other));
+            store.set_file_record(
+                file_rel,
+                FileRecord {
+                    keys,
+                    mtime,
+                    size,
+                    file_type,
+                },
+            );
+        }
+        Ok(store)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -777,5 +931,74 @@ mod tests {
         bytes.push(b' '); // alter payload → sidecar checksum mismatch
         std::fs::write(&meta_path, &bytes).unwrap();
         assert!(VectorStore::load(dir.path(), &id).is_err());
+    }
+
+    // ---- Build path (step 4) --------------------------------------------------
+
+    fn code_chunk(path: &str, class: Option<&str>, func: Option<&str>, content: &str) -> CodeChunk {
+        CodeChunk {
+            file_path: std::path::PathBuf::from(path),
+            function_name: func.map(str::to_string),
+            class_name: class.map(str::to_string),
+            line_start: 1,
+            line_end: 10,
+            content: content.to_string(),
+            content_hash: format!("{:x}", md5::compute(content)),
+            language: crate::Language::Rust,
+        }
+    }
+
+    #[test]
+    fn identity_and_key_are_stable_and_ordinal_disambiguates() {
+        let a = chunk_identity("src/a.rs", None, Some("foo"), 0);
+        assert_eq!(a, "src/a.rs::::foo::0");
+        assert_eq!(identity_key(&a), identity_key("src/a.rs::::foo::0"), "stable");
+        // Duplicate (file, class, fn) name → different ordinal → distinct keys.
+        let k0 = identity_key(&chunk_identity("src/a.rs", Some("S"), Some("new"), 0));
+        let k1 = identity_key(&chunk_identity("src/a.rs", Some("S"), Some("new"), 1));
+        assert_ne!(k0, k1);
+        // File-level chunk identity.
+        assert_eq!(chunk_identity("src/a.rs", None, None, 7), "src/a.rs#file");
+    }
+
+    #[test]
+    fn from_embedded_populates_store_and_file_records() {
+        const D: usize = 6;
+        let root = std::path::Path::new("/proj");
+        let chunks = vec![
+            code_chunk("/proj/src/a.rs", None, Some("foo"), "fn foo(){}"),
+            code_chunk("/proj/src/a.rs", Some("S"), Some("new"), "fn new()->S{}"),
+            code_chunk("/proj/src/a.rs", Some("S"), Some("new"), "fn new(x)->S{}"), // dup name
+            code_chunk("/proj/src/b.rs", None, Some("bar"), "fn bar(){}"),
+        ];
+        let vectors: Vec<Vec<f32>> = (0..chunks.len()).map(|i| unit(D, i)).collect();
+
+        let store = VectorStore::from_embedded(&chunks, &vectors, root).unwrap();
+        assert_eq!(store.len(), 4, "same-named fns get distinct keys via ordinal");
+
+        // Root-relative path + correct metadata joined on search.
+        let hits = store.search(&unit(D, 0), 1).unwrap();
+        assert_eq!(hits[0].meta.file_rel_path, "src/a.rs");
+        assert_eq!(hits[0].meta.function_name.as_deref(), Some("foo"));
+
+        // Per-file records grouped by root-relative path.
+        assert_eq!(store.file_record("src/a.rs").unwrap().keys.len(), 3);
+        assert_eq!(store.file_record("src/b.rs").unwrap().keys.len(), 1);
+
+        // Deterministic: a rebuild yields identical keys.
+        let store2 = VectorStore::from_embedded(&chunks, &vectors, root).unwrap();
+        let keys = |s: &VectorStore| -> Vec<u64> {
+            let mut k: Vec<u64> = s.file_record("src/a.rs").unwrap().keys.iter().copied().collect();
+            k.sort_unstable();
+            k
+        };
+        assert_eq!(keys(&store), keys(&store2));
+    }
+
+    #[test]
+    fn from_embedded_rejects_mismatched_lengths() {
+        let root = std::path::Path::new("/proj");
+        let chunks = vec![code_chunk("/proj/a.rs", None, Some("f"), "x")];
+        assert!(VectorStore::from_embedded(&chunks, &[], root).is_err());
     }
 }
