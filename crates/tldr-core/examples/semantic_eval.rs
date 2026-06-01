@@ -451,4 +451,77 @@ fn main() {
     println!("Recall@5:    {:.3}  ({}/{})", hits_at_5 as f64 / n, hits_at_5, gold.len());
     println!("Recall@10:   {:.3}  ({}/{})", hits_at_10 as f64 / n, hits_at_10, gold.len());
     println!("MRR:         {:.3}", mrr_sum / n);
+
+    // TLDR-l5d acceptance: store-path equivalence on real data. Build a usearch
+    // VectorStore over the SAME root/model/cache and check that its per-query
+    // top-K ranking is IDENTICAL to the dense SemanticIndex path (same vectors,
+    // same exact cosine). Gated on TLDR_EVAL_STORE=1 (extra build + searches).
+    let store_eval = std::env::var("TLDR_EVAL_STORE")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    if store_eval {
+        use tldr_core::semantic::embedder::Embedder;
+        use tldr_core::semantic::vector_store::VectorStore;
+        use tldr_core::semantic::ChunkGranularity;
+
+        eprintln!("\nBuilding usearch VectorStore (store-path equivalence)...");
+        let store = VectorStore::build(
+            &root,
+            &BuildOptions {
+                model,
+                granularity: ChunkGranularity::Function,
+                languages: None,
+                show_progress: true,
+                use_cache: true,
+            },
+            Some(Default::default()),
+        )
+        .expect("VectorStore::build failed");
+        let mut q_embedder = Embedder::new(model).expect("query embedder");
+
+        // The dense path's file_path is root-prefixed; store paths are
+        // root-relative — normalize both to the same root-relative form.
+        let canon_root = root.canonicalize().unwrap_or_else(|_| root.clone());
+        let rel = |p: &std::path::Path| -> String {
+            let cp = p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+            cp.strip_prefix(&canon_root)
+                .unwrap_or(&cp)
+                .to_string_lossy()
+                .replace('\\', "/")
+        };
+
+        let mut identical = 0usize;
+        for (query, _, _) in &gold {
+            let dense_list: Vec<(String, Option<String>, u32)> = index
+                .search(query, &opts)
+                .expect("dense search")
+                .results
+                .iter()
+                .take(TOP_K)
+                .map(|r| (rel(&r.file_path), r.function_name.clone(), r.line_start))
+                .collect();
+
+            let qv = q_embedder.embed_query(query).expect("embed_query");
+            let store_list: Vec<(String, Option<String>, u32)> = store
+                .search(&qv, TOP_K)
+                .expect("store search")
+                .iter()
+                .map(|h| (h.meta.file_rel_path.clone(), h.meta.function_name.clone(), h.meta.line_start))
+                .collect();
+
+            if dense_list == store_list {
+                identical += 1;
+            } else {
+                eprintln!("  DIVERGE: \"{}\"", &query[..query.len().min(50)]);
+                eprintln!("    dense[0]: {:?}", dense_list.first());
+                eprintln!("    store[0]: {:?}", store_list.first());
+            }
+        }
+        println!(
+            "\nStore-path equivalence: {}/{} gold queries IDENTICAL top-{} (file,fn,line) ranking",
+            identical,
+            gold.len(),
+            TOP_K
+        );
+    }
 }
