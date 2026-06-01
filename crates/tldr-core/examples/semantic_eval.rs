@@ -502,8 +502,16 @@ fn main() {
         let mut tie = 0usize;
         let mut epsilon = 0usize;
         let mut real = 0usize;
+        // Score dense DEEP (top-50) so a store item that lands just outside the
+        // dense top-K still gets a real dense cosine instead of a guess.
+        let score_opts = IndexSearchOptions {
+            top_k: 50,
+            threshold: 0.0,
+            include_snippet: false,
+            ..Default::default()
+        };
         for (query, _, _) in &gold {
-            let dense = index.search(query, &opts).expect("dense search");
+            let dense = index.search(query, &score_opts).expect("dense search");
             let d_items: Vec<Item> = dense
                 .results
                 .iter()
@@ -513,7 +521,6 @@ fn main() {
             let dscore: HashMap<Item, f64> = dense
                 .results
                 .iter()
-                .take(TOP_K)
                 .map(|r| ((rel(&r.file_path), r.function_name.clone(), r.line_start), r.score))
                 .collect();
 
