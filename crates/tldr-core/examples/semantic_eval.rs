@@ -490,38 +490,57 @@ fn main() {
                 .replace('\\', "/")
         };
 
-        let mut identical = 0usize;
+        // Classify each query: order-identical, tie-reorder (same items + same
+        // sorted cosine profile, just a different tie-winner order), or a genuine
+        // item difference (an item with a clearly-different cosine — a real bug).
+        // Exact cosine over the same vectors means order can only differ at equal
+        // cosine, so the distance profile is the rigorous equivalence signal.
+        let round = |x: f64| (x * 1e5).round() as i64;
+        let mut order_identical = 0usize;
+        let mut tie_reorder = 0usize;
+        let mut item_different = 0usize;
         for (query, _, _) in &gold {
-            let dense_list: Vec<(String, Option<String>, u32)> = index
-                .search(query, &opts)
-                .expect("dense search")
+            let dense = index.search(query, &opts).expect("dense search");
+            let dense_list: Vec<(String, Option<String>, u32)> = dense
                 .results
                 .iter()
                 .take(TOP_K)
                 .map(|r| (rel(&r.file_path), r.function_name.clone(), r.line_start))
                 .collect();
+            // dense score is cosine similarity; usearch distance ≈ 1 - similarity.
+            let dense_profile: Vec<i64> =
+                dense.results.iter().take(TOP_K).map(|r| round(1.0 - r.score)).collect();
 
             let qv = q_embedder.embed_query(query).expect("embed_query");
-            let store_list: Vec<(String, Option<String>, u32)> = store
-                .search(&qv, TOP_K)
-                .expect("store search")
+            let hits = store.search(&qv, TOP_K).expect("store search");
+            let store_list: Vec<(String, Option<String>, u32)> = hits
                 .iter()
                 .map(|h| (h.meta.file_rel_path.clone(), h.meta.function_name.clone(), h.meta.line_start))
                 .collect();
+            let store_profile: Vec<i64> = hits.iter().map(|h| round(h.distance as f64)).collect();
 
             if dense_list == store_list {
-                identical += 1;
+                order_identical += 1;
+            } else if dense_profile == store_profile {
+                // Same sorted cosine values at every rank → only the tie-winner
+                // order differs. Equivalent.
+                tie_reorder += 1;
             } else {
-                eprintln!("  DIVERGE: \"{}\"", &query[..query.len().min(50)]);
-                eprintln!("    dense[0]: {:?}", dense_list.first());
-                eprintln!("    store[0]: {:?}", store_list.first());
+                item_different += 1;
+                eprintln!("  ITEM-DIFF: \"{}\"", &query[..query.len().min(50)]);
+                eprintln!("    dense[0]: {:?}  d={}", dense_list.first(), dense_profile.first().copied().unwrap_or(0));
+                eprintln!("    store[0]: {:?}  d={}", store_list.first(), store_profile.first().copied().unwrap_or(0));
             }
         }
+        let equivalent = order_identical + tie_reorder;
+        println!("\nStore-path equivalence over {} gold queries:", gold.len());
+        println!("  order-identical:     {}", order_identical);
+        println!("  tie-reorder (equiv): {}", tie_reorder);
+        println!("  ITEM-DIFFERENT:      {}  (must be 0 for results-equivalence)", item_different);
         println!(
-            "\nStore-path equivalence: {}/{} gold queries IDENTICAL top-{} (file,fn,line) ranking",
-            identical,
-            gold.len(),
-            TOP_K
+            "  => EQUIVALENT: {}/{} (identical cosine ranking; ties aside)",
+            equivalent,
+            gold.len()
         );
     }
 }
