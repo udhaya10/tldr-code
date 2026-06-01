@@ -120,8 +120,12 @@ Manifest {
                              //   WHICH files are in the corpus.
     root:             String,// canonical project root the keys are relative to
     chunk_count:      u64,
-    keys_checksum:    u64,   // digest of the SORTED usearch key set — detects vector
-                             //   key drift that the sidecar checksum alone misses.
+    keys_checksum:    u64,   // digest of the SORTED usearch key set — detects KEY-SET
+                             //   drift (membership) the sidecar checksum misses.
+    index_checksum:   u64,   // digest of the on-disk index FILE bytes — detects a
+                             //   corrupted/swapped index where the keys still match
+                             //   but the VECTORS are wrong (keys_checksum can't catch
+                             //   that; Codex round-3). Computed over index.<gen>.usearch.
     sidecar_checksum: u64,   // digest of the sidecar payload.
 }
 ```
@@ -130,9 +134,10 @@ On `load()`, **reject → full rebuild** (logged, never silent) if ANY of
 `format_version, embedding_model, model_revision, dimensions, scalar_kind,
 search_mode, embed_schema, chunk_params, walker_version, root` mismatch the running
 config; OR the loaded index's reported dims/count disagree with the manifest; OR
-`sidecar_checksum` fails; OR the digest of the loaded usearch key set ≠
-`keys_checksum` (catches index/sidecar drift); OR the generation embedded in the
-loaded filenames ≠ `generation`.
+`sidecar_checksum` / `index_checksum` fails; OR the digest of the loaded usearch key
+set ≠ `keys_checksum`; OR the generation embedded in the loaded filenames ≠
+`generation`. (`index_checksum` covers vector correctness; `keys_checksum` covers
+key membership — both are needed.)
 
 ### 4.1 Stable chunk key (`u64`)
 
@@ -203,14 +208,16 @@ generation-suffixed (§7), so the generation is carried at the file level.
 **Snippets are NOT stored — read lazily at query time** (Codex review: §4 claimed
 the sidecar serves results without re-chunking, but ChunkMeta had no snippet). The
 decision: keep the sidecar small by NOT storing chunk text. At query time, produce
-the snippet with a **bounded source read** anchored by `(file_rel_path, line_start,
-line_end)` and **validated against `content_hash`** — recompute the hash of the read
-span; on file-missing or hash-mismatch (the file changed since indexing), return the
-result **without a snippet** (degraded, never wrong). This avoids re-chunking (we
-have the line range), avoids sidecar bloat, and is self-correcting (a changed file
-triggers a delta that refreshes both vector and lines). Storing `content` in the
-sidecar is an opt-in alternative for fully source-independent serving, at the cost
-of size — deferred unless a need appears.
+the snippet from a **single read of the bounded span** anchored by `(file_rel_path,
+line_start, line_end)`, then **hash that exact buffer** and render the snippet **from
+the same buffer** — read once, validate, render, never re-open between hash and
+render (avoids a TOCTOU where the file changes between validation and display).
+Guards: missing file, `line_start/line_end` out of range, an over-large span, or
+`hash ≠ content_hash` → return the result **without a snippet** (degraded, never
+wrong). This avoids re-chunking (we have the line range), avoids sidecar bloat, and
+is self-correcting (a changed file triggers a delta that refreshes vector + lines).
+Storing `content` in the sidecar is an opt-in alternative for fully source-
+independent serving, at the cost of size — deferred unless a need appears.
 
 `indexed_at` (the per-file mtime+size used by reconcile) lives on the **per-file
 record** (§4.3), not per chunk.
@@ -221,9 +228,11 @@ Persisted alongside the sidecar (and rebuilt in RAM on `load()`):
 
 ```
 FileRecord {
-    keys:  Set<u64>,   // which chunk keys belong to this file (O(1) delta lookup)
-    mtime: u64,        // file mtime AT INDEX time — reconcile signal (§7)
-    size:  u64,        // file size  AT INDEX time — catches same-mtime edits
+    keys:      Set<u64>, // which chunk keys belong to this file (O(1) delta lookup)
+    mtime:     u64,      // file mtime AT INDEX time — reconcile signal (§7)
+    size:      u64,      // file size  AT INDEX time — catches same-mtime edits
+    file_type: enum,     // Regular | Symlink | Other — detects file↔dir/type swaps
+                         //   at reconcile (§7.3), not just content changes
 }
 ```
 
@@ -327,39 +336,68 @@ The fix is **immutable, generation-suffixed artifacts plus a single atomic point
    same for `meta.<gen>` and `manifest.<gen>` (the manifest embeds `gen`,
    `keys_checksum`, `sidecar_checksum`). **`fsync` each file AND `fsync` the
    directory** after the renames (a rename isn't durable until the dir is synced).
-3. Write `CURRENT.tmp` (containing `gen`) → `fsync` → **rename `CURRENT.tmp` →
-   `CURRENT`** → `fsync` the directory. This rename is the commit point.
-4. GC: delete generations older than `gen-1` (keep the previous generation as a
-   rollback target; never delete the one `CURRENT` points at).
+3. Write `CURRENT.tmp` → `fsync` → **rename `CURRENT.tmp` → `CURRENT`** → `fsync` the
+   directory. This rename is the commit point. **`CURRENT` is structured, not a bare
+   integer** (Codex round-3): `CURRENT { magic: u32, gen: u64, checksum: u32 }` so a
+   torn/partial write is *detectable*. On read, if `magic`/`checksum` is invalid,
+   **do not trust it** — fall back (§7.2) to scanning `manifest.<gen>` files newest→
+   oldest and loading the newest one that verifies.
+4. GC: retain the **last `KEEP_GENS` generations** (default **3**) AND any generation
+   younger than a **grace window** (default **60 s**); delete only generations that
+   are both older than `KEEP_GENS` back *and* past the grace window. Never delete the
+   generation `CURRENT` points at. (Retention > 1 + grace is what makes the
+   concurrent-reader race below safe; a bare `gen-1` is not enough.)
 
-A crash at any point leaves `CURRENT` pointing at a fully-written older generation;
-the half-written `<gen>` files are unreferenced and reaped on next open. No
-in-place overwrite ever touches the live generation.
+A crash at any point leaves `CURRENT` pointing at a fully-written older generation
+(or, if `CURRENT` itself is torn, the newest verifying `manifest.<gen>`); the
+half-written `<gen>` files are unreferenced and reaped on next open. No in-place
+overwrite ever touches a live generation.
 
-### 7.2 Startup load + verify
+### 7.2 Load + verify (startup, and any reader)
 
-1. Read `CURRENT` → `gen`. Load `index.<gen>.usearch`, `meta.<gen>`, `manifest.<gen>`.
-2. **Verify the manifest gates** (§4.0): config fields match, index dims/count agree,
-   `sidecar_checksum` ok, usearch key-set digest == `keys_checksum`, and the
-   generation embedded in all three filenames == `gen`.
-3. On any failure, try the **previous generation** (`gen-1`); if that also fails →
-   **full rebuild**.
+1. Read `CURRENT`; if `magic`/`checksum` valid → `gen`. If `CURRENT` is torn/missing
+   → **scan** `manifest.<gen>` files newest→oldest and pick the newest that verifies.
+2. Load `index.<gen>.usearch`, `meta.<gen>`, `manifest.<gen>`. If any file is missing
+   (a concurrent GC removed it after we read `CURRENT`) → **re-read `CURRENT` and
+   retry** (bounded, e.g. 3×); the retention+grace (§7.1) makes this near-impossible.
+3. **Verify the manifest gates** (§4.0): config fields match, index dims/count agree,
+   `sidecar_checksum` AND `index_checksum` ok, usearch key-set digest == `keys_checksum`,
+   and the generation embedded in all three filenames == `gen`.
+4. On verify failure, try the **previous generation**; if none of the retained
+   generations verify → **full rebuild**.
+
+This load path is used by the daemon at startup AND by a **cold CLI reader** that
+opens the store directly — see §8 for the reader/writer concurrency contract.
 
 ### 7.3 Reconcile (precise, implementable)
 
 After a verified load, catch changes made while the daemon was down — **without**
 re-chunking the whole tree:
 
-- For each `FileRecord` (§4.3): stat the file. If **mtime ≠ stored mtime OR size ≠
-  stored size** → run a §5 delta on it. (Comparing to the *stored* values, not
-  wall-clock, so clock skew is irrelevant. Size catches the rare same-mtime edit.)
-- `FileRecord` whose file is **gone** → remove its keys (delete while down).
-- A source file **on disk with no `FileRecord`** → chunk + add (created while down).
-- **Residual risk:** same mtime AND same size AND different content. Genuinely rare
-  (most edits change size or mtime); it self-heals on the next real edit, and a
-  `tldr index --rebuild` (or a content-hash full sweep behind an explicit flag) is
-  the escape hatch. We do **not** content-hash every file on every startup — that
-  cost is unbounded on large repos; mtime+size is the bounded default.
+- The `FileRecord` (§4.3) stores `file_type` (regular / symlink / other) alongside
+  `{keys, mtime, size}`, so reconcile can detect *type* changes, not just content.
+- For each `FileRecord`: `lstat`/`stat` the path.
+  - **Now a regular indexable file**, and **mtime ≠ stored OR size ≠ stored** → §5
+    delta. (Compare to *stored* values, so clock skew is irrelevant; size catches
+    the rare same-mtime edit.)
+  - **Gone**, OR **no longer a regular indexable file** (replaced by a directory,
+    socket, etc. — the file↔dir swap) → treat as **deletion**: remove its keys.
+- A source file **on disk with no `FileRecord`** → chunk + add (created while down,
+  or a dir→file swap).
+- **Symlinks:** follow `ProjectWalker`'s policy (it does not follow symlinks by
+  default → symlinked files are simply not in the corpus). If a future config
+  enables following them, key by the **canonical target path** and store the target's
+  identity in the record, so a re-pointed link is seen as a change. Until then,
+  symlinks are out of scope and excluded — documented, not silently mishandled.
+- **Case-only renames** (`Foo.rs`→`foo.rs`) on case-insensitive filesystems: the
+  corpus enumeration normalizes paths per the platform's case rules and detects
+  canonical-case drift as a rename (old record removed, new added). Edge case; the
+  walker's canonicalization is the single source of truth for path identity.
+- **Residual risk:** same mtime AND same size AND same type AND different content.
+  Genuinely rare; self-heals on the next real edit; escape hatch = `tldr index
+  --rebuild` (or a content-hash full sweep behind an explicit flag). We do **not**
+  content-hash every file on every startup — unbounded on large repos; mtime+size+type
+  is the bounded default.
 - If reconcile itself errors or detects structural drift → **full rebuild**.
 
 ---
@@ -379,9 +417,20 @@ re-chunking the whole tree:
   the `spawn_blocking` flush job. Same rule for the legacy "invalidate" path until
   deltas land: signal via an `AtomicBool`/channel, never `index.lock()` inline.
 - Search and delta serialize on the mutex (correct; both are short once warm).
-- One daemon per project (socket keyed by project hash), so there is no
-  cross-daemon writer contention on the same index file in normal use. Saves use
-  atomic temp+rename so an external reader never sees a half-written index.
+- One daemon per project (socket keyed by project hash) → a single writer; no
+  cross-daemon writer contention on the store in normal use.
+- **Reader/writer contract — the cold CLI can read the store while the daemon writes
+  it** (Codex round-3: the cold `tldr semantic` path opens the store directly, so the
+  daemon is NOT the only reader). The store is **single-writer (daemon), multi-reader**:
+  - Writers only ever *create* new `<gen>` files and atomically swap `CURRENT`
+    (§7.1); they never mutate a published generation in place.
+  - A reader snapshots `CURRENT` → `gen`, then opens that generation's immutable
+    trio. GC **retention (`KEEP_GENS`) + grace window** (§7.1) keep the snapshotted
+    generation alive long enough to open; if a reader still races a GC and hits a
+    missing file, it **re-reads `CURRENT` and retries** (§7.2).
+  - This needs no cross-process lock for *reads*. (A coarse advisory file lock around
+    *writes* is optional belt-and-suspenders, but the immutable-generation + pointer
+    design already makes readers see a consistent snapshot.)
 
 ---
 
@@ -478,14 +527,24 @@ Each phase is independently testable and shippable.
   re-embed rather than building a dual-read legacy shim. The atc re-embed already
   paid most of it for the deployed model.
 
+**Manifest field encodings (resolved — concrete recipes):**
+- `model_revision` = the `EmbeddingModel` enum variant **+** the fastembed model id
+  **+** a pinned source revision/hash of the ONNX weights & tokenizer (fastembed
+  exposes the model descriptor; pin its revision). A tokenizer/weights bump changes
+  this string → invalidates.
+- `chunk_params` = a stable serialization of `ChunkOptions` (granularity, max_tokens,
+  overlap, language filter) — e.g. its bincode/debug digest. Boundary-affecting only.
+- `walker_version` = a digest of the effective ignore-rule set + walker config
+  (default-excludes, `.gitignore` honored?, lang hint) — bump when corpus selection
+  changes.
+- `embed_schema` already exists (raw-v1 / enriched-v1). `format_version` is a manual
+  bump for any on-disk layout change.
+
 **Still open — confirm before / during P0:**
-1. **`model_revision` source.** What concretely identifies the tokenizer+weights
-   revision for the manifest? (fastembed model id + a pinned revision/hash.) Needed
-   so a tokenizer bump invalidates correctly.
-2. **`walker_version` / `chunk_params` encoding.** A stable string derived from the
-   ignore-rule set + ChunkOptions, bumped when either changes.
-3. **`Notify` source & delete events.** Confirm what emits `Notify` today and whether
+1. **`Notify` source & delete events.** Confirm what emits `Notify` today and whether
    it fires on file delete/rename. If deletes aren't emitted, §7.3 reconcile is the
    safety net — but verify the watcher so deletes aren't silently missed while live.
-4. **`content` in sidecar?** Default = lazy source read (§4.2). Revisit only if a
+2. **`content` in sidecar?** Default = lazy source read (§4.2). Revisit only if a
    consumer needs snippets for files that may be absent/moved at query time.
+3. **`KEEP_GENS` / grace window** (§7.1) tuning vs disk usage (each retained
+   generation is a full index copy) — start at 3 gens / 60 s, measure.
