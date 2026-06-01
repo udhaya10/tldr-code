@@ -421,7 +421,21 @@ impl EmbeddingCache {
         }
 
         let cache_file = self.config.cache_dir.join("cache.json");
-        let temp_file = self.config.cache_dir.join("cache.json.tmp");
+        // Per-process unique temp name. A FIXED `cache.json.tmp` is shared
+        // across processes, so two concurrent flushers (e.g. two agents/CLI
+        // runs against the same cache) race: one renames the temp away and the
+        // other's rename hits `No such file or directory` (os error 2). A
+        // pid+nanos suffix gives each flusher its own temp to rename; it still
+        // ends in `.tmp` so `cleanup_temp_files` reaps orphans. (Lost-update
+        // under concurrent writers — last rename wins — is a deeper follow-up.)
+        let nanos = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let temp_file = self
+            .config
+            .cache_dir
+            .join(format!("cache.json.{}.{}.tmp", std::process::id(), nanos));
 
         // Write to temp file with exclusive lock
         {
@@ -439,8 +453,13 @@ impl EmbeddingCache {
             file.unlock()?;
         }
 
-        // Atomic rename
-        fs::rename(&temp_file, &cache_file)?;
+        // Atomic rename. On failure, best-effort remove our unique temp so a
+        // failed flush does not leave an orphan behind (cleanup_temp_files also
+        // reaps these on next open).
+        if let Err(e) = fs::rename(&temp_file, &cache_file) {
+            let _ = fs::remove_file(&temp_file);
+            return Err(e.into());
+        }
 
         self.dirty = false;
         Ok(())
