@@ -424,9 +424,10 @@ fn main() {
                 (Some(_), false, _) => "—",
             }
         };
+        let q_short: String = query.chars().take(58).collect();
         println!(
             "{:<58} {:>5} {:>6} {}",
-            &query[..query.len().min(58)],
+            q_short,
             rank_str,
             fn_str,
             want_file

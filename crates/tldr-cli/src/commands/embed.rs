@@ -82,12 +82,11 @@ impl EmbedArgs {
             }
         };
 
-        let model_name = self.model.as_deref().unwrap_or("arctic-m");
         writer.progress(&format!(
-            "Embedding code in {} ({:?} granularity, {} model)...",
+            "Embedding code in {} ({:?} granularity, {:?} model)...",
             self.path.display(),
             granularity,
-            model_name
+            model
         ));
 
         // Convert language filters

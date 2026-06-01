@@ -127,11 +127,10 @@ impl SemanticArgs {
             }
         }
 
-        let model_name = self.model.as_deref().unwrap_or("arctic-m");
         writer.progress(&format!(
-            "Building semantic index for {} ({} model)...",
+            "Building semantic index for {} ({:?} model)...",
             self.path.display(),
-            model_name
+            model
         ));
 
         // Build options

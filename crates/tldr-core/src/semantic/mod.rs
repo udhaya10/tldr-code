@@ -17,8 +17,8 @@
 //   is not just patching the bugs: PROMOTE this to a first-class "Layer 6:
 //   Semantic/Retrieval" with the same rigor — own embedding+index+fusion here,
 //   document it in ARCHITECTURE.md, back it with in-process `usearch`. See epic
-//   TLDR-blm. (NOTE: `SemanticIndex` below is the REAL, working path — contrast
-//   search/embedding_client.rs, which is the dead HTTP stub.)
+//   TLDR-blm. (NOTE: `SemanticIndex` below is the REAL, working path — the old
+//   HTTP stub search/embedding_client.rs was removed in TLDR-cs5.)
 //!
 //! # Architecture
 //!
