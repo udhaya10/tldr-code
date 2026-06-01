@@ -31,6 +31,9 @@ use super::bm25::{Bm25Index, Bm25Result};
 use crate::types::Language;
 use crate::TldrResult;
 
+#[cfg(feature = "semantic")]
+use crate::semantic::{IndexSearchOptions, SemanticIndex};
+
 /// One dense (embedding) search hit, as fed into RRF fusion.
 ///
 /// TLDR-4er/cs5: this used to live in the dead HTTP `embedding_client` stub.
@@ -174,6 +177,58 @@ pub fn hybrid_search(
         overlap,
         fallback_mode,
     })
+}
+
+/// Production entry point for hybrid search: pull dense hits from an in-process
+/// `SemanticIndex`, reduce them to best-chunk-per-file, and RRF-fuse with BM25.
+///
+/// This is what the CLI (`tldr semantic --hybrid`) and the MCP `tldr_semantic`
+/// tool call so the fused path is reachable in production (TLDR-4er). Dense
+/// results are reduced to one entry per file (the index returns chunk hits
+/// score-descending, so the first occurrence per file is its best) because BM25
+/// and RRF fuse at file granularity.
+#[cfg(feature = "semantic")]
+pub fn hybrid_search_with_index(
+    index: &mut SemanticIndex,
+    query: &str,
+    root: &Path,
+    language: Language,
+    top_k: usize,
+) -> TldrResult<HybridSearchReport> {
+    let opts = IndexSearchOptions {
+        top_k,
+        threshold: 0.0, // rank everything; RRF cares about order, not a cutoff
+        include_snippet: true,
+        snippet_lines: 5,
+    };
+    let dense_report = index.search(query, &opts)?;
+
+    let mut seen = std::collections::HashSet::new();
+    let dense: Vec<SemanticResult> = dense_report
+        .results
+        .iter()
+        .filter_map(|r| {
+            // CRITICAL: key dense hits by the SAME path form BM25 uses
+            // (root-relative). SemanticIndex stores cwd-relative paths; without
+            // stripping `root` the fusion keys never match -> overlap is always 0
+            // and RRF degenerates to concatenating two lists instead of fusing.
+            let file = r
+                .file_path
+                .strip_prefix(root)
+                .unwrap_or(&r.file_path)
+                .to_string_lossy()
+                .to_string();
+            seen.insert(file.clone()).then(|| SemanticResult {
+                doc_id: file,
+                score: r.score,
+                line_start: r.line_start,
+                line_end: r.line_end,
+                snippet: r.snippet.clone(),
+            })
+        })
+        .collect();
+
+    hybrid_search(query, root, language, top_k, DEFAULT_K_CONSTANT, &dense)
 }
 
 /// Fuse BM25 and semantic results using Reciprocal Rank Fusion

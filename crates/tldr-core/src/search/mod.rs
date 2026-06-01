@@ -24,5 +24,7 @@ pub use enriched::{
     EnrichedSearchOptions, EnrichedSearchReport, SearchMode, StructureLookup,
 };
 pub use hybrid::{hybrid_search, HybridResult, HybridSearchReport, SemanticResult};
+#[cfg(feature = "semantic")]
+pub use hybrid::hybrid_search_with_index;
 pub use text::{search, SearchMatch};
 pub use tokenizer::Tokenizer;

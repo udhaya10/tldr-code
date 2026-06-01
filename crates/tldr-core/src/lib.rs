@@ -132,6 +132,8 @@ pub use search::{
     HybridResult, HybridSearchReport, SearchMatch, SearchMode, SemanticResult, StructureLookup,
     Tokenizer,
 };
+#[cfg(feature = "semantic")]
+pub use search::hybrid_search_with_index;
 
 /// Result type alias for all TLDR operations
 pub type TldrResult<T> = Result<T, TldrError>;

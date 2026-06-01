@@ -19,7 +19,7 @@ use std::time::Instant;
 
 use tldr_core::config::TldrConfig;
 use tldr_core::semantic::{BuildOptions, EmbeddingModel, IndexSearchOptions, SemanticIndex};
-use tldr_core::{hybrid_search, Language, SemanticResult};
+use tldr_core::{hybrid_search_with_index, Language};
 
 /// (query, expected file path suffix, optional expected function name)
 ///
@@ -183,31 +183,15 @@ fn main() {
     println!("{}", "-".repeat(96));
 
     for (query, want_file, want_fn) in &gold {
-        let report = index.search(query, &opts).expect("search failed");
         let want_file_n = norm(want_file);
 
         let mut rank: Option<usize> = None;
         let mut fn_matched = false;
         if hybrid {
-            // Reduce this query's dense hits to best-chunk-per-file (results are
-            // already score-descending, so the first occurrence per file wins),
-            // then RRF-fuse with BM25 and rank the gold FILE in the fused list.
-            let mut seen = std::collections::HashSet::new();
-            let dense: Vec<SemanticResult> = report
-                .results
-                .iter()
-                .filter_map(|r| {
-                    let f = r.file_path.to_string_lossy().to_string();
-                    seen.insert(f.clone()).then(|| SemanticResult {
-                        doc_id: f,
-                        score: r.score,
-                        line_start: r.line_start,
-                        line_end: r.line_end,
-                        snippet: String::new(),
-                    })
-                })
-                .collect();
-            let fused = hybrid_search(query, &root, Language::Rust, TOP_K, 60.0, &dense)
+            // Measure the EXACT production path (tldr semantic --hybrid / MCP):
+            // build dense from the index, reduce to best-per-file, RRF-fuse with
+            // BM25, then rank the gold FILE in the fused list.
+            let fused = hybrid_search_with_index(&mut index, query, &root, Language::Rust, TOP_K)
                 .expect("hybrid search failed");
             for (i, hr) in fused.results.iter().enumerate() {
                 if norm(&hr.file_path.to_string_lossy()).ends_with(&want_file_n) {
@@ -217,6 +201,7 @@ fn main() {
             }
         } else {
             // Dense-only: first chunk whose file matches the expected suffix.
+            let report = index.search(query, &opts).expect("search failed");
             for (i, r) in report.results.iter().enumerate() {
                 let fp = norm(&r.file_path.to_string_lossy());
                 if fp.ends_with(&want_file_n) {

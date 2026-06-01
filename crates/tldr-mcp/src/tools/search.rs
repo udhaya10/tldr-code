@@ -148,12 +148,32 @@ pub fn handle_semantic(args: Value) -> ToolsCallResult {
         tldr_core::Language::Python
     };
 
-    // TLDR-4er: hybrid_search now takes dense results (&[SemanticResult]) from a
-    // SemanticIndex instead of the deleted HTTP stub. Passing &[] keeps this tool
-    // BM25-only — its PRE-EXISTING behavior (the old `None`/stub never returned
-    // dense hits). TODO(TLDR-4er finish): build a SemanticIndex here and feed real
-    // dense results so the agent-facing `tldr_semantic` tool actually fuses.
-    match tldr_core::hybrid_search(&query, &path, lang, top_k, 60.0, &[]) {
+    // TLDR-4er: build the in-process dense index and RRF-fuse it with BM25 so the
+    // agent-facing `tldr_semantic` tool does REAL hybrid retrieval. It was
+    // BM25-only before (the deleted HTTP embedding stub never returned dense hits).
+    // Model resolves from .tldr config, exactly like `tldr semantic`.
+    let project_root = tldr_core::config::find_project_root(&path);
+    let config = tldr_core::config::TldrConfig::resolve(project_root.as_deref());
+    let model = match tldr_core::semantic::EmbeddingModel::resolve(None, &config) {
+        Ok(m) => m,
+        Err(e) => return ToolsCallResult::error(e),
+    };
+    let build_opts = tldr_core::semantic::BuildOptions {
+        model,
+        granularity: tldr_core::semantic::ChunkGranularity::Function,
+        languages: None,
+        show_progress: false,
+        use_cache: true,
+    };
+    let mut index = match tldr_core::semantic::SemanticIndex::build(
+        &path,
+        build_opts,
+        Some(tldr_core::semantic::CacheConfig::default()),
+    ) {
+        Ok(i) => i,
+        Err(e) => return ToolsCallResult::error(format!("Index build failed: {}", e)),
+    };
+    match tldr_core::hybrid_search_with_index(&mut index, &query, &path, lang, top_k) {
         Ok(report) => match serde_json::to_string_pretty(&report) {
             Ok(json) => ToolsCallResult::text(json),
             Err(e) => ToolsCallResult::error(format!("Serialization error: {}", e)),

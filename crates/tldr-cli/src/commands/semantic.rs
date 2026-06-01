@@ -4,10 +4,9 @@
 //! Builds an in-memory index and returns semantically similar code chunks.
 //
 // TLDR-AUDIT: This is the REAL, shipping semantic path — it drives the
-//   in-process `SemanticIndex` (fastembed/Arctic). It works. Do NOT confuse it
-//   with search/embedding_client.rs (dead HTTP stub, TLDR-cs5) or the unwired
-//   RRF fusion in search/hybrid.rs (TLDR-4er). When hybrid is completed, this
-//   command (and `tldr search`) is where the fused path should be wired in.
+//   in-process `SemanticIndex` (fastembed/Arctic). TLDR-cs5 deleted the dead
+//   HTTP stub; TLDR-4er wired RRF fusion — `--hybrid` here fuses this dense
+//   index with BM25 via `hybrid_search_with_index`.
 
 use std::path::PathBuf;
 
@@ -18,6 +17,7 @@ use tldr_core::config::{find_project_root, TldrConfig};
 use tldr_core::semantic::{
     BuildOptions, CacheConfig, ChunkGranularity, EmbeddingModel, IndexSearchOptions, SemanticIndex,
 };
+use tldr_core::{hybrid_search_with_index, HybridSearchReport, Language};
 
 use crate::output::{OutputFormat, OutputWriter};
 
@@ -42,6 +42,12 @@ pub struct SemanticArgs {
     /// (TLDR-h27). Use `--top` for the result count; set `-t` only to filter.
     #[arg(short = 't', long, default_value = "0.0")]
     pub threshold: f64,
+
+    /// Fuse dense (embedding) search with BM25 keyword search via Reciprocal
+    /// Rank Fusion (TLDR-4er). Recovers lexically-strong matches that pure dense
+    /// retrieval misses. Results are file-level; `--threshold` does not apply.
+    #[arg(long)]
+    pub hybrid: bool,
 
     /// Embedding model: arctic-xs, arctic-s, arctic-m, arctic-m-long, arctic-l
     #[arg(short, long)]
@@ -109,6 +115,19 @@ impl SemanticArgs {
             self.query
         ));
 
+        // TLDR-4er: hybrid mode fuses this dense index with BM25 via RRF.
+        if self.hybrid {
+            let language = Language::from_directory(&self.path).unwrap_or(Language::Python);
+            let report =
+                hybrid_search_with_index(&mut index, &self.query, &self.path, language, self.top)?;
+            if writer.is_text() {
+                writer.write_text(&format_hybrid_text(&report))?;
+            } else {
+                writer.write(&report)?;
+            }
+            return Ok(());
+        }
+
         // Search options
         let search_opts = IndexSearchOptions {
             top_k: self.top,
@@ -130,6 +149,49 @@ impl SemanticArgs {
 
         Ok(())
     }
+}
+
+/// Format a hybrid (BM25 + dense RRF) search report for text output.
+fn format_hybrid_text(report: &HybridSearchReport) -> String {
+    use colored::Colorize;
+
+    let mut output = String::new();
+    output.push_str(&format!(
+        "{}: \"{}\"\n",
+        "Hybrid search (BM25 + dense RRF)".bold(),
+        report.query.cyan()
+    ));
+    if let Some(mode) = &report.fallback_mode {
+        output.push_str(&format!("Mode: {} (no dense results)\n", mode.yellow()));
+    }
+    output.push_str(&format!(
+        "Candidates: {} | BM25-only: {} | dense-only: {} | overlap: {}\n\n",
+        report.total_candidates, report.bm25_only, report.dense_only, report.overlap
+    ));
+
+    if report.results.is_empty() {
+        output.push_str("No matches found.\n");
+        return output;
+    }
+    for (i, r) in report.results.iter().enumerate() {
+        output.push_str(&format!(
+            "{}. {} (rrf: {:.4})\n",
+            i + 1,
+            r.file_path.display().to_string().green(),
+            r.rrf_score
+        ));
+        let ranks = match (r.bm25_rank, r.dense_rank) {
+            (Some(b), Some(d)) => format!("   bm25 #{b}, dense #{d}"),
+            (Some(b), None) => format!("   bm25 #{b}"),
+            (None, Some(d)) => format!("   dense #{d}"),
+            (None, None) => String::new(),
+        };
+        if !ranks.is_empty() {
+            output.push_str(&ranks);
+            output.push('\n');
+        }
+    }
+    output
 }
 
 
