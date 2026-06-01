@@ -119,9 +119,13 @@ pub struct TLDRDaemon {
     last_activity: Arc<RwLock<Instant>>,
     /// Number of indexed files (for status reporting)
     indexed_files: Arc<RwLock<usize>>,
-    /// Persistent semantic index (built lazily on first query, invalidated on Notify)
+    /// Persistent semantic index (built lazily on first query, invalidated on
+    /// Notify). A `std::sync::Mutex` (not tokio `RwLock`) so it can be locked
+    /// inside `spawn_blocking`, where the heavy build/search runs off the async
+    /// executor — `SemanticIndex` is `Send` but `!Sync`, so a tokio guard could
+    /// not cross the blocking boundary anyway (TLDR-atc).
     #[cfg(feature = "semantic")]
-    semantic_index: Arc<RwLock<Option<SemanticIndex>>>,
+    semantic_index: Arc<std::sync::Mutex<Option<SemanticIndex>>>,
 }
 
 impl TLDRDaemon {
@@ -146,7 +150,7 @@ impl TLDRDaemon {
             last_activity: Arc::new(RwLock::new(Instant::now())),
             indexed_files: Arc::new(RwLock::new(0)),
             #[cfg(feature = "semantic")]
-            semantic_index: Arc::new(RwLock::new(None)),
+            semantic_index: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -455,29 +459,40 @@ impl TLDRDaemon {
                 {
                     match self.resolve_semantic_model(None) {
                         Ok(model) => {
-                            let mut index_guard = self.semantic_index.write().await;
-                            let already_warm =
-                                index_guard.as_ref().is_some_and(|idx| idx.model() == model);
-                            if already_warm {
-                                warmed.push("semantic_index (cached)");
-                            } else {
-                                let build_opts = BuildOptions {
-                                    model,
-                                    show_progress: false,
-                                    use_cache: true,
-                                    ..Default::default()
-                                };
-                                match SemanticIndex::build(
-                                    &self.project,
-                                    build_opts,
-                                    Some(CacheConfig::default()),
-                                ) {
-                                    Ok(idx) => {
-                                        *index_guard = Some(idx);
-                                        warmed.push("semantic_index");
+                            // Build off the async executor (see the Semantic
+                            // handler) so warming stays responsive/stoppable.
+                            let idx_arc = Arc::clone(&self.semantic_index);
+                            let project = self.project.clone();
+                            let res = tokio::task::spawn_blocking(
+                                move || -> Result<bool, String> {
+                                    let mut guard = idx_arc
+                                        .lock()
+                                        .map_err(|e| format!("lock poisoned: {e}"))?;
+                                    if guard.as_ref().is_some_and(|idx| idx.model() == model) {
+                                        return Ok(false); // already warm with this model
                                     }
-                                    Err(e) => errors.push(format!("semantic_index: {}", e)),
-                                }
+                                    let build_opts = BuildOptions {
+                                        model,
+                                        show_progress: false,
+                                        use_cache: true,
+                                        ..Default::default()
+                                    };
+                                    let idx = SemanticIndex::build(
+                                        &project,
+                                        build_opts,
+                                        Some(CacheConfig::default()),
+                                    )
+                                    .map_err(|e| e.to_string())?;
+                                    *guard = Some(idx);
+                                    Ok(true)
+                                },
+                            )
+                            .await;
+                            match res {
+                                Ok(Ok(true)) => warmed.push("semantic_index"),
+                                Ok(Ok(false)) => warmed.push("semantic_index (cached)"),
+                                Ok(Err(e)) => errors.push(format!("semantic_index: {}", e)),
+                                Err(e) => errors.push(format!("semantic_index: {}", e)),
                             }
                         }
                         Err(e) => errors.push(format!("semantic_index: {}", e)),
@@ -519,86 +534,88 @@ impl TLDRDaemon {
                     }
                 };
 
-                // Semantic search with persistent index.
-                // TLDR-atc DIAG: time lock-acquisition, build, and search
-                // separately so daemon.log shows where the latency lives.
-                let t_lock = Instant::now();
-                let mut index_guard = self.semantic_index.write().await;
-                let lock_ms = t_lock.elapsed().as_millis();
+                // Run the (potentially heavy) build + ONNX search on a BLOCKING
+                // thread, NOT the async executor. `SemanticIndex::build` and
+                // `index.search` are synchronous CPU/IO work; running them inline
+                // on a tokio worker starved the accept/idle/shutdown loops, so a
+                // `daemon stop` issued mid-build hung until the build finished
+                // (and the resident-index lock stayed held the whole time). The
+                // std Mutex is held only INSIDE this blocking task, so concurrent
+                // queries serialize on the blocking pool while the event loop
+                // stays responsive and stoppable (TLDR-atc).
+                let idx_arc = Arc::clone(&self.semantic_index);
+                let project = self.project.clone();
+                let join =
+                    tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
+                        let mut guard = idx_arc
+                            .lock()
+                            .map_err(|e| format!("semantic index lock poisoned: {e}"))?;
 
-                // (Re)build lazily when the slot is empty OR the resident index
-                // was built with a different model. The single slot must never
-                // serve stale-model vectors after a model switch.
-                let needs_build = match index_guard.as_ref() {
-                    Some(idx) => idx.model() != model,
-                    None => true,
-                };
-                if needs_build {
-                    let t_build = Instant::now();
-                    let build_opts = BuildOptions {
-                        model,
-                        show_progress: false,
-                        use_cache: true,
-                        ..Default::default()
-                    };
-                    match SemanticIndex::build(
-                        &self.project,
-                        build_opts,
-                        Some(CacheConfig::default()),
-                    ) {
-                        Ok(idx) => {
+                        // (Re)build lazily when the slot is empty OR the resident
+                        // index was built with a different model — the single slot
+                        // must never serve stale-model vectors after a switch.
+                        let needs_build = match guard.as_ref() {
+                            Some(idx) => idx.model() != model,
+                            None => true,
+                        };
+                        if needs_build {
+                            let t_build = Instant::now();
+                            let build_opts = BuildOptions {
+                                model,
+                                show_progress: false,
+                                use_cache: true,
+                                ..Default::default()
+                            };
+                            let idx = SemanticIndex::build(
+                                &project,
+                                build_opts,
+                                Some(CacheConfig::default()),
+                            )
+                            .map_err(|e| format!("Failed to build semantic index: {e}"))?;
                             eprintln!(
-                                "[atc-diag] semantic BUILD took {}ms (lock_wait {}ms, model {:?})",
+                                "[atc-diag] semantic BUILD took {}ms (model {:?})",
                                 t_build.elapsed().as_millis(),
-                                lock_ms,
                                 model
                             );
-                            *index_guard = Some(idx);
+                            *guard = Some(idx);
+                        } else {
+                            eprintln!("[atc-diag] semantic RESIDENT hit (model {:?})", model);
                         }
-                        Err(e) => {
-                            return DaemonResponse::Error {
-                                status: "error".to_string(),
-                                error: format!("Failed to build semantic index: {}", e),
-                            };
-                        }
-                    }
-                } else {
-                    eprintln!(
-                        "[atc-diag] semantic RESIDENT hit (lock_wait {}ms, model {:?})",
-                        lock_ms, model
-                    );
-                }
 
-                // Search the index. Threshold defaults to 0.0 (no score cutoff),
-                // matching the cold CLI default (TLDR-h27) so warm doesn't hide
-                // correct top-ranked matches.
-                let t_search = Instant::now();
-                let index = index_guard.as_mut().unwrap();
-                let search_opts = IndexSearchOptions {
-                    top_k,
-                    threshold: threshold.unwrap_or(0.0),
-                    include_snippet: true,
-                    snippet_lines: 5,
-                };
+                        // Threshold defaults to 0.0 (no score cutoff), matching the
+                        // cold CLI default (TLDR-h27) so warm doesn't hide correct
+                        // top-ranked matches.
+                        let t_search = Instant::now();
+                        let index = guard.as_mut().expect("index present after build");
+                        let search_opts = IndexSearchOptions {
+                            top_k,
+                            threshold: threshold.unwrap_or(0.0),
+                            include_snippet: true,
+                            snippet_lines: 5,
+                        };
+                        let report = index
+                            .search(&query, &search_opts)
+                            .map_err(|e| format!("Semantic search failed: {e}"))?;
+                        eprintln!(
+                            "[atc-diag] semantic SEARCH took {}ms",
+                            t_search.elapsed().as_millis()
+                        );
+                        serde_json::to_value(&report)
+                            .map_err(|e| format!("Serialization error: {e}"))
+                    })
+                    .await;
 
-                let result = match index.search(&query, &search_opts) {
-                    Ok(report) => match serde_json::to_value(&report) {
-                        Ok(value) => DaemonResponse::Result(value),
-                        Err(e) => DaemonResponse::Error {
-                            status: "error".to_string(),
-                            error: format!("Serialization error: {}", e),
-                        },
+                match join {
+                    Ok(Ok(value)) => DaemonResponse::Result(value),
+                    Ok(Err(e)) => DaemonResponse::Error {
+                        status: "error".to_string(),
+                        error: e,
                     },
                     Err(e) => DaemonResponse::Error {
                         status: "error".to_string(),
-                        error: format!("Semantic search failed: {}", e),
+                        error: format!("semantic task failed: {e}"),
                     },
-                };
-                eprintln!(
-                    "[atc-diag] semantic SEARCH took {}ms",
-                    t_search.elapsed().as_millis()
-                );
-                result
+                }
             }
 
             #[cfg(not(feature = "semantic"))]
@@ -1164,11 +1181,13 @@ impl TLDRDaemon {
         let file_hash = super::salsa::hash_path(&file);
         self.cache.invalidate_by_input(file_hash);
 
-        // Invalidate semantic index so it rebuilds on next query
+        // Invalidate semantic index so it rebuilds on next query. Plain sync
+        // lock-set-drop with no await in scope, so it never blocks the runtime.
         #[cfg(feature = "semantic")]
         {
-            let mut idx = self.semantic_index.write().await;
-            *idx = None;
+            if let Ok(mut idx) = self.semantic_index.lock() {
+                *idx = None;
+            }
         }
 
         let threshold = self.config.auto_reindex_threshold;
@@ -2162,7 +2181,7 @@ mod tests {
 
         // Verify index is populated
         {
-            let idx = daemon.semantic_index.read().await;
+            let idx = daemon.semantic_index.lock().unwrap();
             // Index may be Some (if ONNX model available) or None (if build failed)
             // We just verify the field exists and is accessible
             let _ = idx.is_some();
@@ -2177,7 +2196,7 @@ mod tests {
 
         // Verify index was cleared
         {
-            let idx = daemon.semantic_index.read().await;
+            let idx = daemon.semantic_index.lock().unwrap();
             assert!(
                 idx.is_none(),
                 "Semantic index should be invalidated after Notify"
