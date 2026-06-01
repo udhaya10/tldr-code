@@ -148,9 +148,12 @@ pub fn handle_semantic(args: Value) -> ToolsCallResult {
         tldr_core::Language::Python
     };
 
-    // Hybrid search (falls back to BM25-only if embedding service unavailable)
-    // M8: Graceful degradation when embedding service is not available
-    match tldr_core::hybrid_search(&query, &path, lang, top_k, 60.0, None) {
+    // TLDR-4er: hybrid_search now takes dense results (&[SemanticResult]) from a
+    // SemanticIndex instead of the deleted HTTP stub. Passing &[] keeps this tool
+    // BM25-only — its PRE-EXISTING behavior (the old `None`/stub never returned
+    // dense hits). TODO(TLDR-4er finish): build a SemanticIndex here and feed real
+    // dense results so the agent-facing `tldr_semantic` tool actually fuses.
+    match tldr_core::hybrid_search(&query, &path, lang, top_k, 60.0, &[]) {
         Ok(report) => match serde_json::to_string_pretty(&report) {
             Ok(json) => ToolsCallResult::text(json),
             Err(e) => ToolsCallResult::error(format!("Serialization error: {}", e)),

@@ -2934,9 +2934,6 @@ pub struct Bm25Result {
     pub matched_terms: Vec<String>,
 }
 
-/// Embedding client placeholder for hybrid search
-pub struct EmbeddingClient;
-
 /// Hybrid search result (spec Section 2.6.3)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HybridResult {

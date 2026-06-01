@@ -19,6 +19,7 @@ use std::time::Instant;
 
 use tldr_core::config::TldrConfig;
 use tldr_core::semantic::{BuildOptions, EmbeddingModel, IndexSearchOptions, SemanticIndex};
+use tldr_core::{hybrid_search, Language, SemanticResult};
 
 /// (query, expected file path suffix, optional expected function name)
 ///
@@ -122,6 +123,19 @@ fn main() {
             EmbeddingModel::default()
         });
     eprintln!("Eval embedding model: {:?}", model);
+    // TLDR-4er: hybrid mode fuses dense (SemanticIndex) with BM25 via RRF at FILE
+    // granularity. Off by default (dense-only). Enable with TLDR_EVAL_HYBRID=1.
+    let hybrid = std::env::var("TLDR_EVAL_HYBRID")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    eprintln!(
+        "Eval mode: {}",
+        if hybrid {
+            "HYBRID (BM25 + dense RRF, file-level)"
+        } else {
+            "dense-only"
+        }
+    );
     let mut index = SemanticIndex::build(
         &root,
         BuildOptions {
@@ -172,26 +186,59 @@ fn main() {
         let report = index.search(query, &opts).expect("search failed");
         let want_file_n = norm(want_file);
 
-        // First result whose file path matches the expected suffix.
         let mut rank: Option<usize> = None;
         let mut fn_matched = false;
-        for (i, r) in report.results.iter().enumerate() {
-            let fp = norm(&r.file_path.to_string_lossy());
-            if fp.ends_with(&want_file_n) {
-                rank = Some(i + 1);
-                if let Some(wf) = want_fn {
-                    fn_matched = r.function_name.as_deref() == Some(*wf);
+        if hybrid {
+            // Reduce this query's dense hits to best-chunk-per-file (results are
+            // already score-descending, so the first occurrence per file wins),
+            // then RRF-fuse with BM25 and rank the gold FILE in the fused list.
+            let mut seen = std::collections::HashSet::new();
+            let dense: Vec<SemanticResult> = report
+                .results
+                .iter()
+                .filter_map(|r| {
+                    let f = r.file_path.to_string_lossy().to_string();
+                    seen.insert(f.clone()).then(|| SemanticResult {
+                        doc_id: f,
+                        score: r.score,
+                        line_start: r.line_start,
+                        line_end: r.line_end,
+                        snippet: String::new(),
+                    })
+                })
+                .collect();
+            let fused = hybrid_search(query, &root, Language::Rust, TOP_K, 60.0, &dense)
+                .expect("hybrid search failed");
+            for (i, hr) in fused.results.iter().enumerate() {
+                if norm(&hr.file_path.to_string_lossy()).ends_with(&want_file_n) {
+                    rank = Some(i + 1);
+                    break;
                 }
-                break;
+            }
+        } else {
+            // Dense-only: first chunk whose file matches the expected suffix.
+            for (i, r) in report.results.iter().enumerate() {
+                let fp = norm(&r.file_path.to_string_lossy());
+                if fp.ends_with(&want_file_n) {
+                    rank = Some(i + 1);
+                    if let Some(wf) = want_fn {
+                        fn_matched = r.function_name.as_deref() == Some(*wf);
+                    }
+                    break;
+                }
             }
         }
 
         let rank_str = rank.map(|r| r.to_string()).unwrap_or_else(|| "—".into());
-        let fn_str = match (want_fn, rank.is_some(), fn_matched) {
-            (None, _, _) => "n/a",
-            (Some(_), true, true) => "yes",
-            (Some(_), true, false) => "no",
-            (Some(_), false, _) => "—",
+        let fn_str = if hybrid {
+            "n/a" // file-level fusion; no function granularity
+        } else {
+            match (want_fn, rank.is_some(), fn_matched) {
+                (None, _, _) => "n/a",
+                (Some(_), true, true) => "yes",
+                (Some(_), true, false) => "no",
+                (Some(_), false, _) => "—",
+            }
         };
         println!(
             "{:<58} {:>5} {:>6} {}",

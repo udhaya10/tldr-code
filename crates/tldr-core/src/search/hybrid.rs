@@ -11,24 +11,16 @@
 //! - k: constant to prevent division by small numbers (default 60)
 //! - rank_i(d): rank of document d in ranking i (1-indexed)
 //!
-//! # Mitigation M8
-//! Gracefully degrades to BM25-only when embedding service is unavailable.
+//! # Degradation
+//! Gracefully degrades to BM25-only when no dense results are supplied
+//! (`semantic_results` empty) — e.g. when the `semantic` feature is off.
 //
-// TLDR-AUDIT(TLDR-4er): UNWIRED. The RRF fusion logic here is sound and modern
-//   (RRF is current best practice), but this module is the most advanced
-//   retrieval idea in the repo that NEVER RUNS:
-//     - `hybrid_search` is called NOWHERE in the live CLI (grep: zero hits
-//       outside this crate). `tldr search` does BM25/regex only; `tldr semantic`
-//       does dense-only. Neither fuses. So in production you get EITHER lexical
-//       OR dense, never both.
-//     - Its semantic input comes from `EmbeddingClient` (the dead stub, see
-//       TLDR-cs5), so even when constructed it ALWAYS hits the M8 fallback and
-//       degrades to bm25_only. The "graceful degradation" is actually the only
-//       mode that ever executes.
-//   FIX: repoint the semantic side at the in-process `SemanticIndex`
-//   (semantic/index.rs) instead of `EmbeddingClient`, then wire `hybrid_search`
-//   into the CLI so the fused path is reachable. Blocked on TLDR-cs5. See epic
-//   TLDR-blm (this is the highest-value completeness fix).
+// TLDR-4er/cs5 (done): WIRED. The dead `EmbeddingClient` HTTP stub is gone;
+//   `hybrid_search` no longer constructs any embedding backend. Instead the
+//   caller passes `semantic_results: &[SemanticResult]` computed from the
+//   in-process `SemanticIndex` (caller-side, behind the `semantic` feature),
+//   so this module stays feature-agnostic while fusing REAL dense results.
+//   Empty slice => BM25-only (the honest degraded mode).
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -36,9 +28,29 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use super::bm25::{Bm25Index, Bm25Result};
-use super::embedding_client::{EmbeddingClient, SemanticResult};
 use crate::types::Language;
 use crate::TldrResult;
+
+/// One dense (embedding) search hit, as fed into RRF fusion.
+///
+/// TLDR-4er/cs5: this used to live in the dead HTTP `embedding_client` stub.
+/// `hybrid_search` is now decoupled from any embedding backend — the caller
+/// (which holds the in-process `SemanticIndex`, behind the `semantic` feature)
+/// produces these and passes them in. That keeps `search/hybrid.rs` free of the
+/// `semantic` feature gate while still fusing real dense results.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SemanticResult {
+    /// Document ID / file path (the fusion key; must match BM25's file path).
+    pub doc_id: String,
+    /// Cosine similarity score (0-1 for normalized vectors).
+    pub score: f64,
+    /// Start line of the matching region.
+    pub line_start: u32,
+    /// End line of the matching region.
+    pub line_end: u32,
+    /// Snippet of matching content.
+    pub snippet: String,
+}
 
 /// Default RRF k constant
 pub const DEFAULT_K_CONSTANT: f64 = 60.0;
@@ -96,24 +108,26 @@ pub struct HybridSearchReport {
 /// * `language` - Programming language to search
 /// * `top_k` - Number of results to return
 /// * `k_constant` - RRF k constant (default 60)
-/// * `embedding_client` - Optional embedding service client
+/// * `semantic_results` - Dense hits from the caller's `SemanticIndex`, already
+///   reduced to file granularity (best chunk per file). Empty => BM25-only.
 ///
 /// # Returns
 /// HybridSearchReport containing fused results
 ///
 /// # Example
 /// ```ignore
-/// use tldr_core::search::hybrid::hybrid_search;
-/// use tldr_core::search::embedding_client::EmbeddingClient;
+/// use tldr_core::search::hybrid::{hybrid_search, SemanticResult};
 ///
-/// let client = EmbeddingClient::new("http://localhost:8765");
+/// // Caller (with the `semantic` feature) builds a SemanticIndex, searches it,
+/// // and converts the dense hits into `SemanticResult`s keyed by file path.
+/// let dense: Vec<SemanticResult> = /* from SemanticIndex::search */ vec![];
 /// let report = hybrid_search(
 ///     "process data",
 ///     Path::new("src/"),
 ///     Language::Python,
 ///     10,
 ///     60.0,
-///     Some(&client),
+///     &dense,
 /// )?;
 /// ```
 pub fn hybrid_search(
@@ -122,33 +136,22 @@ pub fn hybrid_search(
     language: Language,
     top_k: usize,
     k_constant: f64,
-    embedding_client: Option<&EmbeddingClient>,
+    semantic_results: &[SemanticResult],
 ) -> TldrResult<HybridSearchReport> {
     // Build BM25 index and search
     let bm25_index = Bm25Index::from_project(root, language)?;
     let bm25_results = bm25_index.search(query, top_k * 2); // Get more for RRF
 
-    // Try semantic search if client provided
-    // TLDR-AUDIT(TLDR-4er): `client.search` is the no-op stub (TLDR-cs5), so the
-    // `Ok(results)` arm yields an empty vec and the `Err` arm hits fallback —
-    // either way `semantic_results` is empty and fusion below reduces to BM25.
-    // Replace `EmbeddingClient` with the in-process `SemanticIndex` to make this
-    // branch actually contribute dense results.
-    let (semantic_results, fallback_mode) = match embedding_client {
-        Some(client) => {
-            match client.search(query, &root.to_string_lossy(), top_k * 2) {
-                Ok(results) => (results, None),
-                Err(_) => {
-                    // M8: Graceful degradation
-                    (Vec::new(), Some("bm25_only".to_string()))
-                }
-            }
-        }
-        None => (Vec::new(), Some("bm25_only".to_string())),
+    // Dense side is supplied by the caller (from the in-process SemanticIndex).
+    // Empty => honest BM25-only degradation (e.g. `semantic` feature off).
+    let fallback_mode = if semantic_results.is_empty() {
+        Some("bm25_only".to_string())
+    } else {
+        None
     };
 
     // Fuse results using RRF
-    let fused = fuse_rrf(&bm25_results, &semantic_results, k_constant, top_k);
+    let fused = fuse_rrf(&bm25_results, semantic_results, k_constant, top_k);
 
     // Calculate statistics
     let bm25_files: std::collections::HashSet<_> = bm25_results
@@ -349,9 +352,9 @@ mod tests {
         let test_file = tmp.path().join("test.py");
         std::fs::write(&test_file, "def process_data():\n    pass").unwrap();
 
-        // No embedding client - should fall back to BM25 only
+        // No dense results - should fall back to BM25 only
         let report =
-            hybrid_search("process", tmp.path(), Language::Python, 10, 60.0, None).unwrap();
+            hybrid_search("process", tmp.path(), Language::Python, 10, 60.0, &[]).unwrap();
 
         assert_eq!(report.fallback_mode, Some("bm25_only".to_string()));
         // Should still have BM25 results
