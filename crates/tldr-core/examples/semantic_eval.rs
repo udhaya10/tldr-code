@@ -502,6 +502,7 @@ fn main() {
         let mut tie = 0usize;
         let mut epsilon = 0usize;
         let mut real = 0usize;
+        let mut unproven = 0usize; // store item outside dense top-50 — can't verify
         // Score dense DEEP (top-50) so a store item that lands just outside the
         // dense top-K still gets a real dense cosine instead of a guess.
         let score_opts = IndexSearchOptions {
@@ -559,10 +560,11 @@ fn main() {
                     }
                 }
                 None => {
-                    // store surfaced an item outside the dense top-K — a boundary
-                    // tie (something just past rank K). Treat as epsilon.
-                    epsilon += 1;
-                    "BOUNDARY (store item outside dense top-K)".to_string()
+                    // Store surfaced an item outside dense top-50 — we cannot
+                    // score it, so we CANNOT prove it's a tie. Flag it (not a
+                    // silent epsilon); investigate any nonzero count.
+                    unproven += 1;
+                    "UNPROVEN (store item outside dense top-50)".to_string()
                 }
             };
             eprintln!("  rank {r} [{verdict}]  \"{}\"", &query[..query.len().min(44)]);
@@ -577,6 +579,7 @@ fn main() {
         println!("  order-identical: {order_identical}");
         println!("  TIE (gap<1e-6):  {tie}");
         println!("  EPSILON(<1e-4):  {epsilon}");
+        println!("  UNPROVEN:        {unproven}   <-- outside dense top-50; investigate if >0");
         println!("  REAL (>=1e-4):   {real}   <-- MUST be 0 for results-equivalence");
         println!("  => equivalent modulo ties/epsilon: {equivalent}/{}", gold.len());
     }

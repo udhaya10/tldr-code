@@ -87,6 +87,35 @@ fn embed_schema_version() -> &'static str {
     }
 }
 
+/// Path used in the cache key: relative to `key_root`. A silent raw-path fallback
+/// on a `strip_prefix` miss re-introduces the absolute-vs-relative key divergence
+/// (TLDR-atc/ss3), so misses are handled deterministically — lexical strip, then
+/// canonical strip, then the canonical absolute path with a warning — never a
+/// silent raw fallback. An empty `key_root` (the default / tests) lexically
+/// matches and returns the full path unchanged, preserving legacy keys.
+fn key_rel_path(file_path: &Path, key_root: &Path) -> String {
+    if let Ok(rel) = file_path.strip_prefix(key_root) {
+        return rel.to_string_lossy().to_string();
+    }
+    if let (Ok(cfile), Ok(croot)) = (file_path.canonicalize(), key_root.canonicalize()) {
+        if let Ok(rel) = cfile.strip_prefix(&croot) {
+            return rel.to_string_lossy().to_string();
+        }
+        eprintln!(
+            "[tldr-warn] cache key: {} is outside root {}; keying by canonical path",
+            cfile.display(),
+            croot.display()
+        );
+        return cfile.to_string_lossy().to_string();
+    }
+    eprintln!(
+        "[tldr-warn] cache key: cannot canonicalize {} under {}; keying by raw path",
+        file_path.display(),
+        key_root.display()
+    );
+    file_path.to_string_lossy().to_string()
+}
+
 #[derive(Debug, Clone, Hash, PartialEq, Eq, Serialize, Deserialize)]
 struct CacheKey {
     /// MD5 hash of the code content
@@ -111,13 +140,9 @@ impl CacheKey {
     /// (TLDR-atc). An empty `key_root` (the default for callers that don't set
     /// one, e.g. tests) leaves the path unchanged.
     fn from_chunk(chunk: &CodeChunk, model: EmbeddingModel, key_root: &Path) -> Self {
-        let rel_path = chunk
-            .file_path
-            .strip_prefix(key_root)
-            .unwrap_or(&chunk.file_path);
         Self {
             content_hash: chunk.content_hash.clone(),
-            file_path: rel_path.to_string_lossy().to_string(),
+            file_path: key_rel_path(&chunk.file_path, key_root),
             function_name: chunk.function_name.clone(),
             // TLDR-lwg: the schema tag pins WHICH text was embedded under this
             // content hash. The hash covers raw source; bumping the recipe (raw

@@ -11,9 +11,7 @@
 //! generation + `CURRENT`-pointer save (§7.1). This module is the foundation
 //! those build on, kept deliberately minimal until the dependency is proven.
 
-use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -164,16 +162,18 @@ impl VectorStore {
                 self.dimensions
             )));
         }
-        // usearch does not auto-grow; reserve more before we run out.
-        if self.index.size() >= self.capacity {
+        // Replace semantics: drop any existing vector first. A replace reuses the
+        // freed slot, so only a NEW key can grow the index — reserve just for that
+        // (Codex review: don't reserve when merely updating a full store).
+        let replacing = self.index.contains(key);
+        if replacing {
+            self.index.remove(key).map_err(|e| vs_err("remove", e))?;
+        } else if self.index.size() >= self.capacity {
+            // usearch does not auto-grow; reserve more before we run out.
             self.capacity = self.capacity.saturating_mul(2).max(self.index.size() + 1);
             self.index
                 .reserve(self.capacity)
                 .map_err(|e| vs_err("reserve", e))?;
-        }
-        // Replace semantics: drop any existing vector for this key first.
-        if self.index.contains(key) {
-            self.index.remove(key).map_err(|e| vs_err("remove", e))?;
         }
         self.index.add(key, vector).map_err(|e| vs_err("add", e))?;
         self.meta.insert(key, meta);
@@ -230,7 +230,9 @@ impl VectorStore {
 // =============================================================================
 
 /// On-disk layout version. Bump on any breaking change to the file formats.
-const STORE_FORMAT_VERSION: u32 = 1;
+/// v2: switched persisted checksums + identity key from DefaultHasher to a
+/// stable FNV-1a hash (Codex review) — old stores are rejected on load.
+const STORE_FORMAT_VERSION: u32 = 2;
 /// `CURRENT` magic ("TLDR") so a torn/foreign pointer is detectable.
 const CURRENT_MAGIC: u32 = 0x544C_4452;
 /// Generations retained by GC (the active one + rollback headroom). Keeps a
@@ -345,6 +347,20 @@ impl VectorStore {
             ));
         }
         std::fs::create_dir_all(dir)?;
+
+        // Serialize writers (Codex review): two concurrent saves could derive the
+        // same generation from CURRENT and interleave index/sidecar/manifest. An
+        // exclusive advisory lock on a store lockfile makes save single-writer.
+        // Held until this function returns (the guard drops -> unlocks, even on
+        // error). m01 should ALSO keep writes daemon-only; this is defense-in-depth.
+        use fs2::FileExt;
+        let lock_file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(dir.join("lock"))?;
+        lock_file.lock_exclusive()?;
+
         let gen = read_current(dir).map(|c| c.generation + 1).unwrap_or(1);
 
         // 1. index.<gen>.usearch (immutable; not referenced until CURRENT commits)
@@ -380,7 +396,7 @@ impl VectorStore {
         let manifest_bytes = serde_json::to_vec(&manifest).map_err(|e| vs_err("save", e))?;
         write_sync(&dir.join(format!("manifest.{gen}")), &manifest_bytes)?;
 
-        sync_dir(dir);
+        sync_dir(dir)?;
 
         // 4. CURRENT — the single atomic commit point (temp + rename).
         let cur = CurrentPointer {
@@ -392,21 +408,60 @@ impl VectorStore {
         let tmp = dir.join("CURRENT.tmp");
         write_sync(&tmp, &cur_bytes)?;
         std::fs::rename(&tmp, dir.join("CURRENT"))?;
-        sync_dir(dir);
+        sync_dir(dir)?;
 
         // 5. GC — retain the last KEEP_GENS generations.
         gc_old_generations(dir, gen);
         Ok(())
     }
 
-    /// Load the active generation from `dir`, verifying the manifest against the
-    /// running config `expect`. Returns an error (→ caller full-rebuilds) on a
-    /// missing/torn `CURRENT`, a config mismatch, or any checksum/drift failure.
+    /// Load the active generation from `dir`, verifying against the running config
+    /// `expect`. Tries the `CURRENT` pointer first; if it is missing/torn, or its
+    /// generation fails verification, FALLS BACK to scanning `manifest.<gen>`
+    /// newest-to-oldest for the newest generation that verifies (Codex review).
+    /// Errors (→ caller full-rebuilds) only if no retained generation verifies.
     pub fn load(dir: &Path, expect: &ManifestId) -> TldrResult<Self> {
-        let cur =
-            read_current(dir).ok_or_else(|| vs_err("load", "missing or torn CURRENT pointer"))?;
-        let gen = cur.generation;
+        // Candidate generations, newest first: CURRENT's gen (if valid), then
+        // every on-disk manifest.<gen> descending.
+        let mut gens: Vec<u64> = Vec::new();
+        if let Some(cur) = read_current(dir) {
+            gens.push(cur.generation);
+        }
+        let mut scanned: Vec<u64> = std::fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .strip_prefix("manifest.")
+                    .and_then(|r| r.parse::<u64>().ok())
+            })
+            .collect();
+        scanned.sort_unstable_by(|a, b| b.cmp(a));
+        for g in scanned {
+            if !gens.contains(&g) {
+                gens.push(g);
+            }
+        }
+        if gens.is_empty() {
+            return Err(vs_err("load", "no store generation found"));
+        }
 
+        let mut last_err = None;
+        for gen in gens {
+            match Self::load_generation(dir, gen, expect) {
+                Ok(store) => return Ok(store),
+                Err(e) => last_err = Some(e),
+            }
+        }
+        Err(last_err.unwrap_or_else(|| vs_err("load", "no verifying generation")))
+    }
+
+    /// Verify and load one specific generation: manifest config gates +
+    /// sidecar/index/keys checksums + index size + every sidecar key present in
+    /// the index. Errors on any mismatch (the caller tries an older generation).
+    fn load_generation(dir: &Path, gen: u64, expect: &ManifestId) -> TldrResult<Self> {
         let manifest: Manifest =
             serde_json::from_slice(&std::fs::read(dir.join(format!("manifest.{gen}")))?)
                 .map_err(|e| vs_err("load", e))?;
@@ -417,7 +472,7 @@ impl VectorStore {
             return Err(vs_err("load", "config mismatch (model/dims/params/root)"));
         }
         if manifest.generation != gen {
-            return Err(vs_err("load", "manifest generation != CURRENT"));
+            return Err(vs_err("load", "manifest generation != filename"));
         }
 
         let meta_bytes = std::fs::read(dir.join(format!("meta.{gen}")))?;
@@ -447,6 +502,14 @@ impl VectorStore {
         if index.size() != sidecar.meta.len() {
             return Err(vs_err("load", "index size != sidecar count (drift)"));
         }
+        // `keys_checksum` only proves the sidecar matches the manifest; verify the
+        // usearch index actually CONTAINS every sidecar key, so a vector key-set
+        // that drifted from the sidecar is caught (Codex review — not circular).
+        for &key in sidecar.meta.keys() {
+            if !index.contains(key) {
+                return Err(vs_err("load", "index is missing a sidecar key (drift)"));
+            }
+        }
 
         Ok(Self {
             dimensions,
@@ -458,22 +521,39 @@ impl VectorStore {
     }
 }
 
+/// Stable FNV-1a 64-bit hash. Deterministic across processes, platforms, and
+/// Rust versions — unlike `DefaultHasher` (SipHash), whose output is NOT a
+/// guaranteed-stable on-disk primitive. Used for every persisted checksum AND
+/// for the chunk identity key (`identity_key`), so the on-disk format and the
+/// key scheme don't silently shift under a std change (Codex review).
+fn stable_hash(bytes: &[u8]) -> u64 {
+    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut h = OFFSET;
+    for &b in bytes {
+        h ^= b as u64;
+        h = h.wrapping_mul(PRIME);
+    }
+    h
+}
+
 fn digest_bytes(bytes: &[u8]) -> u64 {
-    let mut h = DefaultHasher::new();
-    bytes.hash(&mut h);
-    h.finish()
+    stable_hash(bytes)
 }
 
 fn keys_digest(sorted_keys: &[u64]) -> u64 {
-    let mut h = DefaultHasher::new();
-    sorted_keys.hash(&mut h);
-    h.finish()
+    let mut buf = Vec::with_capacity(sorted_keys.len() * 8);
+    for k in sorted_keys {
+        buf.extend_from_slice(&k.to_le_bytes());
+    }
+    stable_hash(&buf)
 }
 
 fn current_checksum(magic: u32, generation: u64) -> u32 {
-    let mut h = DefaultHasher::new();
-    (magic, generation).hash(&mut h);
-    (h.finish() & 0xFFFF_FFFF) as u32
+    let mut buf = [0u8; 12];
+    buf[..4].copy_from_slice(&magic.to_le_bytes());
+    buf[4..].copy_from_slice(&generation.to_le_bytes());
+    (stable_hash(&buf) & 0xFFFF_FFFF) as u32
 }
 
 /// Write `bytes` to `path` and fsync the file.
@@ -491,12 +571,20 @@ fn sync_path(path: &Path) -> TldrResult<()> {
     Ok(())
 }
 
-/// Best-effort directory fsync so renames/creates are durable. No-op where the
-/// platform doesn't support opening a directory as a file.
-fn sync_dir(dir: &Path) {
-    if let Ok(f) = std::fs::File::open(dir) {
-        let _ = f.sync_all();
+/// fsync a directory so the renames/creates inside it are durable. Crash-safety
+/// depends on this, so errors are PROPAGATED, not swallowed (Codex review). On
+/// non-unix platforms where a directory can't be opened as a file, renames are
+/// still ordered, so it's a documented no-op there.
+fn sync_dir(dir: &Path) -> TldrResult<()> {
+    #[cfg(unix)]
+    {
+        std::fs::File::open(dir)?.sync_all()?;
     }
+    #[cfg(not(unix))]
+    {
+        let _ = dir;
+    }
+    Ok(())
 }
 
 /// Read + validate the `CURRENT` pointer. `None` if missing, unparseable, wrong
@@ -571,11 +659,10 @@ pub fn chunk_identity(
     }
 }
 
-/// Hash an identity string into the stable u64 usearch key.
+/// Hash an identity string into the stable u64 usearch key (FNV-1a — stable
+/// across processes/Rust versions, unlike `DefaultHasher`).
 pub fn identity_key(identity: &str) -> u64 {
-    let mut h = DefaultHasher::new();
-    identity.hash(&mut h);
-    h.finish()
+    stable_hash(identity.as_bytes())
 }
 
 /// Path relative to the build `root`, used as part of the stable chunk key.
@@ -669,6 +756,10 @@ impl VectorStore {
         let mut ordinals: HashMap<String, u32> = HashMap::new();
         let mut file_keys: HashMap<String, std::collections::BTreeSet<u64>> = HashMap::new();
         let mut file_abs: HashMap<String, PathBuf> = HashMap::new();
+        // key -> identity, to DETECT a 64-bit hash collision between two distinct
+        // identities (astronomically rare, but a silent replace would lose a chunk
+        // — Codex review: the stored identity must actually be checked).
+        let mut seen: HashMap<u64, String> = HashMap::new();
 
         for (chunk, vector) in chunks.iter().zip(vectors.iter()) {
             let file_rel = root_relative(root, &chunk.file_path);
@@ -687,6 +778,15 @@ impl VectorStore {
             );
             *ordinal += 1;
             let key = identity_key(&identity);
+            if let Some(prev) = seen.get(&key) {
+                if prev != &identity {
+                    return Err(vs_err(
+                        "build",
+                        format!("u64 key collision: '{prev}' and '{identity}' both hash to {key}"),
+                    ));
+                }
+            }
+            seen.insert(key, identity.clone());
 
             store.add(
                 key,
@@ -828,15 +928,23 @@ impl VectorStore {
 
 impl ManifestId {
     /// Derive the manifest identity from the build config. A change to ANY field
-    /// here invalidates the persisted store on load (design doc §4.0). `chunk_params`
-    /// and `walker_version` are stable digests of the chunk options / ignore-rule
-    /// set supplied by the caller (their concrete encodings are a §14 open item).
+    /// here invalidates the persisted store on load (design doc §4.0). The `root`
+    /// is **canonicalized** so abs/rel/symlinked invocations produce the same
+    /// identity. `chunk_params` and `walker_version` are stable digests of the
+    /// chunk options / ignore-rule set supplied by the caller, and `model_revision`
+    /// is currently `model_name()` — encoding the tokenizer+weights revision and
+    /// the chunk/walker inputs more fully is a §14 open item (TLDR-l5d follow-up).
     pub fn for_build(
         model: EmbeddingModel,
         root: &Path,
         chunk_params: &str,
         walker_version: &str,
     ) -> Self {
+        let root = root
+            .canonicalize()
+            .unwrap_or_else(|_| root.to_path_buf())
+            .to_string_lossy()
+            .replace('\\', "/");
         Self {
             embedding_model: format!("{model:?}"),
             model_revision: model.model_name().to_string(),
@@ -847,7 +955,7 @@ impl ManifestId {
             embed_schema: embed_schema_tag(),
             chunk_params: chunk_params.to_string(),
             walker_version: walker_version.to_string(),
-            root: root.to_string_lossy().replace('\\', "/"),
+            root,
         }
     }
 }
@@ -1094,19 +1202,41 @@ mod tests {
     }
 
     #[test]
-    fn store_load_rejects_torn_current() {
+    fn store_load_recovers_from_torn_current() {
         const D: usize = 8;
         let dir = tempfile::tempdir().unwrap();
         let id = manifest_id(D);
         let mut store = VectorStore::new(D, 4).unwrap();
         store.add(1, &unit(D, 0), meta("a")).unwrap();
         store.save(dir.path(), &id).unwrap();
-        // Bad magic / checksum → read_current rejects → load errors.
+        // Bad magic/checksum → read_current rejects CURRENT, but load() FALLS BACK
+        // to scanning manifest.<gen> and recovers the valid generation.
         std::fs::write(
             dir.path().join("CURRENT"),
             br#"{"magic":1,"generation":1,"checksum":0}"#,
         )
         .unwrap();
+        let loaded = VectorStore::load(dir.path(), &id).expect("recover via manifest scan");
+        assert_eq!(loaded.len(), 1);
+    }
+
+    #[test]
+    fn store_load_errors_when_no_generation_verifies() {
+        const D: usize = 8;
+        let dir = tempfile::tempdir().unwrap();
+        let id = manifest_id(D);
+        let mut store = VectorStore::new(D, 4).unwrap();
+        store.add(1, &unit(D, 0), meta("a")).unwrap();
+        store.save(dir.path(), &id).unwrap();
+        // Corrupt every manifest.<gen> AND CURRENT → nothing verifies → error.
+        for e in std::fs::read_dir(dir.path()).unwrap().flatten() {
+            let name = e.file_name();
+            if name.to_string_lossy().starts_with("manifest.")
+                || name.to_string_lossy() == "CURRENT"
+            {
+                std::fs::write(e.path(), b"garbage").unwrap();
+            }
+        }
         assert!(VectorStore::load(dir.path(), &id).is_err());
     }
 
