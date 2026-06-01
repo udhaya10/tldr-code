@@ -20,7 +20,8 @@ use serde::{Deserialize, Serialize};
 use usearch::{Index, IndexOptions, MetricKind, ScalarKind};
 
 use crate::error::TldrError;
-use crate::semantic::types::CodeChunk;
+use crate::semantic::index::BuildOptions;
+use crate::semantic::types::{CacheConfig, CodeChunk, EmbeddingModel};
 use crate::TldrResult;
 
 /// Map a usearch error (`cxx::Exception`, or anything `Display`) into `TldrError`.
@@ -669,6 +670,115 @@ impl VectorStore {
         }
         Ok(store)
     }
+
+    /// Production build: chunk `root`, embed each chunk (reusing the
+    /// content-addressed [`EmbeddingCache`] for dedup), and populate the store.
+    ///
+    /// This mirrors [`crate::semantic::SemanticIndex::build`]'s embed loop and
+    /// shares `chunk_code` + `Embedder` + `EmbeddingCache`, so it produces the
+    /// **same vectors** — the basis for results-equivalence (TLDR-l5d acceptance,
+    /// validated on the n=52 eval). Embeds raw `content` (enrichment is off by
+    /// default, matching the index's default path).
+    pub fn build(
+        root: &Path,
+        options: &BuildOptions,
+        cache_config: Option<CacheConfig>,
+    ) -> TldrResult<Self> {
+        use crate::semantic::cache::EmbeddingCache;
+        use crate::semantic::chunker::chunk_code;
+        use crate::semantic::embedder::Embedder;
+        use crate::semantic::types::ChunkOptions;
+
+        let languages = options.languages.as_ref().map(|langs| {
+            langs
+                .iter()
+                .filter_map(|s| crate::Language::from_extension(s))
+                .collect()
+        });
+        let chunk_opts = ChunkOptions {
+            granularity: options.granularity,
+            languages,
+            ..Default::default()
+        };
+        let chunks = chunk_code(root, &chunk_opts)?.chunks;
+
+        let mut cache = if options.use_cache {
+            cache_config.map(EmbeddingCache::open).transpose()?
+        } else {
+            None
+        };
+        // Match the index/CLI cache-key normalization (root-relative keys).
+        if let Some(c) = cache.as_mut() {
+            c.set_key_root(root);
+        }
+
+        // Phase 1: content-addressed cache hits vs. misses.
+        let mut vectors: Vec<Vec<f32>> = vec![Vec::new(); chunks.len()];
+        let mut uncached: Vec<usize> = Vec::new();
+        for (i, chunk) in chunks.iter().enumerate() {
+            match cache.as_mut().and_then(|c| c.get(chunk, options.model)) {
+                Some(v) => vectors[i] = v,
+                None => uncached.push(i),
+            }
+        }
+
+        // Phase 2: embed the misses (raw content; enrichment default-off).
+        if !uncached.is_empty() {
+            let mut embedder = Embedder::new(options.model)?;
+            let texts: Vec<&str> = uncached.iter().map(|&i| chunks[i].content.as_str()).collect();
+            let embeddings = embedder.embed_batch(texts, options.show_progress)?;
+            for (&i, embedding) in uncached.iter().zip(embeddings) {
+                if let Some(c) = cache.as_mut() {
+                    c.put(&chunks[i], embedding.clone(), options.model);
+                }
+                vectors[i] = embedding;
+            }
+        }
+        if let Some(c) = cache.as_mut() {
+            c.flush()?;
+        }
+
+        Self::from_embedded(&chunks, &vectors, root)
+    }
+}
+
+impl ManifestId {
+    /// Derive the manifest identity from the build config. A change to ANY field
+    /// here invalidates the persisted store on load (design doc §4.0). `chunk_params`
+    /// and `walker_version` are stable digests of the chunk options / ignore-rule
+    /// set supplied by the caller (their concrete encodings are a §14 open item).
+    pub fn for_build(
+        model: EmbeddingModel,
+        root: &Path,
+        chunk_params: &str,
+        walker_version: &str,
+    ) -> Self {
+        Self {
+            embedding_model: format!("{model:?}"),
+            model_revision: model.model_name().to_string(),
+            dimensions: model.dimensions() as u32,
+            metric: "cos".to_string(),
+            scalar_kind: "f32".to_string(),
+            search_mode: "exact".to_string(),
+            embed_schema: embed_schema_tag(),
+            chunk_params: chunk_params.to_string(),
+            walker_version: walker_version.to_string(),
+            root: root.to_string_lossy().replace('\\', "/"),
+        }
+    }
+}
+
+/// The embed-input recipe tag (raw vs enriched), mirroring the embedding-cache
+/// key's schema tag so a recipe change invalidates the persisted store.
+fn embed_schema_tag() -> String {
+    let enrich = std::env::var("TLDR_ENRICH")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    if enrich {
+        "enriched-v1".to_string()
+    } else {
+        "raw-v1".to_string()
+    }
 }
 
 #[cfg(test)]
@@ -1000,5 +1110,112 @@ mod tests {
         let root = std::path::Path::new("/proj");
         let chunks = vec![code_chunk("/proj/a.rs", None, Some("f"), "x")];
         assert!(VectorStore::from_embedded(&chunks, &[], root).is_err());
+    }
+
+    // ---- Integration / equivalence (step 5) -----------------------------------
+
+    /// The acceptance core: usearch `exact_search` must rank identically to the
+    /// existing brute-force cosine `top_k_similar` over the same vectors. Proven
+    /// embedder-free with vectors of strictly-decreasing cosine to the query, so
+    /// the order is unambiguous (no tie flakiness).
+    #[test]
+    fn search_ranking_matches_brute_force_cosine() {
+        use crate::semantic::similarity::top_k_similar;
+        const D: usize = 16;
+        let mut store = VectorStore::new(D, 16).unwrap();
+        let vecs: Vec<Vec<f32>> = (0..8u64)
+            .map(|i| {
+                let mut v = vec![0.0f32; D];
+                v[0] = 1.0; // shared direction
+                v[1 + i as usize] = i as f32 * 0.3; // distinct orthogonal -> distinct cos
+                v
+            })
+            .collect();
+        for (i, v) in vecs.iter().enumerate() {
+            store.add(i as u64, v, meta(&format!("c{i}"))).unwrap();
+        }
+        let mut query = vec![0.0f32; D];
+        query[0] = 1.0;
+
+        let candidates: Vec<(usize, &[f32])> =
+            vecs.iter().enumerate().map(|(i, v)| (i, v.as_slice())).collect();
+        let brute: Vec<u64> = top_k_similar(&query, &candidates, 5, 0.0)
+            .iter()
+            .map(|(i, _)| *i as u64)
+            .collect();
+        let usearch: Vec<u64> = store
+            .search(&query, 5)
+            .unwrap()
+            .iter()
+            .map(|h| h.key)
+            .collect();
+
+        assert_eq!(usearch, brute, "exact_search ranking == brute-force cosine");
+        assert_eq!(usearch, vec![0, 1, 2, 3, 4], "deterministic decreasing-cos order");
+    }
+
+    #[test]
+    fn manifest_id_for_build_is_complete_and_deterministic() {
+        let p = std::path::Path::new("/proj");
+        let id = ManifestId::for_build(EmbeddingModel::ArcticL, p, "fn", "v1");
+        assert_eq!(id.dimensions, 1024);
+        assert_eq!(id.metric, "cos");
+        assert_eq!(id.scalar_kind, "f32");
+        assert_eq!(id.search_mode, "exact");
+        assert_eq!(id.root, "/proj");
+        assert!(id.model_revision.contains("arctic"));
+        assert_eq!(id, ManifestId::for_build(EmbeddingModel::ArcticL, p, "fn", "v1"));
+    }
+
+    /// End-to-end through the real ONNX embedder: build → search → manifest →
+    /// save → load. Ignored by default (loads/downloads the model, slow); run
+    /// with `cargo test -- --ignored build_end_to_end_small_corpus`.
+    #[test]
+    #[ignore = "loads the ONNX embedder; run on demand"]
+    fn build_end_to_end_small_corpus() {
+        use crate::semantic::embedder::Embedder;
+        use crate::semantic::types::ChunkGranularity;
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("a.rs"),
+            "/// cosine similarity\nfn cosine_similarity(a: &[f32], b: &[f32]) -> f32 { 0.0 }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("b.rs"),
+            "/// parse configuration\nfn parse_config(p: &str) {}\n",
+        )
+        .unwrap();
+
+        let model = EmbeddingModel::ArcticXS;
+        let opts = BuildOptions {
+            model,
+            granularity: ChunkGranularity::Function,
+            languages: None,
+            show_progress: false,
+            use_cache: true,
+        };
+        let cache = CacheConfig {
+            cache_dir: dir.path().join("cache"),
+            max_size_mb: 50,
+            ttl_days: 1,
+        };
+
+        let store = VectorStore::build(dir.path(), &opts, Some(cache)).unwrap();
+        assert!(store.len() >= 2);
+
+        let mut emb = Embedder::new(model).unwrap();
+        let q = emb
+            .embed_query("compute cosine similarity between vectors")
+            .unwrap();
+        let hits = store.search(&q, 1).unwrap();
+        assert_eq!(hits[0].meta.file_rel_path, "a.rs", "right function ranks top");
+
+        let id = ManifestId::for_build(model, dir.path(), "fn", "v1");
+        let store_dir = dir.path().join("store");
+        store.save(&store_dir, &id).unwrap();
+        let loaded = VectorStore::load(&store_dir, &id).unwrap();
+        assert_eq!(loaded.len(), store.len());
     }
 }
