@@ -11,7 +11,10 @@
 //! generation + `CURRENT`-pointer save (§7.1). This module is the foundation
 //! those build on, kept deliberately minimal until the dependency is proven.
 
+use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use usearch::{Index, IndexOptions, MetricKind, ScalarKind};
@@ -87,6 +90,10 @@ pub struct VectorStore {
     index: Index,
     /// Sidecar: key -> metadata. Kept in lockstep with the index on add/remove.
     meta: HashMap<u64, ChunkMeta>,
+    /// Per-file record: file_rel_path -> {keys, mtime, size, file_type}. The
+    /// startup-reconcile signal and per-file key lookup (design doc §4.3).
+    /// Populated by the build/delta path; persisted in the sidecar.
+    files: HashMap<String, FileRecord>,
 }
 
 impl VectorStore {
@@ -103,7 +110,19 @@ impl VectorStore {
             capacity,
             index,
             meta: HashMap::new(),
+            files: HashMap::new(),
         })
+    }
+
+    /// Record (or replace) a file's per-file entry (design doc §4.3). Used by the
+    /// build/delta path; persisted in the sidecar for reconcile on restart.
+    pub fn set_file_record(&mut self, file_rel_path: String, record: FileRecord) {
+        self.files.insert(file_rel_path, record);
+    }
+
+    /// Look up a file's record (keys + reconcile signal).
+    pub fn file_record(&self, file_rel_path: &str) -> Option<&FileRecord> {
+        self.files.get(file_rel_path)
     }
 
     /// Number of vectors currently in the store.
@@ -191,6 +210,310 @@ impl VectorStore {
             })
             .collect();
         Ok(hits)
+    }
+}
+
+// =============================================================================
+// Persistence (design doc §4.0 manifest, §4.3 records, §7.1/§7.2 crash-safe save)
+// =============================================================================
+
+/// On-disk layout version. Bump on any breaking change to the file formats.
+const STORE_FORMAT_VERSION: u32 = 1;
+/// `CURRENT` magic ("TLDR") so a torn/foreign pointer is detectable.
+const CURRENT_MAGIC: u32 = 0x544C_4452;
+/// Generations retained by GC (the active one + rollback headroom). Keeps a
+/// concurrent reader's snapshot alive across a few saves (design doc §7.1).
+const KEEP_GENS: u64 = 3;
+
+/// What kind of filesystem object a tracked path was at index time — lets
+/// reconcile (§7.3) detect file↔dir/type swaps, not just content changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FileKind {
+    Regular,
+    Symlink,
+    Other,
+}
+
+/// Per-file record (design doc §4.3): which keys belong to the file plus the
+/// `(mtime, size, file_type)` reconcile signal.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FileRecord {
+    pub keys: std::collections::BTreeSet<u64>,
+    pub mtime: u64,
+    pub size: u64,
+    pub file_type: FileKind,
+}
+
+/// The subset of the manifest that must match the running config on `load`, or
+/// the persisted store is incompatible and the caller must full-rebuild
+/// (design doc §4.0). Every field here changes the vectors OR the chunk
+/// boundaries, so a mismatch means the stored vectors can't be trusted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManifestId {
+    pub embedding_model: String,
+    /// Weights + tokenizer revision — a tokenizer bump invalidates vectors even
+    /// under the same model name.
+    pub model_revision: String,
+    pub dimensions: u32,
+    pub metric: String,
+    pub scalar_kind: String,
+    pub search_mode: String,
+    pub embed_schema: String,
+    /// Digest of ChunkOptions (granularity/max_tokens/overlap/lang filter).
+    pub chunk_params: String,
+    /// Digest of the source-selection / ignore rules.
+    pub walker_version: String,
+    pub root: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct Manifest {
+    format_version: u32,
+    generation: u64,
+    #[serde(flatten)]
+    id: ManifestId,
+    chunk_count: u64,
+    /// Digest of the sorted key set — key membership.
+    keys_checksum: u64,
+    /// Digest of the index FILE bytes — vector correctness.
+    index_checksum: u64,
+    /// Digest of the sidecar payload.
+    sidecar_checksum: u64,
+}
+
+/// Borrowed view for serialization (avoids cloning the sidecar on save).
+#[derive(Serialize)]
+struct SidecarRef<'a> {
+    meta: &'a HashMap<u64, ChunkMeta>,
+    files: &'a HashMap<String, FileRecord>,
+}
+
+/// Owned view for deserialization on load.
+#[derive(Deserialize)]
+struct SidecarOwned {
+    meta: HashMap<u64, ChunkMeta>,
+    files: HashMap<String, FileRecord>,
+}
+
+/// The structured `CURRENT` pointer — the single atomic commit point. `magic` +
+/// `checksum` make a torn/partial write detectable (design doc §7.1).
+#[derive(Serialize, Deserialize)]
+struct CurrentPointer {
+    magic: u32,
+    generation: u64,
+    checksum: u32,
+}
+
+impl VectorStore {
+    /// Persist the store into `dir` as a NEW immutable generation, committing
+    /// atomically by swapping the `CURRENT` pointer last (design doc §7.1).
+    ///
+    /// `id` carries the running config (model/dims/params/root) recorded in the
+    /// manifest; `load` rejects a store whose `id` differs. Files written:
+    /// `index.<gen>.usearch`, `meta.<gen>`, `manifest.<gen>`, then `CURRENT`.
+    pub fn save(&self, dir: &Path, id: &ManifestId) -> TldrResult<()> {
+        if id.dimensions as usize != self.dimensions {
+            return Err(vs_err(
+                "save",
+                format!("id.dimensions {} != store {}", id.dimensions, self.dimensions),
+            ));
+        }
+        std::fs::create_dir_all(dir)?;
+        let gen = read_current(dir).map(|c| c.generation + 1).unwrap_or(1);
+
+        // 1. index.<gen>.usearch (immutable; not referenced until CURRENT commits)
+        let index_path = dir.join(format!("index.{gen}.usearch"));
+        let index_str = index_path
+            .to_str()
+            .ok_or_else(|| vs_err("save", "non-utf8 index path"))?;
+        self.index.save(index_str).map_err(|e| vs_err("save", e))?;
+        sync_path(&index_path)?;
+        let index_checksum = digest_bytes(&std::fs::read(&index_path)?);
+
+        // 2. meta.<gen> (sidecar: key->ChunkMeta + per-file records)
+        let sidecar = SidecarRef {
+            meta: &self.meta,
+            files: &self.files,
+        };
+        let sidecar_bytes = serde_json::to_vec(&sidecar).map_err(|e| vs_err("save", e))?;
+        let sidecar_checksum = digest_bytes(&sidecar_bytes);
+        write_sync(&dir.join(format!("meta.{gen}")), &sidecar_bytes)?;
+
+        // 3. manifest.<gen>
+        let mut keys: Vec<u64> = self.meta.keys().copied().collect();
+        keys.sort_unstable();
+        let manifest = Manifest {
+            format_version: STORE_FORMAT_VERSION,
+            generation: gen,
+            id: id.clone(),
+            chunk_count: self.meta.len() as u64,
+            keys_checksum: keys_digest(&keys),
+            index_checksum,
+            sidecar_checksum,
+        };
+        let manifest_bytes = serde_json::to_vec(&manifest).map_err(|e| vs_err("save", e))?;
+        write_sync(&dir.join(format!("manifest.{gen}")), &manifest_bytes)?;
+
+        sync_dir(dir);
+
+        // 4. CURRENT — the single atomic commit point (temp + rename).
+        let cur = CurrentPointer {
+            magic: CURRENT_MAGIC,
+            generation: gen,
+            checksum: current_checksum(CURRENT_MAGIC, gen),
+        };
+        let cur_bytes = serde_json::to_vec(&cur).map_err(|e| vs_err("save", e))?;
+        let tmp = dir.join("CURRENT.tmp");
+        write_sync(&tmp, &cur_bytes)?;
+        std::fs::rename(&tmp, dir.join("CURRENT"))?;
+        sync_dir(dir);
+
+        // 5. GC — retain the last KEEP_GENS generations.
+        gc_old_generations(dir, gen);
+        Ok(())
+    }
+
+    /// Load the active generation from `dir`, verifying the manifest against the
+    /// running config `expect`. Returns an error (→ caller full-rebuilds) on a
+    /// missing/torn `CURRENT`, a config mismatch, or any checksum/drift failure.
+    pub fn load(dir: &Path, expect: &ManifestId) -> TldrResult<Self> {
+        let cur =
+            read_current(dir).ok_or_else(|| vs_err("load", "missing or torn CURRENT pointer"))?;
+        let gen = cur.generation;
+
+        let manifest: Manifest =
+            serde_json::from_slice(&std::fs::read(dir.join(format!("manifest.{gen}")))?)
+                .map_err(|e| vs_err("load", e))?;
+        if manifest.format_version != STORE_FORMAT_VERSION {
+            return Err(vs_err("load", "format_version mismatch"));
+        }
+        if &manifest.id != expect {
+            return Err(vs_err("load", "config mismatch (model/dims/params/root)"));
+        }
+        if manifest.generation != gen {
+            return Err(vs_err("load", "manifest generation != CURRENT"));
+        }
+
+        let meta_bytes = std::fs::read(dir.join(format!("meta.{gen}")))?;
+        if digest_bytes(&meta_bytes) != manifest.sidecar_checksum {
+            return Err(vs_err("load", "sidecar checksum mismatch"));
+        }
+        let index_path = dir.join(format!("index.{gen}.usearch"));
+        if digest_bytes(&std::fs::read(&index_path)?) != manifest.index_checksum {
+            return Err(vs_err("load", "index checksum mismatch"));
+        }
+
+        let sidecar: SidecarOwned =
+            serde_json::from_slice(&meta_bytes).map_err(|e| vs_err("load", e))?;
+        let mut keys: Vec<u64> = sidecar.meta.keys().copied().collect();
+        keys.sort_unstable();
+        if keys_digest(&keys) != manifest.keys_checksum {
+            return Err(vs_err("load", "keys checksum mismatch"));
+        }
+
+        let dimensions = expect.dimensions as usize;
+        let capacity = sidecar.meta.len().max(Self::MIN_CAPACITY);
+        let index = new_f32_index(dimensions, capacity)?;
+        let index_str = index_path
+            .to_str()
+            .ok_or_else(|| vs_err("load", "non-utf8 index path"))?;
+        index.load(index_str).map_err(|e| vs_err("load", e))?;
+        if index.size() != sidecar.meta.len() {
+            return Err(vs_err("load", "index size != sidecar count (drift)"));
+        }
+
+        Ok(Self {
+            dimensions,
+            capacity,
+            index,
+            meta: sidecar.meta,
+            files: sidecar.files,
+        })
+    }
+}
+
+fn digest_bytes(bytes: &[u8]) -> u64 {
+    let mut h = DefaultHasher::new();
+    bytes.hash(&mut h);
+    h.finish()
+}
+
+fn keys_digest(sorted_keys: &[u64]) -> u64 {
+    let mut h = DefaultHasher::new();
+    sorted_keys.hash(&mut h);
+    h.finish()
+}
+
+fn current_checksum(magic: u32, generation: u64) -> u32 {
+    let mut h = DefaultHasher::new();
+    (magic, generation).hash(&mut h);
+    (h.finish() & 0xFFFF_FFFF) as u32
+}
+
+/// Write `bytes` to `path` and fsync the file.
+fn write_sync(path: &Path, bytes: &[u8]) -> TldrResult<()> {
+    use std::io::Write;
+    let mut f = std::fs::File::create(path)?;
+    f.write_all(bytes)?;
+    f.sync_all()?;
+    Ok(())
+}
+
+/// fsync an already-written file (usearch's `save` may not fsync).
+fn sync_path(path: &Path) -> TldrResult<()> {
+    std::fs::File::open(path)?.sync_all()?;
+    Ok(())
+}
+
+/// Best-effort directory fsync so renames/creates are durable. No-op where the
+/// platform doesn't support opening a directory as a file.
+fn sync_dir(dir: &Path) {
+    if let Ok(f) = std::fs::File::open(dir) {
+        let _ = f.sync_all();
+    }
+}
+
+/// Read + validate the `CURRENT` pointer. `None` if missing, unparseable, wrong
+/// magic, or failing its checksum (a torn write) — the caller then treats the
+/// store as absent and rebuilds (the newest-verifying-manifest fallback scan is
+/// a later step).
+fn read_current(dir: &Path) -> Option<CurrentPointer> {
+    let bytes = std::fs::read(dir.join("CURRENT")).ok()?;
+    let cur: CurrentPointer = serde_json::from_slice(&bytes).ok()?;
+    if cur.magic != CURRENT_MAGIC {
+        return None;
+    }
+    if cur.checksum != current_checksum(cur.magic, cur.generation) {
+        return None;
+    }
+    Some(cur)
+}
+
+/// Extract `<gen>` from `index.<gen>.usearch` / `meta.<gen>` / `manifest.<gen>`.
+fn parse_gen(name: &str) -> Option<u64> {
+    let rest = if let Some(r) = name.strip_prefix("index.") {
+        r.strip_suffix(".usearch")?
+    } else if let Some(r) = name.strip_prefix("meta.") {
+        r
+    } else if let Some(r) = name.strip_prefix("manifest.") {
+        r
+    } else {
+        return None;
+    };
+    rest.parse::<u64>().ok()
+}
+
+/// Delete generation files older than `current_gen - (KEEP_GENS - 1)`.
+fn gc_old_generations(dir: &Path, current_gen: u64) {
+    let keep_from = current_gen.saturating_sub(KEEP_GENS - 1);
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for e in entries.flatten() {
+            if let Some(gen) = parse_gen(&e.file_name().to_string_lossy()) {
+                if gen < keep_from {
+                    let _ = std::fs::remove_file(e.path());
+                }
+            }
+        }
     }
 }
 
@@ -334,5 +657,125 @@ mod tests {
         let mut store = VectorStore::new(8, 4).unwrap();
         assert!(store.add(1, &[0.1, 0.2], meta("x")).is_err());
         assert!(store.search(&[0.1, 0.2], 3).is_err());
+    }
+
+    // ---- Persistence (step 3) -------------------------------------------------
+
+    fn manifest_id(dims: usize) -> ManifestId {
+        ManifestId {
+            embedding_model: "ArcticL".into(),
+            model_revision: "rev-1".into(),
+            dimensions: dims as u32,
+            metric: "cos".into(),
+            scalar_kind: "f32".into(),
+            search_mode: "exact".into(),
+            embed_schema: "raw-v1".into(),
+            chunk_params: "fn".into(),
+            walker_version: "w1".into(),
+            root: "/proj".into(),
+        }
+    }
+
+    fn file_record(keys: &[u64]) -> FileRecord {
+        FileRecord {
+            keys: keys.iter().copied().collect(),
+            mtime: 1234,
+            size: 4096,
+            file_type: FileKind::Regular,
+        }
+    }
+
+    #[test]
+    fn store_save_load_roundtrip_preserves_vectors_meta_and_files() {
+        const D: usize = 8;
+        let dir = tempfile::tempdir().unwrap();
+        let id = manifest_id(D);
+
+        let mut store = VectorStore::new(D, 4).unwrap();
+        for i in 0..6u64 {
+            store
+                .add(i * 10 + 1, &unit(D, i as usize), meta(&format!("f{i}")))
+                .unwrap();
+        }
+        store.set_file_record("src/f2.rs".into(), file_record(&[21]));
+        store.save(dir.path(), &id).unwrap();
+
+        let loaded = VectorStore::load(dir.path(), &id).unwrap();
+        assert_eq!(loaded.len(), 6);
+        let hits = loaded.search(&unit(D, 2), 1).unwrap();
+        assert_eq!(hits[0].key, 21);
+        assert_eq!(hits[0].meta.identity, "f2");
+        let rec = loaded.file_record("src/f2.rs").expect("file record persisted");
+        assert!(rec.keys.contains(&21));
+        assert_eq!(rec.file_type, FileKind::Regular);
+    }
+
+    #[test]
+    fn store_generations_increment_and_gc_retains_last_k() {
+        const D: usize = 4;
+        let dir = tempfile::tempdir().unwrap();
+        let id = manifest_id(D);
+        let mut store = VectorStore::new(D, 4).unwrap();
+        store.add(1, &unit(D, 0), meta("a")).unwrap();
+        for _ in 0..5 {
+            store.save(dir.path(), &id).unwrap();
+        }
+        assert_eq!(read_current(dir.path()).unwrap().generation, 5);
+
+        let manifest_exists = |g: u64| dir.path().join(format!("manifest.{g}")).exists();
+        // KEEP_GENS = 3 → gens 1,2 collected; 3,4,5 retained.
+        assert!(!manifest_exists(1) && !manifest_exists(2), "old gens gc'd");
+        assert!(manifest_exists(3) && manifest_exists(4) && manifest_exists(5));
+        assert_eq!(VectorStore::load(dir.path(), &id).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn store_load_rejects_config_mismatch() {
+        const D: usize = 8;
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = VectorStore::new(D, 4).unwrap();
+        store.add(1, &unit(D, 0), meta("a")).unwrap();
+        store.save(dir.path(), &manifest_id(D)).unwrap();
+
+        let mut other = manifest_id(D);
+        other.model_revision = "rev-2".into(); // tokenizer/weights changed
+        assert!(
+            VectorStore::load(dir.path(), &other).is_err(),
+            "a config mismatch must reject -> caller rebuilds"
+        );
+    }
+
+    #[test]
+    fn store_load_rejects_torn_current() {
+        const D: usize = 8;
+        let dir = tempfile::tempdir().unwrap();
+        let id = manifest_id(D);
+        let mut store = VectorStore::new(D, 4).unwrap();
+        store.add(1, &unit(D, 0), meta("a")).unwrap();
+        store.save(dir.path(), &id).unwrap();
+        // Bad magic / checksum → read_current rejects → load errors.
+        std::fs::write(
+            dir.path().join("CURRENT"),
+            br#"{"magic":1,"generation":1,"checksum":0}"#,
+        )
+        .unwrap();
+        assert!(VectorStore::load(dir.path(), &id).is_err());
+    }
+
+    #[test]
+    fn store_load_rejects_tampered_sidecar() {
+        const D: usize = 8;
+        let dir = tempfile::tempdir().unwrap();
+        let id = manifest_id(D);
+        let mut store = VectorStore::new(D, 4).unwrap();
+        store.add(1, &unit(D, 0), meta("a")).unwrap();
+        store.save(dir.path(), &id).unwrap();
+
+        let gen = read_current(dir.path()).unwrap().generation;
+        let meta_path = dir.path().join(format!("meta.{gen}"));
+        let mut bytes = std::fs::read(&meta_path).unwrap();
+        bytes.push(b' '); // alter payload → sidecar checksum mismatch
+        std::fs::write(&meta_path, &bytes).unwrap();
+        assert!(VectorStore::load(dir.path(), &id).is_err());
     }
 }
