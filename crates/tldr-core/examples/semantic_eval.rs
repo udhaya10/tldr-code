@@ -92,6 +92,205 @@ const GOLD: &[(&str, &str, Option<&str>)] = &[
         "dfg/reaching.rs",
         None,
     ),
+    // ---------------------------------------------------------------------
+    // TLDR-6h3: expansion from 14 -> ~52 cases for statistically trustworthy
+    // deltas. Targets are real, doc-verified public functions spread across the
+    // analysis/, callgraph/, ast/, cfg/, dfg/, quality/, security/, context/,
+    // git/, metrics/, alias/, inheritance/, patterns/, diagnostics/ subsystems.
+    // Queries paraphrase each function's PURPOSE in user terms (never the symbol
+    // name) to exercise the modality gap that the Arctic query prefix targets.
+    // Scoring is file-level (ends_with); the Option<fn> is a diagnostic column.
+    // ---------------------------------------------------------------------
+    (
+        "which tests are affected when these files change",
+        "analysis/change_impact.rs",
+        Some("change_impact"),
+    ),
+    (
+        "find unreachable functions that are never called",
+        "analysis/dead.rs",
+        Some("dead_code_analysis"),
+    ),
+    (
+        "detect cycles among mutually recursive functions",
+        "analysis/tarjan.rs",
+        Some("detect_cycles"),
+    ),
+    (
+        "find groups of nodes all reachable from each other",
+        "analysis/tarjan.rs",
+        Some("find_sccs"),
+    ),
+    (
+        "find copy pasted duplicate code blocks",
+        "analysis/clones/detect.rs",
+        None,
+    ),
+    (
+        "which files import a given module",
+        "analysis/importers.rs",
+        Some("find_importers"),
+    ),
+    (
+        "analyze the overall architecture of a codebase",
+        "analysis/architecture.rs",
+        Some("architecture_analysis"),
+    ),
+    (
+        "build def use chains linking definitions to their uses",
+        "dfg/reaching.rs",
+        Some("build_def_use_chains"),
+    ),
+    (
+        "which variable definitions reach a particular line",
+        "dfg/reaching.rs",
+        Some("definitions_reaching_line"),
+    ),
+    (
+        "measure cyclomatic complexity across a codebase",
+        "quality/complexity.rs",
+        Some("analyze_complexity"),
+    ),
+    (
+        "compute the maintainability index of a file",
+        "quality/maintainability.rs",
+        Some("maintainability_index"),
+    ),
+    (
+        "estimate technical debt remediation time",
+        "quality/debt.rs",
+        None,
+    ),
+    (
+        "scan source for hardcoded secrets and api keys",
+        "security/secrets.rs",
+        Some("scan_secrets"),
+    ),
+    (
+        "check if a variable is tainted by untrusted input",
+        "security/taint.rs",
+        Some("is_tainted"),
+    ),
+    (
+        "find sinks where tainted data causes a vulnerability",
+        "security/taint.rs",
+        Some("get_vulnerabilities"),
+    ),
+    (
+        "detect security vulnerabilities using taint tracking",
+        "security/vuln.rs",
+        Some("scan_vulnerabilities"),
+    ),
+    (
+        "build a project wide call graph",
+        "callgraph/builder.rs",
+        Some("build_project_call_graph"),
+    ),
+    (
+        "decide whether a function is a program entry point",
+        "callgraph/builder.rs",
+        Some("is_entry_point"),
+    ),
+    (
+        "convert a file path to a module name",
+        "callgraph/module_path.rs",
+        Some("path_to_module"),
+    ),
+    (
+        "deduplicate repeated strings by interning them into ids",
+        "callgraph/interner.rs",
+        Some("intern"),
+    ),
+    (
+        "resolve an import statement to its target module",
+        "callgraph/import_resolver.rs",
+        Some("resolve"),
+    ),
+    (
+        "extract module information from a source file",
+        "ast/extract.rs",
+        Some("extract_file"),
+    ),
+    (
+        "get the tree sitter grammar for a language",
+        "ast/parser.rs",
+        Some("get_ts_language"),
+    ),
+    (
+        "locate a function node by name in the syntax tree",
+        "ast/function_finder.rs",
+        Some("find_function_node"),
+    ),
+    (
+        "count the number of functions in a codebase",
+        "ast/count.rs",
+        Some("count_functions_canonical"),
+    ),
+    (
+        "gather relevant code context for an llm from an entry point",
+        "context/builder.rs",
+        Some("get_relevant_context"),
+    ),
+    (
+        "format extracted code context as a string for an llm",
+        "context/builder.rs",
+        Some("to_llm_string"),
+    ),
+    (
+        "check whether a path is inside a git repository",
+        "git/mod.rs",
+        Some("is_git_repository"),
+    ),
+    (
+        "get git history with lines added and deleted per file",
+        "git/mod.rs",
+        Some("git_log_numstat"),
+    ),
+    (
+        "compute halstead software complexity metrics for a file",
+        "metrics/halstead.rs",
+        Some("analyze_halstead"),
+    ),
+    (
+        "classify tokens into operators and operands",
+        "metrics/halstead.rs",
+        Some("classify_tokens"),
+    ),
+    (
+        "analyze the class inheritance hierarchy",
+        "inheritance/mod.rs",
+        Some("extract_inheritance"),
+    ),
+    (
+        "diagnose an error from raw compiler error text",
+        "fix/mod.rs",
+        Some("diagnose"),
+    ),
+    (
+        "filter diagnostics by minimum severity level",
+        "diagnostics/mod.rs",
+        Some("filter_diagnostics_by_severity"),
+    ),
+    (
+        "run fixed point iteration for pointer alias analysis",
+        "alias/solver.rs",
+        Some("solve"),
+    ),
+    (
+        "mine recurring code patterns from a directory",
+        "patterns/mod.rs",
+        Some("mine_patterns"),
+    ),
+    (
+        "build a bm25 keyword index from a project directory",
+        "search/bm25.rs",
+        Some("from_project"),
+    ),
+    (
+        "control whether gitignore rules are honored when walking files",
+        "walker.rs",
+        Some("respect_gitignore"),
+    ),
 ];
 
 const TOP_K: usize = 10;
