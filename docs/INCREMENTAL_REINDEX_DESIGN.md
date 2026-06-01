@@ -93,29 +93,46 @@ which ship in l5d (P0).
 
 ### 4.0 Store manifest (version + identity)
 
-A small `manifest` (one per store, e.g. `index.manifest`) guards against pairing
-valid vectors with the wrong metadata after upgrades/model changes/crashes:
+A small `manifest` guards against pairing valid vectors with the wrong metadata
+after upgrades/model changes/crashes. It must cover **every input that changes the
+vectors OR the chunk boundaries** — not just the model name (Codex review):
 
 ```
 Manifest {
-    format_version: u32,     // bump on any on-disk layout change
-    generation:     u64,     // incremented every successful save; index+sidecar
-                             //   MUST share the same generation (atomicity, §7)
-    embedding_model: String, // e.g. "ArcticL" — a model change invalidates vectors
-    dimensions:      u32,    // must equal the loaded usearch index dims
-    metric:          String, // "cos"
-    scalar_kind:     String, // "f32" (i8 later) — quantization changes vectors
-    embed_schema:    String, // raw-v1 / enriched-v1 (same tag as the cache key)
-    root:            String, // canonical project root the keys are relative to
-    chunk_count:     u64,
-    checksum:        u64,    // of the sidecar payload, cross-checked on load
+    format_version:   u32,   // bump on any on-disk layout change
+    generation:       u64,   // the ACTIVE store generation. The index/sidecar/
+                             //   manifest FILES are generation-suffixed (§7); the
+                             //   filename carries the generation, so per-record
+                             //   generation is unnecessary — file-level suffices.
+    embedding_model:  String,// e.g. "ArcticL"
+    model_revision:   String,// fastembed/ONNX weights + TOKENIZER revision. Same
+                             //   model NAME with a changed tokenizer ⇒ incompatible
+                             //   vectors that would otherwise silently match.
+    dimensions:       u32,   // must equal the loaded usearch index dims
+    metric:           String,// "cos"
+    scalar_kind:      String,// "f32" | "i8" — quantization changes vectors
+    search_mode:      String,// "exact" (vs hnsw) — guards a different search build
+    embed_schema:     String,// raw-v1 / enriched-v1 (the embed-INPUT recipe tag)
+    chunk_params:     String,// granularity + max_tokens + overlap + language filter
+                             //   — a chunk-config change moves function boundaries
+                             //   (same content_hash, different spans).
+    walker_version:   String,// source-selection / ignore-rule version — changes
+                             //   WHICH files are in the corpus.
+    root:             String,// canonical project root the keys are relative to
+    chunk_count:      u64,
+    keys_checksum:    u64,   // digest of the SORTED usearch key set — detects vector
+                             //   key drift that the sidecar checksum alone misses.
+    sidecar_checksum: u64,   // digest of the sidecar payload.
 }
 ```
 
-On `load()`: if `format_version`, `embedding_model`, `dimensions`, `scalar_kind`,
-`embed_schema`, or `root` mismatch the running config — or the index's reported
-dims/count disagree with the manifest, or `checksum` fails, or the index and
-sidecar `generation` differ — **reject and full-rebuild** (logged, never silent).
+On `load()`, **reject → full rebuild** (logged, never silent) if ANY of
+`format_version, embedding_model, model_revision, dimensions, scalar_kind,
+search_mode, embed_schema, chunk_params, walker_version, root` mismatch the running
+config; OR the loaded index's reported dims/count disagree with the manifest; OR
+`sidecar_checksum` fails; OR the digest of the loaded usearch key set ≠
+`keys_checksum` (catches index/sidecar drift); OR the generation embedded in the
+loaded filenames ≠ `generation`.
 
 ### 4.1 Stable chunk key (`u64`)
 
@@ -141,11 +158,17 @@ change) is *detectable* and falls back to rebuild.
 **Ordinal instability (Codex review).** `ordinal` is positional, so inserting a
 *new* same-named function *above* an existing one shifts the existing one's
 ordinal → its key churns even though its body did not change. That key is then
-classified `remove(old) + embed(new)`. The damage is bounded: the re-`embed` is a
-**content-hash cache hit** (same body ⇒ no ONNX call), so the real cost is a couple
-of index `remove`/`add` ops, not re-embedding. Acceptable for now; if churn proves
-noticeable, replace the positional ordinal with a content-anchored disambiguator
-(e.g. a short prefix hash of the body) so identity is insertion-order-independent.
+classified `remove(old) + embed(new)`. The damage is bounded **only if** the embed
+hits a content-addressed cache (Codex review): the re-`embed` must resolve the
+**unchanged body** to its existing vector via a `(content_hash, model, embed_schema)
+→ vector` lookup, so it is a cache hit (no ONNX), not a real re-embed.
+**l5d requirement:** preserve this content-addressed embedding lookup as a layer
+*distinct* from the `key (u64) → vector` usearch index — the usearch migration must
+NOT drop content-hash dedup, or every ordinal shift / rename becomes a true
+re-embed. (It is the current `EmbeddingCache` role; keep it, content-keyed.)
+If churn still proves noticeable, replace the positional ordinal with a
+content-anchored disambiguator (e.g. a short prefix hash of the body) so identity is
+insertion-order-independent.
 
 **Root-relative path is load-bearing — do not let it fail silently.** The key uses
 `file_rel_path = strip_prefix(build_root)`. Today `CacheKey::from_chunk` falls back
@@ -169,21 +192,45 @@ ChunkMeta {
     class_name:    Option<String>,
     line_start:    u32,
     line_end:      u32,
-    content_hash:  String,   // detects body changes
-    indexed_at:    u64,      // file mtime (or content-hash time) at index — drives
-                             //   startup reconcile (§7); was referenced there but
-                             //   missing from the schema (Codex review).
+    content_hash:  String,   // detects body changes; also anchors the snippet read
 }
 ```
 
 Serialized compactly (bincode preferred; JSON behind a `--dump` for debugging).
-Small — no vectors. The sidecar is what lets the daemon serve results and run
-deltas **without re-chunking the whole tree** on restart.
+**No vectors and no per-record `generation`** — the sidecar FILE is
+generation-suffixed (§7), so the generation is carried at the file level.
 
-### 4.3 Per-file key index (`file_rel_path → {key}`)
+**Snippets are NOT stored — read lazily at query time** (Codex review: §4 claimed
+the sidecar serves results without re-chunking, but ChunkMeta had no snippet). The
+decision: keep the sidecar small by NOT storing chunk text. At query time, produce
+the snippet with a **bounded source read** anchored by `(file_rel_path, line_start,
+line_end)` and **validated against `content_hash`** — recompute the hash of the read
+span; on file-missing or hash-mismatch (the file changed since indexing), return the
+result **without a snippet** (degraded, never wrong). This avoids re-chunking (we
+have the line range), avoids sidecar bloat, and is self-correcting (a changed file
+triggers a delta that refreshes both vector and lines). Storing `content` in the
+sidecar is an opt-in alternative for fully source-independent serving, at the cost
+of size — deferred unless a need appears.
 
-Derivable from the sidecar (group keys by `file_rel_path`), kept in RAM for O(1)
-"which keys belong to this file" lookups during a delta. Rebuilt on `load()`.
+`indexed_at` (the per-file mtime+size used by reconcile) lives on the **per-file
+record** (§4.3), not per chunk.
+
+### 4.3 Per-file record (`file_rel_path → FileRecord`)
+
+Persisted alongside the sidecar (and rebuilt in RAM on `load()`):
+
+```
+FileRecord {
+    keys:  Set<u64>,   // which chunk keys belong to this file (O(1) delta lookup)
+    mtime: u64,        // file mtime AT INDEX time — reconcile signal (§7)
+    size:  u64,        // file size  AT INDEX time — catches same-mtime edits
+}
+```
+
+`keys` drives "which vectors to touch for this file"; `(mtime, size)` is the
+startup-reconcile signal. Comparing against the **stored** mtime (not wall-clock)
+means clock skew is irrelevant — we only ask "did this file change since we indexed
+it." Size catches the same-mtime-different-content case that mtime alone misses.
 
 ---
 
@@ -248,37 +295,72 @@ The missing piece that made the old behavior feel broken.
   `spawn_blocking` job (event loop stays responsive — same pattern as TLDR-atc).
 - Coalescing: a burst of saves to one file ⇒ one delta; a burst across N files ⇒
   N deltas in one job.
-- **Burst cap (rolling).** If `pending` exceeds a threshold (default **200 files** —
-  a branch switch / `git pull`) **or** the rolling accepted-event count over a short
-  window spikes, skip deltas and schedule a **single full rebuild** instead (deltas
-  stop being cheaper than a rebuild past some fraction of the corpus). The full
-  rebuild supersedes any queued deltas (clear `pending`).
+- **Burst cap (rolling).** Schedule a **single full rebuild** instead of deltas when
+  EITHER: `pending` size > **200 files** (default; a branch switch / `git pull`), OR
+  the rolling count of accepted events over a **2 s window** exceeds **1000** (a
+  storm). The full rebuild supersedes any queued deltas (clear `pending`). All three
+  numbers (`200`, `2 s`, `1000`) are config knobs; defaults chosen so a normal
+  multi-file save stays on the delta path while a tree-wide churn flips to rebuild.
 
 ---
 
 ## 7. Persistence & crash recovery
 
-- **Three files must commit as one unit** (Codex review): the usearch index, the
-  sidecar, and the manifest (§4.0). `usearch::save(path)` is a plain wrapper — it is
-  **not** an atomic temp+rename — so a crash between writing the index and the
-  sidecar/manifest would otherwise leave a split-brain pair (valid vectors, stale or
-  missing metadata).
-- **Save protocol** (periodic — every ~30 s or after K deltas):
-  1. `gen = manifest.generation + 1`.
-  2. Write **all three** to unique temp paths: `index.save(index.tmp.<gen>)`,
-     sidecar → `meta.tmp.<gen>`, manifest (carrying `gen` + sidecar `checksum`) →
-     `manifest.tmp.<gen>`. `fsync` each.
-  3. Rename index and sidecar into place, then **rename the manifest LAST** — the
-     manifest swap is the single **commit point**. A crash before it leaves the old
-     trio intact (temps are reaped on next open).
-- On daemon **startup**: read the manifest first; `index.load()` + read sidecar;
-  **verify the manifest gates** (§4.0: format/model/dims/scalar/schema/root match,
-  index dims+count agree, sidecar checksum + `generation` match). Any mismatch →
-  **full rebuild**.
-- If the manifest verifies, **reconcile**: compare each source file's on-disk mtime
-  to its `indexed_at`; files newer → run a delta; sidecar files that no longer exist
-  → remove their keys. This bounds staleness after a crash without a full rebuild.
-- If load fails or reconcile detects structural drift → **full rebuild**.
+### 7.1 Crash-safe save — generation-suffixed files + pointer swap
+
+The naive "rename index+sidecar, then rename manifest last" is **NOT crash-safe**
+(Codex review): renaming index/sidecar over the live files *destroys the old
+committed pair*, so a crash before the manifest rename corrupts both old and new.
+`usearch::save(path)` is also a plain wrapper, not an atomic temp+rename.
+
+The fix is **immutable, generation-suffixed artifacts plus a single atomic pointer**:
+
+- Files are named by generation and **never overwritten in place**:
+  `index.<gen>.usearch`, `meta.<gen>`, `manifest.<gen>`.
+- One tiny `CURRENT` file holds the active generation number — its atomic rename is
+  the **only** commit point.
+
+**Save** (periodic — every ~30 s or after K deltas):
+1. `gen = current + 1`.
+2. Write the three new-generation files via temp+rename:
+   `index.save(index.<gen>.tmp)` → `fsync` → rename to `index.<gen>.usearch`;
+   same for `meta.<gen>` and `manifest.<gen>` (the manifest embeds `gen`,
+   `keys_checksum`, `sidecar_checksum`). **`fsync` each file AND `fsync` the
+   directory** after the renames (a rename isn't durable until the dir is synced).
+3. Write `CURRENT.tmp` (containing `gen`) → `fsync` → **rename `CURRENT.tmp` →
+   `CURRENT`** → `fsync` the directory. This rename is the commit point.
+4. GC: delete generations older than `gen-1` (keep the previous generation as a
+   rollback target; never delete the one `CURRENT` points at).
+
+A crash at any point leaves `CURRENT` pointing at a fully-written older generation;
+the half-written `<gen>` files are unreferenced and reaped on next open. No
+in-place overwrite ever touches the live generation.
+
+### 7.2 Startup load + verify
+
+1. Read `CURRENT` → `gen`. Load `index.<gen>.usearch`, `meta.<gen>`, `manifest.<gen>`.
+2. **Verify the manifest gates** (§4.0): config fields match, index dims/count agree,
+   `sidecar_checksum` ok, usearch key-set digest == `keys_checksum`, and the
+   generation embedded in all three filenames == `gen`.
+3. On any failure, try the **previous generation** (`gen-1`); if that also fails →
+   **full rebuild**.
+
+### 7.3 Reconcile (precise, implementable)
+
+After a verified load, catch changes made while the daemon was down — **without**
+re-chunking the whole tree:
+
+- For each `FileRecord` (§4.3): stat the file. If **mtime ≠ stored mtime OR size ≠
+  stored size** → run a §5 delta on it. (Comparing to the *stored* values, not
+  wall-clock, so clock skew is irrelevant. Size catches the rare same-mtime edit.)
+- `FileRecord` whose file is **gone** → remove its keys (delete while down).
+- A source file **on disk with no `FileRecord`** → chunk + add (created while down).
+- **Residual risk:** same mtime AND same size AND different content. Genuinely rare
+  (most edits change size or mtime); it self-heals on the next real edit, and a
+  `tldr index --rebuild` (or a content-hash full sweep behind an explicit flag) is
+  the escape hatch. We do **not** content-hash every file on every startup — that
+  cost is unbounded on large repos; mtime+size is the bounded default.
+- If reconcile itself errors or detects structural drift → **full rebuild**.
 
 ---
 
@@ -336,16 +418,24 @@ The full-rebuild path is exactly today's `SemanticIndex::build` (now usearch-bac
 
 ## 11. Phasing
 
-1. **P0 — usearch store (TLDR-l5d):** `key→vector` add/remove/search/save/load +
-   **metadata sidecar + manifest (§4.0)** + per-file index + the paired-atomic save
-   protocol (§7) + manifest-gated load. Full-rebuild path only, no deltas yet — but
-   the sidecar/manifest are **correctness requirements here**, not deferrable to t8f
-   (a restart must serve results without re-chunking the tree).
-2. **P1 — delta core (this doc §5):** `apply_file_delta(file)` with embed/meta/remove
-   classification. Wire `handle_notify` to call it (still synchronous, no debounce).
-3. **P2 — debounce pipeline (§6):** `pending` set + timer + `spawn_blocking` batch +
-   burst cap.
-4. **P3 — persistence/recovery (§7):** periodic atomic save + startup reconcile.
+To avoid the earlier P0/P3 overlap (Codex review): the **save/load mechanism**
+(§7.1 generation-suffixed atomic save, §7.2 manifest-gated load) is **P0** — any
+persisted store needs it. The **delta-specific** parts (periodic *delta*-save
+cadence + GC tuning, and the §7.3 *reconcile*) are **P3**.
+
+1. **P0 — usearch store (TLDR-l5d):** `key→vector` add/remove/exact_search + content-
+   addressed dedup layer (§4.1) + **sidecar + manifest (§4.0)** + per-file records
+   (§4.3) + the **§7.1 crash-safe save / §7.2 manifest-gated load**. Full-rebuild
+   path only, no deltas. The sidecar/manifest/atomic-save are **correctness
+   requirements here**, not deferrable (a restart must serve results without
+   re-chunking, and must never load a split-brain store).
+2. **P1 — delta core (§5):** `apply_file_delta(file)` with embed/meta/remove
+   classification. Wire `handle_notify` to call it (synchronous, no debounce yet).
+3. **P2 — debounce pipeline (§6):** source filter + `pending` set + quiet timer +
+   max-wait + `spawn_blocking` batch + burst cap; `handle_notify` stays lock-free (§8).
+4. **P3 — incremental persistence/recovery:** periodic **delta**-save cadence + old-
+   generation GC (on top of P0's save mechanism) + the **§7.3 startup reconcile**
+   (mtime+size deltas instead of full rebuild).
 
 Each phase is independently testable and shippable.
 
@@ -375,15 +465,27 @@ Each phase is independently testable and shippable.
 
 ---
 
-## 14. Open questions / decisions to confirm before P1
+## 14. Open questions / decisions
 
-1. **Quantization** for `add_*`: `f32` (exact, ~58 MB) vs `i8` (~15 MB, tiny recall
-   loss). Recommend **f32 first**, measure recall on the n=52 eval, then try `i8`.
-2. **Debounce interval** default (750 ms?) and **burst cap** (200 files?).
-3. **Sidecar format**: bincode (small/fast) vs JSON (debuggable). Recommend bincode
-   with a version byte; keep a `--dump` for debugging.
-4. **`indexed_at` source**: file mtime (cheap, good enough) vs content hash on
-   startup (accurate, slower). Recommend mtime + content-hash tiebreak only on
-   suspicion.
-5. Who sends `Notify` today, and does it fire on **delete**? Verify the hook/watch
-   source emits delete events, else add a startup reconcile to catch them.
+**Resolved (this round):**
+- Quantization → **f32 first** (i8 = TLDR-ccg; measure recall on the n=52 eval first).
+- Debounce → 750 ms quiet + 5 s max-wait; burst cap 200 files / 1000 events-per-2s (§6).
+- Reconcile signal → **mtime + size** vs the per-file record; no all-files content
+  hash on startup (§7.3). Content-hash is the per-chunk change detector inside a delta.
+- Sidecar format → bincode + version byte; `--dump` for JSON debugging.
+- **Migration / one-time re-embed → ACCEPTED.** Moving JSON cache → usearch (and the
+  earlier root-relative key change) invalidates old keys once; we pay a single cold
+  re-embed rather than building a dual-read legacy shim. The atc re-embed already
+  paid most of it for the deployed model.
+
+**Still open — confirm before / during P0:**
+1. **`model_revision` source.** What concretely identifies the tokenizer+weights
+   revision for the manifest? (fastembed model id + a pinned revision/hash.) Needed
+   so a tokenizer bump invalidates correctly.
+2. **`walker_version` / `chunk_params` encoding.** A stable string derived from the
+   ignore-rule set + ChunkOptions, bumped when either changes.
+3. **`Notify` source & delete events.** Confirm what emits `Notify` today and whether
+   it fires on file delete/rename. If deletes aren't emitted, §7.3 reconcile is the
+   safety net — but verify the watcher so deletes aren't silently missed while live.
+4. **`content` in sidecar?** Default = lazy source read (§4.2). Revisit only if a
+   consumer needs snippets for files that may be absent/moved at query time.
