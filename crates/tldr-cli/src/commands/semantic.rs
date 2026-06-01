@@ -35,8 +35,12 @@ pub struct SemanticArgs {
     #[arg(short = 'n', long, default_value = "10")]
     pub top: usize,
 
-    /// Minimum similarity threshold (0.0 to 1.0)
-    #[arg(short = 't', long, default_value = "0.5")]
+    /// Minimum similarity threshold (0.0 to 1.0). Default 0.0 = return the
+    /// top-N ranked results with no score cutoff. The Arctic query prefix
+    /// (default-on) is asymmetric, which lowers absolute query/passage cosine
+    /// scores, so a non-zero default would hide correct top-ranked matches
+    /// (TLDR-h27). Use `--top` for the result count; set `-t` only to filter.
+    #[arg(short = 't', long, default_value = "0.0")]
     pub threshold: f64,
 
     /// Embedding model: arctic-xs, arctic-s, arctic-m, arctic-m-long, arctic-l
@@ -118,7 +122,7 @@ impl SemanticArgs {
 
         // Output based on format
         if writer.is_text() {
-            let text = format_semantic_text(&report);
+            let text = format_semantic_text(&report, self.threshold);
             writer.write_text(&text)?;
         } else {
             writer.write(&report)?;
@@ -130,7 +134,10 @@ impl SemanticArgs {
 
 
 /// Format semantic search report for text output
-fn format_semantic_text(report: &tldr_core::semantic::SemanticSearchReport) -> String {
+fn format_semantic_text(
+    report: &tldr_core::semantic::SemanticSearchReport,
+    threshold: f64,
+) -> String {
     use colored::Colorize;
 
     let mut output = String::new();
@@ -143,7 +150,7 @@ fn format_semantic_text(report: &tldr_core::semantic::SemanticSearchReport) -> S
     output.push_str(&format!(
         "Model: {} | Threshold: {:.2} | Searched: {} chunks\n\n",
         format!("{:?}", report.model).yellow(),
-        0.5, // threshold from options
+        threshold,
         report.total_chunks
     ));
 

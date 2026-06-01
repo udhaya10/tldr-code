@@ -17,7 +17,8 @@
 use std::path::PathBuf;
 use std::time::Instant;
 
-use tldr_core::semantic::{BuildOptions, IndexSearchOptions, SemanticIndex};
+use tldr_core::config::TldrConfig;
+use tldr_core::semantic::{BuildOptions, EmbeddingModel, IndexSearchOptions, SemanticIndex};
 
 /// (query, expected file path suffix, optional expected function name)
 ///
@@ -111,9 +112,20 @@ fn main() {
     // unbatched call (17GB, minutes). Cache ON: the schema tag is recipe-honest
     // (raw-v1/enriched-v1) and the query prefix never changes document vectors,
     // so prefix A/B re-runs reuse cached docs and only re-embed the query.
+    // y0q: benchmark the DEPLOYED model (resolved from .tldr config exactly like
+    // the CLI does), not the hardcoded enum default (ArcticM). Otherwise the eval
+    // measures a model users may not run. Override with TLDR_EVAL_MODEL=arctic-l|...
+    let cfg = TldrConfig::resolve(Some(&root));
+    let model = EmbeddingModel::resolve(std::env::var("TLDR_EVAL_MODEL").ok().as_deref(), &cfg)
+        .unwrap_or_else(|e| {
+            eprintln!("model resolve failed ({e}); falling back to default");
+            EmbeddingModel::default()
+        });
+    eprintln!("Eval embedding model: {:?}", model);
     let mut index = SemanticIndex::build(
         &root,
         BuildOptions {
+            model,
             show_progress: true,
             use_cache: true,
             ..Default::default()

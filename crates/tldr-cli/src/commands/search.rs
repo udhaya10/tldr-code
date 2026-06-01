@@ -28,7 +28,7 @@ use crate::output::{format_enriched_search_text, OutputFormat, OutputWriter};
 /// then `literal-fallback+structure` (or `+callgraph`).
 ///
 /// Pass `--regex` to interpret the query as a regex pattern, or
-/// `--hybrid <PATTERN>` to combine BM25 ranking with a regex filter.
+/// `--filter <PATTERN>` to combine BM25 ranking with a regex post-filter.
 #[derive(Debug, Args)]
 pub struct SmartSearchArgs {
     /// Search query (natural language or code terms; BM25 by default,
@@ -53,19 +53,16 @@ pub struct SmartSearchArgs {
 
     /// Use regex pattern matching instead of BM25 ranking.
     /// The query is interpreted as a regex pattern.
-    #[arg(long, conflicts_with = "hybrid")]
+    #[arg(long, conflicts_with = "filter")]
     pub regex: bool,
 
-    /// Hybrid mode: combine BM25 relevance with regex filtering.
-    /// The positional query is used for BM25 ranking, this pattern for regex filtering.
-    // TLDR-AUDIT(TLDR-1a8): MISNOMER. In retrieval, "hybrid" means lexical+DENSE
-    // fusion (BM25 + embeddings). This flag is BM25 + a regex filter — no dense
-    // component at all. A real RRF hybrid exists in tldr-core (search/hybrid.rs,
-    // TLDR-4er) but isn't wired here, so the name collides with the thing it
-    // isn't. Rename to `--filter` (or similar), and reserve `--hybrid` for when
-    // the real dense fusion is wired in. See epic TLDR-blm.
+    /// Filter mode: rank with BM25, then keep only results matching this regex.
+    /// The positional query drives BM25 ranking; this pattern post-filters them.
+    // TLDR-1a8 (done): renamed `--hybrid` -> `--filter`. This is BM25 + a regex
+    // post-filter, NOT lexical+dense fusion. `--hybrid` is reserved for the real
+    // RRF fusion (tldr-core search/hybrid.rs) once it is wired — see TLDR-4er.
     #[arg(long, conflicts_with = "regex")]
-    pub hybrid: Option<String>,
+    pub filter: Option<String>,
 }
 
 impl SmartSearchArgs {
@@ -93,7 +90,7 @@ impl SmartSearchArgs {
 
         let search_mode = if self.regex {
             SearchMode::Regex(self.query.clone())
-        } else if let Some(ref pattern) = self.hybrid {
+        } else if let Some(ref pattern) = self.filter {
             SearchMode::Hybrid {
                 query: self.query.clone(),
                 pattern: pattern.clone(),
