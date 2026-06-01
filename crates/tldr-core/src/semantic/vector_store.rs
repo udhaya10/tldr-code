@@ -554,15 +554,43 @@ pub fn identity_key(identity: &str) -> u64 {
     h.finish()
 }
 
-/// Path relative to the build `root`. On a `strip_prefix` miss, fall back to the
-/// path as-is and normalize separators. (Hardening this miss to a canonical
-/// fallback + warning is tracked as TLDR-ss3.)
+/// Path relative to the build `root`, used as part of the stable chunk key.
+///
+/// A silent raw-path fallback on a `strip_prefix` miss would re-introduce the
+/// absolute-vs-relative key divergence that caused the daemon re-embed bug
+/// (TLDR-atc/ss3), so the misses are handled deterministically and never
+/// silently:
+/// 1. lexical strip (the normal case — chunk paths are root-prefixed);
+/// 2. canonical strip (symlinked root, mixed abs/rel, normalization);
+/// 3. outside the root → the **canonical absolute** path (deterministic), warned;
+/// 4. un-canonicalizable (file gone) → the raw path, but **warned** so the
+///    divergence is diagnosable rather than silent.
 fn root_relative(root: &Path, file_path: &Path) -> String {
-    file_path
-        .strip_prefix(root)
-        .unwrap_or(file_path)
-        .to_string_lossy()
-        .replace('\\', "/")
+    if let Ok(rel) = file_path.strip_prefix(root) {
+        return normalize_sep(rel);
+    }
+    if let (Ok(cfile), Ok(croot)) = (file_path.canonicalize(), root.canonicalize()) {
+        if let Ok(rel) = cfile.strip_prefix(&croot) {
+            return normalize_sep(rel);
+        }
+        eprintln!(
+            "[tldr-warn] vector_store: {} is outside root {}; keying by canonical path",
+            cfile.display(),
+            croot.display()
+        );
+        return normalize_sep(&cfile);
+    }
+    eprintln!(
+        "[tldr-warn] vector_store: cannot canonicalize {} under root {}; keying by raw path",
+        file_path.display(),
+        root.display()
+    );
+    normalize_sep(file_path)
+}
+
+/// Normalize path separators to `/` for stable, cross-platform keys.
+fn normalize_sep(p: &Path) -> String {
+    p.to_string_lossy().replace('\\', "/")
 }
 
 /// `(mtime_secs, size, kind)` for a path — the per-file reconcile signal.
@@ -1110,6 +1138,21 @@ mod tests {
         let root = std::path::Path::new("/proj");
         let chunks = vec![code_chunk("/proj/a.rs", None, Some("f"), "x")];
         assert!(VectorStore::from_embedded(&chunks, &[], root).is_err());
+    }
+
+    #[test]
+    fn root_relative_strips_lexically_and_is_deterministic_on_miss() {
+        // Common case: lexical strip.
+        assert_eq!(
+            root_relative(std::path::Path::new("/proj"), std::path::Path::new("/proj/src/a.rs")),
+            "src/a.rs"
+        );
+        // Not under root and not canonicalizable → raw path, but DETERMINISTIC and
+        // warned (TLDR-ss3) — never a silent abs-vs-rel divergence.
+        assert_eq!(
+            root_relative(std::path::Path::new("/proj"), std::path::Path::new("/elsewhere/x.rs")),
+            "/elsewhere/x.rs"
+        );
     }
 
     // ---- Integration / equivalence (step 5) -----------------------------------
