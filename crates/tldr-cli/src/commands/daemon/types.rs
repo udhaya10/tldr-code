@@ -336,6 +336,17 @@ pub enum DaemonCommand {
         /// Number of results to return
         #[serde(default = "default_top_k")]
         top_k: usize,
+        /// Optional embedding-model override (e.g. `"arctic-l"`). `None` resolves
+        /// from project config — kept identical to the cold CLI path so warm and
+        /// cold rank the same model (TLDR-atc). Backward-compatible: pre-atc
+        /// clients that omit this still deserialize.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+        /// Minimum similarity threshold. `None` => 0.0 (no score cutoff),
+        /// matching the cold CLI default (TLDR-h27) so the warm path does not
+        /// silently hide correct top-ranked matches.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        threshold: Option<f64>,
     },
 
     // Pass-through analysis commands

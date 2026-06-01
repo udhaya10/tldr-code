@@ -116,7 +116,14 @@ impl EmbedArgs {
         let mut cache = if self.no_cache {
             None
         } else {
-            Some(EmbeddingCache::open(CacheConfig::default())?)
+            let mut c = EmbeddingCache::open(CacheConfig::default())?;
+            // TLDR-atc: key entries by path RELATIVE to this embed root, matching
+            // what `SemanticIndex::build` writes (used by `semantic`/`similar`).
+            // Without this, `embed` would write full-path keys that `semantic`
+            // never hits — breaking cross-command cache sharing and forcing a
+            // re-embed. `chunk_code` above is rooted at `self.path`, so strip it.
+            c.set_key_root(&self.path);
+            Some(c)
         };
 
         let mut cache_hits = 0usize;

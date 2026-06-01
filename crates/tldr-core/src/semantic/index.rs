@@ -219,6 +219,15 @@ impl SemanticIndex {
             None
         };
 
+        // Key cache entries by their path RELATIVE to this build root, so the
+        // same file maps to the same key whether the index was rooted at a
+        // relative arg (cold CLI) or the canonical absolute path the daemon uses.
+        // Without this the daemon's absolute keys never matched the cold cache's
+        // relative keys -> 100% miss -> full re-embed on every query (TLDR-atc).
+        if let Some(c) = cache.as_mut() {
+            c.set_key_root(root);
+        }
+
         // Convert languages from strings if provided
         let chunk_languages = options.languages.as_ref().map(|langs| {
             langs

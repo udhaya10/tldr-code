@@ -83,6 +83,50 @@ impl SemanticArgs {
         let model = EmbeddingModel::resolve(self.model.as_deref(), &config)
             .map_err(|e| anyhow::anyhow!("{}", e))?;
 
+        // TLDR-atc: when a warm daemon is running, route the query to its
+        // resident `SemanticIndex` instead of paying the cold ~1.1GB cache load
+        // + ONNX model reload here. The daemon resolves the same model from the
+        // same config (no `model` key => config default), applies the same
+        // threshold default (0.0, TLDR-h27), and returns the identical
+        // `SemanticSearchReport`, so warm and cold output match.
+        //
+        // We skip routing for:
+        //   * `--hybrid`   — the daemon has no hybrid path; keep that
+        //                    best-quality result identical to cold.
+        //   * `--no-cache` — the user asked to bypass the cache the daemon
+        //                    relies on.
+        //   * `--langs`    — the daemon holds an ALL-languages resident index;
+        //                    routing a language-filtered query would silently
+        //                    return every language. Fall back to cold, which
+        //                    builds a langs-filtered index (parity).
+        // Any miss (daemon absent, connection error, or build failure) returns
+        // `None` and falls through to the cold path below.
+        if !self.hybrid && !self.no_cache && self.langs.is_none() {
+            use crate::commands::daemon_router::try_daemon_route;
+
+            let mut params = serde_json::json!({
+                "query": self.query,
+                "top_k": self.top,
+                "threshold": self.threshold,
+            });
+            if let Some(m) = &self.model {
+                params["model"] = serde_json::Value::String(m.clone());
+            }
+
+            if let Some(report) = try_daemon_route::<tldr_core::semantic::SemanticSearchReport>(
+                &self.path,
+                "semantic",
+                params,
+            ) {
+                if writer.is_text() {
+                    writer.write_text(&format_semantic_text(&report, self.threshold))?;
+                } else {
+                    writer.write(&report)?;
+                }
+                return Ok(());
+            }
+        }
+
         let model_name = self.model.as_deref().unwrap_or("arctic-m");
         writer.progress(&format!(
             "Building semantic index for {} ({} model)...",

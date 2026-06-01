@@ -33,7 +33,11 @@ use super::types::{
 #[cfg(test)]
 use super::types::DEFAULT_REINDEX_THRESHOLD;
 #[cfg(feature = "semantic")]
-use tldr_core::semantic::{BuildOptions, CacheConfig, IndexSearchOptions, SemanticIndex};
+use tldr_core::config::TldrConfig;
+#[cfg(feature = "semantic")]
+use tldr_core::semantic::{
+    BuildOptions, CacheConfig, EmbeddingModel, IndexSearchOptions, SemanticIndex,
+};
 use tldr_core::{
     architecture_analysis, build_project_call_graph, change_impact, collect_all_functions,
     dead_code_analysis, detect_or_parse_language, extract_file, find_importers, get_cfg_context,
@@ -337,6 +341,18 @@ impl TLDRDaemon {
         Ok(())
     }
 
+    /// Resolve the embedding model for a semantic request, mirroring the cold
+    /// CLI path (`semantic.rs`): an explicit request override wins, else the
+    /// project config, else the built-in default. Keeping this identical to the
+    /// cold resolver is what makes warm and cold rank the same model (TLDR-atc);
+    /// the daemon's old `BuildOptions::default()` silently pinned ArcticM even
+    /// when the project config asked for ArcticL.
+    #[cfg(feature = "semantic")]
+    fn resolve_semantic_model(&self, override_model: Option<&str>) -> Result<EmbeddingModel, String> {
+        let config = TldrConfig::resolve(Some(&self.project));
+        EmbeddingModel::resolve(override_model, &config)
+    }
+
     /// Handle a daemon command and return the response.
     pub async fn handle_command(&self, cmd: DaemonCommand) -> DaemonResponse {
         match cmd {
@@ -429,29 +445,42 @@ impl TLDRDaemon {
                     }
                 }
 
-                // 4. Warm semantic index
+                // 4. Warm semantic index using the project-config model, so a
+                //    later `Semantic` query with the same resolved model hits
+                //    this warm index instead of rebuilding (TLDR-atc). Warming
+                //    with `BuildOptions::default()` (ArcticM) while the config
+                //    asks for ArcticL would warm the wrong model and force a
+                //    rebuild on the first real query.
                 #[cfg(feature = "semantic")]
                 {
-                    let mut index_guard = self.semantic_index.write().await;
-                    if index_guard.is_some() {
-                        warmed.push("semantic_index (cached)");
-                    } else {
-                        let build_opts = BuildOptions {
-                            show_progress: false,
-                            use_cache: true,
-                            ..Default::default()
-                        };
-                        match SemanticIndex::build(
-                            &self.project,
-                            build_opts,
-                            Some(CacheConfig::default()),
-                        ) {
-                            Ok(idx) => {
-                                *index_guard = Some(idx);
-                                warmed.push("semantic_index");
+                    match self.resolve_semantic_model(None) {
+                        Ok(model) => {
+                            let mut index_guard = self.semantic_index.write().await;
+                            let already_warm =
+                                index_guard.as_ref().is_some_and(|idx| idx.model() == model);
+                            if already_warm {
+                                warmed.push("semantic_index (cached)");
+                            } else {
+                                let build_opts = BuildOptions {
+                                    model,
+                                    show_progress: false,
+                                    use_cache: true,
+                                    ..Default::default()
+                                };
+                                match SemanticIndex::build(
+                                    &self.project,
+                                    build_opts,
+                                    Some(CacheConfig::default()),
+                                ) {
+                                    Ok(idx) => {
+                                        *index_guard = Some(idx);
+                                        warmed.push("semantic_index");
+                                    }
+                                    Err(e) => errors.push(format!("semantic_index: {}", e)),
+                                }
                             }
-                            Err(e) => errors.push(format!("semantic_index: {}", e)),
                         }
+                        Err(e) => errors.push(format!("semantic_index: {}", e)),
                     }
                 }
 
@@ -472,21 +501,58 @@ impl TLDRDaemon {
             }
 
             #[cfg(feature = "semantic")]
-            DaemonCommand::Semantic { query, top_k } => {
-                // Semantic search with persistent index
-                let mut index_guard = self.semantic_index.write().await;
+            DaemonCommand::Semantic {
+                query,
+                top_k,
+                model,
+                threshold,
+            } => {
+                // Resolve the model exactly like the cold CLI path so the warm
+                // result ranks identically (TLDR-atc).
+                let model = match self.resolve_semantic_model(model.as_deref()) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        return DaemonResponse::Error {
+                            status: "error".to_string(),
+                            error: e,
+                        };
+                    }
+                };
 
-                // Build index lazily on first query
-                if index_guard.is_none() {
+                // Semantic search with persistent index.
+                // TLDR-atc DIAG: time lock-acquisition, build, and search
+                // separately so daemon.log shows where the latency lives.
+                let t_lock = Instant::now();
+                let mut index_guard = self.semantic_index.write().await;
+                let lock_ms = t_lock.elapsed().as_millis();
+
+                // (Re)build lazily when the slot is empty OR the resident index
+                // was built with a different model. The single slot must never
+                // serve stale-model vectors after a model switch.
+                let needs_build = match index_guard.as_ref() {
+                    Some(idx) => idx.model() != model,
+                    None => true,
+                };
+                if needs_build {
+                    let t_build = Instant::now();
                     let build_opts = BuildOptions {
+                        model,
                         show_progress: false,
                         use_cache: true,
                         ..Default::default()
                     };
-                    let cache_config = Some(CacheConfig::default());
-
-                    match SemanticIndex::build(&self.project, build_opts, cache_config) {
+                    match SemanticIndex::build(
+                        &self.project,
+                        build_opts,
+                        Some(CacheConfig::default()),
+                    ) {
                         Ok(idx) => {
+                            eprintln!(
+                                "[atc-diag] semantic BUILD took {}ms (lock_wait {}ms, model {:?})",
+                                t_build.elapsed().as_millis(),
+                                lock_ms,
+                                model
+                            );
                             *index_guard = Some(idx);
                         }
                         Err(e) => {
@@ -496,18 +562,26 @@ impl TLDRDaemon {
                             };
                         }
                     }
+                } else {
+                    eprintln!(
+                        "[atc-diag] semantic RESIDENT hit (lock_wait {}ms, model {:?})",
+                        lock_ms, model
+                    );
                 }
 
-                // Search the index
+                // Search the index. Threshold defaults to 0.0 (no score cutoff),
+                // matching the cold CLI default (TLDR-h27) so warm doesn't hide
+                // correct top-ranked matches.
+                let t_search = Instant::now();
                 let index = index_guard.as_mut().unwrap();
                 let search_opts = IndexSearchOptions {
                     top_k,
-                    threshold: 0.5,
+                    threshold: threshold.unwrap_or(0.0),
                     include_snippet: true,
                     snippet_lines: 5,
                 };
 
-                match index.search(&query, &search_opts) {
+                let result = match index.search(&query, &search_opts) {
                     Ok(report) => match serde_json::to_value(&report) {
                         Ok(value) => DaemonResponse::Result(value),
                         Err(e) => DaemonResponse::Error {
@@ -519,7 +593,12 @@ impl TLDRDaemon {
                         status: "error".to_string(),
                         error: format!("Semantic search failed: {}", e),
                     },
-                }
+                };
+                eprintln!(
+                    "[atc-diag] semantic SEARCH took {}ms",
+                    t_search.elapsed().as_millis()
+                );
+                result
             }
 
             #[cfg(not(feature = "semantic"))]
@@ -2037,6 +2116,8 @@ mod tests {
             .handle_command(DaemonCommand::Semantic {
                 query: "greeting function".to_string(),
                 top_k: 5,
+                model: None,
+                threshold: None,
             })
             .await;
 
@@ -2074,6 +2155,8 @@ mod tests {
             .handle_command(DaemonCommand::Semantic {
                 query: "computation".to_string(),
                 top_k: 5,
+                model: None,
+                threshold: None,
             })
             .await;
 
