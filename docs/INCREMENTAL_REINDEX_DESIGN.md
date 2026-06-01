@@ -59,17 +59,63 @@ in-RAM** index. Verified against `usearch/rust/lib.rs`:
 - `add_f32(key: u64, &[f32])` / `add_i8(...)` — insert a vector under a key.
 - `remove(key: u64) -> usize` — delete a key's vector. **This is the linchpin.**
 - `exact_search_f32(query, count)` — exact KNN (our chosen search; not HNSW).
-- `save(path)` / `load(path)` — persist / reload the binary index.
-- `view(path)` is **read-only** (issue #97) → **not used here**; the daemon holds
-  a writable `load()`-ed index. (At our scale the binary is ~58 MB f32 / ~15 MB
-  i8, so `load()` into RAM is cheap and `view()`/mmap is unnecessary.)
+- `save(path)` / `load(path)` (`restore`, copies into RAM) vs `view(path)`
+  (`restore_view`, mmap). We use **`load()`**: it keeps the index **writable**
+  (required for `add`/`remove`), and at our scale (~58 MB f32) the copy is cheap.
+  `view()` is documented read-only (usearch issue #97); that is **not enforced by
+  the Rust types**, so we treat it as read-only by policy rather than relying on it.
+- **`load()` is a scale-bounded decision, not a blanket policy** (Codex review):
+  it copies the whole index into RAM, so with ~20 resident project daemons or a
+  500 MB+ monorepo the duplication becomes material. Revisit `view()` for the
+  read/query path (with a separate writable RAM index for deltas) past that ceiling.
+- **f32 first; i8 is a real option, not irrelevant.** usearch has `ScalarKind::I8`,
+  `add_i8`, and `exact_search_i8` — but i8 needs a **separately built quantized
+  index** and the **query quantized too** (`exact_search_f32` gets no i8 benefit).
+  i8 is ~4× smaller, near-lossless for cosine on unit-normalized vectors, and
+  matters once dims/models compound (ArcticL = 1024 dims). Deferred to TLDR-ccg;
+  measure recall on the n=52 eval before flipping.
 
 The vector store is `key (u64) → vector`. Everything else (file path, function
-name, line range, content hash) lives in a **metadata sidecar** (§4).
+name, line range, content hash) lives in the **metadata sidecar + manifest** (§4),
+which ship in l5d (P0).
 
 ---
 
 ## 4. Data model
+
+> **Scope note (Codex review, 2026-06-01):** the metadata sidecar AND the manifest
+> below are part of **l5d (P0)**, NOT t8f. They are a *correctness* requirement, not
+> an incremental optimization: a persisted usearch index is vectors-only, so after a
+> **daemon restart** search results (path/function/line range/snippet) cannot be
+> reconstructed without the sidecar — and re-chunking the whole tree on every restart
+> is exactly the cost we are removing. l5d ships: usearch vector store **+ sidecar +
+> manifest**. t8f only *adds* the per-file delta logic on top.
+
+### 4.0 Store manifest (version + identity)
+
+A small `manifest` (one per store, e.g. `index.manifest`) guards against pairing
+valid vectors with the wrong metadata after upgrades/model changes/crashes:
+
+```
+Manifest {
+    format_version: u32,     // bump on any on-disk layout change
+    generation:     u64,     // incremented every successful save; index+sidecar
+                             //   MUST share the same generation (atomicity, §7)
+    embedding_model: String, // e.g. "ArcticL" — a model change invalidates vectors
+    dimensions:      u32,    // must equal the loaded usearch index dims
+    metric:          String, // "cos"
+    scalar_kind:     String, // "f32" (i8 later) — quantization changes vectors
+    embed_schema:    String, // raw-v1 / enriched-v1 (same tag as the cache key)
+    root:            String, // canonical project root the keys are relative to
+    chunk_count:     u64,
+    checksum:        u64,    // of the sidecar payload, cross-checked on load
+}
+```
+
+On `load()`: if `format_version`, `embedding_model`, `dimensions`, `scalar_kind`,
+`embed_schema`, or `root` mismatch the running config — or the index's reported
+dims/count disagree with the manifest, or `checksum` fails, or the index and
+sidecar `generation` differ — **reject and full-rebuild** (logged, never silent).
 
 ### 4.1 Stable chunk key (`u64`)
 
@@ -92,6 +138,25 @@ A 64-bit hash makes accidental collisions negligible below ~10^6 keys (birthday
 bound ≈ 2^32). The sidecar stores `identity` per key so a collision (or a hash
 change) is *detectable* and falls back to rebuild.
 
+**Ordinal instability (Codex review).** `ordinal` is positional, so inserting a
+*new* same-named function *above* an existing one shifts the existing one's
+ordinal → its key churns even though its body did not change. That key is then
+classified `remove(old) + embed(new)`. The damage is bounded: the re-`embed` is a
+**content-hash cache hit** (same body ⇒ no ONNX call), so the real cost is a couple
+of index `remove`/`add` ops, not re-embedding. Acceptable for now; if churn proves
+noticeable, replace the positional ordinal with a content-anchored disambiguator
+(e.g. a short prefix hash of the body) so identity is insertion-order-independent.
+
+**Root-relative path is load-bearing — do not let it fail silently.** The key uses
+`file_rel_path = strip_prefix(build_root)`. Today `CacheKey::from_chunk` falls back
+to the **raw** path when `strip_prefix` fails (cache.rs) — which silently re-creates
+the original absolute-vs-relative key-divergence bug for symlinked roots,
+differently-normalized paths, or chunks outside the root. **Requirement:** canonicalize
+the root once and derive `file_rel_path` deterministically; on a `strip_prefix` miss,
+**log a warning and use a single canonical fallback** (e.g. the canonicalized absolute
+path), never the raw as-given path. (Hardening of the existing key path — tracked
+separately; it predates usearch but the same rule applies to the usearch keys.)
+
 ### 4.2 Metadata sidecar (`key → ChunkMeta`)
 
 Stored next to the usearch index (e.g. `index.usearch` + `index.meta`):
@@ -105,10 +170,15 @@ ChunkMeta {
     line_start:    u32,
     line_end:      u32,
     content_hash:  String,   // detects body changes
+    indexed_at:    u64,      // file mtime (or content-hash time) at index — drives
+                             //   startup reconcile (§7); was referenced there but
+                             //   missing from the schema (Codex review).
 }
 ```
 
-Serialized compactly (bincode/JSON). Small — no vectors.
+Serialized compactly (bincode preferred; JSON behind a `--dump` for debugging).
+Small — no vectors. The sidecar is what lets the daemon serve results and run
+deltas **without re-chunking the whole tree** on restart.
 
 ### 4.3 Per-file key index (`file_rel_path → {key}`)
 
@@ -163,30 +233,51 @@ exists: `for k in per_file[file]: index.remove(k); sidecar.remove(k)`.
 
 The missing piece that made the old behavior feel broken.
 
+- **Source-files-only filter (first gate).** Drop the Notify immediately if the
+  path is not an indexable source file (honor the same `ProjectWalker` ignore rules
+  — skip `.git/`, `target/`, `node_modules/`, binaries, the `.tldr/` dir, etc.).
+  Otherwise editor/tooling churn outside the corpus drives needless deltas.
 - Maintain a `pending: HashSet<PathBuf>` of changed files and a debounce timer.
-- Each `Notify(file)` inserts into `pending` and (re)arms a timer
+- Each accepted `Notify(file)` inserts into `pending` and (re)arms a **quiet timer**
   (default **750 ms**, configurable).
-- When the timer fires, drain `pending` and run the §5 delta **per file** inside
-  one `spawn_blocking` job (so the event loop stays responsive — same pattern as
-  the warm-path fix, TLDR-atc).
-- Coalescing means a burst of saves to the same file ⇒ one delta. A burst across
-  N files ⇒ N deltas in one job.
-- Cap: if `pending` exceeds a threshold (e.g. > 200 files — a branch switch /
-  `git pull`), skip deltas and schedule a **single full rebuild** instead (deltas
-  stop being cheaper than a rebuild past some fraction of the corpus).
+- **Hard max-wait deadline.** A re-arming quiet timer alone can be starved forever
+  under a steady low-rate stream of saves. Also stamp the *first* event in a batch;
+  when `now - first >= max_wait` (default **5 s**) flush regardless of the quiet
+  timer. So a batch flushes after 750 ms of quiet **or** 5 s elapsed, whichever first.
+- On flush: drain `pending` and run the §5 delta **per file** inside one
+  `spawn_blocking` job (event loop stays responsive — same pattern as TLDR-atc).
+- Coalescing: a burst of saves to one file ⇒ one delta; a burst across N files ⇒
+  N deltas in one job.
+- **Burst cap (rolling).** If `pending` exceeds a threshold (default **200 files** —
+  a branch switch / `git pull`) **or** the rolling accepted-event count over a short
+  window spikes, skip deltas and schedule a **single full rebuild** instead (deltas
+  stop being cheaper than a rebuild past some fraction of the corpus). The full
+  rebuild supersedes any queued deltas (clear `pending`).
 
 ---
 
 ## 7. Persistence & crash recovery
 
-- After a delta job, mark the index dirty; a **periodic saver** (e.g. every 30 s,
-  or after K deltas) calls `index.save()` + writes the sidecar **atomically**
-  (unique temp + rename — reuse the cache-flush race fix from TLDR-atc).
-- On daemon **startup**: `index.load()` + read sidecar, rebuild the per-file
-  index, then **reconcile**: compare each file's on-disk mtime to a stored
-  `indexed_at`; for files newer than the index, run a delta; for files in the
-  sidecar that no longer exist, remove their keys. This bounds staleness after a
-  crash without a full rebuild.
+- **Three files must commit as one unit** (Codex review): the usearch index, the
+  sidecar, and the manifest (§4.0). `usearch::save(path)` is a plain wrapper — it is
+  **not** an atomic temp+rename — so a crash between writing the index and the
+  sidecar/manifest would otherwise leave a split-brain pair (valid vectors, stale or
+  missing metadata).
+- **Save protocol** (periodic — every ~30 s or after K deltas):
+  1. `gen = manifest.generation + 1`.
+  2. Write **all three** to unique temp paths: `index.save(index.tmp.<gen>)`,
+     sidecar → `meta.tmp.<gen>`, manifest (carrying `gen` + sidecar `checksum`) →
+     `manifest.tmp.<gen>`. `fsync` each.
+  3. Rename index and sidecar into place, then **rename the manifest LAST** — the
+     manifest swap is the single **commit point**. A crash before it leaves the old
+     trio intact (temps are reaped on next open).
+- On daemon **startup**: read the manifest first; `index.load()` + read sidecar;
+  **verify the manifest gates** (§4.0: format/model/dims/scalar/schema/root match,
+  index dims+count agree, sidecar checksum + `generation` match). Any mismatch →
+  **full rebuild**.
+- If the manifest verifies, **reconcile**: compare each source file's on-disk mtime
+  to its `indexed_at`; files newer → run a delta; sidecar files that no longer exist
+  → remove their keys. This bounds staleness after a crash without a full rebuild.
 - If load fails or reconcile detects structural drift → **full rebuild**.
 
 ---
@@ -197,6 +288,14 @@ The missing piece that made the old behavior feel broken.
   `Arc<std::sync::Mutex<…>>` (introduced in TLDR-atc). All mutation (delta jobs,
   saves) and search happen while holding it **inside `spawn_blocking`**, so the
   async event loop never blocks and `daemon stop` stays responsive.
+- **`handle_notify` MUST NOT take the index mutex on the async thread** (Codex
+  review — today it does, `daemon.rs::handle_notify`, which parks a Tokio worker
+  for the *whole build* if a Notify lands mid-build). Notify is async and must stay
+  O(1) and lock-free w.r.t. the index: it only (a) filters non-source paths, (b)
+  inserts into the debounce `pending` set (its own tiny lock or an mpsc channel),
+  and (c) arms/stamps the timer. The index mutex is acquired **only** later, inside
+  the `spawn_blocking` flush job. Same rule for the legacy "invalidate" path until
+  deltas land: signal via an `AtomicBool`/channel, never `index.lock()` inline.
 - Search and delta serialize on the mutex (correct; both are short once warm).
 - One daemon per project (socket keyed by project hash), so there is no
   cross-daemon writer contention on the same index file in normal use. Saves use
@@ -238,7 +337,10 @@ The full-rebuild path is exactly today's `SemanticIndex::build` (now usearch-bac
 ## 11. Phasing
 
 1. **P0 — usearch store (TLDR-l5d):** `key→vector` add/remove/search/save/load +
-   metadata sidecar + per-file index. Full-rebuild path only. No deltas yet.
+   **metadata sidecar + manifest (§4.0)** + per-file index + the paired-atomic save
+   protocol (§7) + manifest-gated load. Full-rebuild path only, no deltas yet — but
+   the sidecar/manifest are **correctness requirements here**, not deferrable to t8f
+   (a restart must serve results without re-chunking the tree).
 2. **P1 — delta core (this doc §5):** `apply_file_delta(file)` with embed/meta/remove
    classification. Wire `handle_notify` to call it (still synchronous, no debounce).
 3. **P2 — debounce pipeline (§6):** `pending` set + timer + `spawn_blocking` batch +
