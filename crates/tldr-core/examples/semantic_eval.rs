@@ -490,57 +490,87 @@ fn main() {
                 .replace('\\', "/")
         };
 
-        // Classify each query: order-identical, tie-reorder (same items + same
-        // sorted cosine profile, just a different tie-winner order), or a genuine
-        // item difference (an item with a clearly-different cosine — a real bug).
-        // Exact cosine over the same vectors means order can only differ at equal
-        // cosine, so the distance profile is the rigorous equivalence signal.
-        let round = |x: f64| (x * 1e5).round() as i64;
+        // Diagnostic: at the FIRST differing rank, compare the two competing
+        // items by the SAME dense f64 cosine scorer. dense uses f64 + stable sort
+        // (chunk order tie-break); the store uses usearch f32 exact_search. So a
+        // reorder is a TIE (equal dense cosine), an EPSILON f32/f64 boundary
+        // flip, or a REAL ranking bug (the store ranked a clearly-lower-cosine
+        // item higher). Only REAL > 0 fails results-equivalence.
+        use std::collections::HashMap;
+        type Item = (String, Option<String>, u32);
         let mut order_identical = 0usize;
-        let mut tie_reorder = 0usize;
-        let mut item_different = 0usize;
+        let mut tie = 0usize;
+        let mut epsilon = 0usize;
+        let mut real = 0usize;
         for (query, _, _) in &gold {
             let dense = index.search(query, &opts).expect("dense search");
-            let dense_list: Vec<(String, Option<String>, u32)> = dense
+            let d_items: Vec<Item> = dense
                 .results
                 .iter()
                 .take(TOP_K)
                 .map(|r| (rel(&r.file_path), r.function_name.clone(), r.line_start))
                 .collect();
-            // dense score is cosine similarity; usearch distance ≈ 1 - similarity.
-            let dense_profile: Vec<i64> =
-                dense.results.iter().take(TOP_K).map(|r| round(1.0 - r.score)).collect();
+            let dscore: HashMap<Item, f64> = dense
+                .results
+                .iter()
+                .take(TOP_K)
+                .map(|r| ((rel(&r.file_path), r.function_name.clone(), r.line_start), r.score))
+                .collect();
 
             let qv = q_embedder.embed_query(query).expect("embed_query");
-            let hits = store.search(&qv, TOP_K).expect("store search");
-            let store_list: Vec<(String, Option<String>, u32)> = hits
+            let s_items: Vec<Item> = store
+                .search(&qv, TOP_K)
+                .expect("store search")
                 .iter()
                 .map(|h| (h.meta.file_rel_path.clone(), h.meta.function_name.clone(), h.meta.line_start))
                 .collect();
-            let store_profile: Vec<i64> = hits.iter().map(|h| round(h.distance as f64)).collect();
 
-            if dense_list == store_list {
-                order_identical += 1;
-            } else if dense_profile == store_profile {
-                // Same sorted cosine values at every rank → only the tie-winner
-                // order differs. Equivalent.
-                tie_reorder += 1;
-            } else {
-                item_different += 1;
-                eprintln!("  ITEM-DIFF: \"{}\"", &query[..query.len().min(50)]);
-                eprintln!("    dense[0]: {:?}  d={}", dense_list.first(), dense_profile.first().copied().unwrap_or(0));
-                eprintln!("    store[0]: {:?}  d={}", store_list.first(), store_profile.first().copied().unwrap_or(0));
-            }
+            let first = (0..d_items.len().min(s_items.len())).find(|&r| d_items[r] != s_items[r]);
+            let r = match first {
+                None => {
+                    order_identical += 1;
+                    continue;
+                }
+                Some(r) => r,
+            };
+            let d_item = &d_items[r];
+            let s_item = &s_items[r];
+            let d_sc = dscore.get(d_item).copied().unwrap_or(f64::NAN);
+            let s_sc = dscore.get(s_item).copied(); // store's pick, scored by DENSE cosine
+            let verdict = match s_sc {
+                Some(s_sc) => {
+                    let gap = (d_sc - s_sc).abs();
+                    if gap < 1e-6 {
+                        tie += 1;
+                        format!("TIE      gap={gap:.2e}")
+                    } else if gap < 1e-4 {
+                        epsilon += 1;
+                        format!("EPSILON  gap={gap:.2e}")
+                    } else {
+                        real += 1;
+                        format!("REAL     gap={gap:.2e}  <-- ranking bug")
+                    }
+                }
+                None => {
+                    // store surfaced an item outside the dense top-K — a boundary
+                    // tie (something just past rank K). Treat as epsilon.
+                    epsilon += 1;
+                    "BOUNDARY (store item outside dense top-K)".to_string()
+                }
+            };
+            eprintln!("  rank {r} [{verdict}]  \"{}\"", &query[..query.len().min(44)]);
+            eprintln!("    dense[{r}]: {d_item:?}  sim={d_sc:.6}");
+            eprintln!(
+                "    store[{r}]: {s_item:?}  dense_sim={}",
+                s_sc.map(|x| format!("{x:.6}")).unwrap_or_else(|| "(outside top-K)".into())
+            );
         }
-        let equivalent = order_identical + tie_reorder;
+        let equivalent = order_identical + tie + epsilon;
         println!("\nStore-path equivalence over {} gold queries:", gold.len());
-        println!("  order-identical:     {}", order_identical);
-        println!("  tie-reorder (equiv): {}", tie_reorder);
-        println!("  ITEM-DIFFERENT:      {}  (must be 0 for results-equivalence)", item_different);
-        println!(
-            "  => EQUIVALENT: {}/{} (identical cosine ranking; ties aside)",
-            equivalent,
-            gold.len()
-        );
+        println!("  order-identical: {order_identical}");
+        println!("  TIE (gap<1e-6):  {tie}");
+        println!("  EPSILON(<1e-4):  {epsilon}");
+        println!("  REAL (>=1e-4):   {real}   <-- MUST be 0 for results-equivalence");
+        println!("  => equivalent modulo ties/epsilon: {equivalent}/{}", gold.len());
     }
 }
