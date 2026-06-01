@@ -124,3 +124,8 @@ pub use index::{BuildOptions, SearchOptions as IndexSearchOptions, SemanticIndex
 // TLDR-lwg: this module was never declared, so it shipped uncompiled and unwired.
 pub mod enrichment;
 pub use enrichment::{build_embedding_text, enrich_chunks, EmbeddingUnit};
+
+// TLDR-l5d: usearch-backed vector store (key u64 -> f32 vector). Step 1 is the
+// dependency smoke test + index helper; sidecar/manifest/crash-safe-save follow
+// (docs/INCREMENTAL_REINDEX_DESIGN.md §4/§7).
+pub mod vector_store;
