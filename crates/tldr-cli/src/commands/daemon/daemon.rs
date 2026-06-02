@@ -35,12 +35,9 @@ use super::types::DEFAULT_REINDEX_THRESHOLD;
 #[cfg(feature = "semantic")]
 use tldr_core::config::TldrConfig;
 #[cfg(feature = "semantic")]
-use tldr_core::semantic::{
-    load_or_build_store, query_store, store_dir_for, BuildOptions, CacheConfig, EmbeddingModel,
-    IndexSearchOptions,
-};
+use tldr_core::semantic::{EmbeddingModel, IndexSearchOptions};
 #[cfg(feature = "semantic")]
-use tldr_core::semantic::vector_store::VectorStore;
+use super::index_manager::IndexManager;
 use tldr_core::{
     architecture_analysis, build_project_call_graph, change_impact, collect_all_functions,
     dead_code_analysis, detect_or_parse_language, extract_file, find_importers, get_cfg_context,
@@ -122,12 +119,10 @@ pub struct TLDRDaemon {
     last_activity: Arc<RwLock<Instant>>,
     /// Number of indexed files (for status reporting)
     indexed_files: Arc<RwLock<usize>>,
-    /// Resident vector store + its model (built lazily on first query or warm,
-    /// invalidated on Notify). `std::sync::Mutex` because build/search runs
-    /// inside `spawn_blocking`. Migration to `RwLock` for concurrent reads is
-    /// TLDR-ac0.1.
+    /// Resident vector store with read/write split (TLDR-ac0.1). Concurrent
+    /// queries take a shared read lock; build and invalidate take a write lock.
     #[cfg(feature = "semantic")]
-    semantic_store: Arc<std::sync::Mutex<Option<(EmbeddingModel, VectorStore)>>>,
+    semantic_store: Arc<IndexManager>,
 }
 
 impl TLDRDaemon {
@@ -152,7 +147,7 @@ impl TLDRDaemon {
             last_activity: Arc::new(RwLock::new(Instant::now())),
             indexed_files: Arc::new(RwLock::new(0)),
             #[cfg(feature = "semantic")]
-            semantic_store: Arc::new(std::sync::Mutex::new(None)),
+            semantic_store: Arc::new(IndexManager::new()),
         }
     }
 
@@ -459,34 +454,11 @@ impl TLDRDaemon {
                 {
                     match self.resolve_semantic_model(None) {
                         Ok(model) => {
-                            let store_arc = Arc::clone(&self.semantic_store);
+                            let mgr = Arc::clone(&self.semantic_store);
                             let project = self.project.clone();
-                            let res = tokio::task::spawn_blocking(
-                                move || -> Result<bool, String> {
-                                    let mut guard = store_arc
-                                        .lock()
-                                        .map_err(|e| format!("lock poisoned: {e}"))?;
-                                    if guard.as_ref().is_some_and(|(m, _)| *m == model) {
-                                        return Ok(false);
-                                    }
-                                    let build_opts = BuildOptions {
-                                        model,
-                                        show_progress: false,
-                                        use_cache: true,
-                                        ..Default::default()
-                                    };
-                                    let store_dir = store_dir_for(&project);
-                                    let store = load_or_build_store(
-                                        &project,
-                                        &store_dir,
-                                        &build_opts,
-                                        Some(CacheConfig::default()),
-                                    )
-                                    .map_err(|e| e.to_string())?;
-                                    *guard = Some((model, store));
-                                    Ok(true)
-                                },
-                            )
+                            let res = tokio::task::spawn_blocking(move || {
+                                mgr.warm(&project, model)
+                            })
                             .await;
                             match res {
                                 Ok(Ok(true)) => warmed.push("semantic_store"),
@@ -532,72 +504,18 @@ impl TLDRDaemon {
                     }
                 };
 
-                // Run on a blocking thread — build/search are sync CPU/IO work.
-                // The std Mutex is held only INSIDE this task so the event loop
-                // stays responsive (TLDR-atc / TLDR-qr9).
-                let store_arc = Arc::clone(&self.semantic_store);
+                let mgr = Arc::clone(&self.semantic_store);
                 let project = self.project.clone();
-                let join =
-                    tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
-                        let mut guard = store_arc
-                            .lock()
-                            .map_err(|e| format!("semantic store lock poisoned: {e}"))?;
-
-                        let needs_build = match guard.as_ref() {
-                            Some((m, _)) => *m != model,
-                            None => true,
-                        };
-                        if needs_build {
-                            let t_build = Instant::now();
-                            let build_opts = BuildOptions {
-                                model,
-                                show_progress: false,
-                                use_cache: true,
-                                ..Default::default()
-                            };
-                            let store_dir = store_dir_for(&project);
-                            let store = load_or_build_store(
-                                &project,
-                                &store_dir,
-                                &build_opts,
-                                Some(CacheConfig::default()),
-                            )
-                            .map_err(|e| format!("Failed to build vector store: {e}"))?;
-                            eprintln!(
-                                "[zxb-diag] store BUILD took {}ms (model {:?})",
-                                t_build.elapsed().as_millis(),
-                                model
-                            );
-                            *guard = Some((model, store));
-                        } else {
-                            eprintln!("[zxb-diag] store RESIDENT hit (model {:?})", model);
-                        }
-
-                        let t_search = Instant::now();
-                        let (_, store) = guard.as_ref().expect("store present after build");
-                        let search_opts = IndexSearchOptions {
-                            top_k,
-                            threshold: threshold.unwrap_or(0.0),
-                            include_snippet: true,
-                            snippet_lines: 5,
-                        };
-                        let report = query_store(
-                            store,
-                            &project,
-                            &query,
-                            &search_opts,
-                            model,
-                            Instant::now(),
-                        )
-                        .map_err(|e| format!("Semantic search failed: {e}"))?;
-                        eprintln!(
-                            "[zxb-diag] store SEARCH took {}ms",
-                            t_search.elapsed().as_millis()
-                        );
-                        serde_json::to_value(&report)
-                            .map_err(|e| format!("Serialization error: {e}"))
-                    })
-                    .await;
+                let join = tokio::task::spawn_blocking(move || {
+                    let search_opts = IndexSearchOptions {
+                        top_k,
+                        threshold: threshold.unwrap_or(0.0),
+                        include_snippet: true,
+                        snippet_lines: 5,
+                    };
+                    mgr.query(&project, &query, &search_opts, model)
+                })
+                .await;
 
                 match join {
                     Ok(Ok(value)) => DaemonResponse::Result(value),
@@ -1176,16 +1094,10 @@ impl TLDRDaemon {
         self.cache.invalidate_by_input(file_hash);
 
         // Invalidate the resident store so it rebuilds on next query.
-        // Take the lock on a blocking thread (TLDR-qr9).
         #[cfg(feature = "semantic")]
         {
-            let store = std::sync::Arc::clone(&self.semantic_store);
-            let _ = tokio::task::spawn_blocking(move || {
-                if let Ok(mut guard) = store.lock() {
-                    *guard = None;
-                }
-            })
-            .await;
+            let mgr = Arc::clone(&self.semantic_store);
+            let _ = tokio::task::spawn_blocking(move || mgr.invalidate()).await;
         }
 
         let threshold = self.config.auto_reindex_threshold;
@@ -2177,11 +2089,9 @@ mod tests {
             })
             .await;
 
-        // Verify store is populated
-        {
-            let store = daemon.semantic_store.lock().unwrap();
-            let _ = store.is_some();
-        }
+        // Store may or may not be warm (depends on ONNX model availability
+        // in the test env). The test cares about the invalidation below.
+        let _ = daemon.semantic_store.is_warm();
 
         // Notify a file change - should invalidate the store
         let _ = daemon
@@ -2191,13 +2101,10 @@ mod tests {
             .await;
 
         // Verify store was cleared
-        {
-            let store = daemon.semantic_store.lock().unwrap();
-            assert!(
-                store.is_none(),
-                "Semantic store should be invalidated after Notify"
-            );
-        }
+        assert!(
+            !daemon.semantic_store.is_warm(),
+            "Semantic store should be invalidated after Notify"
+        );
     }
 
     #[tokio::test]

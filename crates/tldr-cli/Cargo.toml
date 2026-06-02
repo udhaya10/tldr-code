@@ -45,6 +45,7 @@ md5 = { workspace = true }
 dunce = { workspace = true }
 tokio = { version = "1", features = ["net", "io-util", "sync", "rt-multi-thread", "macros", "time", "signal"] }
 dashmap = "5"
+parking_lot = "0.12"
 walkdir = "2"
 regex = "1"
 dirs = "5"

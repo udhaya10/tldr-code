@@ -3524,6 +3524,7 @@ dependencies = [
  "libc",
  "line-numbers",
  "md5",
+ "parking_lot",
  "paste",
  "predicates",
  "process_alive",

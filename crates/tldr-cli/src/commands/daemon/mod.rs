@@ -52,6 +52,8 @@ pub mod daemon_registry;
 #[path = "daemon.rs"]
 pub mod daemon_impl;
 pub mod error;
+#[cfg(feature = "semantic")]
+pub mod index_manager;
 pub mod ipc;
 pub mod list;
 pub mod notify;
