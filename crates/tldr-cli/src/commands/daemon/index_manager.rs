@@ -186,7 +186,7 @@ impl IndexManager {
 
         // Deletion: `Notify` can't always distinguish edit from delete (§5).
         if !(file.exists() && file.is_file()) {
-            let file_rel = root_relative(project, file);
+            let file_rel = deleted_file_rel(project, file);
             let mut guard = self.store.write();
             return match guard.as_mut() {
                 Some((m, store)) if *m == model => {
@@ -286,6 +286,33 @@ impl IndexManager {
     pub fn is_warm(&self) -> bool {
         self.store.read().is_some()
     }
+
+    /// Number of vectors in the resident store, or `None` if cold. A delta's
+    /// effect is observable here — an edit keeps the count (no orphaned keys),
+    /// a delete drops it by the file's chunk count.
+    pub fn store_len(&self) -> Option<usize> {
+        self.store.read().as_ref().map(|(_, s)| s.len())
+    }
+}
+
+/// Root-relative key for a **deleted** file. The file is gone, so
+/// [`root_relative`]'s canonicalize fallback can't run; derive the relative tail
+/// by a purely lexical strip against `project` **and** its canonical form. The
+/// build keyed by the lexical relative path, and a `Notify` sender that emits a
+/// canonicalized path still strips to the same tail (canonicalizing only
+/// rewrites the root prefix, not the relative remainder) — so deletes match the
+/// stored keys even under a symlinked root (the ss3 bug class). Falls back to
+/// `root_relative` (which warns) only if neither prefix matches.
+fn deleted_file_rel(project: &Path, file: &Path) -> String {
+    if let Ok(rel) = file.strip_prefix(project) {
+        return rel.to_string_lossy().replace('\\', "/");
+    }
+    if let Ok(croot) = project.canonicalize() {
+        if let Ok(rel) = file.strip_prefix(&croot) {
+            return rel.to_string_lossy().replace('\\', "/");
+        }
+    }
+    root_relative(project, file)
 }
 
 #[cfg(test)]

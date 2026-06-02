@@ -2129,6 +2129,73 @@ mod tests {
         );
     }
 
+    /// End-to-end delta through `handle_notify` (TLDR-t8f). Asserts the two
+    /// acceptance criteria a warmth-only check can't see — that an EDIT keeps
+    /// the vector count (delta keys match the build's, so no orphaned/phantom
+    /// vectors) and a DELETE removes all of the file's vectors. No-ops cleanly
+    /// when ONNX is unavailable (the store never warms; `store_len` is `None`).
+    #[cfg(feature = "semantic")]
+    #[tokio::test]
+    async fn test_semantic_delta_edit_keeps_count_and_delete_removes_all() {
+        let temp = tempfile::tempdir().unwrap();
+        let py = temp.path().join("m.py");
+        std::fs::write(
+            &py,
+            "def alpha(x):\n    return x + 1\n\ndef beta(y):\n    return y * 2\n",
+        )
+        .unwrap();
+        let daemon = TLDRDaemon::new(temp.path().to_path_buf(), DaemonConfig::default());
+
+        // Warm the store (builds iff ONNX is present in this env).
+        let _ = daemon
+            .handle_command(DaemonCommand::Semantic {
+                query: "alpha".to_string(),
+                top_k: 5,
+                model: None,
+                threshold: None,
+            })
+            .await;
+        let Some(len0) = daemon.semantic_store.store_len() else {
+            return; // No ONNX here — nothing to assert about deltas.
+        };
+        assert!(len0 >= 2, "two functions should be indexed, got {len0}");
+
+        // EDIT alpha's body -> the delta re-embeds alpha, leaves beta as a
+        // metadata-only entry, removes nothing. The COUNT must be unchanged: a
+        // changed count would mean the delta computed different keys than the
+        // build and orphaned/duplicated vectors (the ss3 divergence class).
+        std::fs::write(
+            &py,
+            "def alpha(x):\n    return x + 100\n\ndef beta(y):\n    return y * 2\n",
+        )
+        .unwrap();
+        let _ = daemon
+            .handle_command(DaemonCommand::Notify { file: py.clone() })
+            .await;
+        assert_eq!(
+            daemon.semantic_store.store_len(),
+            Some(len0),
+            "edit delta must keep the vector count (keys match the build — no orphans)"
+        );
+
+        // DELETE the only file -> every one of its vectors removed (acceptance:
+        // "deleted functions' vectors are removed"). This exercises the deleted-
+        // path file_rel derivation end-to-end, which the unit test bypasses.
+        std::fs::remove_file(&py).unwrap();
+        let _ = daemon
+            .handle_command(DaemonCommand::Notify { file: py.clone() })
+            .await;
+        assert_eq!(
+            daemon.semantic_store.store_len(),
+            Some(0),
+            "delete delta must remove all of the file's vectors"
+        );
+        assert!(
+            daemon.semantic_store.is_warm(),
+            "store stays warm across edit + delete deltas"
+        );
+    }
+
     #[tokio::test]
     async fn test_daemon_warm_wires_caches() {
         let temp = tempfile::tempdir().unwrap();
