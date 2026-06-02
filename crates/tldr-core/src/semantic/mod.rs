@@ -94,6 +94,7 @@ pub use types::{
     // Result types
     SemanticSearchResult,
     SimilarityReport,
+    store_dir_for,
 };
 
 // Phase 2: Similarity
@@ -130,8 +131,7 @@ pub use enrichment::{build_embedding_text, enrich_chunks, EmbeddingUnit};
 // (docs/INCREMENTAL_REINDEX_DESIGN.md §4/§7).
 pub mod vector_store;
 
-// TLDR-m01: store-backed semantic search — the production bridge from a query to
-// the usearch VectorStore, with a transparent fall back to the in-memory
-// SemanticIndex. First production caller of VectorStore::load.
+// TLDR-m01/zxb: store-backed semantic search — the ONLY search path (TLDR-lx7).
+// No SemanticIndex fallback. VectorStore works or the user gets an error.
 pub mod store_search;
-pub use store_search::search_with_store;
+pub use store_search::{load_or_build_store, query_store, search_with_store};

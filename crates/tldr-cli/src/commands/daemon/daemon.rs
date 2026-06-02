@@ -36,8 +36,11 @@ use super::types::DEFAULT_REINDEX_THRESHOLD;
 use tldr_core::config::TldrConfig;
 #[cfg(feature = "semantic")]
 use tldr_core::semantic::{
-    BuildOptions, CacheConfig, EmbeddingModel, IndexSearchOptions, SemanticIndex,
+    load_or_build_store, query_store, store_dir_for, BuildOptions, CacheConfig, EmbeddingModel,
+    IndexSearchOptions,
 };
+#[cfg(feature = "semantic")]
+use tldr_core::semantic::vector_store::VectorStore;
 use tldr_core::{
     architecture_analysis, build_project_call_graph, change_impact, collect_all_functions,
     dead_code_analysis, detect_or_parse_language, extract_file, find_importers, get_cfg_context,
@@ -119,13 +122,12 @@ pub struct TLDRDaemon {
     last_activity: Arc<RwLock<Instant>>,
     /// Number of indexed files (for status reporting)
     indexed_files: Arc<RwLock<usize>>,
-    /// Persistent semantic index (built lazily on first query, invalidated on
-    /// Notify). A `std::sync::Mutex` (not tokio `RwLock`) because the heavy
-    /// build/search runs inside `spawn_blocking` (a sync context) and
-    /// `SemanticIndex::search` needs `&mut self` (exclusive) anyway. A future
-    /// `RwLock<VectorStore>` migration for concurrent reads is TLDR-ac0.1.
+    /// Resident vector store + its model (built lazily on first query or warm,
+    /// invalidated on Notify). `std::sync::Mutex` because build/search runs
+    /// inside `spawn_blocking`. Migration to `RwLock` for concurrent reads is
+    /// TLDR-ac0.1.
     #[cfg(feature = "semantic")]
-    semantic_index: Arc<std::sync::Mutex<Option<SemanticIndex>>>,
+    semantic_store: Arc<std::sync::Mutex<Option<(EmbeddingModel, VectorStore)>>>,
 }
 
 impl TLDRDaemon {
@@ -150,7 +152,7 @@ impl TLDRDaemon {
             last_activity: Arc::new(RwLock::new(Instant::now())),
             indexed_files: Arc::new(RwLock::new(0)),
             #[cfg(feature = "semantic")]
-            semantic_index: Arc::new(std::sync::Mutex::new(None)),
+            semantic_store: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -449,27 +451,23 @@ impl TLDRDaemon {
                     }
                 }
 
-                // 4. Warm semantic index using the project-config model, so a
-                //    later `Semantic` query with the same resolved model hits
-                //    this warm index instead of rebuilding (TLDR-atc). Warming
-                //    with `BuildOptions::default()` (ArcticM) while the config
-                //    asks for ArcticL would warm the wrong model and force a
-                //    rebuild on the first real query.
+                // 4. Warm the vector store: load from disk (near-instant if
+                //    fresh) or build+save on miss. Uses the project-config
+                //    model so a later query with the same model hits the
+                //    resident store (TLDR-atc / TLDR-zxb).
                 #[cfg(feature = "semantic")]
                 {
                     match self.resolve_semantic_model(None) {
                         Ok(model) => {
-                            // Build off the async executor (see the Semantic
-                            // handler) so warming stays responsive/stoppable.
-                            let idx_arc = Arc::clone(&self.semantic_index);
+                            let store_arc = Arc::clone(&self.semantic_store);
                             let project = self.project.clone();
                             let res = tokio::task::spawn_blocking(
                                 move || -> Result<bool, String> {
-                                    let mut guard = idx_arc
+                                    let mut guard = store_arc
                                         .lock()
                                         .map_err(|e| format!("lock poisoned: {e}"))?;
-                                    if guard.as_ref().is_some_and(|idx| idx.model() == model) {
-                                        return Ok(false); // already warm with this model
+                                    if guard.as_ref().is_some_and(|(m, _)| *m == model) {
+                                        return Ok(false);
                                     }
                                     let build_opts = BuildOptions {
                                         model,
@@ -477,25 +475,27 @@ impl TLDRDaemon {
                                         use_cache: true,
                                         ..Default::default()
                                     };
-                                    let idx = SemanticIndex::build(
+                                    let store_dir = store_dir_for(&project);
+                                    let store = load_or_build_store(
                                         &project,
-                                        build_opts,
+                                        &store_dir,
+                                        &build_opts,
                                         Some(CacheConfig::default()),
                                     )
                                     .map_err(|e| e.to_string())?;
-                                    *guard = Some(idx);
+                                    *guard = Some((model, store));
                                     Ok(true)
                                 },
                             )
                             .await;
                             match res {
-                                Ok(Ok(true)) => warmed.push("semantic_index"),
-                                Ok(Ok(false)) => warmed.push("semantic_index (cached)"),
-                                Ok(Err(e)) => errors.push(format!("semantic_index: {}", e)),
-                                Err(e) => errors.push(format!("semantic_index: {}", e)),
+                                Ok(Ok(true)) => warmed.push("semantic_store"),
+                                Ok(Ok(false)) => warmed.push("semantic_store (cached)"),
+                                Ok(Err(e)) => errors.push(format!("semantic_store: {}", e)),
+                                Err(e) => errors.push(format!("semantic_store: {}", e)),
                             }
                         }
-                        Err(e) => errors.push(format!("semantic_index: {}", e)),
+                        Err(e) => errors.push(format!("semantic_store: {}", e)),
                     }
                 }
 
@@ -522,8 +522,6 @@ impl TLDRDaemon {
                 model,
                 threshold,
             } => {
-                // Resolve the model exactly like the cold CLI path so the warm
-                // result ranks identically (TLDR-atc).
                 let model = match self.resolve_semantic_model(model.as_deref()) {
                     Ok(m) => m,
                     Err(e) => {
@@ -534,28 +532,19 @@ impl TLDRDaemon {
                     }
                 };
 
-                // Run the (potentially heavy) build + ONNX search on a BLOCKING
-                // thread, NOT the async executor. `SemanticIndex::build` and
-                // `index.search` are synchronous CPU/IO work; running them inline
-                // on a tokio worker starved the accept/idle/shutdown loops, so a
-                // `daemon stop` issued mid-build hung until the build finished
-                // (and the resident-index lock stayed held the whole time). The
-                // std Mutex is held only INSIDE this blocking task, so concurrent
-                // queries serialize on the blocking pool while the event loop
-                // stays responsive and stoppable (TLDR-atc).
-                let idx_arc = Arc::clone(&self.semantic_index);
+                // Run on a blocking thread — build/search are sync CPU/IO work.
+                // The std Mutex is held only INSIDE this task so the event loop
+                // stays responsive (TLDR-atc / TLDR-qr9).
+                let store_arc = Arc::clone(&self.semantic_store);
                 let project = self.project.clone();
                 let join =
                     tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
-                        let mut guard = idx_arc
+                        let mut guard = store_arc
                             .lock()
-                            .map_err(|e| format!("semantic index lock poisoned: {e}"))?;
+                            .map_err(|e| format!("semantic store lock poisoned: {e}"))?;
 
-                        // (Re)build lazily when the slot is empty OR the resident
-                        // index was built with a different model — the single slot
-                        // must never serve stale-model vectors after a switch.
                         let needs_build = match guard.as_ref() {
-                            Some(idx) => idx.model() != model,
+                            Some((m, _)) => *m != model,
                             None => true,
                         };
                         if needs_build {
@@ -566,38 +555,43 @@ impl TLDRDaemon {
                                 use_cache: true,
                                 ..Default::default()
                             };
-                            let idx = SemanticIndex::build(
+                            let store_dir = store_dir_for(&project);
+                            let store = load_or_build_store(
                                 &project,
-                                build_opts,
+                                &store_dir,
+                                &build_opts,
                                 Some(CacheConfig::default()),
                             )
-                            .map_err(|e| format!("Failed to build semantic index: {e}"))?;
+                            .map_err(|e| format!("Failed to build vector store: {e}"))?;
                             eprintln!(
-                                "[atc-diag] semantic BUILD took {}ms (model {:?})",
+                                "[zxb-diag] store BUILD took {}ms (model {:?})",
                                 t_build.elapsed().as_millis(),
                                 model
                             );
-                            *guard = Some(idx);
+                            *guard = Some((model, store));
                         } else {
-                            eprintln!("[atc-diag] semantic RESIDENT hit (model {:?})", model);
+                            eprintln!("[zxb-diag] store RESIDENT hit (model {:?})", model);
                         }
 
-                        // Threshold defaults to 0.0 (no score cutoff), matching the
-                        // cold CLI default (TLDR-h27) so warm doesn't hide correct
-                        // top-ranked matches.
                         let t_search = Instant::now();
-                        let index = guard.as_mut().expect("index present after build");
+                        let (_, store) = guard.as_ref().expect("store present after build");
                         let search_opts = IndexSearchOptions {
                             top_k,
                             threshold: threshold.unwrap_or(0.0),
                             include_snippet: true,
                             snippet_lines: 5,
                         };
-                        let report = index
-                            .search(&query, &search_opts)
-                            .map_err(|e| format!("Semantic search failed: {e}"))?;
+                        let report = query_store(
+                            store,
+                            &project,
+                            &query,
+                            &search_opts,
+                            model,
+                            Instant::now(),
+                        )
+                        .map_err(|e| format!("Semantic search failed: {e}"))?;
                         eprintln!(
-                            "[atc-diag] semantic SEARCH took {}ms",
+                            "[zxb-diag] store SEARCH took {}ms",
                             t_search.elapsed().as_millis()
                         );
                         serde_json::to_value(&report)
@@ -1181,23 +1175,13 @@ impl TLDRDaemon {
         let file_hash = super::salsa::hash_path(&file);
         self.cache.invalidate_by_input(file_hash);
 
-        // Invalidate the resident semantic index so it rebuilds on next query.
-        // Take the lock on a BLOCKING thread, never the async executor: the
-        // Semantic handler holds this same std::sync::Mutex across a multi-second
-        // build inside spawn_blocking, so a `.lock()` on the async path would park
-        // a tokio worker for the whole build (TLDR-qr9). Await the blocking task
-        // so invalidation completes before we respond.
-        //
-        // Ordering caveat: a Semantic build/search already holding the lock when
-        // this Notify arrives finishes against the pre-notify index before this
-        // clears it; the next query then rebuilds. This matches the prior mutex
-        // ordering — only the async-worker parking is fixed. The event-driven
-        // delta path (TLDR-ac0.2) supersedes this coarse invalidate entirely.
+        // Invalidate the resident store so it rebuilds on next query.
+        // Take the lock on a blocking thread (TLDR-qr9).
         #[cfg(feature = "semantic")]
         {
-            let idx = std::sync::Arc::clone(&self.semantic_index);
+            let store = std::sync::Arc::clone(&self.semantic_store);
             let _ = tokio::task::spawn_blocking(move || {
-                if let Ok(mut guard) = idx.lock() {
+                if let Ok(mut guard) = store.lock() {
                     *guard = None;
                 }
             })
@@ -2175,7 +2159,7 @@ mod tests {
 
     #[cfg(feature = "semantic")]
     #[tokio::test]
-    async fn test_semantic_index_invalidated_on_notify() {
+    async fn test_semantic_store_invalidated_on_notify() {
         let temp = tempfile::tempdir().unwrap();
         let py_file = temp.path().join("example.py");
         std::fs::write(&py_file, "def compute(x):\n    return x * 2\n").unwrap();
@@ -2193,27 +2177,25 @@ mod tests {
             })
             .await;
 
-        // Verify index is populated
+        // Verify store is populated
         {
-            let idx = daemon.semantic_index.lock().unwrap();
-            // Index may be Some (if ONNX model available) or None (if build failed)
-            // We just verify the field exists and is accessible
-            let _ = idx.is_some();
+            let store = daemon.semantic_store.lock().unwrap();
+            let _ = store.is_some();
         }
 
-        // Notify a file change - should invalidate the index
+        // Notify a file change - should invalidate the store
         let _ = daemon
             .handle_command(DaemonCommand::Notify {
                 file: py_file.clone(),
             })
             .await;
 
-        // Verify index was cleared
+        // Verify store was cleared
         {
-            let idx = daemon.semantic_index.lock().unwrap();
+            let store = daemon.semantic_store.lock().unwrap();
             assert!(
-                idx.is_none(),
-                "Semantic index should be invalidated after Notify"
+                store.is_none(),
+                "Semantic store should be invalidated after Notify"
             );
         }
     }

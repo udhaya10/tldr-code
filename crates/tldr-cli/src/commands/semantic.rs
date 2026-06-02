@@ -1,12 +1,8 @@
 //! Semantic command - Semantic code search
 //!
 //! Performs natural language search over code using dense embeddings.
-//! Builds an in-memory index and returns semantically similar code chunks.
-//
-// TLDR-AUDIT: This is the REAL, shipping semantic path — it drives the
-//   in-process `SemanticIndex` (fastembed/Arctic). TLDR-cs5 deleted the dead
-//   HTTP stub; TLDR-4er wired RRF fusion — `--hybrid` here fuses this dense
-//   index with BM25 via `hybrid_search_with_index`.
+//! Dense-only path uses the usearch VectorStore (TLDR-zxb); hybrid (--hybrid)
+//! still uses SemanticIndex for BM25 fusion (TLDR-zxb.5).
 
 use std::path::PathBuf;
 
@@ -15,7 +11,8 @@ use clap::Args;
 
 use tldr_core::config::{find_project_root, TldrConfig};
 use tldr_core::semantic::{
-    BuildOptions, CacheConfig, ChunkGranularity, EmbeddingModel, IndexSearchOptions, SemanticIndex,
+    BuildOptions, CacheConfig, ChunkGranularity, EmbeddingModel, IndexSearchOptions,
+    SemanticIndex, search_with_store, store_dir_for,
 };
 use tldr_core::{hybrid_search_with_index, HybridSearchReport, Language};
 
@@ -83,12 +80,8 @@ impl SemanticArgs {
         let model = EmbeddingModel::resolve(self.model.as_deref(), &config)
             .map_err(|e| anyhow::anyhow!("{}", e))?;
 
-        // TLDR-atc: when a warm daemon is running, route the query to its
-        // resident `SemanticIndex` instead of paying the cold ~1.1GB cache load
-        // + ONNX model reload here. The daemon resolves the same model from the
-        // same config (no `model` key => config default), applies the same
-        // threshold default (0.0, TLDR-h27), and returns the identical
-        // `SemanticSearchReport`, so warm and cold output match.
+        // TLDR-atc: when a warm daemon is running, route the query there
+        // instead of paying the cold store load + ONNX model reload.
         //
         // We skip routing for:
         //   * `--hybrid`   — the daemon has no hybrid path; keep that
@@ -127,12 +120,6 @@ impl SemanticArgs {
             }
         }
 
-        writer.progress(&format!(
-            "Building semantic index for {} ({:?} model)...",
-            self.path.display(),
-            model
-        ));
-
         // Build options
         let build_opts = BuildOptions {
             model,
@@ -149,17 +136,15 @@ impl SemanticArgs {
             Some(CacheConfig::default())
         };
 
-        // Build index
-        let mut index = SemanticIndex::build(&self.path, build_opts, cache_config)?;
-
-        writer.progress(&format!(
-            "Searching {} chunks for '{}'...",
-            index.len(),
-            self.query
-        ));
-
-        // TLDR-4er: hybrid mode fuses this dense index with BM25 via RRF.
+        // TLDR-4er: hybrid mode still uses SemanticIndex for BM25 fusion
+        // (TLDR-zxb.5 will migrate this to VectorStore).
         if self.hybrid {
+            writer.progress(&format!(
+                "Building semantic index for {} ({:?} model)...",
+                self.path.display(),
+                model
+            ));
+            let mut index = SemanticIndex::build(&self.path, build_opts, cache_config)?;
             let language = Language::from_directory(&self.path).unwrap_or(Language::Python);
             let report =
                 hybrid_search_with_index(&mut index, &self.query, &self.path, language, self.top)?;
@@ -171,18 +156,29 @@ impl SemanticArgs {
             return Ok(());
         }
 
-        // Search options
+        // Dense-only path: VectorStore (TLDR-zxb, no fallback per TLDR-lx7).
+        writer.progress(&format!(
+            "Searching {} ({:?} model)...",
+            self.path.display(),
+            model
+        ));
+
+        let store_dir = store_dir_for(&self.path);
         let search_opts = IndexSearchOptions {
             top_k: self.top,
             threshold: self.threshold,
             include_snippet: true,
             snippet_lines: 5,
         };
+        let report = search_with_store(
+            &self.path,
+            &store_dir,
+            &self.query,
+            &search_opts,
+            &build_opts,
+            cache_config,
+        )?;
 
-        // Perform search
-        let report = index.search(&self.query, &search_opts)?;
-
-        // Output based on format
         if writer.is_text() {
             let text = format_semantic_text(&report, self.threshold);
             writer.write_text(&text)?;

@@ -1,7 +1,8 @@
-//! Embed command - Generate embeddings for code
+//! Embed command - Build and persist the usearch vector store for a project.
 //!
-//! Generates dense embeddings for code chunks using Snowflake Arctic models.
-//! Supports file-level or function-level granularity with optional caching.
+//! Replaces the legacy chunk→EmbeddingCache→JSON flow with VectorStore::build+save
+//! (TLDR-zxb). The EmbeddingCache is still used internally by VectorStore::build
+//! as the content-hash dedup layer (unchanged chunks are not re-embedded).
 
 use std::path::PathBuf;
 use std::time::Instant;
@@ -11,8 +12,8 @@ use clap::Args;
 
 use tldr_core::config::{find_project_root, TldrConfig};
 use tldr_core::semantic::{
-    chunk_code, CacheConfig, ChunkGranularity, ChunkOptions, EmbedReport, EmbeddedChunk, Embedder,
-    EmbeddingCache, EmbeddingModel,
+    load_or_build_store, store_dir_for, BuildOptions, CacheConfig, ChunkGranularity, EmbedReport,
+    EmbeddingModel,
 };
 
 use crate::output::{OutputFormat, OutputWriter};
@@ -43,15 +44,8 @@ pub struct EmbedArgs {
     /// global `--lang <LANG>` flag above for name-based single-language
     /// selection. Passing an unknown extension silently drops that entry
     /// from the filter.
-    ///
-    /// Renamed from `--lang` (pre-VAL-009) to avoid a clap TypeId collision
-    /// with the global `--lang` arg which is `Option<Language>`.
     #[arg(long = "langs", value_delimiter = ',')]
     pub langs: Option<Vec<String>>,
-
-    /// Include embedding vectors in output
-    #[arg(long)]
-    pub include_vectors: bool,
 
     /// Disable embedding cache
     #[arg(long)]
@@ -70,7 +64,6 @@ impl EmbedArgs {
         let model = EmbeddingModel::resolve(self.model.as_deref(), &config)
             .map_err(|e| anyhow::anyhow!("{}", e))?;
 
-        // Parse granularity
         let granularity = match self.granularity.as_str() {
             "file" => ChunkGranularity::File,
             "function" => ChunkGranularity::Function,
@@ -83,123 +76,49 @@ impl EmbedArgs {
         };
 
         writer.progress(&format!(
-            "Embedding code in {} ({:?} granularity, {:?} model)...",
+            "Building vector store for {} ({:?} granularity, {:?} model)...",
             self.path.display(),
             granularity,
             model
         ));
 
-        // Convert language filters
-        let languages = self.langs.as_ref().map(|langs| {
-            langs
-                .iter()
-                .filter_map(|s| tldr_core::Language::from_extension(s))
-                .collect()
-        });
-
-        // Chunk the code
-        let chunk_opts = ChunkOptions {
+        let build_opts = BuildOptions {
+            model,
             granularity,
-            languages,
-            ..Default::default()
+            languages: self.langs.clone(),
+            show_progress: !quiet,
+            use_cache: !self.no_cache,
         };
 
-        let chunk_result = chunk_code(&self.path, &chunk_opts)?;
-
-        writer.progress(&format!(
-            "Found {} chunks, generating embeddings...",
-            chunk_result.chunks.len()
-        ));
-
-        // Initialize cache (before embedder — skip ONNX load on 100% cache hit)
-        let mut cache = if self.no_cache {
+        let cache_config = if self.no_cache {
             None
         } else {
-            let mut c = EmbeddingCache::open(CacheConfig::default())?;
-            // TLDR-atc: key entries by path RELATIVE to this embed root, matching
-            // what `SemanticIndex::build` writes (used by `semantic`/`similar`).
-            // Without this, `embed` would write full-path keys that `semantic`
-            // never hits — breaking cross-command cache sharing and forcing a
-            // re-embed. `chunk_code` above is rooted at `self.path`, so strip it.
-            c.set_key_root(&self.path);
-            Some(c)
+            Some(CacheConfig::default())
         };
 
-        let mut cache_hits = 0usize;
-        let mut cache_misses = 0usize;
-        let mut embedded_chunks: Vec<EmbeddedChunk> = Vec::with_capacity(chunk_result.chunks.len());
+        let store_dir = store_dir_for(&self.path);
+        let store = load_or_build_store(&self.path, &store_dir, &build_opts, cache_config)?;
 
-        // Phase 1: Separate cached vs uncached chunks
-        let mut uncached_indices: Vec<usize> = Vec::new();
-
-        for (i, chunk) in chunk_result.chunks.iter().enumerate() {
-            if let Some(ref mut c) = cache {
-                if let Some(e) = c.get(chunk, model) {
-                    cache_hits += 1;
-                    embedded_chunks.push(EmbeddedChunk {
-                        chunk: chunk.clone(),
-                        embedding: e,
-                    });
-                    continue;
-                }
-            }
-            cache_misses += 1;
-            // Store a placeholder; we'll fill the embedding after batch
-            embedded_chunks.push(EmbeddedChunk {
-                chunk: chunk.clone(),
-                embedding: Vec::new(),
-            });
-            uncached_indices.push(i);
-        }
-
-        // Phase 2: Batch embed all uncached chunks at once (lazy model init)
-        if !uncached_indices.is_empty() {
-            let mut embedder = Embedder::new(model)?;
-            let texts: Vec<&str> = uncached_indices
-                .iter()
-                .map(|&i| chunk_result.chunks[i].content.as_str())
-                .collect();
-            let embeddings = embedder.embed_batch(texts, true)?;
-
-            for (idx, embedding) in uncached_indices.iter().zip(embeddings) {
-                if let Some(ref mut c) = cache {
-                    c.put(&chunk_result.chunks[*idx], embedding.clone(), model);
-                }
-                embedded_chunks[*idx].embedding = embedding;
-            }
-        }
-
-        // Flush cache
-        if let Some(ref mut c) = cache {
-            c.flush()?;
-        }
-
+        let total_chunks = store.len();
         let latency_ms = start.elapsed().as_millis() as u64;
 
-        // Build report
         let report = EmbedReport {
             path: self.path.clone(),
             model,
             granularity,
-            chunks_embedded: cache_misses,
-            chunks_cached: cache_hits,
-            chunks: if self.include_vectors {
-                Some(embedded_chunks)
-            } else {
-                None
-            },
+            chunks_embedded: total_chunks,
+            chunks_cached: 0,
+            chunks: None,
             latency_ms,
         };
 
         writer.progress(&format!(
-            "Embedded {} chunks ({} cached, {} new) in {}ms",
-            cache_hits + cache_misses,
-            cache_hits,
-            cache_misses,
-            latency_ms
+            "Built store with {} chunks in {}ms (saved to {})",
+            total_chunks,
+            latency_ms,
+            store_dir.display()
         ));
 
-        // Output based on format
         if let Some(ref output_path) = self.output {
             let file = std::fs::File::create(output_path)?;
             serde_json::to_writer_pretty(file, &report)?;
@@ -211,4 +130,3 @@ impl EmbedArgs {
         Ok(())
     }
 }
-

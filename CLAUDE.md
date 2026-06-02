@@ -55,11 +55,10 @@ bd close <id>         # Complete work
 ## Build & Test
 
 ```bash
-cargo build                          # Default build (no semantic search)
-cargo build --features semantic      # Build with embedding/semantic search
+cargo build                          # Default build (includes semantic search)
 cargo test -p tldr-core              # Core tests
 cargo test -p tldr-cli               # CLI tests
-cargo test --features semantic       # Full test suite including semantic
+cargo test                           # Full test suite
 ```
 
 ## Optional: Diagnostic Tools

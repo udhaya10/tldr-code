@@ -1,59 +1,61 @@
-//! Store-backed semantic search (TLDR-m01): the production bridge from a query
-//! to the usearch [`VectorStore`], with a transparent fall back to the in-memory
-//! [`SemanticIndex`].
+//! Store-backed semantic search (TLDR-m01 / TLDR-zxb): the production search
+//! path using the usearch [`VectorStore`].
 //!
-//! This is the first production caller of [`VectorStore::load`]. The store proved
-//! results-equivalent to the dense `SemanticIndex` path (TLDR-l5d, 52/52), so this
-//! helper returns the SAME [`SemanticSearchReport`] **shape** the index does.
+//! ## No fallback (TLDR-lx7)
+//!
+//! This is the ONLY search path. There is no silent degradation to the legacy
+//! in-memory `SemanticIndex` or JSON cache. If the store cannot load, build, or
+//! search, the error propagates with a detailed message so the user can fix it.
+//! A tool should run at 100% performance or tell you why it can't.
+//!
+//! ## Two entry points
+//!
+//! - [`search_with_store`] — cold CLI one-shot: loads or builds the store,
+//!   checks freshness, embeds the query, searches. One call does everything.
+//! - [`query_store`] — daemon reuse: takes an already-loaded [`VectorStore`]
+//!   reference, embeds the query, searches. No load/build/freshness overhead
+//!   per query — the daemon manages the resident store and freshness separately.
 //!
 //! ## Freshness gate (TLDR-kkt)
 //!
 //! [`VectorStore::load`] only verifies persisted manifest/index integrity, not
-//! whether the SOURCE changed since the store was built — so this helper adds a
-//! coarse "detect drift → full rebuild" gate (the §7.3 reconcile; the per-file
-//! incremental delta is the separate t8f optimization). After a clean load it
-//! compares the store's build-time corpus digest against
-//! [`compute_corpus_digest`] over the current `root`; on any difference (a file
-//! added/removed, or any file's mtime/size changed) it REBUILDS instead of serving
-//! stale rankings. The digest is a stat-only walk (no parse), computed over the
-//! pre-parse candidate set, so a supported file that yields zero chunks counts
-//! identically at build and check and never reads as a phantom addition.
+//! whether the SOURCE changed since the store was built — so the cold path adds
+//! a coarse "detect drift → full rebuild" gate. After a clean load it compares
+//! the store's build-time corpus digest against [`compute_corpus_digest`] over
+//! the current `root`; on any difference (a file added/removed, or any file's
+//! mtime/size changed) it REBUILDS instead of serving stale rankings. The digest
+//! is a stat-only walk (no parse), computed over the pre-parse candidate set, so
+//! a supported file that yields zero chunks counts identically at build and check.
 //!
-//! Residual (design §7.3): an edit with the SAME mtime-second AND SAME size is not
-//! detected; self-heals on the next real edit, escape hatch = manual rebuild.
+//! Residual (design §7.3): an edit with the SAME mtime-second AND SAME size is
+//! not detected; self-heals on the next real edit, escape hatch = manual rebuild.
 //!
-//! Control flow (Codex + advisor reviewed):
+//! ## Control flow
+//!
 //! - `load()` fails (no/torn/incompatible generation) → REBUILD via
-//!   [`VectorStore::build`] then best-effort `save()`. A rebuild is the designed
-//!   response to any [`VectorStore::load`] failure (it already falls back across
-//!   retained generations internally and only errors when none verify).
-//! - `build()`, query-`embed`, or `search()` errors → fall back to [`SemanticIndex`]
-//!   (the store is unusable for some environmental reason; never surface the error).
-//! - `save()` errors → warn and keep going with the in-RAM store; persistence is an
-//!   optimization for the NEXT query, not required for THIS one.
-//! - An empty/whitespace query → empty report (the store would otherwise score every
-//!   chunk 1.0 off the zero query vector; `SemanticIndex` scores them 0.0 and filters
-//!   them out — see `search_with_store`).
+//!   [`VectorStore::build`] then `save()`.
+//! - `build()` or `save()` errors → propagate with detailed message.
+//! - query-`embed` or `search()` errors → propagate with detailed message.
+//! - An empty/whitespace query → empty report (the store would otherwise score
+//!   every chunk 1.0 off the zero query vector).
 //!
-//! `store_dir` is an explicit input: the global-vs-`.tldr/` location decision (and
-//! making the daemon writer + cold CLI reader resolve a byte-identical path) belongs
-//! at the call sites, not here — which also keeps this unit tempdir-testable.
+//! `store_dir` is an explicit input: the global-vs-`.tldr/` location decision
+//! (and making the daemon writer + cold CLI reader resolve a byte-identical path)
+//! belongs at the call sites, not here — keeps this unit tempdir-testable.
 //!
-//! ## Store-location precondition (HARD requirement for PR2/TLDR-zxb)
+//! ## Store-location precondition
 //!
 //! `store_dir` and the embedding `cache_dir` MUST live OUTSIDE the indexed corpus
-//! (`root`). The freshness gate (below) walks `root`; if the store's own writes
-//! (`manifest.<gen>`, `index.*.usearch`, `cache.json`) land inside `root` they
-//! register as "source drift" and force a rebuild on EVERY query. Production
-//! satisfies this two ways — the global cache dir (`~/.cache/tldr/…`, the
-//! `CacheConfig::default`) is outside any project, and an in-tree `.tldr/` store
-//! is skipped by `ProjectWalker`. The wiring PR must not place the store in a
-//! walked, non-skipped subdirectory of `root`.
+//! (`root`). The freshness gate walks `root`; if the store's own writes land
+//! inside `root` they register as "source drift" and force a rebuild on EVERY
+//! query. The global cache dir (`~/.cache/tldr/…`) is outside any project, and
+//! an in-tree `.tldr/` store is skipped by `ProjectWalker`.
 
 use std::path::Path;
 use std::time::Instant;
 
-use crate::semantic::index::{make_snippet, BuildOptions, SearchOptions, SemanticIndex};
+use crate::semantic::embedder::Embedder;
+use crate::semantic::index::{make_snippet, BuildOptions, SearchOptions};
 use crate::semantic::types::{
     CacheConfig, EmbeddingModel, SemanticSearchReport, SemanticSearchResult,
 };
@@ -98,13 +100,14 @@ pub(crate) fn manifest_id_for(root: &Path, options: &BuildOptions) -> ManifestId
 }
 
 /// Run a semantic query through the usearch store, building+persisting it on a
-/// miss and falling back to the in-memory [`SemanticIndex`] on any store error.
+/// miss. Returns a [`SemanticSearchReport`].
 ///
-/// Returns a [`SemanticSearchReport`] with the same SHAPE as
-/// [`SemanticIndex::search`], and results proved equivalent (TLDR-l5d, 52/52).
-/// A loaded store IS source-freshness-checked (corpus-digest drift -> rebuild;
-/// see the module-level "Freshness gate" note). The remaining non-drop-in nuance
-/// is tie-break ordering for equal-cosine duplicates (TLDR-2af).
+/// This is the cold CLI entry point — loads or builds the store, checks
+/// freshness, embeds the query, searches. For the daemon (resident store),
+/// use [`query_store`] instead.
+///
+/// There is NO fallback (TLDR-lx7). If the store cannot load, build, save,
+/// or search, the error propagates so the user can diagnose and fix it.
 pub fn search_with_store(
     root: &Path,
     store_dir: &Path,
@@ -113,97 +116,80 @@ pub fn search_with_store(
     build_options: &BuildOptions,
     cache_config: Option<CacheConfig>,
 ) -> TldrResult<SemanticSearchReport> {
-    // Empty/whitespace query: the embedder returns a ZERO vector, for which usearch
-    // cosine distance is 0 → every chunk would score 1.0 and flood past the
-    // threshold. `SemanticIndex` scores a zero query 0.0 (and filters it out under
-    // any positive threshold), so return an empty report rather than spurious
-    // perfect matches. (Degenerate input; the model never zero-embeds real text.)
-    //
-    // `total_chunks` is 0 here BY DESIGN: we short-circuit WITHOUT loading/building
-    // the store, so nothing was searched. This differs from `SemanticIndex`, which
-    // reports its corpus size for an empty query because its cold path builds the
-    // index first — work we deliberately skip for a degenerate query.
     if query.trim().is_empty() {
         return Ok(SemanticSearchReport {
             results: Vec::new(),
             total_results: 0,
             query: query.to_string(),
             model: build_options.model,
-            total_chunks: 0, // nothing searched (short-circuit) — see note above
+            total_chunks: 0,
             matches_above_threshold: 0,
             latency_ms: 0,
             cache_hit: false,
         });
     }
-    match try_store_search(
-        root,
-        store_dir,
-        query,
-        search_options,
-        build_options,
-        cache_config.clone(),
-    ) {
-        Ok(report) => Ok(report),
-        Err(e) => {
-            eprintln!(
-                "[tldr-warn] store search path failed ({e}); falling back to in-memory index"
-            );
-            let mut index = SemanticIndex::build(root, build_options.clone(), cache_config)?;
-            index.search(query, search_options)
-        }
-    }
-}
-
-/// The store-only path. Errors here (build / query-embed / search) trigger the
-/// [`SemanticIndex`] fallback in [`search_with_store`]; a `load` failure rebuilds
-/// in place and a `save` failure is swallowed with a warning.
-fn try_store_search(
-    root: &Path,
-    store_dir: &Path,
-    query: &str,
-    search_options: &SearchOptions,
-    build_options: &BuildOptions,
-    cache_config: Option<CacheConfig>,
-) -> TldrResult<SemanticSearchReport> {
-    use crate::semantic::embedder::Embedder;
 
     let start = Instant::now();
-    let id = manifest_id_for(root, build_options);
+    let store = load_or_build_store(root, store_dir, build_options, cache_config)?;
+    query_store(&store, root, query, search_options, build_options.model, start)
+}
 
-    // Freshness gate (TLDR-kkt): a loaded store is served only if its build-time
-    // corpus digest still matches the current source tree. A stat-only walk
-    // (no parse) catches added/removed files and mtime/size edits; on drift we
-    // REBUILD rather than serve stale rankings. (For the not-yet-wired helper this
-    // walks per query; the resident-daemon path in TLDR-zxb will move the check to
-    // load/notify time instead of every query.)
+/// Load an existing store (if fresh) or build+save a new one.
+///
+/// Exported for callers that need the store itself (e.g. the daemon warm
+/// command pre-builds the store without issuing a query).
+pub fn load_or_build_store(
+    root: &Path,
+    store_dir: &Path,
+    build_options: &BuildOptions,
+    cache_config: Option<CacheConfig>,
+) -> TldrResult<VectorStore> {
+    let id = manifest_id_for(root, build_options);
     let current_digest = compute_corpus_digest(root);
 
-    // Serve the loaded store only if it loaded cleanly AND is still fresh.
-    // Otherwise REBUILD: load() failures (missing/torn/incompatible) and a stale
-    // digest both mean "the on-disk store is unusable as-is".
-    let store = match VectorStore::load(store_dir, &id) {
-        Ok(s) if s.corpus_digest() == current_digest => s,
+    match VectorStore::load(store_dir, &id) {
+        Ok(s) if s.corpus_digest() == current_digest => Ok(s),
         loaded => {
             if loaded.is_ok() {
                 eprintln!("[tldr-info] semantic store is stale (source changed); rebuilding");
             }
-            // A build()/save() failure is environmental; let build() errors
-            // propagate to the SemanticIndex fallback, but treat a save() failure
-            // as non-fatal (we still have a usable in-RAM store for THIS query).
             let s = VectorStore::build(root, build_options, cache_config)?;
-            if let Err(e) = s.save(store_dir, &id) {
-                eprintln!(
-                    "[tldr-warn] store save failed ({e}); serving from the in-RAM store \
-                     (the next query rebuilds)"
-                );
-            }
-            s
+            s.save(store_dir, &id)?;
+            Ok(s)
         }
-    };
+    }
+}
 
-    // Same query embedding as SemanticIndex: embed_query applies the Arctic
-    // asymmetric query prefix (documents were indexed WITHOUT a prefix).
-    let mut embedder = Embedder::new(build_options.model)?;
+/// Search an already-loaded store — the daemon reuse entry point.
+///
+/// Takes a [`VectorStore`] reference (the daemon holds this resident in its
+/// state), embeds the query, and searches. No load/build/freshness overhead —
+/// the caller is responsible for store lifecycle and freshness checks.
+///
+/// `start` is the caller's timing anchor (pass `Instant::now()` if you don't
+/// care about including load time in the latency).
+pub fn query_store(
+    store: &VectorStore,
+    root: &Path,
+    query: &str,
+    search_options: &SearchOptions,
+    model: EmbeddingModel,
+    start: Instant,
+) -> TldrResult<SemanticSearchReport> {
+    if query.trim().is_empty() {
+        return Ok(SemanticSearchReport {
+            results: Vec::new(),
+            total_results: 0,
+            query: query.to_string(),
+            model,
+            total_chunks: 0,
+            matches_above_threshold: 0,
+            latency_ms: 0,
+            cache_hit: false,
+        });
+    }
+
+    let mut embedder = Embedder::new(model)?;
     let qv = embedder.embed_query(query)?;
 
     let total_chunks = store.len();
@@ -211,7 +197,7 @@ fn try_store_search(
 
     Ok(hits_to_report(
         query,
-        build_options.model,
+        model,
         hits,
         root,
         search_options,
@@ -219,6 +205,7 @@ fn try_store_search(
         start.elapsed().as_millis() as u64,
     ))
 }
+
 
 /// Convert raw store [`SearchHit`]s into a [`SemanticSearchReport`] with the SAME
 /// shape `SemanticIndex::search` produces. Pure apart from the lazy snippet read,
@@ -433,10 +420,8 @@ mod tests {
 
     #[test]
     fn empty_query_returns_empty_report_not_spurious_matches() {
-        // A zero query vector would make usearch score every chunk 1.0; guard it so
-        // we match SemanticIndex (which scores a zero query 0.0 and filters it out).
-        // Uses a nonexistent store_dir/root: the guard must short-circuit BEFORE any
-        // store/embedder work, so this needs no model and no corpus.
+        // A zero query vector would make usearch score every chunk 1.0; guard
+        // against that by short-circuiting before any store/embedder work.
         let bopts = build_opts(EmbeddingModel::ArcticM, ChunkGranularity::Function, None);
         for q in ["", "   ", "\t\n"] {
             let r = search_with_store(
@@ -450,19 +435,17 @@ mod tests {
             .unwrap();
             assert!(r.results.is_empty(), "empty query {q:?} -> no results");
             assert_eq!(r.total_results, 0);
-            // total_chunks is 0 BY DESIGN: the guard short-circuits without
-            // loading/building the store, so nothing was searched (see the guard).
             assert_eq!(r.total_chunks, 0, "empty query searches nothing");
             assert_eq!(r.matches_above_threshold, 0);
             assert_eq!(r.query, q, "query echoed back verbatim");
         }
     }
 
-    // End-to-end with the real embedder: rebuild-on-miss -> persist -> load-hit, and
-    // parity against SemanticIndex. Ignored by default (loads the ONNX model).
+    // End-to-end with the real embedder: rebuild-on-miss -> persist -> load-hit.
+    // Ignored by default (loads the ONNX model).
     #[test]
     #[ignore = "loads the ONNX embedder; run on demand"]
-    fn search_with_store_rebuilds_persists_and_matches_index() {
+    fn search_with_store_rebuilds_persists_and_loads() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join("a.rs"),
@@ -477,7 +460,7 @@ mod tests {
 
         let model = EmbeddingModel::ArcticXS;
         let bopts = build_opts(model, ChunkGranularity::Function, None);
-        let sopts = opts(0.0, true); // threshold 0 so parity isn't masked by filtering
+        let sopts = opts(0.0, true);
         let store_dir = dir.path().join("store");
         let cache = || {
             Some(CacheConfig {
@@ -499,19 +482,11 @@ mod tests {
         );
 
         // Second call: store_dir now exists -> load hit (no rebuild) -> same ranking.
-        // No file is edited between build and this load-hit, so the freshness gate's
-        // corpus digest matches and the store is served as-is. The drift -> rebuild
-        // path is exercised by the dedicated TLDR-kkt freshness tests, not here.
         let r2 = search_with_store(dir.path(), &store_dir, query, &sopts, &bopts, cache()).unwrap();
         let order = |r: &SemanticSearchReport| {
             r.results.iter().map(|x| x.file_path.clone()).collect::<Vec<_>>()
         };
         assert_eq!(order(&r1), order(&r2), "load-hit path matches rebuild path");
-
-        // Parity: the store path's ranking equals the in-memory SemanticIndex path.
-        let mut index = SemanticIndex::build(dir.path(), bopts.clone(), cache()).unwrap();
-        let ir = index.search(query, &sopts).unwrap();
-        assert_eq!(order(&r1), order(&ir), "store path == SemanticIndex ranking");
     }
 
     // Freshness gate (TLDR-kkt) end-to-end: rebuild ONLY on source drift. Detects

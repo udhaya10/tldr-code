@@ -454,6 +454,26 @@ impl Default for CacheConfig {
     }
 }
 
+/// Resolve the per-project store directory for usearch vector stores.
+///
+/// Layout: `~/.cache/tldr/stores/<hash>/` where `<hash>` is the first 16 hex
+/// chars of the MD5 of the canonicalized project root. Both the daemon and
+/// cold CLI call this so they resolve a BYTE-IDENTICAL path (TLDR-zxb
+/// requirement). The directory is OUTSIDE the indexed corpus (satisfying
+/// the store-location precondition for the freshness gate).
+pub fn store_dir_for(project_root: &std::path::Path) -> std::path::PathBuf {
+    let canonical = project_root
+        .canonicalize()
+        .unwrap_or_else(|_| project_root.to_path_buf());
+    let digest = md5::compute(canonical.to_string_lossy().as_bytes());
+    let hash = &format!("{:x}", digest)[..16];
+    dirs::cache_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+        .join("tldr")
+        .join("stores")
+        .join(hash)
+}
+
 /// Cache statistics
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CacheStats {
