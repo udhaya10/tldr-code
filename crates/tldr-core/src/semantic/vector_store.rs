@@ -1001,6 +1001,14 @@ impl VectorStore {
             languages,
             ..Default::default()
         };
+        // Snapshot the corpus digest BEFORE chunking so it describes the source
+        // state the vectors are built from (Codex review — TOCTOU). Computing it
+        // AFTER the embed pass could capture a mid-build edit, persisting a digest
+        // that matches the NEW tree while the vectors describe the OLD one — the
+        // freshness gate would then never rebuild for that edit. Stat-before-read
+        // skews the other way: a mid-build edit makes stored != the post-edit
+        // digest, so the next load rebuilds (correct).
+        let corpus_digest = compute_corpus_digest(root);
         let chunks = chunk_code(root, &chunk_opts)?.chunks;
 
         // P0 guards — shared with SemanticIndex::build (same limits, not copies).
@@ -1070,10 +1078,9 @@ impl VectorStore {
         }
 
         let mut store = Self::from_embedded(&chunks, &vectors, root)?;
-        // Stamp the build-time corpus digest (TLDR-kkt). Computed over the SAME
-        // candidate enumeration the chunker used above, so the freshness gate
-        // compares like with like.
-        store.corpus_digest = compute_corpus_digest(root);
+        // Stamp the digest captured BEFORE chunking (see TOCTOU note above), so the
+        // freshness gate compares against the snapshot the vectors describe.
+        store.corpus_digest = corpus_digest;
         Ok(store)
     }
 }

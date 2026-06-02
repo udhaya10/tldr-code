@@ -6,18 +6,21 @@
 //! results-equivalent to the dense `SemanticIndex` path (TLDR-l5d, 52/52), so this
 //! helper returns the SAME [`SemanticSearchReport`] **shape** the index does.
 //!
-//! ## Freshness — NOT a drop-in yet (precondition for wiring)
+//! ## Freshness gate (TLDR-kkt)
 //!
-//! Unlike [`SemanticIndex::build`], which always re-reads current source, a loaded
-//! store is served as-is: [`VectorStore::load`] verifies persisted manifest/index
-//! integrity but does NOT check whether the source files changed since the store
-//! was built. The manifest only invalidates on a model/chunking/walker change, so
-//! today this helper is **build-once-until-config-changes** — after a source edit it
-//! can serve stale vectors and rankings. A coarse "detect drift → full rebuild"
-//! freshness gate (the §7.3 reconcile, tracked as TLDR-kkt, distinct from the t8f
-//! incremental optimization) is a **precondition for wiring this into the
-//! CLI/daemon/MCP paths** (PR2 is hard-blocked on it). Until then this is a tested
-//! library unit, not a wired search path.
+//! [`VectorStore::load`] only verifies persisted manifest/index integrity, not
+//! whether the SOURCE changed since the store was built — so this helper adds a
+//! coarse "detect drift → full rebuild" gate (the §7.3 reconcile; the per-file
+//! incremental delta is the separate t8f optimization). After a clean load it
+//! compares the store's build-time corpus digest against
+//! [`compute_corpus_digest`] over the current `root`; on any difference (a file
+//! added/removed, or any file's mtime/size changed) it REBUILDS instead of serving
+//! stale rankings. The digest is a stat-only walk (no parse), computed over the
+//! pre-parse candidate set, so a supported file that yields zero chunks counts
+//! identically at build and check and never reads as a phantom addition.
+//!
+//! Residual (design §7.3): an edit with the SAME mtime-second AND SAME size is not
+//! detected; self-heals on the next real edit, escape hatch = manual rebuild.
 //!
 //! Control flow (Codex + advisor reviewed):
 //! - `load()` fails (no/torn/incompatible generation) → REBUILD via
