@@ -377,12 +377,16 @@ impl VectorStore {
 
         // Next generation = max(valid CURRENT, highest on-disk manifest) + 1. A
         // torn CURRENT must NOT reset numbering to 1 and overwrite existing
-        // manifest.<gen> history (Codex review).
-        let gen = read_current(dir)
+        // manifest.<gen> history (Codex review). `checked_add` guards against a
+        // stray/adversarial manifest.<u64::MAX> filename overflowing the counter
+        // (Codex review): the base is drawn from arbitrary on-disk filenames.
+        let prev_gen = read_current(dir)
             .map(|c| c.generation)
             .unwrap_or(0)
-            .max(manifest_gens(dir).into_iter().max().unwrap_or(0))
-            + 1;
+            .max(manifest_gens(dir).into_iter().max().unwrap_or(0));
+        let gen = prev_gen
+            .checked_add(1)
+            .ok_or_else(|| vs_err("save", "generation counter overflow"))?;
 
         // 1. index.<gen>.usearch (immutable; not referenced until CURRENT commits)
         let index_path = dir.join(format!("index.{gen}.usearch"));
@@ -437,10 +441,21 @@ impl VectorStore {
     }
 
     /// Load the active generation from `dir`, verifying against the running config
-    /// `expect`. Tries the `CURRENT` pointer first; if it is missing/torn, or its
-    /// generation fails verification, FALLS BACK to scanning `manifest.<gen>`
-    /// newest-to-oldest for the newest generation that verifies (Codex review).
-    /// Errors (→ caller full-rebuilds) only if no retained generation verifies.
+    /// `expect`. Scans candidate generations newest-to-oldest for the newest that
+    /// both MATCHES `expect` and verifies intact, with one exception that guards
+    /// against serving stale data (Codex review):
+    ///
+    /// - If the NEWEST committed generation is `Incompatible` (config/format
+    ///   mismatch), the store was built under a different model/schema → REJECT so
+    ///   the caller full-rebuilds. We never resurrect a stale older generation
+    ///   behind a config change.
+    /// - Otherwise (the newest is `Corrupt`, or any OLDER generation fails), fall
+    ///   back: an older generation that is `Corrupt` is skipped as unusable, and one
+    ///   that is `Incompatible` is skipped as not-a-candidate for the current config.
+    ///   Either way the scan continues to the next-older generation.
+    ///
+    /// Errors (→ caller full-rebuilds) only if no retained generation matches and
+    /// verifies.
     pub fn load(dir: &Path, expect: &ManifestId) -> TldrResult<Self> {
         // Shared lock: a concurrent save() holds the EXCLUSIVE lock while it writes
         // its generation files, so this blocks until no save is mid-write — the
@@ -1323,6 +1338,24 @@ mod tests {
             read_current(dir.path()).unwrap().generation,
             4,
             "next gen must advance past the highest on-disk manifest, not reset to 1"
+        );
+    }
+
+    #[test]
+    fn store_save_rejects_generation_overflow() {
+        // Codex review (j): the next-gen base is drawn from arbitrary on-disk
+        // manifest.<u64> filenames, so a stray/adversarial manifest.<u64::MAX> must
+        // surface a clean error, not a `+ 1` overflow panic (debug) / wrap-to-0
+        // (release) that would clobber generation 0.
+        const D: usize = 8;
+        let dir = tempfile::tempdir().unwrap();
+        let id = manifest_id(D);
+        let mut store = VectorStore::new(D, 4).unwrap();
+        store.add(1, &unit(D, 0), meta("a")).unwrap();
+        std::fs::write(dir.path().join(format!("manifest.{}", u64::MAX)), b"x").unwrap();
+        assert!(
+            store.save(dir.path(), &id).is_err(),
+            "a manifest.<u64::MAX> filename must error, not overflow the gen counter"
         );
     }
 
