@@ -560,8 +560,10 @@ fn test_e2e_text_format() {
 #[test]
 #[ignore] // slow and environment-dependent
 fn test_e2e_dogfood_no_crash() {
-    let codebase =
-        PathBuf::from("/Users/cosimo/.opc-dev/opc/packages/tldr-code/tldr-rs-v2-canonical");
+    // Dogfood on this crate's own Rust source — portable across machines.
+    // (Was a hardcoded /Users/cosimo/... path that only existed on the original
+    // author's machine, failing everywhere else with ENOENT — TLDR-7aa.)
+    let codebase = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
 
     let output = tldr_bin()
         .args([
