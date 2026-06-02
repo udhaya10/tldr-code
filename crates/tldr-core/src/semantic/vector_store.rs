@@ -1541,6 +1541,64 @@ mod tests {
         assert_eq!(usearch, vec![0, 1, 2, 3, 4], "deterministic decreasing-cos order");
     }
 
+    // ---- search() edge cases (characterization guards) ------------------------
+    // These lock in already-correct boundary behavior so a future refactor of
+    // search() can't silently regress it. They are NOT fail-before-fix.
+
+    #[test]
+    fn search_empty_store_returns_empty() {
+        const D: usize = 8;
+        let store = VectorStore::new(D, 4).unwrap();
+        // No vectors added: k.min(size)=0 -> empty, must NOT panic or error.
+        let hits = store.search(&unit(D, 0), 5).unwrap();
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn search_k_exceeds_len_returns_exactly_len() {
+        const D: usize = 8;
+        let mut store = VectorStore::new(D, 4).unwrap();
+        for i in 0..3u64 {
+            store.add(i, &unit(D, i as usize), meta(&format!("c{i}"))).unwrap();
+        }
+        // Asking for far more than exist clamps to the population, never errors.
+        let hits = store.search(&unit(D, 0), 100).unwrap();
+        assert_eq!(hits.len(), 3);
+    }
+
+    #[test]
+    fn search_k_zero_returns_empty() {
+        const D: usize = 8;
+        let mut store = VectorStore::new(D, 4).unwrap();
+        store.add(1, &unit(D, 0), meta("a")).unwrap();
+        assert!(store.search(&unit(D, 0), 0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn search_equal_cosine_returns_all_and_is_stable() {
+        // Several identical vectors => identical cosine to the query (a hard tie).
+        // The store must return ALL of them with the right count and the SAME order
+        // on repeated calls (self-consistency). Cross-engine tie order vs the dense
+        // path is a SEPARATE, tracked concern (TLDR-2af) — not asserted here.
+        const D: usize = 8;
+        let mut store = VectorStore::new(D, 8).unwrap();
+        let v = unit(D, 0);
+        for i in 0..5u64 {
+            store.add(i, &v, meta(&format!("dup{i}"))).unwrap();
+        }
+        let run = |s: &VectorStore| -> Vec<u64> {
+            s.search(&v, 5).unwrap().iter().map(|h| h.key).collect()
+        };
+        let first = run(&store);
+        assert_eq!(first.len(), 5, "all equal-cosine items returned");
+        assert_eq!(
+            first.iter().copied().collect::<std::collections::BTreeSet<_>>(),
+            (0..5u64).collect::<std::collections::BTreeSet<_>>(),
+            "the returned key SET is exactly the populated keys"
+        );
+        assert_eq!(first, run(&store), "repeated search is order-stable");
+    }
+
     #[test]
     fn manifest_id_for_build_is_complete_and_deterministic() {
         let p = std::path::Path::new("/proj");

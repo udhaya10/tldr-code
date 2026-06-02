@@ -375,11 +375,17 @@ fn main() {
     let mut hits_at_10 = 0usize;
     let mut mrr_sum = 0.0f64;
 
+    // ASCII-only, pipe-safe rendering (this harness is used in a paste-the-output
+    // workflow under TLDR_QUIET=1): a leading status column makes hits/misses
+    // scannable, and missed queries are re-listed below the table. Status is a
+    // pure function of `rank` — it does NOT feed the recall/MRR counters.
     println!(
-        "\n{:<58} {:>5} {:>6} {}",
-        "query", "rank", "fn?", "expected"
+        "\n{:<5}{:<58} {:>5} {:>6}  {}",
+        "stat", "query", "rank", "fn?", "expected"
     );
-    println!("{}", "-".repeat(96));
+    println!("{}", "-".repeat(100));
+
+    let mut misses: Vec<(String, String)> = Vec::new();
 
     for (query, want_file, want_fn) in &gold {
         let want_file_n = norm(want_file);
@@ -424,9 +430,16 @@ fn main() {
                 (Some(_), false, _) => "—",
             }
         };
+        // Status glyph (presentation only): top-5 hit / top-10 hit / miss.
+        let status = match rank {
+            Some(r) if r <= 5 => "[5]",
+            Some(_) => "[10]",
+            None => "[X]",
+        };
         let q_short: String = query.chars().take(58).collect();
         println!(
-            "{:<58} {:>5} {:>6} {}",
+            "{:<5}{:<58} {:>5} {:>6}  {}",
+            status,
             q_short,
             rank_str,
             fn_str,
@@ -441,16 +454,30 @@ fn main() {
                 hits_at_10 += 1;
             }
             mrr_sum += 1.0 / r as f64;
+        } else {
+            misses.push((query.to_string(), want_file.to_string()));
         }
     }
 
     let n = gold.len().max(1) as f64;
-    println!("{}", "-".repeat(96));
+    println!("{}", "-".repeat(100));
     println!("\nScope:       {}", root.display());
     println!("Gold cases:  {} (of {} total; rest out of scope)", gold.len(), GOLD.len());
     println!("Recall@5:    {:.3}  ({}/{})", hits_at_5 as f64 / n, hits_at_5, gold.len());
     println!("Recall@10:   {:.3}  ({}/{})", hits_at_10 as f64 / n, hits_at_10, gold.len());
     println!("MRR:         {:.3}", mrr_sum / n);
+
+    // Re-list the queries that fell outside top-10 so the worst cases are visible
+    // without re-scanning the table (the [X] rows above).
+    if misses.is_empty() {
+        println!("Misses:      none (every gold query landed in top-{TOP_K})");
+    } else {
+        println!("Misses:      {} (outside top-{TOP_K}):", misses.len());
+        for (query, want_file) in &misses {
+            let q_short: String = query.chars().take(58).collect();
+            println!("  [X] {q_short:<58} -> {want_file}");
+        }
+    }
 
     // TLDR-l5d acceptance: store-path equivalence on real data. Build a usearch
     // VectorStore over the SAME root/model/cache and check that its per-query
@@ -582,5 +609,15 @@ fn main() {
         println!("  UNPROVEN:        {unproven}   <-- outside dense top-50; investigate if >0");
         println!("  REAL (>=1e-4):   {real}   <-- MUST be 0 for results-equivalence");
         println!("  => equivalent modulo ties/epsilon: {equivalent}/{}", gold.len());
+        // Single-line machine-scannable verdict. Equivalence requires zero REAL
+        // ranking divergences AND zero UNPROVEN items (an unscored store pick could
+        // hide a divergence). TIE/EPSILON are acceptable float/tie-order noise.
+        if real == 0 && unproven == 0 {
+            println!("  VERDICT: PASS — store path is results-equivalent to dense");
+        } else {
+            println!(
+                "  VERDICT: FAIL — {real} REAL divergence(s), {unproven} UNPROVEN item(s); investigate above"
+            );
+        }
     }
 }
