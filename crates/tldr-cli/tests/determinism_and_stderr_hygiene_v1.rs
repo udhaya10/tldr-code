@@ -211,12 +211,15 @@ fn run_clones_strip_timing(dir: &Path) -> Value {
     v
 }
 
-/// Recursively remove every `detection_time_ms` field (wall-clock, inherently
-/// variable) so byte-equality compares only deterministic content.
+/// Recursively remove every wall-clock timing field — any key ending in
+/// `_time_ms` (e.g. `detection_time_ms`, `scan_time_ms`, `analysis_time_ms`) at
+/// any depth — so byte-equality compares only deterministic content. Shared by
+/// the clones and hubs determinism checks so neither carries the top-level-only
+/// strip bug that hid TLDR-lx6.
 fn strip_timing_fields(v: &mut Value) {
     match v {
         Value::Object(map) => {
-            map.remove("detection_time_ms");
+            map.retain(|k, _| !k.ends_with("_time_ms"));
             for child in map.values_mut() {
                 strip_timing_fields(child);
             }
@@ -282,11 +285,11 @@ fn run_hubs_strip_timing(dir: &Path) -> Value {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let mut v: Value = serde_json::from_str(&stdout)
         .unwrap_or_else(|e| panic!("hubs stdout not JSON: {e}\n{stdout}"));
-    // Strip timing fields if present (defensive; not all schemas have them).
-    if let Some(obj) = v.as_object_mut() {
-        obj.remove("scan_time_ms");
-        obj.remove("analysis_time_ms");
-    }
+    // Strip wall-clock timing recursively (Codex review of lx6: the prior
+    // top-level-only strip carried the same latent bug — a nested timing field
+    // would slip through). `strip_timing_fields` removes any `*_time_ms` key at
+    // any depth, covering scan_time_ms / analysis_time_ms and future ones.
+    strip_timing_fields(&mut v);
     v
 }
 
