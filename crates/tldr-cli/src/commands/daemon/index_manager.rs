@@ -1,30 +1,54 @@
 //! Thin concurrency wrapper around the daemon's resident VectorStore.
 //!
 //! Owns `parking_lot::RwLock<Option<(EmbeddingModel, VectorStore)>>` and
-//! exposes exactly three operations: `query` (shared read-lock fast path,
-//! exclusive write-lock on cold miss), `warm` (write-lock build), and
-//! `invalidate` (write-lock clear). The daemon and future watcher never
-//! touch a raw lock.
+//! exposes `query` (shared read-lock fast path, exclusive write-lock on cold
+//! miss), `warm` (write-lock build), `invalidate` (write-lock clear), and
+//! `apply_delta` (incremental per-file re-index — TLDR-t8f). The daemon and
+//! future watcher never touch a raw lock.
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::time::Instant;
 
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 
+use tldr_core::semantic::vector_store::{key_chunks, root_relative, stat_signal, VectorStore};
 use tldr_core::semantic::{
-    load_or_build_store, query_store, store_dir_for, BuildOptions, CacheConfig, EmbeddingModel,
-    IndexSearchOptions,
+    chunk_file, load_or_build_store, query_store, store_dir_for, BuildOptions, CacheConfig,
+    ChunkOptions, Embedder, EmbeddingModel, IndexSearchOptions,
 };
-use tldr_core::semantic::vector_store::VectorStore;
+
+/// Result of an incremental delta on a single file change (TLDR-t8f).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeltaOutcome {
+    /// Store cold or warm under a different model — no-op; the next query's
+    /// cold build already reflects the change.
+    Skipped,
+    /// The file was deleted: `removed` vectors dropped from the store.
+    Deleted { removed: usize },
+    /// Delta applied in place: `embedded` of `total` chunks re-embedded (the
+    /// rest were metadata-only line shifts).
+    Applied { embedded: usize, total: usize },
+    /// The delta path can't safely produce build-equivalent vectors for this
+    /// configuration (e.g. `TLDR_ENRICH` on, whose per-file enrichment would
+    /// diverge from the whole-corpus build). Caller should full-rebuild.
+    NeedsRebuild,
+}
 
 pub struct IndexManager {
     store: RwLock<Option<(EmbeddingModel, VectorStore)>>,
+    /// Resident embedder, kept loaded across deltas so a per-save incremental
+    /// re-index pays no ONNX startup cost (design intent — TLDR-t8f). Lazily
+    /// created and re-created on a model change. Behind its own `Mutex` so a
+    /// delta's embed doesn't touch the store lock.
+    embedder: Mutex<Option<(EmbeddingModel, Embedder)>>,
 }
 
 impl IndexManager {
     pub fn new() -> Self {
         Self {
             store: RwLock::new(None),
+            embedder: Mutex::new(None),
         }
     }
 
@@ -125,6 +149,130 @@ impl IndexManager {
             .map_err(|e| e.to_string())?;
         *guard = Some((model, store));
         Ok(true)
+    }
+
+    /// Incremental per-file re-index (TLDR-t8f, design doc §5). On a file change,
+    /// re-chunk **only** that file, re-embed only the chunks whose body changed,
+    /// remove vanished keys, and apply the delta to the resident store in place —
+    /// a few-ms update instead of a full rebuild.
+    ///
+    /// Concurrency: classification reads the store under a **shared read lock**
+    /// (dropped before embedding), embedding runs **lock-free** on the resident
+    /// embedder, and only the final apply takes the **write lock** — which
+    /// re-validates against the current store and errors on a stale snapshot, so
+    /// a concurrent rebuild can never produce a half-applied delta. MUST be called
+    /// inside `spawn_blocking` (never hold a guard across `.await`; TLDR-qr9).
+    ///
+    /// Returns [`DeltaOutcome::Skipped`] when the store is cold / a different
+    /// model (the next cold query already reflects the change). Any `Err` — or
+    /// [`DeltaOutcome::NeedsRebuild`] — means the caller should [`Self::invalidate`]
+    /// and let the next query full-rebuild (the design's fallback).
+    pub fn apply_delta(&self, project: &Path, file: &Path) -> Result<DeltaOutcome, String> {
+        // Per-file enrichment can't reproduce the whole-corpus build vectors, so
+        // a delta would diverge from the index. Fall back to a full rebuild.
+        let enrich = std::env::var("TLDR_ENRICH")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        if enrich {
+            return Ok(DeltaOutcome::NeedsRebuild);
+        }
+
+        // 0. Capture the warm model (or bail if cold). The delta embeds with the
+        //    SAME model the resident store was built with — no model param needed.
+        let model = match self.store.read().as_ref() {
+            Some((m, _)) => *m,
+            None => return Ok(DeltaOutcome::Skipped),
+        };
+
+        // Deletion: `Notify` can't always distinguish edit from delete (§5).
+        if !(file.exists() && file.is_file()) {
+            let file_rel = root_relative(project, file);
+            let mut guard = self.store.write();
+            return match guard.as_mut() {
+                Some((m, store)) if *m == model => {
+                    let removed = store
+                        .apply_file_delete(&file_rel)
+                        .map_err(|e| e.to_string())?;
+                    Ok(DeltaOutcome::Deleted { removed })
+                }
+                // Store rebuilt/invalidated under a different model since step 0.
+                _ => Ok(DeltaOutcome::Skipped),
+            };
+        }
+
+        // 1. Re-chunk ONLY this file (lock-free). Match the build's chunk options:
+        //    BuildOptions defaults to function granularity, all languages.
+        let chunk_opts = ChunkOptions::default();
+        let new_chunks = chunk_file(file, &chunk_opts)
+            .map_err(|e| format!("delta chunk_file failed: {e}"))?
+            .chunks;
+        // Shared key computation — identical keys to the build (else removes miss).
+        let keyed = key_chunks(project, &new_chunks);
+
+        // 2. Classify under a shared read lock: which keys need re-embedding
+        //    (new, or content-hash changed). Drop the lock before embedding.
+        let to_embed: Vec<usize> = {
+            let guard = self.store.read();
+            let store = match guard.as_ref() {
+                Some((m, s)) if *m == model => s,
+                _ => return Ok(DeltaOutcome::Skipped),
+            };
+            keyed
+                .iter()
+                .enumerate()
+                .filter_map(|(i, (key, meta))| {
+                    let changed = match store.content_hash(*key) {
+                        None => true,
+                        Some(h) => h != meta.content_hash.as_str(),
+                    };
+                    changed.then_some(i)
+                })
+                .collect()
+        };
+
+        // 3. Embed the changed chunks (lock-free, on the resident embedder).
+        let mut embedded: HashMap<u64, Vec<f32>> = HashMap::new();
+        if !to_embed.is_empty() {
+            let texts: Vec<&str> = to_embed
+                .iter()
+                .map(|&i| new_chunks[i].content.as_str())
+                .collect();
+            let vectors = self.embed(model, texts)?;
+            for (&i, vector) in to_embed.iter().zip(vectors) {
+                embedded.insert(keyed[i].0, vector);
+            }
+        }
+
+        // 4. Apply under the write lock — re-validates against the current store.
+        let signal = stat_signal(file);
+        let file_rel = keyed
+            .first()
+            .map(|(_, m)| m.file_rel_path.clone())
+            .unwrap_or_else(|| root_relative(project, file));
+        let mut guard = self.store.write();
+        let store = match guard.as_mut() {
+            Some((m, s)) if *m == model => s,
+            _ => return Ok(DeltaOutcome::Skipped),
+        };
+        store
+            .apply_file_delta(&file_rel, &keyed, &embedded, signal)
+            .map_err(|e| e.to_string())?;
+        Ok(DeltaOutcome::Applied {
+            embedded: embedded.len(),
+            total: keyed.len(),
+        })
+    }
+
+    /// Embed `texts` with the resident embedder, (re)creating it on a model
+    /// change. Holds only the embedder `Mutex` — never the store lock.
+    fn embed(&self, model: EmbeddingModel, texts: Vec<&str>) -> Result<Vec<Vec<f32>>, String> {
+        let mut guard = self.embedder.lock();
+        if !guard.as_ref().is_some_and(|(m, _)| *m == model) {
+            let embedder = Embedder::new(model).map_err(|e| e.to_string())?;
+            *guard = Some((model, embedder));
+        }
+        let (_, embedder) = guard.as_mut().expect("embedder present after init");
+        embedder.embed_batch(texts, false).map_err(|e| e.to_string())
     }
 
     /// Write-lock invalidate: drops the resident store so the next query

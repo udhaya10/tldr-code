@@ -221,6 +221,114 @@ impl VectorStore {
         Ok(present)
     }
 
+    /// The stored content-hash for `key`, if present. The delta path reads this
+    /// to classify a re-chunked function as EMBED (hash changed / new key) vs
+    /// META-ONLY (unchanged body, shifted lines) — design doc §5 (TLDR-t8f).
+    pub fn content_hash(&self, key: u64) -> Option<&str> {
+        self.meta.get(&key).map(|m| m.content_hash.as_str())
+    }
+
+    /// Drop a file's per-file record. Returns the removed record (its keys), if
+    /// any. The keys' vectors are NOT removed here — callers that delete a file
+    /// use [`Self::apply_file_delete`], which removes both.
+    pub fn remove_file_record(&mut self, file_rel_path: &str) -> Option<FileRecord> {
+        self.files.remove(file_rel_path)
+    }
+
+    /// Remove every chunk of a **deleted** file: drop each key's vector + sidecar
+    /// entry, then the per-file record. Returns the number of vectors removed.
+    /// Design doc §5 "File deletion" (TLDR-t8f).
+    pub fn apply_file_delete(&mut self, file_rel_path: &str) -> TldrResult<usize> {
+        let keys: Vec<u64> = match self.files.get(file_rel_path) {
+            Some(rec) => rec.keys.iter().copied().collect(),
+            None => return Ok(0),
+        };
+        let mut removed = 0;
+        for k in keys {
+            if self.remove(k)? {
+                removed += 1;
+            }
+        }
+        self.files.remove(file_rel_path);
+        Ok(removed)
+    }
+
+    /// Apply an incremental delta for a **single file** atomically (design doc
+    /// §5). `keyed` is the file's freshly re-chunked `(key, ChunkMeta)` set (from
+    /// the shared [`key_chunks`]); `embedded` supplies vectors for exactly the
+    /// keys whose body changed (the EMBED set, computed lock-free by the caller).
+    ///
+    /// Steps, all under the caller's write lock:
+    /// 1. **Remove** keys in the old file record but not in `keyed` (deleted /
+    ///    renamed-away functions).
+    /// 2. For each `(key, meta)`: re-classify against the *current* store
+    ///    (re-validation — the caller classified under a since-dropped read lock,
+    ///    so a concurrent delta could have shifted state). A key that needs a
+    ///    vector but is absent from `embedded` is a **stale snapshot**: return an
+    ///    error so the caller falls back to a full rebuild rather than serve a
+    ///    half-applied delta. An unchanged body gets a **metadata-only** refresh
+    ///    (new line numbers, no ONNX).
+    /// 3. Replace the per-file record with the new key set + `signal`.
+    ///
+    /// `signal` is the `(mtime, size, kind)` from [`stat_signal`] on the file.
+    pub fn apply_file_delta(
+        &mut self,
+        file_rel_path: &str,
+        keyed: &[(u64, ChunkMeta)],
+        embedded: &HashMap<u64, Vec<f32>>,
+        signal: (u64, u64, FileKind),
+    ) -> TldrResult<()> {
+        use std::collections::BTreeSet;
+
+        let new_keys: BTreeSet<u64> = keyed.iter().map(|(k, _)| *k).collect();
+
+        // 1. Removed = old keys no longer present in the re-chunked file.
+        if let Some(old) = self.files.get(file_rel_path) {
+            let removed: Vec<u64> = old.keys.difference(&new_keys).copied().collect();
+            for k in removed {
+                self.remove(k)?;
+            }
+        }
+
+        // 2. Add / update each current chunk.
+        for (key, meta) in keyed {
+            let needs_embed = match self.content_hash(*key) {
+                None => true,                                  // new key
+                Some(h) => h != meta.content_hash.as_str(),    // changed body
+            };
+            if needs_embed {
+                match embedded.get(key) {
+                    // add() replaces in place when the key already exists.
+                    Some(vector) => self.add(*key, vector, meta.clone())?,
+                    None => {
+                        return Err(vs_err(
+                            "delta",
+                            format!(
+                                "stale snapshot: no vector for changed key {key} ({})",
+                                meta.identity
+                            ),
+                        ))
+                    }
+                }
+            } else {
+                // META-ONLY: refresh line numbers etc. without re-embedding.
+                self.meta.insert(*key, meta.clone());
+            }
+        }
+
+        // 3. Refresh the per-file record (key set + reconcile signal).
+        self.set_file_record(
+            file_rel_path.to_string(),
+            FileRecord {
+                keys: new_keys,
+                mtime: signal.0,
+                size: signal.1,
+                file_type: signal.2,
+            },
+        );
+        Ok(())
+    }
+
     /// Exact (100% recall) top-`k` search. Returns hits joined to their sidecar
     /// metadata, nearest first. A key present in the index but missing from the
     /// sidecar is skipped (defensive; the two are kept in lockstep).
@@ -827,6 +935,54 @@ pub fn identity_key(identity: &str) -> u64 {
     stable_hash(identity.as_bytes())
 }
 
+/// Compute the stable `(key, ChunkMeta)` for each chunk, assigning positional
+/// ordinals per `(file_rel, class, function)`. **Pure** — depends only on the
+/// chunks + `root`.
+///
+/// Shared by [`VectorStore::from_embedded`] (whole corpus) and the per-file
+/// delta path (TLDR-t8f), so both compute **identical keys**. A divergence here
+/// would make a delta's `remove`/replace miss the old vectors it must update —
+/// hence the single source of truth. Ordinals are positional within `chunks`
+/// (which a delta supplies file-by-file via [`crate::semantic::chunk_file`], and
+/// `from_embedded` supplies for the whole corpus); the per-file `base` key means
+/// the count is naturally scoped to each `(file, class, function)` regardless.
+pub fn key_chunks(root: &Path, chunks: &[CodeChunk]) -> Vec<(u64, ChunkMeta)> {
+    let mut ordinals: HashMap<String, u32> = HashMap::new();
+    chunks
+        .iter()
+        .map(|chunk| {
+            let file_rel = root_relative(root, &chunk.file_path);
+            let base = format!(
+                "{}::{}::{}",
+                file_rel,
+                chunk.class_name.as_deref().unwrap_or(""),
+                chunk.function_name.as_deref().unwrap_or("")
+            );
+            let ordinal = ordinals.entry(base).or_insert(0);
+            let identity = chunk_identity(
+                &file_rel,
+                chunk.class_name.as_deref(),
+                chunk.function_name.as_deref(),
+                *ordinal,
+            );
+            *ordinal += 1;
+            let key = identity_key(&identity);
+            (
+                key,
+                ChunkMeta {
+                    identity,
+                    file_rel_path: file_rel,
+                    function_name: chunk.function_name.clone(),
+                    class_name: chunk.class_name.clone(),
+                    line_start: chunk.line_start,
+                    line_end: chunk.line_end,
+                    content_hash: chunk.content_hash.clone(),
+                },
+            )
+        })
+        .collect()
+}
+
 /// Path relative to the build `root`, used as part of the stable chunk key.
 ///
 /// A silent raw-path fallback on a `strip_prefix` miss would re-introduce the
@@ -838,7 +994,7 @@ pub fn identity_key(identity: &str) -> u64 {
 /// 3. outside the root → the **canonical absolute** path (deterministic), warned;
 /// 4. un-canonicalizable (file gone) → the raw path, but **warned** so the
 ///    divergence is diagnosable rather than silent.
-fn root_relative(root: &Path, file_path: &Path) -> String {
+pub fn root_relative(root: &Path, file_path: &Path) -> String {
     if let Ok(rel) = file_path.strip_prefix(root) {
         return normalize_sep(rel);
     }
@@ -867,8 +1023,9 @@ fn normalize_sep(p: &Path) -> String {
 }
 
 /// `(mtime_secs, size, kind)` for a path — the per-file reconcile signal.
-/// Best-effort: an un-stattable path yields `(0, 0, Other)`.
-fn stat_signal(path: &Path) -> (u64, u64, FileKind) {
+/// Best-effort: an un-stattable path yields `(0, 0, Other)`. Also the signal a
+/// delta stamps into the refreshed [`FileRecord`] (TLDR-t8f).
+pub fn stat_signal(path: &Path) -> (u64, u64, FileKind) {
     match std::fs::symlink_metadata(path) {
         Ok(md) => {
             let ft = md.file_type();
@@ -914,44 +1071,22 @@ impl VectorStore {
         };
 
         let mut store = Self::new(dimensions, chunks.len())?;
-        // ordinal counter keyed by identity-without-ordinal.
-        let mut ordinals: HashMap<String, u32> = HashMap::new();
+        // Identical key/meta computation to the delta path (shared `key_chunks`),
+        // so a delta's remove/replace lands on the same keys this build wrote.
+        let keyed = key_chunks(root, chunks);
         let mut file_keys: HashMap<String, std::collections::BTreeSet<u64>> = HashMap::new();
         let mut file_abs: HashMap<String, PathBuf> = HashMap::new();
 
-        for (chunk, vector) in chunks.iter().zip(vectors.iter()) {
-            let file_rel = root_relative(root, &chunk.file_path);
-            let base = format!(
-                "{}::{}::{}",
-                file_rel,
-                chunk.class_name.as_deref().unwrap_or(""),
-                chunk.function_name.as_deref().unwrap_or("")
-            );
-            let ordinal = ordinals.entry(base).or_insert(0);
-            let identity = chunk_identity(
-                &file_rel,
-                chunk.class_name.as_deref(),
-                chunk.function_name.as_deref(),
-                *ordinal,
-            );
-            *ordinal += 1;
-            let key = identity_key(&identity);
+        for ((key, meta), (chunk, vector)) in keyed.iter().zip(chunks.iter().zip(vectors.iter())) {
             // add() detects a u64 key collision between distinct identities.
-            store.add(
-                key,
-                vector,
-                ChunkMeta {
-                    identity,
-                    file_rel_path: file_rel.clone(),
-                    function_name: chunk.function_name.clone(),
-                    class_name: chunk.class_name.clone(),
-                    line_start: chunk.line_start,
-                    line_end: chunk.line_end,
-                    content_hash: chunk.content_hash.clone(),
-                },
-            )?;
-            file_keys.entry(file_rel.clone()).or_default().insert(key);
-            file_abs.entry(file_rel).or_insert_with(|| chunk.file_path.clone());
+            store.add(*key, vector, meta.clone())?;
+            file_keys
+                .entry(meta.file_rel_path.clone())
+                .or_default()
+                .insert(*key);
+            file_abs
+                .entry(meta.file_rel_path.clone())
+                .or_insert_with(|| chunk.file_path.clone());
         }
 
         for (file_rel, keys) in file_keys {
@@ -1261,6 +1396,113 @@ mod tests {
         assert_eq!(store.len(), 1, "re-add of the same key does not grow the store");
         let hits = store.search(&unit(D, 1), 1).unwrap();
         assert_eq!(hits[0].meta.content_hash, "h2");
+    }
+
+    // ---- Incremental delta (TLDR-t8f, design doc §5) --------------------------
+
+    /// A ChunkMeta in file `f.rs` with an explicit content-hash + start line.
+    fn fmeta(id: &str, hash: &str, line_start: u32) -> ChunkMeta {
+        ChunkMeta {
+            identity: id.to_string(),
+            file_rel_path: "f.rs".to_string(),
+            function_name: Some(id.to_string()),
+            class_name: None,
+            line_start,
+            line_end: line_start + 4,
+            content_hash: hash.to_string(),
+        }
+    }
+
+    #[test]
+    fn apply_file_delta_classifies_embed_meta_only_and_remove() {
+        const D: usize = 8;
+        let mut store = VectorStore::new(D, 8).unwrap();
+        // Seed file f.rs with three functions a/b/c (keys 1/2/3).
+        store.add(1, &unit(D, 1), fmeta("a", "h-a", 1)).unwrap();
+        store.add(2, &unit(D, 2), fmeta("b", "h-b", 10)).unwrap();
+        store.add(3, &unit(D, 3), fmeta("c", "h-c", 20)).unwrap();
+        store.set_file_record(
+            "f.rs".to_string(),
+            FileRecord {
+                keys: [1u64, 2, 3].into_iter().collect(),
+                mtime: 0,
+                size: 0,
+                file_type: FileKind::Regular,
+            },
+        );
+        assert_eq!(store.len(), 3);
+
+        // New chunk set after an edit:
+        //   a: same body, shifted down 2 lines -> META-ONLY (no vector needed)
+        //   b: changed body                    -> EMBED
+        //   c: deleted                         -> REMOVE
+        //   d: new function (key 4)            -> EMBED
+        let keyed = vec![
+            (1u64, fmeta("a", "h-a", 3)),
+            (2u64, fmeta("b", "h-b2", 10)),
+            (4u64, fmeta("d", "h-d", 30)),
+        ];
+        let mut embedded = HashMap::new();
+        embedded.insert(2u64, unit(D, 5));
+        embedded.insert(4u64, unit(D, 6));
+
+        store
+            .apply_file_delta("f.rs", &keyed, &embedded, (7, 99, FileKind::Regular))
+            .unwrap();
+
+        // c removed; a/b/d present; size unchanged (1 removed, 1 added).
+        assert!(!store.contains(3), "deleted function's vector removed");
+        assert!(store.contains(1) && store.contains(2) && store.contains(4));
+        assert_eq!(store.len(), 3);
+        // META-ONLY key keeps its hash; EMBED keys carry the new hashes.
+        assert_eq!(store.content_hash(1), Some("h-a"));
+        assert_eq!(store.content_hash(2), Some("h-b2"));
+        assert_eq!(store.content_hash(4), Some("h-d"));
+        // META-ONLY line shift landed (search joins the refreshed meta).
+        let hit = store.search(&unit(D, 1), 1).unwrap();
+        assert_eq!(hit[0].key, 1);
+        assert_eq!(hit[0].meta.line_start, 3, "line numbers refreshed without re-embed");
+        // File record reflects the new key set + reconcile signal.
+        let rec = store.file_record("f.rs").unwrap();
+        assert_eq!(rec.keys, [1u64, 2, 4].into_iter().collect());
+        assert_eq!((rec.mtime, rec.size), (7, 99));
+    }
+
+    #[test]
+    fn apply_file_delta_stale_snapshot_is_an_error() {
+        const D: usize = 8;
+        let mut store = VectorStore::new(D, 4).unwrap();
+        // A new key whose vector was NOT supplied (the caller's read-lock snapshot
+        // went stale) must error so the daemon falls back to a full rebuild.
+        let keyed = vec![(9u64, fmeta("x", "h-x", 1))];
+        let embedded = HashMap::new();
+        let err = store
+            .apply_file_delta("f.rs", &keyed, &embedded, (0, 0, FileKind::Regular))
+            .unwrap_err();
+        assert!(format!("{err}").contains("stale snapshot"));
+    }
+
+    #[test]
+    fn apply_file_delete_removes_all_keys_and_record() {
+        const D: usize = 8;
+        let mut store = VectorStore::new(D, 4).unwrap();
+        store.add(1, &unit(D, 1), fmeta("a", "h-a", 1)).unwrap();
+        store.add(2, &unit(D, 2), fmeta("b", "h-b", 5)).unwrap();
+        store.set_file_record(
+            "f.rs".to_string(),
+            FileRecord {
+                keys: [1u64, 2].into_iter().collect(),
+                mtime: 0,
+                size: 0,
+                file_type: FileKind::Regular,
+            },
+        );
+
+        assert_eq!(store.apply_file_delete("f.rs").unwrap(), 2);
+        assert!(store.is_empty());
+        assert!(store.file_record("f.rs").is_none());
+        // Idempotent: deleting an unknown file removes nothing.
+        assert_eq!(store.apply_file_delete("f.rs").unwrap(), 0);
     }
 
     #[test]

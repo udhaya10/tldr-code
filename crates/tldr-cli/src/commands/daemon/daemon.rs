@@ -1093,11 +1093,29 @@ impl TLDRDaemon {
         let file_hash = super::salsa::hash_path(&file);
         self.cache.invalidate_by_input(file_hash);
 
-        // Invalidate the resident store so it rebuilds on next query.
+        // Incrementally re-index the changed file in the resident store instead
+        // of dropping it (TLDR-t8f). A warm store applies a per-file delta —
+        // re-embedding only that file's changed chunks — so query results
+        // reflect the edit without a full corpus rebuild. A cold store no-ops
+        // (the next query's cold build already sees the change). Any failure
+        // falls back to invalidate() → full rebuild on the next query.
         #[cfg(feature = "semantic")]
         {
             let mgr = Arc::clone(&self.semantic_store);
-            let _ = tokio::task::spawn_blocking(move || mgr.invalidate()).await;
+            let project = self.project.clone();
+            let changed = file.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                use super::index_manager::DeltaOutcome;
+                match mgr.apply_delta(&project, &changed) {
+                    Ok(DeltaOutcome::NeedsRebuild) => mgr.invalidate(),
+                    Ok(_) => {}
+                    Err(e) => {
+                        eprintln!("[t8f] delta failed for {}: {e}; rebuilding", changed.display());
+                        mgr.invalidate();
+                    }
+                }
+            })
+            .await;
         }
 
         let threshold = self.config.auto_reindex_threshold;
@@ -2071,7 +2089,7 @@ mod tests {
 
     #[cfg(feature = "semantic")]
     #[tokio::test]
-    async fn test_semantic_store_invalidated_on_notify() {
+    async fn test_semantic_store_delta_on_notify_preserves_warmth() {
         let temp = tempfile::tempdir().unwrap();
         let py_file = temp.path().join("example.py");
         std::fs::write(&py_file, "def compute(x):\n    return x * 2\n").unwrap();
@@ -2079,7 +2097,8 @@ mod tests {
         let config = DaemonConfig::default();
         let daemon = TLDRDaemon::new(temp.path().to_path_buf(), config);
 
-        // First semantic search - builds index
+        // First semantic search - builds index (warms the store iff ONNX is
+        // available in this env; the assertion below is robust either way).
         let _ = daemon
             .handle_command(DaemonCommand::Semantic {
                 query: "computation".to_string(),
@@ -2088,22 +2107,25 @@ mod tests {
                 threshold: None,
             })
             .await;
+        let warm_before = daemon.semantic_store.is_warm();
 
-        // Store may or may not be warm (depends on ONNX model availability
-        // in the test env). The test cares about the invalidation below.
-        let _ = daemon.semantic_store.is_warm();
+        // Edit the file on disk so the delta has a changed body to re-embed.
+        std::fs::write(&py_file, "def compute(x):\n    return x * 3\n").unwrap();
 
-        // Notify a file change - should invalidate the store
+        // Notify a file change — the incremental delta (TLDR-t8f) updates the
+        // store IN PLACE; unlike the old behavior it must NOT invalidate a warm
+        // store. (Pre-t8f this dropped the store to None.)
         let _ = daemon
             .handle_command(DaemonCommand::Notify {
                 file: py_file.clone(),
             })
             .await;
 
-        // Verify store was cleared
-        assert!(
-            !daemon.semantic_store.is_warm(),
-            "Semantic store should be invalidated after Notify"
+        assert_eq!(
+            daemon.semantic_store.is_warm(),
+            warm_before,
+            "Notify must preserve the store's warm-state via an incremental \
+             delta, not invalidate it"
         );
     }
 
