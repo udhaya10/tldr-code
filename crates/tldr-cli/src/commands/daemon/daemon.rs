@@ -120,10 +120,10 @@ pub struct TLDRDaemon {
     /// Number of indexed files (for status reporting)
     indexed_files: Arc<RwLock<usize>>,
     /// Persistent semantic index (built lazily on first query, invalidated on
-    /// Notify). A `std::sync::Mutex` (not tokio `RwLock`) so it can be locked
-    /// inside `spawn_blocking`, where the heavy build/search runs off the async
-    /// executor — `SemanticIndex` is `Send` but `!Sync`, so a tokio guard could
-    /// not cross the blocking boundary anyway (TLDR-atc).
+    /// Notify). A `std::sync::Mutex` (not tokio `RwLock`) because the heavy
+    /// build/search runs inside `spawn_blocking` (a sync context) and
+    /// `SemanticIndex::search` needs `&mut self` (exclusive) anyway. A future
+    /// `RwLock<VectorStore>` migration for concurrent reads is TLDR-ac0.1.
     #[cfg(feature = "semantic")]
     semantic_index: Arc<std::sync::Mutex<Option<SemanticIndex>>>,
 }
@@ -1181,13 +1181,27 @@ impl TLDRDaemon {
         let file_hash = super::salsa::hash_path(&file);
         self.cache.invalidate_by_input(file_hash);
 
-        // Invalidate semantic index so it rebuilds on next query. Plain sync
-        // lock-set-drop with no await in scope, so it never blocks the runtime.
+        // Invalidate the resident semantic index so it rebuilds on next query.
+        // Take the lock on a BLOCKING thread, never the async executor: the
+        // Semantic handler holds this same std::sync::Mutex across a multi-second
+        // build inside spawn_blocking, so a `.lock()` on the async path would park
+        // a tokio worker for the whole build (TLDR-qr9). Await the blocking task
+        // so invalidation completes before we respond.
+        //
+        // Ordering caveat: a Semantic build/search already holding the lock when
+        // this Notify arrives finishes against the pre-notify index before this
+        // clears it; the next query then rebuilds. This matches the prior mutex
+        // ordering — only the async-worker parking is fixed. The event-driven
+        // delta path (TLDR-ac0.2) supersedes this coarse invalidate entirely.
         #[cfg(feature = "semantic")]
         {
-            if let Ok(mut idx) = self.semantic_index.lock() {
-                *idx = None;
-            }
+            let idx = std::sync::Arc::clone(&self.semantic_index);
+            let _ = tokio::task::spawn_blocking(move || {
+                if let Ok(mut guard) = idx.lock() {
+                    *guard = None;
+                }
+            })
+            .await;
         }
 
         let threshold = self.config.auto_reindex_threshold;
