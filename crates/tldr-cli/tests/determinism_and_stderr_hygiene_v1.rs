@@ -201,17 +201,33 @@ fn run_clones_strip_timing(dir: &Path) -> Value {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let mut v: Value = serde_json::from_str(&stdout)
         .unwrap_or_else(|e| panic!("clones stdout not JSON: {e}\n{stdout}"));
-    // Strip wall-clock timing (inherently variable) so byte-equality
-    // captures CONTENT determinism only — that's what the bug was
-    // about. The fix made the `clone_pairs[]` order stable; timing
-    // was never claimed to be byte-stable.
-    if let Some(meta) = v.get_mut("metadata").and_then(|m| m.as_object_mut()) {
-        meta.remove("detection_time_ms");
-    }
-    if let Some(stats) = v.get_mut("stats").and_then(|s| s.as_object_mut()) {
-        stats.remove("detection_time_ms");
-    }
+    // Strip wall-clock timing (inherently variable) so byte-equality captures
+    // CONTENT determinism only — the fix made `clone_pairs[]` order stable;
+    // timing was never claimed byte-stable. `detection_time_ms` appears in BOTH
+    // `stats` and `summary` (TLDR-lx6: the old code only stripped `stats` plus a
+    // non-existent `metadata`, so the unstripped `summary` timing made this test
+    // fail), so strip it RECURSIVELY wherever it occurs.
+    strip_timing_fields(&mut v);
     v
+}
+
+/// Recursively remove every `detection_time_ms` field (wall-clock, inherently
+/// variable) so byte-equality compares only deterministic content.
+fn strip_timing_fields(v: &mut Value) {
+    match v {
+        Value::Object(map) => {
+            map.remove("detection_time_ms");
+            for child in map.values_mut() {
+                strip_timing_fields(child);
+            }
+        }
+        Value::Array(arr) => {
+            for child in arr.iter_mut() {
+                strip_timing_fields(child);
+            }
+        }
+        _ => {}
+    }
 }
 
 #[test]
