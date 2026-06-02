@@ -162,6 +162,20 @@ impl VectorStore {
                 self.dimensions
             )));
         }
+        // Collision guard (Codex review): a re-add with the SAME identity is a
+        // legitimate update (delta: changed body, same key); a same-key/DIFFERENT-
+        // identity is a u64 hash collision that would silently lose a chunk.
+        if let Some(existing) = self.meta.get(&key) {
+            if existing.identity != meta.identity {
+                return Err(vs_err(
+                    "add",
+                    format!(
+                        "u64 key collision: '{}' vs '{}' both hash to {key}",
+                        existing.identity, meta.identity
+                    ),
+                ));
+            }
+        }
         // Replace semantics: drop any existing vector first. A replace reuses the
         // freed slot, so only a NEW key can grow the index — reserve just for that
         // (Codex review: don't reserve when merely updating a full store).
@@ -361,7 +375,14 @@ impl VectorStore {
             .open(dir.join("lock"))?;
         lock_file.lock_exclusive()?;
 
-        let gen = read_current(dir).map(|c| c.generation + 1).unwrap_or(1);
+        // Next generation = max(valid CURRENT, highest on-disk manifest) + 1. A
+        // torn CURRENT must NOT reset numbering to 1 and overwrite existing
+        // manifest.<gen> history (Codex review).
+        let gen = read_current(dir)
+            .map(|c| c.generation)
+            .unwrap_or(0)
+            .max(manifest_gens(dir).into_iter().max().unwrap_or(0))
+            + 1;
 
         // 1. index.<gen>.usearch (immutable; not referenced until CURRENT commits)
         let index_path = dir.join(format!("index.{gen}.usearch"));
@@ -421,93 +442,111 @@ impl VectorStore {
     /// newest-to-oldest for the newest generation that verifies (Codex review).
     /// Errors (→ caller full-rebuilds) only if no retained generation verifies.
     pub fn load(dir: &Path, expect: &ManifestId) -> TldrResult<Self> {
-        // Candidate generations, newest first: CURRENT's gen (if valid), then
-        // every on-disk manifest.<gen> descending.
-        let mut gens: Vec<u64> = Vec::new();
-        if let Some(cur) = read_current(dir) {
-            gens.push(cur.generation);
-        }
-        let mut scanned: Vec<u64> = std::fs::read_dir(dir)
-            .into_iter()
-            .flatten()
-            .flatten()
-            .filter_map(|e| {
-                e.file_name()
-                    .to_string_lossy()
-                    .strip_prefix("manifest.")
-                    .and_then(|r| r.parse::<u64>().ok())
-            })
-            .collect();
-        scanned.sort_unstable_by(|a, b| b.cmp(a));
-        for g in scanned {
-            if !gens.contains(&g) {
-                gens.push(g);
-            }
+        // Shared lock: a concurrent save() holds the EXCLUSIVE lock while it writes
+        // its generation files, so this blocks until no save is mid-write — the
+        // fallback scan can't pick up an in-flight, not-yet-committed generation
+        // (Codex review).
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(dir.join("lock"))?;
+        // Fully-qualified via fs2 (not the std inherent `File::lock_shared`, which is
+        // only stable from 1.89) so the lock path is MSRV-agnostic — the project pins
+        // no rust-version.
+        fs2::FileExt::lock_shared(&lock)?;
+
+        let current_gen = read_current(dir).map(|c| c.generation);
+        let mut gens = manifest_gens(dir);
+        gens.sort_unstable_by(|a, b| b.cmp(a)); // newest first
+        if let Some(cg) = current_gen {
+            // Trust CURRENT as the newest COMMITTED generation: ignore any
+            // higher-numbered manifest (an in-flight save that didn't commit).
+            gens.retain(|g| *g <= cg);
         }
         if gens.is_empty() {
             return Err(vs_err("load", "no store generation found"));
         }
 
+        let mut newest = true;
         let mut last_err = None;
         for gen in gens {
             match Self::load_generation(dir, gen, expect) {
-                Ok(store) => return Ok(store),
-                Err(e) => last_err = Some(e),
+                Ok(store) => {
+                    if !newest {
+                        eprintln!(
+                            "[tldr-warn] vector_store: recovered from older generation {gen} \
+                             (the newest committed one was unusable); the next save repairs CURRENT"
+                        );
+                    }
+                    return Ok(store);
+                }
+                // The NEWEST committed generation being for a different
+                // model/schema means the config changed -> rebuild; do NOT
+                // resurrect a stale older generation (Codex review).
+                Err(LoadFail::Incompatible(e)) if newest => return Err(e),
+                Err(f) => last_err = Some(f.into_err()),
             }
+            newest = false;
         }
         Err(last_err.unwrap_or_else(|| vs_err("load", "no verifying generation")))
     }
 
-    /// Verify and load one specific generation: manifest config gates +
-    /// sidecar/index/keys checksums + index size + every sidecar key present in
-    /// the index. Errors on any mismatch (the caller tries an older generation).
-    fn load_generation(dir: &Path, gen: u64, expect: &ManifestId) -> TldrResult<Self> {
+    /// Verify and load one specific generation. The failure is typed so `load()`
+    /// only falls back to an older generation on `Corrupt` (IO/parse/checksum/
+    /// drift), never on `Incompatible` (config/format mismatch).
+    fn load_generation(dir: &Path, gen: u64, expect: &ManifestId) -> Result<Self, LoadFail> {
+        let manifest_bytes =
+            std::fs::read(dir.join(format!("manifest.{gen}"))).map_err(|e| LoadFail::Corrupt(e.into()))?;
         let manifest: Manifest =
-            serde_json::from_slice(&std::fs::read(dir.join(format!("manifest.{gen}")))?)
-                .map_err(|e| vs_err("load", e))?;
+            serde_json::from_slice(&manifest_bytes).map_err(|e| LoadFail::Corrupt(vs_err("load", e)))?;
         if manifest.format_version != STORE_FORMAT_VERSION {
-            return Err(vs_err("load", "format_version mismatch"));
+            return Err(LoadFail::Incompatible(vs_err("load", "format_version mismatch")));
         }
         if &manifest.id != expect {
-            return Err(vs_err("load", "config mismatch (model/dims/params/root)"));
+            return Err(LoadFail::Incompatible(vs_err(
+                "load",
+                "config mismatch (model/dims/params/root)",
+            )));
         }
         if manifest.generation != gen {
-            return Err(vs_err("load", "manifest generation != filename"));
+            return Err(LoadFail::Corrupt(vs_err("load", "manifest generation != filename")));
         }
 
-        let meta_bytes = std::fs::read(dir.join(format!("meta.{gen}")))?;
+        let meta_bytes =
+            std::fs::read(dir.join(format!("meta.{gen}"))).map_err(|e| LoadFail::Corrupt(e.into()))?;
         if digest_bytes(&meta_bytes) != manifest.sidecar_checksum {
-            return Err(vs_err("load", "sidecar checksum mismatch"));
+            return Err(LoadFail::Corrupt(vs_err("load", "sidecar checksum mismatch")));
         }
         let index_path = dir.join(format!("index.{gen}.usearch"));
-        if digest_bytes(&std::fs::read(&index_path)?) != manifest.index_checksum {
-            return Err(vs_err("load", "index checksum mismatch"));
+        let index_bytes = std::fs::read(&index_path).map_err(|e| LoadFail::Corrupt(e.into()))?;
+        if digest_bytes(&index_bytes) != manifest.index_checksum {
+            return Err(LoadFail::Corrupt(vs_err("load", "index checksum mismatch")));
         }
 
         let sidecar: SidecarOwned =
-            serde_json::from_slice(&meta_bytes).map_err(|e| vs_err("load", e))?;
+            serde_json::from_slice(&meta_bytes).map_err(|e| LoadFail::Corrupt(vs_err("load", e)))?;
         let mut keys: Vec<u64> = sidecar.meta.keys().copied().collect();
         keys.sort_unstable();
         if keys_digest(&keys) != manifest.keys_checksum {
-            return Err(vs_err("load", "keys checksum mismatch"));
+            return Err(LoadFail::Corrupt(vs_err("load", "keys checksum mismatch")));
         }
 
         let dimensions = expect.dimensions as usize;
         let capacity = sidecar.meta.len().max(Self::MIN_CAPACITY);
-        let index = new_f32_index(dimensions, capacity)?;
+        let index = new_f32_index(dimensions, capacity).map_err(LoadFail::Corrupt)?;
         let index_str = index_path
             .to_str()
-            .ok_or_else(|| vs_err("load", "non-utf8 index path"))?;
-        index.load(index_str).map_err(|e| vs_err("load", e))?;
+            .ok_or_else(|| LoadFail::Corrupt(vs_err("load", "non-utf8 index path")))?;
+        index.load(index_str).map_err(|e| LoadFail::Corrupt(vs_err("load", e)))?;
         if index.size() != sidecar.meta.len() {
-            return Err(vs_err("load", "index size != sidecar count (drift)"));
+            return Err(LoadFail::Corrupt(vs_err("load", "index size != sidecar count (drift)")));
         }
         // `keys_checksum` only proves the sidecar matches the manifest; verify the
-        // usearch index actually CONTAINS every sidecar key, so a vector key-set
-        // that drifted from the sidecar is caught (Codex review — not circular).
+        // usearch index actually CONTAINS every sidecar key (Codex — not circular).
         for &key in sidecar.meta.keys() {
             if !index.contains(key) {
-                return Err(vs_err("load", "index is missing a sidecar key (drift)"));
+                return Err(LoadFail::Corrupt(vs_err("load", "index is missing a sidecar key (drift)")));
             }
         }
 
@@ -519,6 +558,37 @@ impl VectorStore {
             files: sidecar.files,
         })
     }
+}
+
+/// Why a single generation failed to load — drives whether `load()` may fall
+/// back to an older generation (`Corrupt`) or must reject and rebuild
+/// (`Incompatible`, when the newest committed generation is the offender).
+enum LoadFail {
+    Incompatible(TldrError),
+    Corrupt(TldrError),
+}
+
+impl LoadFail {
+    fn into_err(self) -> TldrError {
+        match self {
+            LoadFail::Incompatible(e) | LoadFail::Corrupt(e) => e,
+        }
+    }
+}
+
+/// All generation numbers with an on-disk `manifest.<gen>` (unsorted).
+fn manifest_gens(dir: &Path) -> Vec<u64> {
+    std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .strip_prefix("manifest.")
+                .and_then(|r| r.parse::<u64>().ok())
+        })
+        .collect()
 }
 
 /// Stable FNV-1a 64-bit hash. Deterministic across processes, platforms, and
@@ -588,9 +658,8 @@ fn sync_dir(dir: &Path) -> TldrResult<()> {
 }
 
 /// Read + validate the `CURRENT` pointer. `None` if missing, unparseable, wrong
-/// magic, or failing its checksum (a torn write) — the caller then treats the
-/// store as absent and rebuilds (the newest-verifying-manifest fallback scan is
-/// a later step).
+/// magic, or failing its checksum (a torn write) — `load()` then falls back to
+/// scanning `manifest.<gen>` for the newest verifying generation.
 fn read_current(dir: &Path) -> Option<CurrentPointer> {
     let bytes = std::fs::read(dir.join("CURRENT")).ok()?;
     let cur: CurrentPointer = serde_json::from_slice(&bytes).ok()?;
@@ -756,10 +825,6 @@ impl VectorStore {
         let mut ordinals: HashMap<String, u32> = HashMap::new();
         let mut file_keys: HashMap<String, std::collections::BTreeSet<u64>> = HashMap::new();
         let mut file_abs: HashMap<String, PathBuf> = HashMap::new();
-        // key -> identity, to DETECT a 64-bit hash collision between two distinct
-        // identities (astronomically rare, but a silent replace would lose a chunk
-        // — Codex review: the stored identity must actually be checked).
-        let mut seen: HashMap<u64, String> = HashMap::new();
 
         for (chunk, vector) in chunks.iter().zip(vectors.iter()) {
             let file_rel = root_relative(root, &chunk.file_path);
@@ -778,16 +843,7 @@ impl VectorStore {
             );
             *ordinal += 1;
             let key = identity_key(&identity);
-            if let Some(prev) = seen.get(&key) {
-                if prev != &identity {
-                    return Err(vs_err(
-                        "build",
-                        format!("u64 key collision: '{prev}' and '{identity}' both hash to {key}"),
-                    ));
-                }
-            }
-            seen.insert(key, identity.clone());
-
+            // add() detects a u64 key collision between distinct identities.
             store.add(
                 key,
                 vector,
@@ -1089,11 +1145,27 @@ mod tests {
     fn vector_store_readd_updates_metadata_in_place() {
         const D: usize = 8;
         let mut store = VectorStore::new(D, 4).unwrap();
-        store.add(42, &unit(D, 1), meta("old")).unwrap();
-        store.add(42, &unit(D, 1), meta("new")).unwrap(); // same key, new meta
+        // A realistic delta re-add: SAME identity (key = hash(identity)), changed
+        // body -> updated content_hash.
+        let mut m1 = meta("foo");
+        m1.content_hash = "h1".into();
+        let mut m2 = meta("foo");
+        m2.content_hash = "h2".into();
+        store.add(42, &unit(D, 1), m1).unwrap();
+        store.add(42, &unit(D, 1), m2).unwrap();
         assert_eq!(store.len(), 1, "re-add of the same key does not grow the store");
         let hits = store.search(&unit(D, 1), 1).unwrap();
-        assert_eq!(hits[0].meta.identity, "new");
+        assert_eq!(hits[0].meta.content_hash, "h2");
+    }
+
+    #[test]
+    fn vector_store_add_rejects_key_collision() {
+        const D: usize = 8;
+        let mut store = VectorStore::new(D, 4).unwrap();
+        store.add(99, &unit(D, 1), meta("alpha")).unwrap();
+        // Same key, DIFFERENT identity = a u64 hash collision -> rejected, not a
+        // silent replace that would lose the first chunk.
+        assert!(store.add(99, &unit(D, 1), meta("beta")).is_err());
     }
 
     #[test]
@@ -1198,6 +1270,59 @@ mod tests {
         assert!(
             VectorStore::load(dir.path(), &other).is_err(),
             "a config mismatch must reject -> caller rebuilds"
+        );
+    }
+
+    #[test]
+    fn store_load_rejects_incompatible_newest_over_compatible_older() {
+        // REGRESSION (Codex HIGH): the newest COMMITTED generation is for a
+        // different config; a compatible OLDER generation still sits on disk. load()
+        // must REJECT (→ caller rebuilds), NOT silently resurrect the stale older gen.
+        // Pre-fix (every load_generation error fell back) this returned the gen-1 store.
+        const D: usize = 8;
+        let dir = tempfile::tempdir().unwrap();
+        let id_a = manifest_id(D);
+        let mut id_b = manifest_id(D);
+        id_b.model_revision = "rev-2".into(); // newest gen built under a new model
+
+        let mut store = VectorStore::new(D, 4).unwrap();
+        store.add(1, &unit(D, 0), meta("a")).unwrap();
+        store.save(dir.path(), &id_a).unwrap(); // gen1, compatible with id_a
+        store.save(dir.path(), &id_b).unwrap(); // gen2, CURRENT→gen2, id_b only
+
+        assert_eq!(read_current(dir.path()).unwrap().generation, 2);
+        assert!(
+            VectorStore::load(dir.path(), &id_a).is_err(),
+            "incompatible newest gen must reject, not fall back to the stale gen-1"
+        );
+    }
+
+    #[test]
+    fn store_save_does_not_reset_generation_after_torn_current() {
+        // REGRESSION (Codex HIGH): a torn CURRENT must NOT reset numbering to 1 and
+        // overwrite existing manifest.<gen> history. The next gen = max(valid CURRENT,
+        // highest on-disk manifest) + 1. Pre-fix (gen = read_current→torn→1) the save
+        // wrote manifest.1, clobbering gens 2/3.
+        const D: usize = 8;
+        let dir = tempfile::tempdir().unwrap();
+        let id = manifest_id(D);
+        let mut store = VectorStore::new(D, 4).unwrap();
+        store.add(1, &unit(D, 0), meta("a")).unwrap();
+        for _ in 0..3 {
+            store.save(dir.path(), &id).unwrap(); // gens 1,2,3
+        }
+        assert_eq!(read_current(dir.path()).unwrap().generation, 3);
+        // Tear CURRENT (bad checksum) so read_current() returns None.
+        std::fs::write(
+            dir.path().join("CURRENT"),
+            br#"{"magic":1,"generation":3,"checksum":0}"#,
+        )
+        .unwrap();
+        store.save(dir.path(), &id).unwrap();
+        assert_eq!(
+            read_current(dir.path()).unwrap().generation,
+            4,
+            "next gen must advance past the highest on-disk manifest, not reset to 1"
         );
     }
 
