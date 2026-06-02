@@ -626,7 +626,7 @@ impl SemanticIndex {
 /// Create a snippet from code content
 ///
 /// Takes the first N lines of the content for display purposes.
-fn make_snippet(content: &str, max_lines: usize) -> String {
+pub(crate) fn make_snippet(content: &str, max_lines: usize) -> String {
     content
         .lines()
         .take(max_lines)

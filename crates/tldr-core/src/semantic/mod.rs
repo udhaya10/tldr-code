@@ -129,3 +129,9 @@ pub use enrichment::{build_embedding_text, enrich_chunks, EmbeddingUnit};
 // dependency smoke test + index helper; sidecar/manifest/crash-safe-save follow
 // (docs/INCREMENTAL_REINDEX_DESIGN.md §4/§7).
 pub mod vector_store;
+
+// TLDR-m01: store-backed semantic search — the production bridge from a query to
+// the usearch VectorStore, with a transparent fall back to the in-memory
+// SemanticIndex. First production caller of VectorStore::load.
+pub mod store_search;
+pub use store_search::search_with_store;
