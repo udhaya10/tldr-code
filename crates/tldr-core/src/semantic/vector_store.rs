@@ -102,6 +102,11 @@ pub struct VectorStore {
     /// startup-reconcile signal and per-file key lookup (design doc §4.3).
     /// Populated by the build/delta path; persisted in the sidecar.
     files: HashMap<String, FileRecord>,
+    /// Stat-only digest of the candidate corpus at build time (TLDR-kkt). Set by
+    /// [`Self::build`], persisted in the manifest, and restored by [`Self::load`].
+    /// 0 for stores built without a root (e.g. unit tests via `new`/`from_embedded`),
+    /// which simply never trip the freshness gate.
+    corpus_digest: u64,
 }
 
 impl VectorStore {
@@ -119,6 +124,7 @@ impl VectorStore {
             index,
             meta: HashMap::new(),
             files: HashMap::new(),
+            corpus_digest: 0,
         })
     }
 
@@ -141,6 +147,14 @@ impl VectorStore {
     /// Whether the store holds no vectors.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    /// The build-time corpus digest persisted with this store (TLDR-kkt). Compare
+    /// against [`compute_corpus_digest`] over the current root to detect source
+    /// drift (added/removed file, or any file's mtime/size change). 0 for stores
+    /// built without a root (unit tests).
+    pub fn corpus_digest(&self) -> u64 {
+        self.corpus_digest
     }
 
     /// The vector dimensionality (fixed per embedding model).
@@ -247,7 +261,9 @@ impl VectorStore {
 /// On-disk layout version. Bump on any breaking change to the file formats.
 /// v2: switched persisted checksums + identity key from DefaultHasher to a
 /// stable FNV-1a hash (Codex review) — old stores are rejected on load.
-const STORE_FORMAT_VERSION: u32 = 2;
+/// v3: added `corpus_digest` to the manifest (TLDR-kkt freshness gate) — old
+/// stores lack it and are rebuilt once.
+const STORE_FORMAT_VERSION: u32 = 3;
 /// `CURRENT` magic ("TLDR") so a torn/foreign pointer is detectable.
 const CURRENT_MAGIC: u32 = 0x544C_4452;
 /// Generations retained by GC (the active one + rollback headroom). Keeps a
@@ -322,6 +338,13 @@ struct Manifest {
     index_checksum: u64,
     /// Digest of the sidecar payload.
     sidecar_checksum: u64,
+    /// Stat-only digest of the candidate source corpus at build time (TLDR-kkt).
+    /// `store_search` rebuilds when the current corpus digest differs — i.e. a
+    /// file was added/removed or any file's mtime/size changed. `serde(default)`
+    /// so a v2 manifest (which lacks it) still deserializes; it then fails the
+    /// `format_version` gate and is rebuilt.
+    #[serde(default)]
+    corpus_digest: u64,
 }
 
 /// Borrowed view for serialization (avoids cloning the sidecar on save).
@@ -418,6 +441,7 @@ impl VectorStore {
             keys_checksum: keys_digest(&keys),
             index_checksum,
             sidecar_checksum,
+            corpus_digest: self.corpus_digest,
         };
         let manifest_bytes = serde_json::to_vec(&manifest).map_err(|e| vs_err("save", e))?;
         write_sync(&dir.join(format!("manifest.{gen}")), &manifest_bytes)?;
@@ -574,6 +598,9 @@ impl VectorStore {
             index,
             meta: sidecar.meta,
             files: sidecar.files,
+            // Restore the build-time corpus digest so the freshness gate can
+            // compare it against the current on-disk corpus (TLDR-kkt).
+            corpus_digest: manifest.corpus_digest,
         })
     }
 }
@@ -607,6 +634,52 @@ fn manifest_gens(dir: &Path) -> Vec<u64> {
                 .and_then(|r| r.parse::<u64>().ok())
         })
         .collect()
+}
+
+/// Stat-only digest of the candidate source corpus under `root` — the TLDR-kkt
+/// freshness gate. Hashes the sorted `(root-relative path, mtime_secs, size)` of
+/// every file [`chunker::enumerate_corpus_files`](crate::semantic::chunker::enumerate_corpus_files)
+/// would feed the chunker. NO content read, NO parse — just a walk + `stat`, so
+/// it stays bounded on large repos (design §7.3: do NOT content-hash every file).
+///
+/// The digest flips when the file SET changes (add/remove) or any file's
+/// mtime/size changes; `store_search` rebuilds when the stored digest differs.
+/// Sorted + root-relative so the value is identical regardless of cwd or the
+/// walk's enumeration order. Because membership is decided at the WALK layer
+/// (before parsing), a supported file that yields zero chunks counts identically
+/// at build and check — it can never read as a spurious addition.
+///
+/// Residual (documented, design §7.3): an edit with the SAME mtime AND SAME size
+/// AND no set change is not detected; self-heals on the next real edit, escape
+/// hatch = manual rebuild.
+pub(crate) fn compute_corpus_digest(root: &Path) -> u64 {
+    let mut rows: Vec<(String, u64, u64)> = crate::semantic::chunker::enumerate_corpus_files(root)
+        .into_iter()
+        .map(|path| {
+            let (mtime, size) = match std::fs::metadata(&path) {
+                Ok(md) => {
+                    let mtime = md
+                        .modified()
+                        .ok()
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    (mtime, md.len())
+                }
+                Err(_) => (0, 0),
+            };
+            (root_relative(root, &path), mtime, size)
+        })
+        .collect();
+    rows.sort_unstable();
+    let mut buf = Vec::with_capacity(rows.len() * 24);
+    for (path, mtime, size) in &rows {
+        buf.extend_from_slice(path.as_bytes());
+        buf.push(0); // separator so ("ab","c") and ("a","bc") can't collide
+        buf.extend_from_slice(&mtime.to_le_bytes());
+        buf.extend_from_slice(&size.to_le_bytes());
+    }
+    stable_hash(&buf)
 }
 
 /// Stable FNV-1a 64-bit hash. Deterministic across processes, platforms, and
@@ -996,7 +1069,12 @@ impl VectorStore {
             c.flush()?;
         }
 
-        Self::from_embedded(&chunks, &vectors, root)
+        let mut store = Self::from_embedded(&chunks, &vectors, root)?;
+        // Stamp the build-time corpus digest (TLDR-kkt). Computed over the SAME
+        // candidate enumeration the chunker used above, so the freshness gate
+        // compares like with like.
+        store.corpus_digest = compute_corpus_digest(root);
+        Ok(store)
     }
 }
 
@@ -1600,6 +1678,51 @@ mod tests {
             "the returned key SET is exactly the populated keys"
         );
         assert_eq!(first, run(&store), "repeated search is order-stable");
+    }
+
+    // ---- corpus digest / freshness gate (TLDR-kkt) ----------------------------
+
+    #[test]
+    fn corpus_digest_is_deterministic_and_tracks_add_edit_delete() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = |n: &str| dir.path().join(n);
+        std::fs::write(p("a.rs"), "fn a() {}\n").unwrap();
+        std::fs::write(p("b.rs"), "fn b() {}\n").unwrap();
+
+        let d0 = compute_corpus_digest(dir.path());
+        assert_eq!(d0, compute_corpus_digest(dir.path()), "same tree -> same digest");
+
+        // ADD a file -> digest changes.
+        std::fs::write(p("c.rs"), "fn c() {}\n").unwrap();
+        let d_add = compute_corpus_digest(dir.path());
+        assert_ne!(d0, d_add, "adding a file must change the digest");
+
+        // EDIT (size change) -> digest changes.
+        std::fs::write(p("c.rs"), "fn c() { let _x = 1; }\n").unwrap();
+        let d_edit = compute_corpus_digest(dir.path());
+        assert_ne!(d_add, d_edit, "editing a file (size delta) must change the digest");
+
+        // DELETE -> digest changes, and removing the only added file returns to d0
+        // (a.rs/b.rs are untouched, so their mtime/size rows are identical).
+        std::fs::remove_file(p("c.rs")).unwrap();
+        assert_eq!(compute_corpus_digest(dir.path()), d0, "delete restores the prior digest");
+    }
+
+    #[test]
+    fn corpus_digest_counts_zero_chunk_files() {
+        // THE TRAP (TLDR-kkt): a file that yields NO chunks (a `mod.rs` of only
+        // `pub mod` decls) must still be COUNTED in the digest. If it weren't, the
+        // freshness gate would see it as a perpetual "addition" and rebuild-always.
+        // Proof it participates: adding such a file changes the digest, and the
+        // digest is then stable across repeated computes.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("lib.rs"), "fn real() {}\n").unwrap();
+        let before = compute_corpus_digest(dir.path());
+
+        std::fs::write(dir.path().join("mod.rs"), "pub mod a;\n").unwrap();
+        let after = compute_corpus_digest(dir.path());
+        assert_ne!(before, after, "a zero-chunk file must be counted in the corpus digest");
+        assert_eq!(after, compute_corpus_digest(dir.path()), "digest stable with the 0-chunk file");
     }
 
     #[test]

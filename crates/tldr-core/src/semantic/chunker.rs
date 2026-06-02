@@ -35,7 +35,7 @@
 //! }
 //! ```
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use tree_sitter::{Node, Tree};
 
@@ -276,22 +276,8 @@ fn chunk_directory<P: AsRef<Path>>(path: P, options: &ChunkOptions) -> TldrResul
     let mut all_chunks = Vec::new();
     let mut all_skipped = Vec::new();
 
-    for entry in crate::walker::ProjectWalker::new(path).iter() {
-        let file_type = match entry.file_type() {
-            Some(ft) => ft,
-            None => continue,
-        };
-        if !file_type.is_file() {
-            continue;
-        }
-        // Apply the chunker's per-file filters: hidden / binary
-        // extensions are still excluded here even though the directory
-        // walk has been pre-filtered.
-        let entry_path = entry.path();
-        if is_binary_or_hidden(entry_path) {
-            continue;
-        }
-        match chunk_file(entry_path, options) {
+    for entry_path in enumerate_corpus_files(path) {
+        match chunk_file(&entry_path, options) {
             Ok(result) => {
                 all_chunks.extend(result.chunks);
                 all_skipped.extend(result.skipped);
@@ -309,6 +295,33 @@ fn chunk_directory<P: AsRef<Path>>(path: P, options: &ChunkOptions) -> TldrResul
         chunks: all_chunks,
         skipped: all_skipped,
     })
+}
+
+/// Enumerate the candidate source files under `root` — the **pre-parse** corpus
+/// the chunker feeds to `chunk_file()`: `ProjectWalker` (honours `.gitignore`,
+/// `DEFAULT_EXCLUDE_DIRS`, generated-dir sentinels) → regular files → not
+/// binary/hidden. This is the SINGLE source of truth for "which files are in the
+/// corpus", shared by `chunk_directory` and the store freshness gate (TLDR-kkt),
+/// so the two can never drift. Membership is decided BEFORE parsing, so a
+/// supported file that yields ZERO chunks (e.g. a `mod.rs` of only `pub mod`
+/// declarations) still counts here — which is exactly what keeps the freshness
+/// digest from spuriously flagging such files as additions.
+pub(crate) fn enumerate_corpus_files(root: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    for entry in crate::walker::ProjectWalker::new(root).iter() {
+        let Some(file_type) = entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_file() {
+            continue;
+        }
+        let entry_path = entry.path();
+        if is_binary_or_hidden(entry_path) {
+            continue;
+        }
+        files.push(entry_path.to_path_buf());
+    }
+    files
 }
 
 /// Check if a file is binary or hidden

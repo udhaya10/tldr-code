@@ -35,6 +35,17 @@
 //! `store_dir` is an explicit input: the global-vs-`.tldr/` location decision (and
 //! making the daemon writer + cold CLI reader resolve a byte-identical path) belongs
 //! at the call sites, not here — which also keeps this unit tempdir-testable.
+//!
+//! ## Store-location precondition (HARD requirement for PR2/TLDR-zxb)
+//!
+//! `store_dir` and the embedding `cache_dir` MUST live OUTSIDE the indexed corpus
+//! (`root`). The freshness gate (below) walks `root`; if the store's own writes
+//! (`manifest.<gen>`, `index.*.usearch`, `cache.json`) land inside `root` they
+//! register as "source drift" and force a rebuild on EVERY query. Production
+//! satisfies this two ways — the global cache dir (`~/.cache/tldr/…`, the
+//! `CacheConfig::default`) is outside any project, and an in-tree `.tldr/` store
+//! is skipped by `ProjectWalker`. The wiring PR must not place the store in a
+//! walked, non-skipped subdirectory of `root`.
 
 use std::path::Path;
 use std::time::Instant;
@@ -43,7 +54,9 @@ use crate::semantic::index::{make_snippet, BuildOptions, SearchOptions, Semantic
 use crate::semantic::types::{
     CacheConfig, EmbeddingModel, SemanticSearchReport, SemanticSearchResult,
 };
-use crate::semantic::vector_store::{ChunkMeta, ManifestId, SearchHit, VectorStore};
+use crate::semantic::vector_store::{
+    compute_corpus_digest, ChunkMeta, ManifestId, SearchHit, VectorStore,
+};
 use crate::TldrResult;
 
 /// Version of the chunker/walker pipeline that produces embedded chunks. BUMP
@@ -152,12 +165,23 @@ fn try_store_search(
     let start = Instant::now();
     let id = manifest_id_for(root, build_options);
 
-    // load() → on ANY failure, REBUILD. load() already scans retained generations
-    // and only errors when none verify (missing / torn / config-incompatible), all
-    // of which mean "the on-disk store is unusable as-is → rebuild".
+    // Freshness gate (TLDR-kkt): a loaded store is served only if its build-time
+    // corpus digest still matches the current source tree. A stat-only walk
+    // (no parse) catches added/removed files and mtime/size edits; on drift we
+    // REBUILD rather than serve stale rankings. (For the not-yet-wired helper this
+    // walks per query; the resident-daemon path in TLDR-zxb will move the check to
+    // load/notify time instead of every query.)
+    let current_digest = compute_corpus_digest(root);
+
+    // Serve the loaded store only if it loaded cleanly AND is still fresh.
+    // Otherwise REBUILD: load() failures (missing/torn/incompatible) and a stale
+    // digest both mean "the on-disk store is unusable as-is".
     let store = match VectorStore::load(store_dir, &id) {
-        Ok(s) => s,
-        Err(_) => {
+        Ok(s) if s.corpus_digest() == current_digest => s,
+        loaded => {
+            if loaded.is_ok() {
+                eprintln!("[tldr-info] semantic store is stale (source changed); rebuilding");
+            }
             // A build()/save() failure is environmental; let build() errors
             // propagate to the SemanticIndex fallback, but treat a save() failure
             // as non-fatal (we still have a usable in-RAM store for THIS query).
@@ -483,5 +507,65 @@ mod tests {
         let mut index = SemanticIndex::build(dir.path(), bopts.clone(), cache()).unwrap();
         let ir = index.search(query, &sopts).unwrap();
         assert_eq!(order(&r1), order(&ir), "store path == SemanticIndex ranking");
+    }
+
+    // Freshness gate (TLDR-kkt) end-to-end: rebuild ONLY on source drift. Detects
+    // rebuilds by counting persisted manifest.<gen> files. Ignored (loads ONNX).
+    #[test]
+    #[ignore = "loads the ONNX embedder; run on demand"]
+    fn store_freshness_gate_rebuilds_only_on_source_drift() {
+        // PRECONDITION (also a hard requirement for PR2/TLDR-zxb): the store_dir and
+        // cache_dir MUST live OUTSIDE the indexed corpus. Otherwise the store's own
+        // writes (manifest/index/cache.json) land in the walked tree and register as
+        // "source drift" -> rebuild-always. Production satisfies this via the global
+        // cache dir or the walker-skipped `.tldr/`. Here: corpus and work are
+        // separate tempdirs.
+        let corpus = tempfile::tempdir().unwrap();
+        let work = tempfile::tempdir().unwrap();
+        std::fs::write(
+            corpus.path().join("foo.rs"),
+            "/// cosine similarity\nfn cosine_similarity(a: &[f32], b: &[f32]) -> f32 { 0.0 }\n",
+        )
+        .unwrap();
+        // A zero-chunk supported file (only a module decl) — the TLDR-kkt trap: it
+        // must NOT cause a rebuild on an otherwise-unchanged tree.
+        std::fs::write(corpus.path().join("emptymod.rs"), "pub mod nothing;\n").unwrap();
+
+        let model = EmbeddingModel::ArcticXS;
+        let bopts = build_opts(model, ChunkGranularity::Function, None);
+        let sopts = opts(0.0, false);
+        let store_dir = work.path().join("store");
+        let cache = || {
+            Some(CacheConfig {
+                cache_dir: work.path().join("cache"),
+                max_size_mb: 50,
+                ttl_days: 1,
+            })
+        };
+        let q = "compute cosine similarity";
+        let gens = || {
+            std::fs::read_dir(&store_dir)
+                .unwrap()
+                .flatten()
+                .filter(|e| e.file_name().to_string_lossy().starts_with("manifest."))
+                .count()
+        };
+
+        // Call 1: builds + persists -> generation 1.
+        search_with_store(corpus.path(), &store_dir, q, &sopts, &bopts, cache()).unwrap();
+        assert_eq!(gens(), 1, "first call builds one generation");
+
+        // Call 2: tree UNCHANGED (incl the 0-chunk file) -> load-hit, NO rebuild.
+        search_with_store(corpus.path(), &store_dir, q, &sopts, &bopts, cache()).unwrap();
+        assert_eq!(gens(), 1, "fresh store must NOT rebuild (0-chunk file is no phantom add)");
+
+        // Edit a source file (size change) -> drift -> rebuild -> generation 2.
+        std::fs::write(
+            corpus.path().join("foo.rs"),
+            "/// cosine similarity\nfn cosine_similarity(a: &[f32], b: &[f32]) -> f32 { 1.0 }\n// e\n",
+        )
+        .unwrap();
+        search_with_store(corpus.path(), &store_dir, q, &sopts, &bopts, cache()).unwrap();
+        assert_eq!(gens(), 2, "source edit must rebuild -> new generation");
     }
 }
