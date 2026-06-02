@@ -507,9 +507,11 @@ impl VectorStore {
         Err(last_err.unwrap_or_else(|| vs_err("load", "no verifying generation")))
     }
 
-    /// Verify and load one specific generation. The failure is typed so `load()`
-    /// only falls back to an older generation on `Corrupt` (IO/parse/checksum/
-    /// drift), never on `Incompatible` (config/format mismatch).
+    /// Verify and load one specific generation. The failure is typed `Incompatible`
+    /// (config/format mismatch) vs `Corrupt` (IO/parse/checksum/drift) so `load()`
+    /// can REJECT when the NEWEST committed generation is `Incompatible` (config
+    /// changed → rebuild) while still scanning older generations past any other
+    /// failure. See `load()` for the full fallback policy.
     fn load_generation(dir: &Path, gen: u64, expect: &ManifestId) -> Result<Self, LoadFail> {
         let manifest_bytes =
             std::fs::read(dir.join(format!("manifest.{gen}"))).map_err(|e| LoadFail::Corrupt(e.into()))?;
