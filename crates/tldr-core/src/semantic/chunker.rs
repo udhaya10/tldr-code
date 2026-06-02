@@ -297,6 +297,114 @@ fn chunk_directory<P: AsRef<Path>>(path: P, options: &ChunkOptions) -> TldrResul
     })
 }
 
+/// Check whether a single `file` would be included in the corpus enumerated by
+/// [`enumerate_corpus_files`] — i.e., the same `ProjectWalker` filters
+/// (`.gitignore`, `DEFAULT_EXCLUDE_DIRS`, generated-dir sentinels), the
+/// `is_binary_or_hidden` gate, and the `Language::from_path` check all agree
+/// the file is indexable. Used by the delta path (TLDR-ac0.6) as the first
+/// gate before `chunk_file`, so a Notify for a non-corpus file is a no-op.
+///
+/// Implementation: builds a `WalkBuilder` rooted at `root` with the same
+/// config as `ProjectWalker`, but prunes every directory that is NOT an
+/// ancestor of `file` — so the walk visits only the O(depth) ancestor chain
+/// plus the target file's siblings at the leaf level. The file is in the
+/// corpus iff the walker yields it AND it passes `is_binary_or_hidden`.
+pub fn is_corpus_file(root: &Path, file: &Path) -> bool {
+    use crate::walker::{dir_has_generated_sentinel, DEFAULT_EXCLUDE_DIRS};
+    use ignore::WalkBuilder;
+
+    let canonical_file = match file.canonicalize() {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+    let canonical_root = match root.canonicalize() {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+
+    let rel = match canonical_file.strip_prefix(&canonical_root) {
+        Ok(r) => r,
+        Err(_) => return false,
+    };
+
+    // Quick pre-checks before building the walker.
+    if is_binary_or_hidden(&canonical_file) {
+        return false;
+    }
+    if Language::from_path(&canonical_file).is_none() {
+        return false;
+    }
+
+    // Collect the ancestor chain from root to the file's parent so we can
+    // prune the walk to only descend into these directories.
+    let ancestors: std::collections::HashSet<std::path::PathBuf> = {
+        let mut set = std::collections::HashSet::new();
+        set.insert(canonical_root.clone());
+        let mut cur = canonical_root.clone();
+        for component in rel.parent().into_iter().flat_map(|p| p.components()) {
+            cur = cur.join(component);
+            set.insert(cur.clone());
+        }
+        set
+    };
+
+    let preserve_js_ts_dirs =
+        crate::walker::root_is_js_ts_dominated(&canonical_root);
+    let js_ts_preserved: &[&str] = if preserve_js_ts_dirs {
+        crate::walker::JS_TS_PRESERVED_DIRS
+    } else {
+        &[]
+    };
+
+    let mut builder = WalkBuilder::new(&canonical_root);
+    builder
+        .hidden(true)
+        .git_ignore(true)
+        .git_global(true)
+        .git_exclude(true)
+        .parents(true)
+        .follow_links(false)
+        .max_depth(Some(rel.components().count()));
+
+    builder.filter_entry(move |entry| {
+        let is_dir = entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
+        if is_dir {
+            // Only descend into ancestors of the target file.
+            let entry_canon = entry.path().canonicalize().unwrap_or_else(|_| entry.path().to_path_buf());
+            if !ancestors.contains(&entry_canon) {
+                return false;
+            }
+            if let Some(name) = entry.file_name().to_str() {
+                if js_ts_preserved.contains(&name) {
+                    // preserved for JS/TS — defer to .gitignore
+                } else if DEFAULT_EXCLUDE_DIRS.contains(&name) {
+                    return false;
+                }
+            }
+            if dir_has_generated_sentinel(entry.path()) {
+                return false;
+            }
+        }
+        true
+    });
+
+    for res in builder.build() {
+        let Ok(entry) = res else { continue };
+        let Some(ft) = entry.file_type() else { continue };
+        if !ft.is_file() {
+            continue;
+        }
+        let entry_canon = match entry.path().canonicalize() {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        if entry_canon == canonical_file {
+            return true;
+        }
+    }
+    false
+}
+
 /// Enumerate the candidate source files under `root` — the **pre-parse** corpus
 /// the chunker feeds to `chunk_file()`: `ProjectWalker` (honours `.gitignore`,
 /// `DEFAULT_EXCLUDE_DIRS`, generated-dir sentinels) → regular files → not
@@ -1224,5 +1332,61 @@ fn bar() {}
 
         assert!(names.contains(&&"main".to_string()));
         assert!(!names.iter().any(|n| *n == "dep"));
+    }
+
+    // --- is_corpus_file (TLDR-ac0.6) ---
+    // The single-file gate must agree with enumerate_corpus_files: same walker
+    // rules (gitignore, DEFAULT_EXCLUDE_DIRS), is_binary_or_hidden, and the
+    // Language::from_path check.
+
+    #[test]
+    fn is_corpus_file_accepts_recognized_source() {
+        let tmp = TempDir::new().unwrap();
+        let file = tmp.path().join("src/lib.rs");
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(&file, "fn f() {}\n").unwrap();
+        assert!(is_corpus_file(tmp.path(), &file));
+    }
+
+    #[test]
+    fn is_corpus_file_rejects_unknown_extension() {
+        let tmp = TempDir::new().unwrap();
+        let file = tmp.path().join("src/data.xyz");
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(&file, "not source\n").unwrap();
+        assert!(!is_corpus_file(tmp.path(), &file));
+    }
+
+    #[test]
+    fn is_corpus_file_rejects_excluded_dir() {
+        let tmp = TempDir::new().unwrap();
+        let file = tmp.path().join("node_modules/foo/bar.js");
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(&file, "function f() {}\n").unwrap();
+        assert!(!is_corpus_file(tmp.path(), &file));
+    }
+
+    #[test]
+    fn is_corpus_file_rejects_gitignored() {
+        let tmp = TempDir::new().unwrap();
+        // The ignore crate only honours .gitignore inside a git repo.
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(tmp.path())
+            .output()
+            .unwrap();
+        fs::write(tmp.path().join(".gitignore"), "generated/\n").unwrap();
+        let file = tmp.path().join("generated/auto.py");
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(&file, "def gen(): pass\n").unwrap();
+        assert!(!is_corpus_file(tmp.path(), &file));
+    }
+
+    #[test]
+    fn is_corpus_file_rejects_missing_file() {
+        let tmp = TempDir::new().unwrap();
+        let file = tmp.path().join("src/gone.rs");
+        // Never created — canonicalize fails, so it can't be in the corpus.
+        assert!(!is_corpus_file(tmp.path(), &file));
     }
 }

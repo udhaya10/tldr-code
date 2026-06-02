@@ -21,6 +21,9 @@ use tldr_core::semantic::{
 /// Result of an incremental delta on a single file change (TLDR-t8f).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeltaOutcome {
+    /// Path is outside the source corpus — filtered by the same rules as the
+    /// build walker (TLDR-ac0.6). No-op, distinct from a cold-store skip.
+    Filtered,
     /// Store cold or warm under a different model — no-op; the next query's
     /// cold build already reflects the change.
     Skipped,
@@ -168,6 +171,32 @@ impl IndexManager {
     /// [`DeltaOutcome::NeedsRebuild`] — means the caller should [`Self::invalidate`]
     /// and let the next query full-rebuild (the design's fallback).
     pub fn apply_delta(&self, project: &Path, file: &Path) -> Result<DeltaOutcome, String> {
+        let is_delete = !(file.exists() && file.is_file());
+
+        // 0. Capture the warm model (or bail if cold) FIRST — a cold store always
+        //    no-ops (the next query rebuilds via enumerate_corpus_files anyway), so
+        //    short-circuit before the corpus walk. This matters on cold churn (a
+        //    `git checkout` / `npm install` between daemon start and first query
+        //    floods Notify events); without this, every such edit would pay a
+        //    discarded walker build. `model` is a Copy enum — free to hold here and
+        //    drop on the Filtered/NeedsRebuild paths below. The delta embeds with
+        //    the SAME model the resident store was built with — no model param.
+        let model = match self.store.read().as_ref() {
+            Some((m, _)) => *m,
+            None => return Ok(DeltaOutcome::Skipped),
+        };
+
+        // §6 corpus filter for EDITS (TLDR-ac0.6): cheap, filesystem-only check
+        // using the SAME walker rules as the build (gitignore + DEFAULT_EXCLUDE_DIRS
+        // + generated-dir sentinels + binary/hidden + language extension). Run
+        // BEFORE the enrich gate so a noisy write under an ignored path
+        // (node_modules/, target/, ...) is a cheap no-op instead of triggering a
+        // full rebuild. Deletes can't be walker-checked (the file is gone); they're
+        // filtered store-side below by counting removed keys.
+        if !is_delete && !tldr_core::semantic::is_corpus_file(project, file) {
+            return Ok(DeltaOutcome::Filtered);
+        }
+
         // Per-file enrichment can't reproduce the whole-corpus build vectors, so
         // a delta would diverge from the index. Fall back to a full rebuild.
         let enrich = std::env::var("TLDR_ENRICH")
@@ -177,15 +206,15 @@ impl IndexManager {
             return Ok(DeltaOutcome::NeedsRebuild);
         }
 
-        // 0. Capture the warm model (or bail if cold). The delta embeds with the
-        //    SAME model the resident store was built with — no model param needed.
-        let model = match self.store.read().as_ref() {
-            Some((m, _)) => *m,
-            None => return Ok(DeltaOutcome::Skipped),
-        };
-
-        // Deletion: `Notify` can't always distinguish edit from delete (§5).
-        if !(file.exists() && file.is_file()) {
+        // Deletion: `Notify` can't always distinguish edit from delete (§5). Use
+        // the resident store as the source of truth (TLDR-ac0.6): apply_file_delete
+        // is a clean no-op (`Ok(0)`, no FileRecord written) for a path it has no
+        // record of, so 0 keys removed means the file was never in the corpus →
+        // report Filtered, store untouched. A removal >0 inherits gitignore /
+        // JS-TS-preservation / generated-sentinel rules by construction, because
+        // the store IS the build's filtered output — no path replica to drift from
+        // the walker.
+        if is_delete {
             let file_rel = deleted_file_rel(project, file);
             let mut guard = self.store.write();
             return match guard.as_mut() {
@@ -193,7 +222,11 @@ impl IndexManager {
                     let removed = store
                         .apply_file_delete(&file_rel)
                         .map_err(|e| e.to_string())?;
-                    Ok(DeltaOutcome::Deleted { removed })
+                    if removed == 0 {
+                        Ok(DeltaOutcome::Filtered)
+                    } else {
+                        Ok(DeltaOutcome::Deleted { removed })
+                    }
                 }
                 // Store rebuilt/invalidated under a different model since step 0.
                 _ => Ok(DeltaOutcome::Skipped),
@@ -369,5 +402,129 @@ mod tests {
         assert!(!manager.is_warm());
         manager.invalidate();
         assert!(!manager.is_warm());
+    }
+
+    // --- TLDR-ac0.6 source-filter tests ---
+
+    use tldr_core::semantic::vector_store::{ChunkMeta, FileKind, FileRecord};
+
+    fn seeded_manager() -> IndexManager {
+        let manager = IndexManager::new();
+        let model = EmbeddingModel::default();
+        let dims = model.dimensions();
+        let mut vector = vec![0.0; dims];
+        vector[0] = 1.0;
+
+        let mut store = VectorStore::new(dims, 8).unwrap();
+        store
+            .add(
+                1,
+                &vector,
+                ChunkMeta {
+                    identity: "src/lib.rs::seed::0".to_string(),
+                    file_rel_path: "src/lib.rs".to_string(),
+                    function_name: Some("seed".to_string()),
+                    class_name: None,
+                    line_start: 1,
+                    line_end: 1,
+                    content_hash: "seed-hash".to_string(),
+                },
+            )
+            .unwrap();
+        // Register the per-file record too — apply_file_delete keys off this, so
+        // without it every delete would no-op (0 removed) regardless of the path,
+        // and the store-as-source-of-truth delete filter wouldn't be exercised.
+        store.set_file_record(
+            "src/lib.rs".to_string(),
+            FileRecord {
+                keys: std::iter::once(1).collect(),
+                mtime: 0,
+                size: 0,
+                file_type: FileKind::Regular,
+            },
+        );
+        *manager.store.write() = Some((model, store));
+        manager
+    }
+
+    fn write_file(root: &std::path::Path, rel: &str, contents: &[u8]) -> std::path::PathBuf {
+        let path = root.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, contents).unwrap();
+        path
+    }
+
+    #[test]
+    fn apply_delta_filters_non_corpus_edit_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cases = [
+            write_file(tmp.path(), "node_modules/foo/bar.js", b"function f(){}\n"),
+            write_file(tmp.path(), "target/debug/main", b"\0ELF\n"),
+            write_file(tmp.path(), "src/data.xyz", b"unknown ext\n"),
+            write_file(tmp.path(), ".git/HEAD", b"ref: refs/heads/main\n"),
+        ];
+
+        for path in &cases {
+            let manager = seeded_manager();
+            let before = manager.store_len();
+            let outcome = manager.apply_delta(tmp.path(), path).unwrap();
+            assert_eq!(outcome, DeltaOutcome::Filtered, "expected Filtered for {}", path.display());
+            assert_eq!(manager.store_len(), before, "store_len changed for {}", path.display());
+        }
+    }
+
+    #[test]
+    fn apply_delta_filters_ignored_delete_paths() {
+        // A delete of a path with no FileRecord removes 0 keys → the store-as-
+        // source-of-truth filter reports Filtered, store untouched. (The path
+        // never existed on disk, so apply_delta takes the delete branch.)
+        let tmp = tempfile::tempdir().unwrap();
+        let deleted = tmp.path().join("node_modules/foo/bar.js");
+        let manager = seeded_manager();
+        let before = manager.store_len();
+
+        let outcome = manager.apply_delta(tmp.path(), &deleted).unwrap();
+        assert_eq!(outcome, DeltaOutcome::Filtered);
+        assert_eq!(manager.store_len(), before);
+    }
+
+    #[test]
+    fn apply_delta_deletes_corpus_file_from_store() {
+        // The mirror of the filter case: a delete whose rel-path DOES match a
+        // stored FileRecord removes its keys and reports Deleted. This proves the
+        // delete branch keys off the store (the seeded record is "src/lib.rs"),
+        // not a path rule — the file need not exist on disk.
+        let tmp = tempfile::tempdir().unwrap();
+        let deleted = tmp.path().join("src/lib.rs");
+        let manager = seeded_manager();
+        assert_eq!(manager.store_len(), Some(1));
+
+        let outcome = manager.apply_delta(tmp.path(), &deleted).unwrap();
+        assert_eq!(outcome, DeltaOutcome::Deleted { removed: 1 });
+        assert_eq!(manager.store_len(), Some(0));
+    }
+
+    #[test]
+    fn apply_delta_filters_gitignored_source_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Initialize a git repo so .gitignore is honoured by the ignore crate.
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(tmp.path())
+            .output()
+            .unwrap();
+        std::fs::write(tmp.path().join(".gitignore"), "generated/\n").unwrap();
+        write_file(tmp.path(), "generated/auto.py", b"def gen(): pass\n");
+
+        let manager = seeded_manager();
+        let before = manager.store_len();
+        let path = tmp.path().join("generated/auto.py");
+        let outcome = manager.apply_delta(tmp.path(), &path).unwrap();
+        assert_eq!(
+            outcome,
+            DeltaOutcome::Filtered,
+            "gitignored file must be filtered"
+        );
+        assert_eq!(manager.store_len(), before);
     }
 }

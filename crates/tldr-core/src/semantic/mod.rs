@@ -110,7 +110,7 @@ pub use embedder::Embedder;
 
 // Phase 4: Chunker
 pub mod chunker;
-pub use chunker::{chunk_code, chunk_file, ChunkResult, SkippedFile};
+pub use chunker::{chunk_code, chunk_file, is_corpus_file, ChunkResult, SkippedFile};
 
 // Phase 5: Cache
 pub mod cache;

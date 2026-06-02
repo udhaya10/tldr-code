@@ -114,7 +114,7 @@ const GENERATED_DIR_SENTINELS: &[&str] = &["doxygen.css", "doxygen.svg"];
 /// (which uses `ProjectWalker`) returned `functions_analyzed: 0` on
 /// ts-dom-gen even though `tldr calls` (which uses the scanner) returned
 /// 112 nodes / 200 edges from the same file (`src/build/emitter.ts`).
-const JS_TS_PRESERVED_DIRS: &[&str] = &["build", "dist", "out", "bin", "obj"];
+pub(crate) const JS_TS_PRESERVED_DIRS: &[&str] = &["build", "dist", "out", "bin", "obj"];
 
 /// Builder for project walks.
 ///
@@ -312,7 +312,7 @@ impl ProjectWalker {
 /// its source tree is legitimate). Errors during read (permission denied,
 /// non-directory) are treated as "no sentinel found" — the walker then
 /// falls through to the normal name-based exclusion logic.
-fn dir_has_generated_sentinel(dir: &Path) -> bool {
+pub(crate) fn dir_has_generated_sentinel(dir: &Path) -> bool {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return false;
     };
@@ -337,7 +337,7 @@ fn dir_has_generated_sentinel(dir: &Path) -> bool {
 /// To keep the cost bounded, the walk caps at 256 inspected files —
 /// enough to disambiguate even small libraries without scanning a giant
 /// monorepo every time.
-fn root_is_js_ts_dominated(dir: &Path) -> bool {
+pub(crate) fn root_is_js_ts_dominated(dir: &Path) -> bool {
     if !dir.is_dir() {
         return false;
     }
