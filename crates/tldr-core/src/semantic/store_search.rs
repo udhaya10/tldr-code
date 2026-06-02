@@ -100,13 +100,18 @@ pub fn search_with_store(
     // threshold. `SemanticIndex` scores a zero query 0.0 (and filters it out under
     // any positive threshold), so return an empty report rather than spurious
     // perfect matches. (Degenerate input; the model never zero-embeds real text.)
+    //
+    // `total_chunks` is 0 here BY DESIGN: we short-circuit WITHOUT loading/building
+    // the store, so nothing was searched. This differs from `SemanticIndex`, which
+    // reports its corpus size for an empty query because its cold path builds the
+    // index first — work we deliberately skip for a degenerate query.
     if query.trim().is_empty() {
         return Ok(SemanticSearchReport {
             results: Vec::new(),
             total_results: 0,
             query: query.to_string(),
             model: build_options.model,
-            total_chunks: 0,
+            total_chunks: 0, // nothing searched (short-circuit) — see note above
             matches_above_threshold: 0,
             latency_ms: 0,
             cache_hit: false,
@@ -416,6 +421,11 @@ mod tests {
             .unwrap();
             assert!(r.results.is_empty(), "empty query {q:?} -> no results");
             assert_eq!(r.total_results, 0);
+            // total_chunks is 0 BY DESIGN: the guard short-circuits without
+            // loading/building the store, so nothing was searched (see the guard).
+            assert_eq!(r.total_chunks, 0, "empty query searches nothing");
+            assert_eq!(r.matches_above_threshold, 0);
+            assert_eq!(r.query, q, "query echoed back verbatim");
         }
     }
 

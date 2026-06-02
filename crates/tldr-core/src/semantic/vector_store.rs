@@ -84,8 +84,9 @@ pub struct SearchHit {
 
 /// usearch-backed vector store: `key(u64) -> vector` (the usearch index) paired
 /// with a `key -> ChunkMeta` sidecar. One store per embedding model (the vector
-/// dimensionality is fixed per model). Persistence (manifest + crash-safe
-/// generation/`CURRENT` save) lands in the next step; this is the in-memory core.
+/// dimensionality is fixed per model). Persistence is implemented here — a
+/// manifest plus crash-safe generation/`CURRENT` save/load (see [`Self::save`] /
+/// [`Self::load`]).
 ///
 /// `Send` but not `Sync` (the usearch `Index` is not `Sync`); it lives behind the
 /// daemon's `Mutex` like `SemanticIndex`.
