@@ -101,8 +101,10 @@ pub(crate) fn manifest_id_for(root: &Path, options: &BuildOptions) -> ManifestId
 /// miss and falling back to the in-memory [`SemanticIndex`] on any store error.
 ///
 /// Returns a [`SemanticSearchReport`] with the same SHAPE as
-/// [`SemanticIndex::search`]. NOTE: not yet a behavioral drop-in — see the
-/// module-level "Freshness" note (a loaded store is not source-freshness-checked).
+/// [`SemanticIndex::search`], and results proved equivalent (TLDR-l5d, 52/52).
+/// A loaded store IS source-freshness-checked (corpus-digest drift -> rebuild;
+/// see the module-level "Freshness gate" note). The remaining non-drop-in nuance
+/// is tie-break ordering for equal-cosine duplicates (TLDR-2af).
 pub fn search_with_store(
     root: &Path,
     store_dir: &Path,
@@ -497,9 +499,9 @@ mod tests {
         );
 
         // Second call: store_dir now exists -> load hit (no rebuild) -> same ranking.
-        // NOTE: this does NOT cover source-freshness — no file is edited between the
-        // build and this load-hit, so it cannot catch the stale-store divergence
-        // (the loaded store is not re-checked against current source; TLDR-kkt).
+        // No file is edited between build and this load-hit, so the freshness gate's
+        // corpus digest matches and the store is served as-is. The drift -> rebuild
+        // path is exercised by the dedicated TLDR-kkt freshness tests, not here.
         let r2 = search_with_store(dir.path(), &store_dir, query, &sopts, &bopts, cache()).unwrap();
         let order = |r: &SemanticSearchReport| {
             r.results.iter().map(|x| x.file_path.clone()).collect::<Vec<_>>()

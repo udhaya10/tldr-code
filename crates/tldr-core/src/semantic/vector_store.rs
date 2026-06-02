@@ -88,8 +88,10 @@ pub struct SearchHit {
 /// manifest plus crash-safe generation/`CURRENT` save/load (see [`Self::save`] /
 /// [`Self::load`]).
 ///
-/// `Send` but not `Sync` (the usearch `Index` is not `Sync`); it lives behind the
-/// daemon's `Mutex` like `SemanticIndex`.
+/// `Send + Sync` (usearch `Index` is `unsafe impl Send + Sync`; `search` takes
+/// `&self` + a pre-computed query vector, while `add`/`remove` take `&mut self`),
+/// so `Arc<RwLock<VectorStore>>` supports concurrent reads with exclusive writes
+/// (TLDR-ac0.1).
 pub struct VectorStore {
     dimensions: usize,
     /// Reserved usearch capacity; grown (doubled) on demand since usearch does

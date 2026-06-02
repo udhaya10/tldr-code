@@ -69,8 +69,9 @@ pub struct EmbedOptions {
 ///
 /// # Thread Safety
 ///
-/// `Embedder` is `Send` but not `Sync` - create one per thread for
-/// concurrent embedding.
+/// `Embedder` is `Send + Sync`, but the `embed_*` methods take `&mut self` (the
+/// underlying model is mutated during inference), so concurrent embedding still
+/// needs a per-thread instance or a lock.
 pub struct Embedder {
     /// The underlying fastembed TextEmbedding instance
     model: TextEmbedding,
