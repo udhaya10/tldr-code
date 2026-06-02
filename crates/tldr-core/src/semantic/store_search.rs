@@ -4,18 +4,33 @@
 //!
 //! This is the first production caller of [`VectorStore::load`]. The store proved
 //! results-equivalent to the dense `SemanticIndex` path (TLDR-l5d, 52/52), so this
-//! helper returns the SAME [`SemanticSearchReport`] shape the index does and can be
-//! dropped into the CLI / daemon / MCP search paths (wired in a follow-up PR).
+//! helper returns the SAME [`SemanticSearchReport`] **shape** the index does.
+//!
+//! ## Freshness — NOT a drop-in yet (precondition for wiring)
+//!
+//! Unlike [`SemanticIndex::build`], which always re-reads current source, a loaded
+//! store is served as-is: [`VectorStore::load`] verifies persisted manifest/index
+//! integrity but does NOT check whether the source files changed since the store
+//! was built. The manifest only invalidates on a model/chunking/walker change, so
+//! today this helper is **build-once-until-config-changes** — after a source edit it
+//! can serve stale vectors and rankings. A coarse "detect drift → full rebuild"
+//! freshness gate (the §7.3 reconcile, tracked as TLDR-kkt, distinct from the t8f
+//! incremental optimization) is a **precondition for wiring this into the
+//! CLI/daemon/MCP paths** (PR2 is hard-blocked on it). Until then this is a tested
+//! library unit, not a wired search path.
 //!
 //! Control flow (Codex + advisor reviewed):
 //! - `load()` fails (no/torn/incompatible generation) → REBUILD via
 //!   [`VectorStore::build`] then best-effort `save()`. A rebuild is the designed
 //!   response to any [`VectorStore::load`] failure (it already falls back across
 //!   retained generations internally and only errors when none verify).
-//! - `build()` or `search()` errors → fall back to [`SemanticIndex`] (the store is
-//!   unusable for some environmental reason; never surface the error to the user).
+//! - `build()`, query-`embed`, or `search()` errors → fall back to [`SemanticIndex`]
+//!   (the store is unusable for some environmental reason; never surface the error).
 //! - `save()` errors → warn and keep going with the in-RAM store; persistence is an
 //!   optimization for the NEXT query, not required for THIS one.
+//! - An empty/whitespace query → empty report (the store would otherwise score every
+//!   chunk 1.0 off the zero query vector; `SemanticIndex` scores them 0.0 and filters
+//!   them out — see `search_with_store`).
 //!
 //! `store_dir` is an explicit input: the global-vs-`.tldr/` location decision (and
 //! making the daemon writer + cold CLI reader resolve a byte-identical path) belongs
@@ -69,8 +84,9 @@ pub(crate) fn manifest_id_for(root: &Path, options: &BuildOptions) -> ManifestId
 /// Run a semantic query through the usearch store, building+persisting it on a
 /// miss and falling back to the in-memory [`SemanticIndex`] on any store error.
 ///
-/// Returns the same [`SemanticSearchReport`] as [`SemanticIndex::search`], so it
-/// is a drop-in for the production search paths.
+/// Returns a [`SemanticSearchReport`] with the same SHAPE as
+/// [`SemanticIndex::search`]. NOTE: not yet a behavioral drop-in — see the
+/// module-level "Freshness" note (a loaded store is not source-freshness-checked).
 pub fn search_with_store(
     root: &Path,
     store_dir: &Path,
@@ -79,6 +95,23 @@ pub fn search_with_store(
     build_options: &BuildOptions,
     cache_config: Option<CacheConfig>,
 ) -> TldrResult<SemanticSearchReport> {
+    // Empty/whitespace query: the embedder returns a ZERO vector, for which usearch
+    // cosine distance is 0 → every chunk would score 1.0 and flood past the
+    // threshold. `SemanticIndex` scores a zero query 0.0 (and filters it out under
+    // any positive threshold), so return an empty report rather than spurious
+    // perfect matches. (Degenerate input; the model never zero-embeds real text.)
+    if query.trim().is_empty() {
+        return Ok(SemanticSearchReport {
+            results: Vec::new(),
+            total_results: 0,
+            query: query.to_string(),
+            model: build_options.model,
+            total_chunks: 0,
+            matches_above_threshold: 0,
+            latency_ms: 0,
+            cache_hit: false,
+        });
+    }
     match try_store_search(
         root,
         store_dir,
@@ -98,9 +131,9 @@ pub fn search_with_store(
     }
 }
 
-/// The store-only path. Errors here (build/search) trigger the [`SemanticIndex`]
-/// fallback in [`search_with_store`]; a `load` failure rebuilds in place and a
-/// `save` failure is swallowed with a warning.
+/// The store-only path. Errors here (build / query-embed / search) trigger the
+/// [`SemanticIndex`] fallback in [`search_with_store`]; a `load` failure rebuilds
+/// in place and a `save` failure is swallowed with a warning.
 fn try_store_search(
     root: &Path,
     store_dir: &Path,
@@ -364,6 +397,28 @@ mod tests {
         assert!(read_snippet(dir.path(), &oob, 5).is_empty());
     }
 
+    #[test]
+    fn empty_query_returns_empty_report_not_spurious_matches() {
+        // A zero query vector would make usearch score every chunk 1.0; guard it so
+        // we match SemanticIndex (which scores a zero query 0.0 and filters it out).
+        // Uses a nonexistent store_dir/root: the guard must short-circuit BEFORE any
+        // store/embedder work, so this needs no model and no corpus.
+        let bopts = build_opts(EmbeddingModel::ArcticM, ChunkGranularity::Function, None);
+        for q in ["", "   ", "\t\n"] {
+            let r = search_with_store(
+                Path::new("/nonexistent"),
+                Path::new("/nonexistent/store"),
+                q,
+                &opts(0.5, true),
+                &bopts,
+                None,
+            )
+            .unwrap();
+            assert!(r.results.is_empty(), "empty query {q:?} -> no results");
+            assert_eq!(r.total_results, 0);
+        }
+    }
+
     // End-to-end with the real embedder: rebuild-on-miss -> persist -> load-hit, and
     // parity against SemanticIndex. Ignored by default (loads the ONNX model).
     #[test]
@@ -405,6 +460,9 @@ mod tests {
         );
 
         // Second call: store_dir now exists -> load hit (no rebuild) -> same ranking.
+        // NOTE: this does NOT cover source-freshness — no file is edited between the
+        // build and this load-hit, so it cannot catch the stale-store divergence
+        // (the loaded store is not re-checked against current source; TLDR-kkt).
         let r2 = search_with_store(dir.path(), &store_dir, query, &sopts, &bopts, cache()).unwrap();
         let order = |r: &SemanticSearchReport| {
             r.results.iter().map(|x| x.file_path.clone()).collect::<Vec<_>>()
