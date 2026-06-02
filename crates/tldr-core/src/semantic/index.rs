@@ -643,8 +643,12 @@ impl SemanticIndex {
 /// back to the input unchanged when canonicalization fails (e.g. the file no longer
 /// exists), preserving the prior exact-string behavior in that case.
 fn canonicalize_for_match(p: &str) -> String {
+    // No separator normalization: both the caller path and the chunk path are
+    // canonicalized on the SAME platform, so they already share a separator
+    // convention. A `replace('\\','/')` would corrupt a literal backslash in a
+    // Unix filename (a valid char there) and conflate `a\b` with `a/b` (Codex).
     std::fs::canonicalize(p)
-        .map(|c| c.to_string_lossy().replace('\\', "/"))
+        .map(|c| c.to_string_lossy().into_owned())
         .unwrap_or_else(|_| p.to_string())
 }
 
