@@ -1302,7 +1302,8 @@ fn is_scala_wildcard_arm(node: Node, source: &str) -> bool {
         let text = child.utf8_text(source.as_bytes()).unwrap_or("");
         return text == "_";
     }
-    false
+    // The loop never falls through — it returns on the first non-`case` child or
+    // exits via the `goto_next_sibling` guard — so there is no trailing value.
 }
 
 /// Kotlin: a `when_entry` whose first child is the `else` token is the

@@ -13,7 +13,6 @@ use crate::TldrResult;
 
 use super::extract::is_upper_case_name;
 use super::imports::extract_imports_from_tree;
-use super::parser::parse_file;
 
 /// Extract code structure from all files in a directory.
 ///

@@ -4,14 +4,18 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+/// Project configuration loaded from `.tldr/config.json` (global then project).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TldrConfig {
+    /// Config schema version (defaults to 1).
     #[serde(default = "default_version")]
     pub version: u32,
 
+    /// Embedding-provider settings (model, endpoint, dimensions).
     #[serde(default)]
     pub embedding: EmbeddingConfig,
 
+    /// Semantic-search settings (enabled, language filter).
     #[serde(default)]
     pub semantic: SemanticConfig,
 }
@@ -30,20 +34,26 @@ impl Default for TldrConfig {
     }
 }
 
+/// Embedding-provider configuration. Defaults to the local in-process model.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EmbeddingConfig {
+    /// Provider id (`"local"` by default; a cloud seam is future work).
     #[serde(default = "default_provider")]
     pub provider: String,
 
+    /// Override the embedding model name (None = the deployed default).
     #[serde(default)]
     pub model: Option<String>,
 
+    /// Remote endpoint URL for non-local providers.
     #[serde(default)]
     pub endpoint: Option<String>,
 
+    /// Environment-variable name holding the provider API key.
     #[serde(default)]
     pub api_key_env: Option<String>,
 
+    /// Expected embedding dimensionality (provider/model specific).
     #[serde(default)]
     pub dimensions: Option<usize>,
 }
@@ -64,11 +74,14 @@ impl Default for EmbeddingConfig {
     }
 }
 
+/// Semantic-search configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SemanticConfig {
+    /// Whether semantic search is enabled (default true).
     #[serde(default = "default_true")]
     pub enabled: bool,
 
+    /// Restrict indexing/search to these languages (None = all detected).
     #[serde(default)]
     pub langs: Option<Vec<String>>,
 }
@@ -87,10 +100,13 @@ impl Default for SemanticConfig {
 }
 
 impl TldrConfig {
+    /// Parse a config from a JSON string.
     pub fn from_str(s: &str) -> Result<Self, serde_json::Error> {
         serde_json::from_str(s)
     }
 
+    /// Load a config from `path`, falling back to defaults if the file is
+    /// missing or unparseable.
     pub fn from_path(path: &Path) -> Self {
         match std::fs::read_to_string(path) {
             Ok(contents) => Self::from_str(&contents).unwrap_or_default(),

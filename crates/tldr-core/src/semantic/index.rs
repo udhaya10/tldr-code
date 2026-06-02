@@ -512,28 +512,39 @@ impl SemanticIndex {
         function_name: Option<&str>,
         options: &SearchOptions,
     ) -> TldrResult<SimilarityReport> {
-        // Find the query chunk
+        // Find the query chunk. The caller's path and the indexed chunk paths can
+        // differ in form — `similar.rs` passes a CANONICALIZED path, while chunks
+        // carry the walker's possibly-relative/symlinked path — so an exact string
+        // compare silently missed them (TLDR-4oz). Try exact first (cheap), then
+        // fall back to comparing canonical forms.
+        let fn_ok = |c: &EmbeddedChunk| {
+            function_name.is_none() || c.chunk.function_name.as_deref() == function_name
+        };
         let query_chunk = self
             .chunks
             .iter()
-            .find(|c| {
-                c.chunk.file_path.to_string_lossy() == file_path
-                    && (function_name.is_none()
-                        || c.chunk.function_name.as_deref() == function_name)
+            .find(|c| c.chunk.file_path.to_string_lossy() == file_path && fn_ok(c))
+            .or_else(|| {
+                let want = canonicalize_for_match(file_path);
+                self.chunks.iter().find(|c| {
+                    canonicalize_for_match(&c.chunk.file_path.to_string_lossy()) == want && fn_ok(c)
+                })
             })
             .ok_or_else(|| TldrError::ChunkNotFound {
                 file: file_path.to_string(),
                 function: function_name.map(String::from),
             })?;
 
-        // Build candidates (excluding self)
+        // Build candidates, excluding the query chunk itself. Exclude by the query
+        // chunk's OWN stored path (exact), so the caller's path FORM is irrelevant.
+        let self_path = query_chunk.chunk.file_path.to_string_lossy();
+        let self_fn = &query_chunk.chunk.function_name;
         let candidates: Vec<(usize, &[f32])> = self
             .chunks
             .iter()
             .enumerate()
             .filter(|(_, c)| {
-                c.chunk.file_path.to_string_lossy() != file_path
-                    || c.chunk.function_name != query_chunk.chunk.function_name
+                c.chunk.file_path.to_string_lossy() != self_path || &c.chunk.function_name != self_fn
             })
             .map(|(i, c)| (i, c.embedding.as_slice()))
             .collect();
@@ -626,6 +637,17 @@ impl SemanticIndex {
 /// Create a snippet from code content
 ///
 /// Takes the first N lines of the content for display purposes.
+/// Canonicalize a path string for tolerant matching in [`SemanticIndex::find_similar`]
+/// — resolves absolute-vs-relative, `..`, symlinks, and separator differences so a
+/// caller-supplied path matches the form stored on each chunk (TLDR-4oz). Falls
+/// back to the input unchanged when canonicalization fails (e.g. the file no longer
+/// exists), preserving the prior exact-string behavior in that case.
+fn canonicalize_for_match(p: &str) -> String {
+    std::fs::canonicalize(p)
+        .map(|c| c.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_else(|_| p.to_string())
+}
+
 pub(crate) fn make_snippet(content: &str, max_lines: usize) -> String {
     content
         .lines()
@@ -987,21 +1009,63 @@ mod index_tests {
         };
         let index = SemanticIndex::build(temp_dir.path(), options, None).unwrap();
 
-        // WHEN: We find similar to parse_config
+        // WHEN: We find similar to parse_config. Pass the chunk's actual stored
+        // path (rooted at temp_dir), not a bare filename — the index keys chunks by
+        // the path the walker produced (TLDR-4oz: the old bare "config.py" never
+        // matched the absolute stored path, so this test silently failed).
+        let config_path = temp_dir.path().join("config.py");
         let search_opts = SearchOptions {
             top_k: 5,
             threshold: 0.0,
             ..Default::default()
         };
         let report = index
-            .find_similar("config.py", Some("parse_config"), &search_opts)
+            .find_similar(&config_path.to_string_lossy(), Some("parse_config"), &search_opts)
             .unwrap();
 
-        // THEN: Should exclude self and find similar code
+        // THEN: it finds similar code and excludes the query chunk itself.
         assert!(report.exclude_self);
+        assert!(!report.similar.is_empty(), "should surface settings.py / unrelated.py");
         assert!(!report.similar.iter().any(|r| {
-            r.file_path.to_string_lossy() == "config.py"
-                && r.function_name.as_deref() == Some("parse_config")
+            r.file_path == config_path && r.function_name.as_deref() == Some("parse_config")
         }));
+    }
+
+    #[test]
+    #[ignore = "Requires model download"]
+    fn find_similar_matches_despite_path_form_mismatch() {
+        // TLDR-4oz: a query path in a DIFFERENT textual form than the stored chunk
+        // path (here a redundant `/./`) must still match via the canonical fallback,
+        // not just exact string equality. This is the production case: `similar.rs`
+        // passes a canonicalized path while chunks carry the walker's form.
+        let temp_dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp_dir.path().join("config.py"),
+            "def parse_config(path):\n    return read(path)\n",
+        )
+        .unwrap();
+        std::fs::write(
+            temp_dir.path().join("settings.py"),
+            "def load_settings(file):\n    return read(file)\n",
+        )
+        .unwrap();
+        let options = BuildOptions {
+            show_progress: false,
+            use_cache: false,
+            ..Default::default()
+        };
+        let index = SemanticIndex::build(temp_dir.path(), options, None).unwrap();
+
+        // Same file, non-canonical form: the `/./` makes the exact compare fail,
+        // but both sides canonicalize to the same real file.
+        let odd = format!("{}/./config.py", temp_dir.path().to_string_lossy());
+        let report = index
+            .find_similar(
+                &odd,
+                Some("parse_config"),
+                &SearchOptions { top_k: 5, threshold: 0.0, ..Default::default() },
+            )
+            .expect("canonical fallback should resolve the path-form mismatch");
+        assert!(!report.similar.is_empty());
     }
 }
