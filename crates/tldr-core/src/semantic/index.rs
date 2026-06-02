@@ -158,8 +158,9 @@ impl Default for SearchOptions {
 ///
 /// # Thread Safety
 ///
-/// `SemanticIndex` is `Send` but not `Sync` due to the internal embedder.
-/// Create one index per thread for concurrent searches.
+/// `SemanticIndex` is `Send + Sync`; however, `search` takes `&mut self` because
+/// it lazily initializes the embedder, so searches on a shared instance must
+/// serialize via a lock or use per-thread indexes.
 pub struct SemanticIndex {
     /// All embedded chunks in the index
     chunks: Vec<EmbeddedChunk>,
@@ -526,8 +527,18 @@ impl SemanticIndex {
             .find(|c| c.chunk.file_path.to_string_lossy() == file_path && fn_ok(c))
             .or_else(|| {
                 let want = canonicalize_for_match(file_path);
+                // Memoize by path string so we canonicalize once per UNIQUE file,
+                // not once per chunk — chunks from the same file share a path, so
+                // this turns the fallback from O(chunks) syscalls into O(files)
+                // (TLDR-5ur).
+                let mut canon_memo: std::collections::HashMap<String, String> =
+                    std::collections::HashMap::new();
                 self.chunks.iter().find(|c| {
-                    canonicalize_for_match(&c.chunk.file_path.to_string_lossy()) == want && fn_ok(c)
+                    let p = c.chunk.file_path.to_string_lossy();
+                    let canon = canon_memo
+                        .entry(p.to_string())
+                        .or_insert_with(|| canonicalize_for_match(&p));
+                    *canon == want && fn_ok(c)
                 })
             })
             .ok_or_else(|| TldrError::ChunkNotFound {
