@@ -117,7 +117,7 @@ pub fn search_with_store(
     cache_config: Option<CacheConfig>,
 ) -> TldrResult<SemanticSearchReport> {
     if query.trim().is_empty() {
-        return Ok(empty_report(query, build_options.model));
+        return Ok(empty_search_report(query, build_options.model));
     }
 
     let start = Instant::now();
@@ -172,7 +172,7 @@ pub fn query_store(
     // its warm `IndexManager` embedder and calls `query_store_with_vector` instead,
     // skipping this per-query `Embedder::new` (ONNX reload).
     if query.trim().is_empty() {
-        return Ok(empty_report(query, model));
+        return Ok(empty_search_report(query, model));
     }
     let mut embedder = Embedder::new(model)?;
     let qv = embedder.embed_query(query)?;
@@ -200,7 +200,7 @@ pub fn query_store_with_vector(
     // directly: an empty query would otherwise score every chunk 1.0 off the zero
     // vector (the failure pinned by `empty_query_returns_empty_report_*`).
     if query.trim().is_empty() {
-        return Ok(empty_report(query, model));
+        return Ok(empty_search_report(query, model));
     }
 
     let total_chunks = store.len();
@@ -217,8 +217,11 @@ pub fn query_store_with_vector(
     ))
 }
 
-/// The empty-query short-circuit report (no store/embedder work).
-fn empty_report(query: &str, model: EmbeddingModel) -> SemanticSearchReport {
+/// The empty-query short-circuit report (no store/embedder work). Public so the
+/// daemon (`IndexManager::query`) can guard a blank query BEFORE touching the
+/// resident embedder — its construction loads ONNX, so the guard must precede it,
+/// not just `store.search` (TLDR-ac0.5 Codex review).
+pub fn empty_search_report(query: &str, model: EmbeddingModel) -> SemanticSearchReport {
     SemanticSearchReport {
         results: Vec::new(),
         total_results: 0,
@@ -469,14 +472,35 @@ mod tests {
     #[test]
     fn query_store_with_vector_empty_query_short_circuits() {
         // The DAEMON calls query_store_with_vector directly (bypassing query_store's
-        // wrapper guard), so the empty-query zero-vector guard must live in it —
-        // otherwise a blank query scores every chunk 1.0 off the zero vector. This
-        // covers the daemon's actual entry point and needs no embedder/ONNX: an
-        // empty query must short-circuit BEFORE `store.search`. Model is the
+        // wrapper guard), so the empty-query guard must live in it — otherwise a
+        // blank query searches the store and scores chunks off a non-empty query
+        // vector. DISCRIMINATING: the store is POPULATED with one vector that the
+        // dummy query vector matches exactly, so if the guard were removed,
+        // `store.search` would return a hit (total_chunks=1, 1 result) and the
+        // assertions below would FAIL. No embedder/ONNX needed. Model is the
         // configured default, never a hardcoded variant.
         let model = EmbeddingModel::default();
-        let store = VectorStore::new(model.dimensions(), 4).unwrap();
-        let dummy = vec![0.0_f32; model.dimensions()];
+        let dims = model.dimensions();
+        let mut store = VectorStore::new(dims, 4).unwrap();
+        let mut vector = vec![0.0_f32; dims];
+        vector[0] = 1.0;
+        store
+            .add(
+                1,
+                &vector,
+                ChunkMeta {
+                    identity: "a.rs::f::0".to_string(),
+                    file_rel_path: "a.rs".to_string(),
+                    function_name: Some("f".to_string()),
+                    class_name: None,
+                    line_start: 1,
+                    line_end: 2,
+                    content_hash: "h".to_string(),
+                },
+            )
+            .unwrap();
+        // dummy query vector == the seeded vector: a removed guard would match it.
+        let dummy = vector.clone();
         for q in ["", "   ", "\t\n"] {
             let r = query_store_with_vector(
                 &store,

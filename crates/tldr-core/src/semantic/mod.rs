@@ -135,5 +135,6 @@ pub mod vector_store;
 // No SemanticIndex fallback. VectorStore works or the user gets an error.
 pub mod store_search;
 pub use store_search::{
-    load_or_build_store, query_store, query_store_with_vector, search_with_store,
+    empty_search_report, load_or_build_store, query_store, query_store_with_vector,
+    search_with_store,
 };

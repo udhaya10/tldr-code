@@ -76,13 +76,20 @@ impl IndexManager {
         search_opts: &IndexSearchOptions,
         model: EmbeddingModel,
     ) -> Result<serde_json::Value, String> {
+        // Empty/whitespace queries short-circuit FIRST — before embed_query, whose
+        // `Embedder::new` would load ONNX on a cold daemon (and `"   "` would run a
+        // wasted embed) only to be discarded downstream (TLDR-ac0.5 Codex review).
+        // Mirrors the cold `query_store` path, which also guards before Embedder::new.
+        if query.trim().is_empty() {
+            let report = tldr_core::semantic::empty_search_report(query, model);
+            return serde_json::to_value(&report).map_err(|e| format!("Serialization error: {e}"));
+        }
+
         // Embed the query on the RESIDENT embedder BEFORE taking the store lock
         // (TLDR-ac0.5): reuses the same warm embedder as the delta path, so no
         // per-query `Embedder::new` ONNX reload. Done first (not inside the read
         // guard) so the brief embedder-`Mutex` wait doesn't extend the store read
         // lock — warm queries still run `store.search` truly in parallel (ac0.1).
-        // Empty queries short-circuit to a zero vector in `embed_query`; the
-        // store_search guard turns that into an empty report without searching.
         let qv = self.embed_query(model, query)?;
 
         // Fast path: plain shared read — concurrent with other readers.
@@ -754,6 +761,37 @@ mod tests {
         for h in handles {
             h.join().expect("thread panicked");
         }
+    }
+
+    /// The daemon's blank-query guard (TLDR-ac0.5 Codex review) must short-circuit
+    /// BEFORE constructing the resident embedder — a blank query on a COLD daemon
+    /// must NOT load ONNX. Proven WITHOUT ONNX: `embedder_builds` stays 0 and the
+    /// result is an empty report. Covers `IndexManager::query` (the daemon's actual
+    /// entry point); the store_search empty-query test covers query_store_with_vector.
+    #[test]
+    fn blank_query_short_circuits_before_building_embedder() {
+        let manager = IndexManager::new(); // cold: no store, no embedder
+        let model = EmbeddingModel::default();
+        let project = tempfile::tempdir().unwrap();
+        let opts = IndexSearchOptions {
+            top_k: 5,
+            threshold: 0.0,
+            include_snippet: false,
+            snippet_lines: 5,
+        };
+        for q in ["", "   ", "\t\n"] {
+            let v = manager.query(project.path(), q, &opts, model).unwrap();
+            assert_eq!(v["total_results"], serde_json::json!(0), "blank {q:?} -> empty");
+            assert!(
+                v["results"].as_array().unwrap().is_empty(),
+                "blank {q:?} -> no results"
+            );
+        }
+        assert_eq!(
+            manager.embedder_builds(),
+            0,
+            "blank query must NOT construct the embedder (no ONNX load)"
+        );
     }
 
     #[test]
