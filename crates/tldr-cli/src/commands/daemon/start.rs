@@ -21,7 +21,7 @@ use serde::Serialize;
 use crate::output::OutputFormat;
 
 use super::daemon::{start_daemon_background, wait_for_daemon, TLDRDaemon};
-use super::daemon_registry::{add_entry, remove_entry};
+use super::daemon_registry::{add_entry, find_entry_unpruned, is_pid_alive, remove_entry};
 use super::error::DaemonError;
 use super::ipc::{check_socket_alive, cleanup_socket, compute_socket_path, IpcListener};
 use super::pid::{compute_pid_path, try_acquire_lock};
@@ -107,22 +107,30 @@ impl DaemonStartArgs {
         // resolve_project_root — single-instance hardening).
         let project = resolve_project_root(&self.project)?;
 
-        // Note: stale PID cleanup is intentionally NOT performed here. The
-        // flock-based `try_acquire_lock` (called below in foreground mode and
-        // inside `start_daemon_background` for background mode) handles stale
-        // PIDs safely INSIDE the lock — pre-lock cleanup would reopen the
-        // TOCTOU window from issue #14 (two concurrent starts could both
-        // pass the staleness check before either acquired the lock).
-
-        // Check for stale socket and clean up. The socket-side TOCTOU is
-        // additionally guarded by `IpcListener::bind_unix`, which now treats
-        // an existing socket as `AddressInUse` rather than silently
-        // unlink-and-rebind (issue #14).
-        let socket_path = compute_socket_path(&project);
-        if socket_path.exists() && !check_socket_alive(&project).await {
-            // Socket exists but daemon is not responding - stale
-            cleanup_socket(&project)?;
+        // Single-instance guard (TLDR-82b, Hole B): a daemon that already owns
+        // this folder may be mid-cold-build and unable to answer a socket
+        // connect, so we judge liveness by the REGISTERED PID, never by
+        // `check_socket_alive` — otherwise a busy owner is misjudged dead and
+        // we spawn a duplicate that re-indexes the same folder (the cold-build
+        // storm). Use the UNPRUNED lookup: the pruning `find_entry` would
+        // delete a dead entry that `cleanup_socket`'s cross-tmpdir path still
+        // relies on.
+        if let Some(entry) = find_entry_unpruned(&project) {
+            if is_pid_alive(entry.pid) {
+                return Err(anyhow::anyhow!(
+                    "Daemon already running (PID: {})",
+                    entry.pid
+                ));
+            }
         }
+
+        // Note: stale PID cleanup is intentionally NOT performed here, and
+        // neither is stale-SOCKET cleanup (TLDR-82b, Hole B). Both happen
+        // INSIDE the PID flock in `run_foreground` — a pre-lock reap could
+        // race a concurrent start and yank the socket out from under a daemon
+        // that is about to own the folder. `try_acquire_lock` is the
+        // authoritative single-instance backstop; `IpcListener::bind_unix`
+        // never unlinks a live socket for itself (issue #14).
 
         if self.foreground {
             // Run in foreground
@@ -152,6 +160,17 @@ impl DaemonStartArgs {
             other => anyhow::anyhow!("Failed to acquire lock: {}", other),
         })?;
 
+        // Stale-socket cleanup UNDER the lock (TLDR-82b, Hole B): now that we
+        // hold the single-instance flock, reap a socket left behind by a
+        // previously-DEAD daemon so we can bind. Doing this only as the lock
+        // owner means no concurrent start can yank the socket from a daemon
+        // that is about to own the folder. `bind_unix` refuses to unlink a
+        // live socket for itself, so the reap must happen here, not pre-lock.
+        let socket_path = compute_socket_path(project);
+        if socket_path.exists() && !check_socket_alive(project).await {
+            cleanup_socket(project)?;
+        }
+
         // Bind IPC listener
         let listener = IpcListener::bind(project).await.map_err(|e| match e {
             DaemonError::AddressInUse { addr } => {
@@ -163,7 +182,6 @@ impl DaemonStartArgs {
             other => anyhow::anyhow!("Socket error: {}", other),
         })?;
 
-        let socket_path = compute_socket_path(project);
         let our_pid = std::process::id();
 
         // VAL-003 (v0.3.0): register the daemon in the multi-daemon
@@ -311,6 +329,47 @@ mod tests {
             via_direct, via_link,
             "symlinked and direct paths must resolve to the same canonical root"
         );
+    }
+
+    /// HOLE B (TLDR-82b): a live owner that is NOT answering its socket — e.g.
+    /// a daemon pegged mid-~90-min cold build — must still be treated as alive
+    /// so `start` bails instead of spawning a duplicate that re-indexes the
+    /// same folder. We simulate "alive but no live socket" by registering a
+    /// LIVE non-daemon PID (our own test process) with a bogus socket path:
+    /// nothing is listening, so the OLD socket-connect liveness check would
+    /// report "dead" and proceed to reap+spawn — the PID-based check must bail.
+    #[test]
+    fn run_async_bails_on_live_owner_even_without_a_live_socket() {
+        use crate::commands::daemon::daemon_registry::{
+            add_entry, remove_entry, test_support::with_registry_dir,
+        };
+        use crate::output::OutputFormat;
+
+        with_registry_dir(|dir| {
+            let proj_dir = dir.join("busy-project");
+            std::fs::create_dir_all(&proj_dir).unwrap();
+            let project = proj_dir.canonicalize().unwrap();
+
+            // Live PID (ourselves) + a socket path nothing is bound to.
+            let bogus_socket = dir.join("busy-project.sock");
+            add_entry(&project, std::process::id(), &bogus_socket)
+                .expect("inject live owner");
+
+            let args = DaemonStartArgs {
+                project: project.clone(),
+                foreground: true,
+            };
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            let err = rt
+                .block_on(args.run_async(OutputFormat::Json, true))
+                .expect_err("start must bail when a live PID already owns the folder");
+            assert!(
+                err.to_string().contains("already running"),
+                "expected an 'already running' bail, got: {err}"
+            );
+
+            let _ = remove_entry(&project);
+        });
     }
 
     #[test]
