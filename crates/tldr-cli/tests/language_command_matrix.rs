@@ -2790,10 +2790,16 @@ fn check_search(lang: &str) {
     }
 }
 
+/// TLDR-7xz.1: `tldr semantic` is served exclusively by the warm daemon —
+/// with no daemon listening for the fixture, the contract is an HONEST fast
+/// failure carrying the daemon-not-started guidance. Success here would mean
+/// a silent cold serve came back (a regression). The strengthened ≥1-result
+/// invariant moves to the daemon-backed path and returns when matrix
+/// fixtures can run against a warm daemon.
 fn check_semantic(lang: &str) {
     let tmp = TempDir::new().unwrap();
     fixtures::build_fixture(lang, tmp.path());
-    let (status, json, stdout, stderr) = run_tldr(&[
+    let (status, _json, stdout, stderr) = run_tldr(&[
         "semantic",
         "helper function returning a constant",
         tmp.path().to_str().unwrap(),
@@ -2801,71 +2807,56 @@ fn check_semantic(lang: &str) {
         "json",
         "--quiet",
     ]);
-    if !status.success() {
-        fail_cell("semantic", lang, "non-zero exit", &stdout, &stderr);
-    }
-    let results = json.get("results").and_then(Value::as_array);
-    if results.is_none() {
-        fail_cell("semantic", lang, ".results is not an array", &stdout, &stderr);
-    }
-    // Strengthened invariant (language-command-matrix-strengthen-v1): the
-    // canonical fixture defines `helper` (returns constant 1) and
-    // `b_util` (returns constant 2). Semantic search for "helper function
-    // returning a constant" MUST return ≥1 result against these chunks.
-    let n = results.map(|a| a.len()).unwrap_or(0);
-    let total = json
-        .get("total_results")
-        .and_then(Value::as_u64)
-        .unwrap_or(n as u64);
-    if n == 0 && total == 0 {
+    if status.success() {
         fail_cell(
             "semantic",
             lang,
-            ".results empty — expected ≥1 result for query \"helper \
-             function returning a constant\" against fixture defining \
-             helper-as-constant (fixtures/mod.rs:396)",
+            "exit=0 without a warm daemon — the require-warm contract \
+             (TLDR-7xz.1) is broken (silent cold serve)",
+            &stdout,
+            &stderr,
+        );
+    }
+    if !format!("{stdout}\n{stderr}").contains("daemon not started") {
+        fail_cell(
+            "semantic",
+            lang,
+            "expected 'daemon not started — run tldr daemon start' guidance",
             &stdout,
             &stderr,
         );
     }
 }
 
+/// TLDR-7xz.4: `tldr similar` is parked — the contract is a fast failure
+/// with the standardized "not available in this version, <reason>" message
+/// (surface kept, never silently removed). Returns warm in Phase 2 (TLDR-utj),
+/// at which point the strengthened c_dup near-duplicate invariant comes back.
 fn check_similar(lang: &str) {
     let tmp = TempDir::new().unwrap();
     fixtures::build_fixture_with_clone(lang, tmp.path());
     let entry = entry_file(lang, tmp.path());
-    let (status, json, stdout, stderr) = run_tldr(&[
+    let (status, _json, stdout, stderr) = run_tldr(&[
         "similar",
         entry.to_str().unwrap(),
         "--format",
         "json",
         "--quiet",
     ]);
-    if !status.success() {
-        fail_cell("similar", lang, "non-zero exit", &stdout, &stderr);
-    }
-    let arr = json.get("similar_files").and_then(Value::as_array);
-    if arr.is_none() {
+    if status.success() {
         fail_cell(
             "similar",
             lang,
-            ".similar_files is not an array",
+            "exit=0 but the command is parked (TLDR-7xz.4)",
             &stdout,
             &stderr,
         );
     }
-    // Strengthened invariant (language-command-matrix-strengthen-v1): the
-    // build_fixture_with_clone fixture writes a c_dup file mirroring
-    // helper's structure (fixtures/mod.rs clone_dup_payload, line 284).
-    // Embedding-similarity search from the entry file MUST surface ≥1
-    // similar file (the c_dup duplicate, the util sibling, or both).
-    let n = arr.map(|a| a.len()).unwrap_or(0);
-    if n == 0 {
+    if !format!("{stdout}\n{stderr}").contains("not available in this version,") {
         fail_cell(
             "similar",
             lang,
-            ".similar_files empty — expected ≥1 entry given c_dup \
-             near-duplicate fixture (fixtures/mod.rs:284)",
+            "expected the standardized parked message",
             &stdout,
             &stderr,
         );

@@ -311,28 +311,26 @@ fn bug13_method_infos_have_line_end() {
 
 #[test]
 fn bug15_semantic_total_results_populated() {
+    // TLDR-7xz.1: `tldr semantic` is served exclusively by the warm daemon —
+    // with no daemon for the fixture repo, the contract is an honest fast
+    // failure with the daemon-not-started guidance (never a silent cold
+    // serve). The original BUG-15 schema invariant (total_results ==
+    // results.len()) lives in the daemon-served SemanticSearchReport, which
+    // is shape-identical to the old cold report; it is re-assertable
+    // end-to-end once fixture runs can stand up a warm daemon.
     let path = flask_repo();
-    let v = run_json(&[
-        "semantic",
-        "create flask app",
-        path.to_str().unwrap(),
-    ]);
-    let total = v.get("total_results").and_then(|x| x.as_u64());
+    let output = tldr_cmd()
+        .args(["semantic", "create flask app", path.to_str().unwrap()])
+        .output()
+        .expect("run tldr semantic");
     assert!(
-        total.is_some(),
-        "BUG-15 regression: semantic JSON .total_results is null/missing; expected integer. got: {v}"
+        !output.status.success(),
+        "TLDR-7xz.1 regression: exit=0 without a warm daemon (silent cold serve)"
     );
-    let results_len = v
-        .pointer("/results")
-        .and_then(|x| x.as_array())
-        .map(|a| a.len() as u64)
-        .unwrap_or(0);
-    assert_eq!(
-        total.unwrap(),
-        results_len,
-        "BUG-15: total_results ({}) should equal results.len() ({})",
-        total.unwrap(),
-        results_len
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("daemon not started"),
+        "expected 'daemon not started — run tldr daemon start', got: {stderr}"
     );
 }
 

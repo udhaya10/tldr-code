@@ -1361,12 +1361,17 @@ fn check_embed(lang: &str) {
     }
 }
 
+/// TLDR-7xz.1: `tldr semantic` is served exclusively by the warm daemon —
+/// with no daemon listening for the fixture, the contract is an HONEST,
+/// fast failure carrying the daemon-not-started guidance. The old cold-serve
+/// (per-call store build + ONNX load) is gone, so success here would be a
+/// regression: it would mean a silent cold path came back. No embedding
+/// mutex needed — the command must fail before any model is touched.
 #[cfg(feature = "semantic")]
 fn check_semantic(lang: &str) {
-    let _guard = embedding_mutex().lock().unwrap();
     let tmp = make_fixture(lang);
     let path = tmp.path().to_str().unwrap();
-    let (json, stdout, stderr) = check_success(
+    let (_json, stdout, stderr, exit) = check_baseline(
         "semantic",
         lang,
         &[
@@ -1378,20 +1383,30 @@ fn check_semantic(lang: &str) {
             "--quiet",
         ],
     );
-    if !json.is_object() || json.get("results").is_none() {
+    if exit == 0 {
         panic!(
-            "[semantic × {lang}] SILENT_FAIL — missing `results` field\n--- stdout ---\n{}\n--- stderr ---\n{stderr}",
+            "[semantic × {lang}] SILENT_COLD_SERVE — exit=0 without a warm daemon; \
+             the require-warm contract (TLDR-7xz.1) is broken\n--- stdout ---\n{}",
+            truncate(&stdout, 400)
+        );
+    }
+    let combined = format!("{stdout}\n{stderr}");
+    if !combined.contains("daemon not started") {
+        panic!(
+            "[semantic × {lang}] WRONG_MESSAGE — expected 'daemon not started — run tldr daemon start'\n--- stdout ---\n{}\n--- stderr ---\n{stderr}",
             truncate(&stdout, 400)
         );
     }
 }
 
+/// TLDR-7xz.4: `tldr similar` is parked — the contract is a fast failure
+/// with the standardized "not available in this version, <reason>" message
+/// (surface kept, never silently removed). Returns warm in Phase 2 (TLDR-utj).
 #[cfg(feature = "semantic")]
 fn check_similar(lang: &str) {
-    let _guard = embedding_mutex().lock().unwrap();
     let tmp = make_fixture(lang);
     let entry = entry_file(lang, tmp.path());
-    let (json, stdout, stderr) = check_success(
+    let (_json, stdout, stderr, exit) = check_baseline(
         "similar",
         lang,
         &[
@@ -1402,16 +1417,16 @@ fn check_similar(lang: &str) {
             "--quiet",
         ],
     );
-    // med-cleanup-bundle-v1 / M16: when the user passes a whole file
-    // (no `--function`), `tldr similar` now defaults to the aggregated
-    // `AggregatedSimilarityReport` shape (source_file + similar_files
-    // ranked by total similarity), not the legacy per-chunk
-    // `SimilarityReport` shape (source + similar). Accept either.
-    let has_legacy = json.get("source").is_some();
-    let has_aggregated = json.get("source_file").is_some();
-    if !json.is_object() || (!has_legacy && !has_aggregated) {
+    if exit == 0 {
         panic!(
-            "[similar × {lang}] SILENT_FAIL — missing `source` or `source_file` field\n--- stdout ---\n{}\n--- stderr ---\n{stderr}",
+            "[similar × {lang}] PARK_BROKEN — exit=0 but the command is parked (TLDR-7xz.4)\n--- stdout ---\n{}",
+            truncate(&stdout, 400)
+        );
+    }
+    let combined = format!("{stdout}\n{stderr}");
+    if !combined.contains("not available in this version,") {
+        panic!(
+            "[similar × {lang}] WRONG_MESSAGE — expected the standardized parked message\n--- stdout ---\n{}\n--- stderr ---\n{stderr}",
             truncate(&stdout, 400)
         );
     }

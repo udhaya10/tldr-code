@@ -1,8 +1,14 @@
 //! Semantic command - Semantic code search
 //!
-//! Performs natural language search over code using dense embeddings.
-//! Dense-only path uses the usearch VectorStore (TLDR-zxb); hybrid (--hybrid)
-//! still uses SemanticIndex for BM25 fusion (TLDR-zxb.5).
+//! Performs natural language search over code using dense embeddings, served
+//! exclusively by the warm daemon's resident VectorStore (TLDR-7xz.1). The
+//! command has exactly two modes: served warm at full quality, or an honest
+//! one-line explanation of why it can't serve — there is NO silent cold
+//! fallback (the old `search_with_store` fallthrough is gone).
+//!
+//! Parked surfaces (`--hybrid`, `--langs`, `--no-cache`) keep their flags but
+//! fail fast with the standardized "not available in this version" message —
+//! they return at full warm quality with the new engine (TLDR-utj).
 
 use std::path::PathBuf;
 
@@ -10,11 +16,7 @@ use anyhow::Result;
 use clap::Args;
 
 use tldr_core::config::{find_project_root, TldrConfig};
-use tldr_core::semantic::{
-    BuildOptions, CacheConfig, ChunkGranularity, EmbeddingModel, IndexSearchOptions,
-    SemanticIndex, search_with_store, store_dir_for,
-};
-use tldr_core::{hybrid_search_with_index, HybridSearchReport, Language};
+use tldr_core::semantic::EmbeddingModel;
 
 use crate::output::{OutputFormat, OutputWriter};
 
@@ -40,9 +42,8 @@ pub struct SemanticArgs {
     #[arg(short = 't', long, default_value = "0.0")]
     pub threshold: f64,
 
-    /// Fuse dense (embedding) search with BM25 keyword search via Reciprocal
-    /// Rank Fusion (TLDR-4er). Recovers lexically-strong matches that pure dense
-    /// retrieval misses. Results are file-level; `--threshold` does not apply.
+    /// [parked] BM25 + dense fusion — not available in this version
+    /// (returning with the new warm engine).
     #[arg(long)]
     pub hybrid: bool,
 
@@ -50,21 +51,13 @@ pub struct SemanticArgs {
     #[arg(short, long)]
     pub model: Option<String>,
 
-    /// Filter by language via file extensions (comma-separated, e.g., `--langs rs,py`).
-    ///
-    /// Values are parsed by `Language::from_extension`, which accepts file
-    /// extensions such as `rs`, `py`, `ts`, `go`, `java`, `rb`, `kt`, `cpp`.
-    /// Language names (`rust`, `python`) are NOT accepted here; use the
-    /// global `--lang <LANG>` flag above for name-based single-language
-    /// selection. Passing an unknown extension silently drops that entry
-    /// from the filter.
-    ///
-    /// Renamed from `--lang` (pre-VAL-009) to avoid a clap TypeId collision
-    /// with the global `--lang` arg which is `Option<Language>`.
+    /// [parked] Language filter — not available in this version
+    /// (returning with the new warm engine).
     #[arg(long = "langs", value_delimiter = ',')]
     pub langs: Option<Vec<String>>,
 
-    /// Disable embedding cache
+    /// [parked] Bypass the embedding cache — not available in this version
+    /// (cold uncached search was removed).
     #[arg(long)]
     pub no_cache: bool,
 }
@@ -74,165 +67,65 @@ impl SemanticArgs {
     pub fn run(&self, format: OutputFormat, quiet: bool) -> Result<()> {
         let writer = OutputWriter::new(format, quiet);
 
-        // Resolve model: CLI flag > config > built-in default
+        // Parked surfaces (TLDR-7xz.3): keep the flags, fail fast with the
+        // standardized message — never a silent cold serve, never a silently
+        // removed argument. Checked FIRST so a parked flag never half-runs.
+        if self.hybrid {
+            anyhow::bail!(
+                "not available in this version, hybrid (BM25 + dense) search is moving into the warm daemon engine"
+            );
+        }
+        if self.langs.is_some() {
+            anyhow::bail!(
+                "not available in this version, language filtering needs a daemon-side filter (the resident index covers all languages)"
+            );
+        }
+        if self.no_cache {
+            anyhow::bail!(
+                "not available in this version, uncached cold search was removed — semantic queries are served by the warm daemon"
+            );
+        }
+
+        // Validate the model early (CLI flag > config > built-in default) so a
+        // typo'd `--model` fails here instead of after a daemon round-trip.
+        // The daemon re-resolves with the same precedence (daemon.rs
+        // resolve_semantic_model), so warm and cold-config rank the same model.
         let project_root = find_project_root(&self.path);
         let config = TldrConfig::resolve(project_root.as_deref());
-        let model = EmbeddingModel::resolve(self.model.as_deref(), &config)
+        EmbeddingModel::resolve(self.model.as_deref(), &config)
             .map_err(|e| anyhow::anyhow!("{}", e))?;
 
-        // TLDR-atc: when a warm daemon is running, route the query there
-        // instead of paying the cold store load + ONNX model reload.
-        //
-        // We skip routing for:
-        //   * `--hybrid`   — the daemon has no hybrid path; keep that
-        //                    best-quality result identical to cold.
-        //   * `--no-cache` — the user asked to bypass the cache the daemon
-        //                    relies on.
-        //   * `--langs`    — the daemon holds an ALL-languages resident index;
-        //                    routing a language-filtered query would silently
-        //                    return every language. Fall back to cold, which
-        //                    builds a langs-filtered index (parity).
-        // Any miss (daemon absent, connection error, or build failure) returns
-        // `None` and falls through to the cold path below.
-        if !self.hybrid && !self.no_cache && self.langs.is_none() {
-            use crate::commands::daemon_router::try_daemon_route;
+        // Require-warm routing (TLDR-7xz.1): the warm daemon is the ONLY serve
+        // path. Each non-hit maps to honest guidance — the old behavior
+        // (fall through to a cold store load + ONNX reload) is gone.
+        use crate::commands::daemon_router::{route_semantic, SemanticRoute};
 
-            let mut params = serde_json::json!({
-                "query": self.query,
-                "top_k": self.top,
-                "threshold": self.threshold,
-            });
-            if let Some(m) = &self.model {
-                params["model"] = serde_json::Value::String(m.clone());
-            }
+        let mut params = serde_json::json!({
+            "query": self.query,
+            "top_k": self.top,
+            "threshold": self.threshold,
+        });
+        if let Some(m) = &self.model {
+            params["model"] = serde_json::Value::String(m.clone());
+        }
 
-            if let Some(report) = try_daemon_route::<tldr_core::semantic::SemanticSearchReport>(
-                &self.path,
-                "semantic",
-                params,
-            ) {
+        match route_semantic::<tldr_core::semantic::SemanticSearchReport>(&self.path, params) {
+            SemanticRoute::Hit(report) => {
                 if writer.is_text() {
                     writer.write_text(&format_semantic_text(&report, self.threshold))?;
                 } else {
                     writer.write(&report)?;
                 }
-                return Ok(());
+                Ok(())
             }
-        }
-
-        // Build options
-        let build_opts = BuildOptions {
-            model,
-            granularity: ChunkGranularity::Function,
-            languages: self.langs.clone(),
-            show_progress: !quiet,
-            use_cache: !self.no_cache,
-        };
-
-        // Cache config
-        let cache_config = if self.no_cache {
-            None
-        } else {
-            Some(CacheConfig::default())
-        };
-
-        // TLDR-4er: hybrid mode still uses SemanticIndex for BM25 fusion
-        // (TLDR-zxb.5 will migrate this to VectorStore).
-        if self.hybrid {
-            writer.progress(&format!(
-                "Building semantic index for {} ({:?} model)...",
-                self.path.display(),
-                model
-            ));
-            let mut index = SemanticIndex::build(&self.path, build_opts, cache_config)?;
-            let language = Language::from_directory(&self.path).unwrap_or(Language::Python);
-            let report =
-                hybrid_search_with_index(&mut index, &self.query, &self.path, language, self.top)?;
-            if writer.is_text() {
-                writer.write_text(&format_hybrid_text(&report))?;
-            } else {
-                writer.write(&report)?;
+            SemanticRoute::DaemonDown => {
+                anyhow::bail!("daemon not started — run tldr daemon start")
             }
-            return Ok(());
+            SemanticRoute::NotReady(msg) => anyhow::bail!("{msg}"),
+            SemanticRoute::Error(e) => anyhow::bail!("semantic search failed: {e}"),
         }
-
-        // Dense-only path: VectorStore (TLDR-zxb, no fallback per TLDR-lx7).
-        writer.progress(&format!(
-            "Searching {} ({:?} model)...",
-            self.path.display(),
-            model
-        ));
-
-        let store_dir = store_dir_for(&self.path);
-        let search_opts = IndexSearchOptions {
-            top_k: self.top,
-            threshold: self.threshold,
-            include_snippet: true,
-            snippet_lines: 5,
-        };
-        let report = search_with_store(
-            &self.path,
-            &store_dir,
-            &self.query,
-            &search_opts,
-            &build_opts,
-            cache_config,
-        )?;
-
-        if writer.is_text() {
-            let text = format_semantic_text(&report, self.threshold);
-            writer.write_text(&text)?;
-        } else {
-            writer.write(&report)?;
-        }
-
-        Ok(())
     }
 }
-
-/// Format a hybrid (BM25 + dense RRF) search report for text output.
-fn format_hybrid_text(report: &HybridSearchReport) -> String {
-    use colored::Colorize;
-
-    let mut output = String::new();
-    output.push_str(&format!(
-        "{}: \"{}\"\n",
-        "Hybrid search (BM25 + dense RRF)".bold(),
-        report.query.cyan()
-    ));
-    if let Some(mode) = &report.fallback_mode {
-        output.push_str(&format!("Mode: {} (no dense results)\n", mode.yellow()));
-    }
-    output.push_str(&format!(
-        "Candidates: {} | BM25-only: {} | dense-only: {} | overlap: {}\n\n",
-        report.total_candidates, report.bm25_only, report.dense_only, report.overlap
-    ));
-
-    if report.results.is_empty() {
-        output.push_str("No matches found.\n");
-        return output;
-    }
-    for (i, r) in report.results.iter().enumerate() {
-        output.push_str(&format!(
-            "{}. {} (rrf: {:.4})\n",
-            i + 1,
-            r.file_path.display().to_string().green(),
-            r.rrf_score
-        ));
-        let ranks = match (r.bm25_rank, r.dense_rank) {
-            (Some(b), Some(d)) => format!("   bm25 #{b}, dense #{d}"),
-            (Some(b), None) => format!("   bm25 #{b}"),
-            (None, Some(d)) => format!("   dense #{d}"),
-            (None, None) => String::new(),
-        };
-        if !ranks.is_empty() {
-            output.push_str(&ranks);
-            output.push('\n');
-        }
-    }
-    output
-}
-
 
 /// Format semantic search report for text output
 fn format_semantic_text(
@@ -295,4 +188,43 @@ fn format_semantic_text(
     output.push_str(&format!("Search completed in {}ms\n", report.latency_ms));
 
     output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(hybrid: bool, langs: Option<Vec<String>>, no_cache: bool) -> SemanticArgs {
+        SemanticArgs {
+            query: "anything".to_string(),
+            path: PathBuf::from("."),
+            top: 10,
+            threshold: 0.0,
+            hybrid,
+            model: None,
+            langs,
+            no_cache,
+        }
+    }
+
+    /// TLDR-7xz.3: every parked flag fails fast with the standardized
+    /// "not available in this version, <reason>" message — checked before any
+    /// model resolution or daemon round-trip, so these tests are hermetic.
+    #[test]
+    fn parked_flags_fail_fast_with_standardized_message() {
+        let cases = [
+            args(true, None, false),
+            args(false, Some(vec!["rs".into()]), false),
+            args(false, None, true),
+        ];
+        for a in cases {
+            let err = a
+                .run(crate::output::OutputFormat::Json, true)
+                .expect_err("parked flag must fail fast");
+            assert!(
+                err.to_string().starts_with("not available in this version,"),
+                "expected standardized parked message, got: {err}"
+            );
+        }
+    }
 }

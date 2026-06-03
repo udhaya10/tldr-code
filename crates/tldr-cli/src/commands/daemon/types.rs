@@ -324,7 +324,12 @@ pub enum DaemonCommand {
     /// Graceful shutdown
     Shutdown,
 
-    /// File change notification
+    /// File change notification.
+    ///
+    /// TLDR-7xz.6: the IPC leg of the external poke (`tldr daemon notify`,
+    /// driven by git/editor hooks). Lands in `handle_notify ->
+    /// process_dirty_file` — the same single invalidation/re-index funnel the
+    /// in-daemon watcher uses. See notify.rs for the full role description.
     Notify {
         /// Path to the changed file
         file: PathBuf,

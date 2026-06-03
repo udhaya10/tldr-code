@@ -1,14 +1,15 @@
 //! Thin concurrency wrapper around the daemon's resident VectorStore.
 //!
 //! Owns `parking_lot::RwLock<Option<(EmbeddingModel, VectorStore)>>` and
-//! exposes `query` (shared read-lock fast path, exclusive write-lock on cold
-//! miss), `warm` (write-lock build), `invalidate` (write-lock clear), and
-//! `apply_delta` (incremental per-file re-index — TLDR-t8f). The daemon and
-//! future watcher never touch a raw lock.
+//! exposes `query` (shared read-lock warm path; honest [`QueryError::NotReady`]
+//! on a cold store — NEVER an inline build, TLDR-7xz.2), `warm` (write-lock
+//! build), `invalidate` (write-lock clear), and `apply_delta` (incremental
+//! per-file re-index — TLDR-t8f). The daemon and future watcher never touch a
+//! raw lock.
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use parking_lot::{Mutex, RwLock};
 
@@ -17,6 +18,35 @@ use tldr_core::semantic::{
     chunk_file, load_or_build_store, query_store_with_vector, store_dir_for, BuildOptions,
     CacheConfig, ChunkOptions, Embedder, EmbeddingModel, IndexSearchOptions,
 };
+
+/// Why a semantic query could not be served (TLDR-7xz.1/.2).
+///
+/// The daemon has exactly two modes: serve warm at full quality, or say
+/// honestly why it can't. There is no cold build on the query path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QueryError {
+    /// The resident store is cold (never warmed, or invalidated). The fix is
+    /// explicit: `tldr warm`. The query path never builds.
+    NotReady,
+    /// A build currently holds the store write lock (`warm` in progress).
+    /// Honest "in progress" instead of blocking the query for the build's
+    /// duration.
+    Building,
+    /// Embedding/search/serialization failure.
+    Internal(String),
+}
+
+impl std::fmt::Display for QueryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            QueryError::NotReady => write!(f, "index not built — run tldr warm"),
+            QueryError::Building => {
+                write!(f, "index build in progress — retry when warm completes")
+            }
+            QueryError::Internal(e) => write!(f, "{e}"),
+        }
+    }
+}
 
 /// Result of an incremental delta on a single file change (TLDR-t8f).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,9 +93,12 @@ impl IndexManager {
         }
     }
 
-    /// Shared read-lock fast path when the store is warm; exclusive write-lock
-    /// slow path to build on cold miss. Concurrent warm queries run under
-    /// plain `read()` guards — truly parallel, no serialization.
+    /// Serve a semantic query from the WARM resident store, or say honestly why
+    /// it can't (TLDR-7xz.1/.2). Warm queries run under plain shared `read()`
+    /// guards — truly parallel, no serialization. A cold store returns
+    /// [`QueryError::NotReady`]; an in-progress `warm` build (write lock held)
+    /// returns [`QueryError::Building`]. The query path NEVER builds — the old
+    /// silent inline cold-build under the write lock is gone.
     ///
     /// MUST be called inside `spawn_blocking` — never hold the guard across
     /// `.await`.
@@ -75,60 +108,55 @@ impl IndexManager {
         query: &str,
         search_opts: &IndexSearchOptions,
         model: EmbeddingModel,
-    ) -> Result<serde_json::Value, String> {
+    ) -> Result<serde_json::Value, QueryError> {
         // Empty/whitespace queries short-circuit FIRST — before embed_query, whose
         // `Embedder::new` would load ONNX on a cold daemon (and `"   "` would run a
         // wasted embed) only to be discarded downstream (TLDR-ac0.5 Codex review).
         // Mirrors the cold `query_store` path, which also guards before Embedder::new.
         if query.trim().is_empty() {
             let report = tldr_core::semantic::empty_search_report(query, model);
-            return serde_json::to_value(&report).map_err(|e| format!("Serialization error: {e}"));
+            return serde_json::to_value(&report)
+                .map_err(|e| QueryError::Internal(format!("Serialization error: {e}")));
         }
 
-        // Embed the query on the RESIDENT embedder BEFORE taking the store lock
-        // (TLDR-ac0.5): reuses the same warm embedder as the delta path, so no
-        // per-query `Embedder::new` ONNX reload. Done first (not inside the read
-        // guard) so the brief embedder-`Mutex` wait doesn't extend the store read
-        // lock — warm queries still run `store.search` truly in parallel (ac0.1).
-        let qv = self.embed_query(model, query)?;
-
-        // Fast path: plain shared read — concurrent with other readers.
+        // Readiness pre-check BEFORE embedding (TLDR-7xz.2 + advisor): a cold
+        // daemon must answer "not ready" without loading ONNX. The bounded
+        // try_read rides out brief writers (a delta's apply takes the write
+        // lock for milliseconds) while a long `warm` build maps to an honest
+        // Building instead of blocking this query for the build's duration.
         {
-            let guard = self.store.read();
-            if guard.as_ref().is_some_and(|(m, _)| *m == model) {
-                let (_, store) = guard.as_ref().unwrap();
-                return Self::do_search(store, project, query, &qv, search_opts, model);
+            let guard = self
+                .store
+                .try_read_for(Duration::from_millis(250))
+                .ok_or(QueryError::Building)?;
+            if !guard.as_ref().is_some_and(|(m, _)| *m == model) {
+                return Err(QueryError::NotReady);
             }
-        } // drop read lock before acquiring write
+        } // drop read lock before embedding
 
-        // Slow path: exclusive write lock, re-check, build on miss.
-        let mut guard = self.store.write();
-        if !guard.as_ref().is_some_and(|(m, _)| *m == model) {
-            let t_build = Instant::now();
-            let build_opts = BuildOptions {
-                model,
-                show_progress: false,
-                use_cache: true,
-                ..Default::default()
-            };
-            let store_dir = store_dir_for(project);
-            let store = load_or_build_store(
-                project,
-                &store_dir,
-                &build_opts,
-                Some(CacheConfig::default()),
-            )
-            .map_err(|e| format!("Failed to build vector store: {e}"))?;
-            eprintln!(
-                "[ac0.1] store BUILD took {}ms (model {:?})",
-                t_build.elapsed().as_millis(),
-                model
-            );
-            *guard = Some((model, store));
+        // Embed the query on the RESIDENT embedder OUTSIDE the store lock
+        // (TLDR-ac0.5): reuses the same warm embedder as the delta path, so no
+        // per-query `Embedder::new` ONNX reload — and the brief embedder-`Mutex`
+        // wait doesn't extend the store read lock, so warm queries still run
+        // `store.search` truly in parallel (ac0.1).
+        let qv = self
+            .embed_query(model, query)
+            .map_err(QueryError::Internal)?;
+
+        // Re-take the read lock and re-check: the store may have been
+        // invalidated or re-warmed under a different model while we embedded.
+        // Honest NotReady on that (rare) race — never a build.
+        let guard = self
+            .store
+            .try_read_for(Duration::from_millis(250))
+            .ok_or(QueryError::Building)?;
+        match guard.as_ref() {
+            Some((m, store)) if *m == model => {
+                Self::do_search(store, project, query, &qv, search_opts, model)
+                    .map_err(QueryError::Internal)
+            }
+            _ => Err(QueryError::NotReady),
         }
-
-        let (_, store) = guard.as_ref().expect("store present after build");
-        Self::do_search(store, project, query, &qv, search_opts, model)
     }
 
     fn do_search(
@@ -761,6 +789,68 @@ mod tests {
         for h in handles {
             h.join().expect("thread panicked");
         }
+    }
+
+    /// TLDR-7xz.1/.2: a query on a COLD store must return an honest
+    /// `QueryError::NotReady` — WITHOUT building the store and WITHOUT loading
+    /// ONNX (the readiness pre-check fires before `embed_query`). This is the
+    /// unit-level proof that the old inline cold-build slow path is gone.
+    #[test]
+    fn cold_query_returns_not_ready_without_building_anything() {
+        let manager = IndexManager::new(); // cold: no store, no embedder
+        let model = EmbeddingModel::default();
+        let project = tempfile::tempdir().unwrap();
+        let opts = IndexSearchOptions {
+            top_k: 5,
+            threshold: 0.0,
+            include_snippet: false,
+            snippet_lines: 5,
+        };
+
+        let err = manager
+            .query(project.path(), "find the parser", &opts, model)
+            .expect_err("cold store must not serve");
+        assert_eq!(err, QueryError::NotReady);
+        assert_eq!(
+            err.to_string(),
+            "index not built — run tldr warm",
+            "NotReady must carry the standardized guidance"
+        );
+        assert!(!manager.is_warm(), "query must NOT build the store");
+        assert_eq!(
+            manager.embedder_builds(),
+            0,
+            "cold query must NOT construct the embedder (no ONNX load)"
+        );
+    }
+
+    /// A model MISMATCH between the warm store and the request is also honest
+    /// NotReady — never a rebuild on the query path.
+    #[test]
+    fn model_mismatch_returns_not_ready() {
+        let manager = seeded_manager(); // warm @ EmbeddingModel::default()
+        let project = tempfile::tempdir().unwrap();
+        let opts = IndexSearchOptions {
+            top_k: 5,
+            threshold: 0.0,
+            include_snippet: false,
+            snippet_lines: 5,
+        };
+        // Pick any model that differs from the seeded one.
+        let other = [EmbeddingModel::ArcticXS, EmbeddingModel::ArcticL]
+            .into_iter()
+            .find(|m| *m != EmbeddingModel::default())
+            .unwrap();
+
+        let err = manager
+            .query(project.path(), "anything", &opts, other)
+            .expect_err("mismatched model must not serve");
+        assert_eq!(err, QueryError::NotReady);
+        assert_eq!(
+            manager.embedder_builds(),
+            0,
+            "readiness check must fire before any embedder construction"
+        );
     }
 
     /// The daemon's blank-query guard (TLDR-ac0.5 Codex review) must short-circuit

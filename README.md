@@ -24,11 +24,14 @@ This gives you 60+ analysis commands — everything except natural-language sema
 cargo install tldr-cli --features semantic
 ```
 
-Adds three commands:
+Adds:
 
-- `tldr semantic '<query>' <path>` — natural-language code search
-- `tldr embed <path>` — build embedding index
-- `tldr similar <file>` — find similar fragments
+- `tldr semantic '<query>' <path>` — natural-language code search, served by
+  the warm daemon (`tldr daemon start`, then `tldr warm`). With no daemon or a
+  cold index it says so honestly instead of serving slowly.
+- `tldr embed <path>` — build the embedding index
+- `tldr similar <file>` — not available in this version (returning with the
+  new warm engine)
 
 This pulls in `fastembed` + ONNX Runtime. On first run it downloads the arctic-embed-m model (~110MB, cached). Builds reliably on Mac. Other platforms are unverified — if it doesn't compile for you, a PR with the fix is very welcome.
 
@@ -130,8 +133,8 @@ tldr health src/
 | Command | Description |
 |---------|-------------|
 | `search` | BM25 search with structural context |
-| `semantic` | Natural language code search * |
-| `similar` | Find similar code fragments * |
+| `semantic` | Natural language code search (warm daemon) * |
+| `similar` | Find similar code fragments — parked this version * |
 | `context` | LLM-ready context from entry point |
 | `definition` | Go-to-definition |
 | `explain` | Comprehensive function analysis |

@@ -548,9 +548,20 @@ impl TLDRDaemon {
                 })
                 .await;
 
+                // TLDR-7xz.2: warm serves; cold/building answers honestly with a
+                // machine-distinguishable `status: "not_ready"` (the CLI relays
+                // the message instead of silently falling back to a cold serve).
+                // Real failures keep `status: "error"`.
+                use super::index_manager::QueryError;
                 match join {
                     Ok(Ok(value)) => DaemonResponse::Result(value),
-                    Ok(Err(e)) => DaemonResponse::Error {
+                    Ok(Err(e @ (QueryError::NotReady | QueryError::Building))) => {
+                        DaemonResponse::Error {
+                            status: "not_ready".to_string(),
+                            error: e.to_string(),
+                        }
+                    }
+                    Ok(Err(QueryError::Internal(e))) => DaemonResponse::Error {
                         status: "error".to_string(),
                         error: e,
                     },
@@ -1112,6 +1123,11 @@ impl TLDRDaemon {
     }
 
     /// Handle the Notify command (file change notification).
+    ///
+    /// TLDR-7xz.6: this is the external poke's (git/editor hooks via
+    /// `tldr daemon notify`) entry into the SINGLE invalidation/re-index flow
+    /// — it funnels into `process_dirty_file`, the same path the in-daemon
+    /// filesystem watcher uses. Never a parallel mechanism; see notify.rs.
     async fn handle_notify(&self, file: PathBuf) -> DaemonResponse {
         let ReindexOutcome {
             dirty_count,
@@ -2136,15 +2152,19 @@ mod tests {
         }
     }
 
+    /// TLDR-7xz.2: a semantic query on a COLD daemon must answer honestly with
+    /// `status: "not_ready"` and the warm-me guidance — it must NEVER build the
+    /// store inline on the query path (the old behavior this test's predecessor,
+    /// `test_semantic_search_builds_index`, asserted). Deterministic: needs no
+    /// ONNX, because the not-ready check fires before any embedding.
     #[cfg(feature = "semantic")]
     #[tokio::test]
-    async fn test_semantic_search_builds_index() {
-        // Create a temp dir with a simple Python file
+    async fn test_semantic_cold_query_returns_not_ready() {
         let temp = tempfile::tempdir().unwrap();
         let py_file = temp.path().join("hello.py");
         std::fs::write(
             &py_file,
-            "def greet(name):\n    return f'Hello, {name}!'\n\ndef farewell(name):\n    return f'Goodbye, {name}!'\n",
+            "def greet(name):\n    return f'Hello, {name}!'\n",
         )
         .unwrap();
 
@@ -2160,23 +2180,23 @@ mod tests {
             })
             .await;
 
-        // Should return a Result with search results, not an error
         match &response {
-            DaemonResponse::Result(value) => {
-                assert!(value.get("query").is_some());
-                assert!(value.get("results").is_some());
-            }
-            DaemonResponse::Error { error, .. } => {
-                // May fail in CI without ONNX model - that's acceptable
-                // but it should NOT say "not yet implemented"
+            DaemonResponse::Error { status, error } => {
+                assert_eq!(
+                    status, "not_ready",
+                    "cold query must be machine-distinguishable from a real error"
+                );
                 assert!(
-                    !error.contains("not yet implemented"),
-                    "Semantic search should be wired, got: {}",
-                    error
+                    error.contains("index not built"),
+                    "cold query must carry the warm-me guidance, got: {error}"
                 );
             }
-            other => panic!("Unexpected response: {:?}", other),
+            other => panic!("cold semantic query must be not_ready, got: {:?}", other),
         }
+        assert!(
+            !daemon.semantic_store.is_warm(),
+            "the query path must NOT have built the store"
+        );
     }
 
     #[cfg(feature = "semantic")]
@@ -2189,15 +2209,11 @@ mod tests {
         let config = DaemonConfig::default();
         let daemon = TLDRDaemon::new(temp.path().to_path_buf(), config);
 
-        // First semantic search - builds index (warms the store iff ONNX is
-        // available in this env; the assertion below is robust either way).
+        // Warm explicitly — queries never build the store anymore (TLDR-7xz.2).
+        // Warms iff ONNX is available in this env; the assertion below is
+        // robust either way.
         let _ = daemon
-            .handle_command(DaemonCommand::Semantic {
-                query: "computation".to_string(),
-                top_k: 5,
-                model: None,
-                threshold: None,
-            })
+            .handle_command(DaemonCommand::Warm { language: None })
             .await;
         let warm_before = daemon.semantic_store.is_warm();
 
@@ -2238,14 +2254,10 @@ mod tests {
         .unwrap();
         let daemon = TLDRDaemon::new(temp.path().to_path_buf(), DaemonConfig::default());
 
-        // Warm the store (builds iff ONNX is present in this env).
+        // Warm the store explicitly (builds iff ONNX is present in this env) —
+        // queries never build it anymore (TLDR-7xz.2).
         let _ = daemon
-            .handle_command(DaemonCommand::Semantic {
-                query: "alpha".to_string(),
-                top_k: 5,
-                model: None,
-                threshold: None,
-            })
+            .handle_command(DaemonCommand::Warm { language: None })
             .await;
         let Some(len0) = daemon.semantic_store.store_len() else {
             return; // No ONNX here — nothing to assert about deltas.

@@ -81,11 +81,17 @@ pub struct SemanticArgs {
 }
 ```
 
-**How it works:**
-1. Embeds query using FastEmbed model (arctic-s/m/l)
-2. Embeds code chunks (function-level granularity)
-3. Computes cosine similarity
-4. Returns top N semantically similar results
+**How it works (TLDR-7xz: served exclusively by the warm daemon):**
+1. Routes the query to the project's running daemon
+2. The daemon embeds the query on its resident embedder and searches its warm
+   usearch vector store (built by `tldr warm` / `tldr embed`, kept fresh by
+   the file watcher)
+3. Returns top N semantically similar results
+
+With no daemon it answers `daemon not started — run tldr daemon start`; with a
+cold index, `index not built — run tldr warm`. There is no cold per-call
+fallback. `--hybrid`, `--langs`, and `--no-cache` are parked this version
+(`not available in this version, <reason>`).
 
 **Example:**
 ```bash
@@ -111,7 +117,13 @@ tldr semantic "caching" src/ -m arctic-l
 
 **Implementation:** `crates/tldr-cli/src/commands/similar.rs`
 
-**How it works:**
+**Status (TLDR-7xz.4): parked.** Fails fast with `not available in this
+version, seeded similarity needs a warm daemon API (it cold-built an index per
+call) — returning with the new engine`. The argument surface is kept; the
+command returns at full warm quality with the daemon seeded-similarity API
+(TLDR-utj).
+
+**How it worked (and will again, warm):**
 1. Embeds target function/file
 2. Compares against all functions in scope
 3. Returns ranked list of similar code

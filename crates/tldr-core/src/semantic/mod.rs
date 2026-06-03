@@ -24,45 +24,34 @@
 //!
 //! ```text
 //! +-------------------+     +------------------+
-//! |   SemanticIndex   |<--->|  EmbeddingCache  |
-//! +-------------------+     +------------------+
-//!          |                        |
-//!          v                        v
-//! +-------------------+     +------------------+
-//! |     Embedder      |     |     Chunker      |
-//! | (fastembed-rs)    |     | (tree-sitter)    |
-//! +-------------------+     +------------------+
-//!          |
-//!          v
-//! +-------------------+
-//! |    Similarity     |
-//! | (cosine, top-K)   |
+//! |    VectorStore    |<--->|  EmbeddingCache  |
+//! | (usearch, warm    |     +------------------+
+//! |  in the daemon)   |              |
+//! +-------------------+              v
+//!          |                +------------------+
+//!          v                |     Chunker      |
+//! +-------------------+     | (tree-sitter)    |
+//! |     Embedder      |     +------------------+
+//! | (fastembed-rs)    |
 //! +-------------------+
 //! ```
+//!
+//! Serving happens exclusively through the daemon's resident [`vector_store`]
+//! (warm, full quality) — there is no per-call in-process index. The old
+//! `SemanticIndex` (cold chunk→embed→search on every invocation) was removed
+//! in TLDR-7xz.7.
 //!
 //! # Example
 //!
 //! ```rust,ignore
-//! use tldr_core::semantic::{SemanticIndex, SearchOptions, ChunkOptions, EmbedOptions};
+//! use tldr_core::semantic::{load_or_build_store, query_store, BuildOptions, IndexSearchOptions};
 //!
-//! // Build an index from a project directory
-//! let index = SemanticIndex::build(
-//!     Path::new("src/"),
-//!     ChunkOptions::default(),
-//!     EmbedOptions::default(),
-//!     None, // No cache
-//! )?;
+//! // Build (or load) the persistent vector store for a project
+//! let store = load_or_build_store(root, &store_dir, &BuildOptions::default(), None)?;
 //!
-//! // Search for semantically related code
-//! let report = index.search("parse configuration file", SearchOptions::default())?;
-//!
-//! for result in report.results {
-//!     println!("{}: {} (score: {:.2})",
-//!         result.file_path.display(),
-//!         result.function_name.unwrap_or_default(),
-//!         result.score
-//!     );
-//! }
+//! // Search it (the daemon does this on its warm resident copy)
+//! let report = query_store(&store, root, "parse configuration file",
+//!     &IndexSearchOptions::default(), BuildOptions::default().model)?;
 //! ```
 //!
 //! # Modules
@@ -72,7 +61,8 @@
 //! - `chunker`: Code chunking via tree-sitter (Phase 4)
 //! - `similarity`: Cosine similarity and top-K search (Phase 2)
 //! - `cache`: JSON-based embedding cache (Phase 5)
-//! - `index`: In-memory semantic index (Phase 6)
+//! - `index`: shared build/search options + corpus limits (Phase 6)
+//! - `vector_store` / `store_search`: persistent usearch store — the serve path
 
 pub mod types;
 
@@ -116,9 +106,11 @@ pub use chunker::{chunk_code, chunk_file, is_corpus_file, ChunkResult, SkippedFi
 pub mod cache;
 pub use cache::EmbeddingCache;
 
-// Phase 6: Index
+// Phase 6: shared build/search options + index limits. The `SemanticIndex`
+// type itself was nuked in TLDR-7xz.7 — serving goes through the daemon's
+// resident VectorStore only (store_search/vector_store below).
 pub mod index;
-pub use index::{BuildOptions, SearchOptions as IndexSearchOptions, SemanticIndex, MAX_INDEX_SIZE};
+pub use index::{BuildOptions, SearchOptions as IndexSearchOptions, MAX_INDEX_SIZE};
 
 // Enrichment: builds the structural "embedding text" (signature + callers/callees
 // + CFG/DFG summaries + deps) that the index embeds instead of raw source.
