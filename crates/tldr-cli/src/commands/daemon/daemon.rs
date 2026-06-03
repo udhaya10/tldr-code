@@ -1315,6 +1315,39 @@ mod tests {
         assert!(daemon.uptime() < 1.0);
     }
 
+    /// Call-site guard: the daemon's query path resolves the embedding model from
+    /// the PROJECT CONFIG, never a hardcoded/Default model (the trap documented at
+    /// resolve_semantic_model: `BuildOptions::default()` silently pinned ArcticM
+    /// even when config asked for ArcticL). Writes a real `.tldr/config.json` and
+    /// asserts `resolve_semantic_model` — the exact method handle_command uses —
+    /// honors it, and that an explicit override still wins.
+    #[cfg(feature = "semantic")]
+    #[test]
+    fn resolve_semantic_model_honors_project_config() {
+        let temp = TempDir::new().unwrap();
+        std::fs::create_dir_all(temp.path().join(".tldr")).unwrap();
+        std::fs::write(
+            temp.path().join(".tldr").join("config.json"),
+            r#"{"embedding": {"model": "arctic-l"}}"#,
+        )
+        .unwrap();
+        let daemon = TLDRDaemon::new(temp.path().to_path_buf(), DaemonConfig::default());
+
+        let resolved = daemon.resolve_semantic_model(None).unwrap();
+        assert_eq!(
+            resolved,
+            EmbeddingModel::ArcticL,
+            "project config model must be honored (not the built-in default)"
+        );
+
+        let overridden = daemon.resolve_semantic_model(Some("arctic-m")).unwrap();
+        assert_eq!(
+            overridden,
+            EmbeddingModel::ArcticM,
+            "explicit override must beat the project config"
+        );
+    }
+
     #[tokio::test]
     async fn test_daemon_status_initial() {
         let temp = TempDir::new().unwrap();

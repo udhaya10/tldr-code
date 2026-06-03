@@ -45,6 +45,12 @@ pub struct IndexManager {
     /// created and re-created on a model change. Behind its own `Mutex` so a
     /// delta's embed doesn't touch the store lock.
     embedder: Mutex<Option<(EmbeddingModel, Embedder)>>,
+    /// Test-only counter of how many times the resident embedder was actually
+    /// constructed (`Embedder::new`). Lets a test prove the warm query path
+    /// REUSES the embedder (built once, not per query — TLDR-ac0.5) rather than
+    /// just proving result-equivalence. Per-instance to avoid cross-test races.
+    #[cfg(test)]
+    embedder_builds: std::sync::atomic::AtomicUsize,
 }
 
 impl IndexManager {
@@ -52,6 +58,8 @@ impl IndexManager {
         Self {
             store: RwLock::new(None),
             embedder: Mutex::new(None),
+            #[cfg(test)]
+            embedder_builds: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -152,10 +160,20 @@ impl IndexManager {
         let mut guard = self.embedder.lock();
         if !guard.as_ref().is_some_and(|(m, _)| *m == model) {
             let embedder = Embedder::new(model).map_err(|e| e.to_string())?;
+            #[cfg(test)]
+            self.embedder_builds
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             *guard = Some((model, embedder));
         }
         let (_, embedder) = guard.as_mut().expect("embedder present after init");
         embedder.embed_query(query).map_err(|e| e.to_string())
+    }
+
+    /// Test-only: how many times the resident embedder was constructed.
+    #[cfg(test)]
+    fn embedder_builds(&self) -> usize {
+        self.embedder_builds
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Write-lock build: load from disk (if fresh) or full-rebuild. Used by the
@@ -656,6 +674,85 @@ mod tests {
                 c.2,
                 w.2
             );
+        }
+    }
+
+    /// The PERF claim of ac0.5: the daemon builds the embedder ONCE and reuses it
+    /// across queries (no per-query ONNX reload). The parity test alone can't prove
+    /// this — it would pass even with `Embedder::new` per query. Here the per-
+    /// instance build counter makes reuse deterministic: two queries -> exactly one
+    /// construction. Uses the SAME model `seeded_manager` baked in
+    /// (EmbeddingModel::default()) so `query()` takes the WARM fast path; a model
+    /// mismatch would hit the slow rebuild and invalidate the count. Ignored
+    /// (loads the ONNX embedder).
+    #[test]
+    #[ignore = "loads the ONNX embedder; run on demand"]
+    fn resident_embedder_built_once_across_queries() {
+        let manager = seeded_manager(); // warm store @ EmbeddingModel::default()
+        let model = EmbeddingModel::default();
+        let project = tempfile::tempdir().unwrap();
+        let opts = IndexSearchOptions {
+            top_k: 5,
+            threshold: 0.0,
+            include_snippet: false,
+            snippet_lines: 5,
+        };
+
+        assert_eq!(manager.embedder_builds(), 0, "no embedder before any query");
+        manager
+            .query(project.path(), "first query about parsing", &opts, model)
+            .unwrap();
+        assert_eq!(manager.embedder_builds(), 1, "embedder built on first query");
+        manager
+            .query(project.path(), "a second, different query", &opts, model)
+            .unwrap();
+        assert_eq!(
+            manager.embedder_builds(),
+            1,
+            "embedder REUSED on the second query — not reconstructed"
+        );
+    }
+
+    /// Two searches on a WARM (seeded) store overlap under shared read locks rather
+    /// than serializing. NOTE: this validates warm-store read-lock concurrency
+    /// ONLY. It does NOT test the embed-before-lock ordering (`do_search` takes a
+    /// pre-computed vector and never embeds) — that ordering is a code-structure
+    /// fact, verified by reading `query()`, not by this test.
+    #[test]
+    fn concurrent_warm_searches_overlap() {
+        let manager = Arc::new(seeded_manager());
+        let model = EmbeddingModel::default();
+        let mut dummy = vec![0.0_f32; model.dimensions()];
+        dummy[0] = 1.0;
+        let opts = IndexSearchOptions {
+            top_k: 5,
+            threshold: 0.0,
+            include_snippet: false,
+            snippet_lines: 5,
+        };
+
+        let barrier = Arc::new(Barrier::new(2));
+        let handles: Vec<_> = (0..2)
+            .map(|_| {
+                let mgr = Arc::clone(&manager);
+                let bar = Arc::clone(&barrier);
+                let dv = dummy.clone();
+                let so = opts.clone();
+                std::thread::spawn(move || {
+                    let guard = mgr.store.read();
+                    let (_, store) = guard.as_ref().expect("warm store");
+                    // Both threads now hold a shared read lock simultaneously. If
+                    // do_search took a write lock (or read locks were exclusive),
+                    // the barrier would deadlock and the test would hang.
+                    bar.wait();
+                    let v = IndexManager::do_search(store, Path::new("/p"), "q", &dv, &so, model)
+                        .expect("search ok");
+                    assert!(v.get("results").is_some(), "report has results field");
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().expect("thread panicked");
         }
     }
 

@@ -466,6 +466,36 @@ mod tests {
         }
     }
 
+    #[test]
+    fn query_store_with_vector_empty_query_short_circuits() {
+        // The DAEMON calls query_store_with_vector directly (bypassing query_store's
+        // wrapper guard), so the empty-query zero-vector guard must live in it —
+        // otherwise a blank query scores every chunk 1.0 off the zero vector. This
+        // covers the daemon's actual entry point and needs no embedder/ONNX: an
+        // empty query must short-circuit BEFORE `store.search`. Model is the
+        // configured default, never a hardcoded variant.
+        let model = EmbeddingModel::default();
+        let store = VectorStore::new(model.dimensions(), 4).unwrap();
+        let dummy = vec![0.0_f32; model.dimensions()];
+        for q in ["", "   ", "\t\n"] {
+            let r = query_store_with_vector(
+                &store,
+                Path::new("/p"),
+                q,
+                &dummy,
+                &opts(0.5, true),
+                model,
+                Instant::now(),
+            )
+            .unwrap();
+            assert!(r.results.is_empty(), "empty query {q:?} -> no results");
+            assert_eq!(r.total_results, 0);
+            assert_eq!(r.total_chunks, 0, "empty query must NOT search the store");
+            assert_eq!(r.matches_above_threshold, 0);
+            assert_eq!(r.query, q, "query echoed back verbatim");
+        }
+    }
+
     // End-to-end with the real embedder: rebuild-on-miss -> persist -> load-hit.
     // Ignored by default (loads the ONNX model).
     #[test]
