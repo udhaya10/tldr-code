@@ -123,6 +123,12 @@ walkdir = "2"
 ignore = "0.4"
 dunce = "1.0"
 
+# In-daemon filesystem watcher (TLDR-ac0.2). PINNED (=X.Y.Z) per the workspace
+# convention. `notify` is consumed via debouncer-full's re-export
+# (`notify_debouncer_full::notify`) so there is only ever one `notify` version
+# in the tree — no two-version skew between a direct dep and the debouncer's.
+notify-debouncer-full = "=0.7.0"
+
 # Difftastic L1/L2 graft - Phase 1
 bumpalo = "3.16.0"
 typed-arena = "2.0.2"

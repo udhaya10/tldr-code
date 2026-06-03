@@ -82,6 +82,18 @@ fn count_tree_files(tree: &FileTree) -> usize {
     }
 }
 
+/// Result of applying one changed file via [`TLDRDaemon::process_dirty_file`].
+/// The IPC `Notify` handler turns this into a `NotifyResponse`; the in-daemon
+/// watcher worker (TLDR-ac0.2) discards it (no client to answer).
+pub(crate) struct ReindexOutcome {
+    /// Number of files in the dirty set after this one was added.
+    pub dirty_count: usize,
+    /// The auto-reindex threshold in effect.
+    pub threshold: usize,
+    /// Whether this file pushed the dirty count to the threshold.
+    pub reindex_triggered: bool,
+}
+
 // =============================================================================
 // TLDRDaemon - Main Daemon Process
 // =============================================================================
@@ -185,6 +197,14 @@ impl TLDRDaemon {
         *self.indexed_files.read().await
     }
 
+    /// Number of files currently in the dirty set. Test-only observable used by
+    /// the watcher end-to-end smoke test (TLDR-ac0.2) to confirm an event was
+    /// routed through `process_dirty_file`.
+    #[cfg(test)]
+    pub(crate) async fn dirty_file_count(&self) -> usize {
+        self.dirty_files.read().await.len()
+    }
+
     /// Get a summary of all sessions.
     pub fn all_sessions_summary(&self) -> AllSessionsSummary {
         let mut summary = AllSessionsSummary {
@@ -251,6 +271,17 @@ impl TLDRDaemon {
                 }
             });
         }
+
+        // In-daemon filesystem watcher (TLDR-ac0.2). Bound to a NAMED guard:
+        // `let _ = ...` would drop the Debouncer at the end of the statement and
+        // silently stop watching. The guard lives for the whole run loop and
+        // drops on shutdown, which stops the OS watcher and ends its worker.
+        #[cfg(feature = "semantic")]
+        let _watcher_guard = if self.config.enable_watcher {
+            super::watcher::spawn_watcher(Arc::clone(&self))
+        } else {
+            None
+        };
 
         // Main event loop
         let idle_timeout = std::time::Duration::from_secs(self.config.idle_timeout_secs);
@@ -1082,6 +1113,35 @@ impl TLDRDaemon {
 
     /// Handle the Notify command (file change notification).
     async fn handle_notify(&self, file: PathBuf) -> DaemonResponse {
+        let ReindexOutcome {
+            dirty_count,
+            threshold,
+            reindex_triggered,
+        } = self.process_dirty_file(file).await;
+
+        DaemonResponse::NotifyResponse {
+            status: "ok".to_string(),
+            dirty_count,
+            threshold,
+            reindex_triggered,
+        }
+    }
+
+    /// Apply one changed file to the dirty set + caches. Shared by the IPC
+    /// `Notify` handler and the in-daemon filesystem watcher worker (TLDR-ac0.2)
+    /// so both paths get IDENTICAL reindex semantics: dirty-set bookkeeping,
+    /// salsa cache invalidation, and (semantic) the in-place index delta.
+    ///
+    /// Path handling is INTENTIONALLY canonicalization-free (verified TLDR-ac0.2,
+    /// 2026-06-03). Two independent reasons, both empirical:
+    /// - The salsa key hashes the RAW path to match the raw-path registration
+    ///   side (the `vec![hash_path(&file)]` handler arms above); canonicalizing
+    ///   here alone would diverge from registration and make invalidation miss.
+    /// - The vector-store delta keying (`root_relative` / `deleted_file_rel`) is
+    ///   already hardened against a non-canonical root, and a deleted file can't
+    ///   be canonicalized — so canonicalizing before `apply_delta` would break
+    ///   the delete path. Pass the path through as-is.
+    pub(crate) async fn process_dirty_file(&self, file: PathBuf) -> ReindexOutcome {
         // Add file to dirty set
         let dirty_count = {
             let mut dirty = self.dirty_files.write().await;
@@ -1131,8 +1191,7 @@ impl TLDRDaemon {
             // For now, just clear the dirty set
         }
 
-        DaemonResponse::NotifyResponse {
-            status: "ok".to_string(),
+        ReindexOutcome {
             dirty_count,
             threshold,
             reindex_triggered,

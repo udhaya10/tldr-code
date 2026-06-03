@@ -66,6 +66,8 @@ pub mod status;
 pub mod stop;
 pub mod types;
 pub mod warm;
+#[cfg(feature = "semantic")]
+pub mod watcher;
 pub use daemon_impl as daemon;
 
 // Re-export core types for convenience

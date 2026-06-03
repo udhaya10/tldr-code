@@ -30,6 +30,13 @@ pub const HOOK_FLUSH_THRESHOLD: usize = 5;
 // Configuration Types
 // =============================================================================
 
+/// Serde default for [`DaemonConfig::enable_watcher`]: the in-daemon watcher is
+/// ON by default, so a config that predates the field (where serde would
+/// otherwise fill `bool::default()` == `false`) keeps the self-watch behavior.
+fn default_enable_watcher() -> bool {
+    true
+}
+
 /// Daemon configuration loaded from .tldr/config.json or .claude/settings.json
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DaemonConfig {
@@ -44,6 +51,18 @@ pub struct DaemonConfig {
 
     /// Idle timeout in seconds (default: 1800 = 30 min)
     pub idle_timeout_secs: u64,
+
+    /// Whether the in-daemon filesystem watcher is active (TLDR-ac0.2).
+    /// DEFAULT ON: the daemon self-watches its project root on start (the
+    /// recorded cutover plan — TLDR-4vb). During the window before the C++
+    /// fsnotifier is disabled (cross-repo, TLDR-ejm) both watchers may feed
+    /// `process_dirty_file` for one edit; that overlap is wasteful but
+    /// harmless — `apply_delta`'s content-hash check makes the second delta a
+    /// no-op. Set to `false` (or `TLDR_IN_DAEMON_WATCH=0`, if wired) to opt out.
+    /// `#[serde(default = "default_enable_watcher")]` keeps older persisted
+    /// configs (which lack the field) defaulting to the ON behavior.
+    #[serde(default = "default_enable_watcher")]
+    pub enable_watcher: bool,
 }
 
 impl Default for DaemonConfig {
@@ -53,6 +72,7 @@ impl Default for DaemonConfig {
             auto_reindex_threshold: DEFAULT_REINDEX_THRESHOLD,
             semantic_model: "bge-large-en-v1.5".to_string(),
             idle_timeout_secs: IDLE_TIMEOUT_SECS,
+            enable_watcher: default_enable_watcher(),
         }
     }
 }
