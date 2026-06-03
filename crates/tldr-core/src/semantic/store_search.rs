@@ -117,16 +117,7 @@ pub fn search_with_store(
     cache_config: Option<CacheConfig>,
 ) -> TldrResult<SemanticSearchReport> {
     if query.trim().is_empty() {
-        return Ok(SemanticSearchReport {
-            results: Vec::new(),
-            total_results: 0,
-            query: query.to_string(),
-            model: build_options.model,
-            total_chunks: 0,
-            matches_above_threshold: 0,
-            latency_ms: 0,
-            cache_hit: false,
-        });
+        return Ok(empty_report(query, build_options.model));
     }
 
     let start = Instant::now();
@@ -176,24 +167,44 @@ pub fn query_store(
     model: EmbeddingModel,
     start: Instant,
 ) -> TldrResult<SemanticSearchReport> {
+    // Cold-CLI path: no resident embedder, so construct a one-shot one and embed
+    // here. The daemon (resident embedder — TLDR-ac0.5) embeds the query against
+    // its warm `IndexManager` embedder and calls `query_store_with_vector` instead,
+    // skipping this per-query `Embedder::new` (ONNX reload).
     if query.trim().is_empty() {
-        return Ok(SemanticSearchReport {
-            results: Vec::new(),
-            total_results: 0,
-            query: query.to_string(),
-            model,
-            total_chunks: 0,
-            matches_above_threshold: 0,
-            latency_ms: 0,
-            cache_hit: false,
-        });
+        return Ok(empty_report(query, model));
     }
-
     let mut embedder = Embedder::new(model)?;
     let qv = embedder.embed_query(query)?;
+    query_store_with_vector(store, root, query, &qv, search_options, model, start)
+}
+
+/// Search an already-loaded store with a PRE-COMPUTED query vector — the daemon's
+/// resident-embedder path (TLDR-ac0.5).
+///
+/// Identical to [`query_store`] except the caller supplies `query_vector` (already
+/// run through [`Embedder::embed_query`], i.e. WITH the model's asymmetric query
+/// prefix), so the daemon reuses one warm embedder across queries instead of
+/// reloading ONNX per search. `query` is still passed for the empty-query guard
+/// and to echo back in the report.
+pub fn query_store_with_vector(
+    store: &VectorStore,
+    root: &Path,
+    query: &str,
+    query_vector: &[f32],
+    search_options: &SearchOptions,
+    model: EmbeddingModel,
+    start: Instant,
+) -> TldrResult<SemanticSearchReport> {
+    // Guard lives HERE (not only in the wrapper) because the daemon calls this
+    // directly: an empty query would otherwise score every chunk 1.0 off the zero
+    // vector (the failure pinned by `empty_query_returns_empty_report_*`).
+    if query.trim().is_empty() {
+        return Ok(empty_report(query, model));
+    }
 
     let total_chunks = store.len();
-    let hits = store.search(&qv, search_options.top_k)?;
+    let hits = store.search(query_vector, search_options.top_k)?;
 
     Ok(hits_to_report(
         query,
@@ -204,6 +215,20 @@ pub fn query_store(
         total_chunks,
         start.elapsed().as_millis() as u64,
     ))
+}
+
+/// The empty-query short-circuit report (no store/embedder work).
+fn empty_report(query: &str, model: EmbeddingModel) -> SemanticSearchReport {
+    SemanticSearchReport {
+        results: Vec::new(),
+        total_results: 0,
+        query: query.to_string(),
+        model,
+        total_chunks: 0,
+        matches_above_threshold: 0,
+        latency_ms: 0,
+        cache_hit: false,
+    }
 }
 
 
@@ -458,7 +483,10 @@ mod tests {
         )
         .unwrap();
 
-        let model = EmbeddingModel::ArcticXS;
+        // Resolve the CONFIGURED model (project config > built-in default), never a
+        // hardcoded variant — matches the daemon's resolve_semantic_model path.
+        let config = crate::config::TldrConfig::resolve(Some(dir.path()));
+        let model = EmbeddingModel::resolve(None, &config).unwrap();
         let bopts = build_opts(model, ChunkGranularity::Function, None);
         let sopts = opts(0.0, true);
         let store_dir = dir.path().join("store");
@@ -511,7 +539,10 @@ mod tests {
         // must NOT cause a rebuild on an otherwise-unchanged tree.
         std::fs::write(corpus.path().join("emptymod.rs"), "pub mod nothing;\n").unwrap();
 
-        let model = EmbeddingModel::ArcticXS;
+        // Resolve the CONFIGURED model (project config > built-in default), never a
+        // hardcoded variant — matches the daemon's resolve_semantic_model path.
+        let config = crate::config::TldrConfig::resolve(Some(corpus.path()));
+        let model = EmbeddingModel::resolve(None, &config).unwrap();
         let bopts = build_opts(model, ChunkGranularity::Function, None);
         let sopts = opts(0.0, false);
         let store_dir = work.path().join("store");

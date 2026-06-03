@@ -14,8 +14,8 @@ use parking_lot::{Mutex, RwLock};
 
 use tldr_core::semantic::vector_store::{key_chunks, root_relative, stat_signal, VectorStore};
 use tldr_core::semantic::{
-    chunk_file, load_or_build_store, query_store, store_dir_for, BuildOptions, CacheConfig,
-    ChunkOptions, Embedder, EmbeddingModel, IndexSearchOptions,
+    chunk_file, load_or_build_store, query_store_with_vector, store_dir_for, BuildOptions,
+    CacheConfig, ChunkOptions, Embedder, EmbeddingModel, IndexSearchOptions,
 };
 
 /// Result of an incremental delta on a single file change (TLDR-t8f).
@@ -68,12 +68,21 @@ impl IndexManager {
         search_opts: &IndexSearchOptions,
         model: EmbeddingModel,
     ) -> Result<serde_json::Value, String> {
+        // Embed the query on the RESIDENT embedder BEFORE taking the store lock
+        // (TLDR-ac0.5): reuses the same warm embedder as the delta path, so no
+        // per-query `Embedder::new` ONNX reload. Done first (not inside the read
+        // guard) so the brief embedder-`Mutex` wait doesn't extend the store read
+        // lock — warm queries still run `store.search` truly in parallel (ac0.1).
+        // Empty queries short-circuit to a zero vector in `embed_query`; the
+        // store_search guard turns that into an empty report without searching.
+        let qv = self.embed_query(model, query)?;
+
         // Fast path: plain shared read — concurrent with other readers.
         {
             let guard = self.store.read();
             if guard.as_ref().is_some_and(|(m, _)| *m == model) {
                 let (_, store) = guard.as_ref().unwrap();
-                return Self::do_search(store, project, query, search_opts, model);
+                return Self::do_search(store, project, query, &qv, search_opts, model);
             }
         } // drop read lock before acquiring write
 
@@ -104,24 +113,49 @@ impl IndexManager {
         }
 
         let (_, store) = guard.as_ref().expect("store present after build");
-        Self::do_search(store, project, query, search_opts, model)
+        Self::do_search(store, project, query, &qv, search_opts, model)
     }
 
     fn do_search(
         store: &VectorStore,
         project: &Path,
         query: &str,
+        query_vector: &[f32],
         search_opts: &IndexSearchOptions,
         model: EmbeddingModel,
     ) -> Result<serde_json::Value, String> {
         let t_search = Instant::now();
-        let report = query_store(store, project, query, search_opts, model, Instant::now())
-            .map_err(|e| format!("Semantic search failed: {e}"))?;
+        let report = query_store_with_vector(
+            store,
+            project,
+            query,
+            query_vector,
+            search_opts,
+            model,
+            Instant::now(),
+        )
+        .map_err(|e| format!("Semantic search failed: {e}"))?;
         eprintln!(
             "[ac0.1] store SEARCH took {}ms",
             t_search.elapsed().as_millis()
         );
         serde_json::to_value(&report).map_err(|e| format!("Serialization error: {e}"))
+    }
+
+    /// Embed a search QUERY on the resident embedder (TLDR-ac0.5), (re)creating it
+    /// on a model change. Applies the model's asymmetric query prefix via
+    /// [`Embedder::embed_query`] — the query counterpart to [`Self::embed`] (which
+    /// uses `embed_batch`, no prefix, for indexed documents on the delta path).
+    /// Shares the SAME `embedder` field; holds only the embedder `Mutex`, never the
+    /// store lock.
+    fn embed_query(&self, model: EmbeddingModel, query: &str) -> Result<Vec<f32>, String> {
+        let mut guard = self.embedder.lock();
+        if !guard.as_ref().is_some_and(|(m, _)| *m == model) {
+            let embedder = Embedder::new(model).map_err(|e| e.to_string())?;
+            *guard = Some((model, embedder));
+        }
+        let (_, embedder) = guard.as_mut().expect("embedder present after init");
+        embedder.embed_query(query).map_err(|e| e.to_string())
     }
 
     /// Write-lock build: load from disk (if fresh) or full-rebuild. Used by the
@@ -502,6 +536,127 @@ mod tests {
         let outcome = manager.apply_delta(tmp.path(), &deleted).unwrap();
         assert_eq!(outcome, DeltaOutcome::Deleted { removed: 1 });
         assert_eq!(manager.store_len(), Some(0));
+    }
+
+    // --- TLDR-ac0.5 resident-embedder parity ---
+
+    /// The pass/fail for ac0.5 is results-EQUIVALENCE: reusing the daemon's warm
+    /// embedder (via `query_store_with_vector`) must rank IDENTICALLY to the cold
+    /// path's fresh `Embedder::new` per query (via `query_store`). The pure
+    /// `hits_to_report` unit tests never touch an embedder, so they can't catch a
+    /// query-vector regression — this end-to-end test is the real gate. Ignored by
+    /// default (loads the ONNX model).
+    #[test]
+    #[ignore = "loads the ONNX embedder; run on demand"]
+    fn resident_embedder_query_matches_fresh_embedder_ranking() {
+        let corpus = tempfile::tempdir().unwrap();
+        let work = tempfile::tempdir().unwrap();
+        std::fs::write(
+            corpus.path().join("sim.rs"),
+            "/// cosine similarity between two vectors\n\
+             fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 { 0.0 }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            corpus.path().join("cfg.rs"),
+            "/// parse a configuration file from disk\n\
+             fn parse_config(path: &str) -> String { String::new() }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            corpus.path().join("http.rs"),
+            "/// send an http get request and return the body\n\
+             fn http_get(url: &str) -> String { String::new() }\n",
+        )
+        .unwrap();
+
+        // Resolve the model the SAME way the daemon does (daemon.rs
+        // resolve_semantic_model): project config > built-in default. Never a
+        // hardcoded variant and never `BuildOptions::default()` (which silently
+        // pins ArcticM regardless of config — the trap called out in daemon.rs).
+        // The cold and warm paths must search the same configured model.
+        let config = tldr_core::config::TldrConfig::resolve(Some(corpus.path()));
+        let model = EmbeddingModel::resolve(None, &config).unwrap();
+        let build_opts = BuildOptions {
+            model,
+            show_progress: false,
+            use_cache: true,
+            ..Default::default()
+        };
+        // store_dir + cache MUST live outside the corpus (freshness-gate precondition).
+        let store_dir = work.path().join("store");
+        let cache = || {
+            Some(CacheConfig {
+                cache_dir: work.path().join("cache"),
+                max_size_mb: 50,
+                ttl_days: 1,
+            })
+        };
+        let search_opts = IndexSearchOptions {
+            top_k: 10,
+            threshold: 0.0, // keep every hit so the FULL ranking is compared
+            include_snippet: false,
+            snippet_lines: 5,
+        };
+        let query = "compute cosine similarity between vectors";
+
+        // Cold path: build+persist the store and embed with a FRESH Embedder.
+        let cold = tldr_core::semantic::search_with_store(
+            corpus.path(),
+            &store_dir,
+            query,
+            &search_opts,
+            &build_opts,
+            cache(),
+        )
+        .unwrap();
+        let cold_val = serde_json::to_value(&cold).unwrap();
+
+        // Warm path: load the SAME persisted store into the IndexManager and query
+        // through the RESIDENT embedder (the ac0.5 code path).
+        let store = load_or_build_store(corpus.path(), &store_dir, &build_opts, cache()).unwrap();
+        let manager = IndexManager::new();
+        *manager.store.write() = Some((model, store));
+        let warm_val = manager
+            .query(corpus.path(), query, &search_opts, model)
+            .unwrap();
+
+        // Extract ordered (file_path, function_name, score) — latency is excluded.
+        let ranking = |v: &serde_json::Value| -> Vec<(String, String, f64)> {
+            v["results"]
+                .as_array()
+                .expect("results array")
+                .iter()
+                .map(|r| {
+                    (
+                        r["file_path"].as_str().unwrap_or("").to_string(),
+                        r["function_name"].as_str().unwrap_or("").to_string(),
+                        r["score"].as_f64().unwrap_or(f64::NAN),
+                    )
+                })
+                .collect()
+        };
+        let cold_rank = ranking(&cold_val);
+        let warm_rank = ranking(&warm_val);
+
+        assert!(!cold_rank.is_empty(), "cold path returned no results");
+        assert_eq!(
+            cold_rank.len(),
+            warm_rank.len(),
+            "result count differs: cold {:?} vs warm {:?}",
+            cold_rank,
+            warm_rank
+        );
+        for (i, (c, w)) in cold_rank.iter().zip(&warm_rank).enumerate() {
+            assert_eq!(c.0, w.0, "rank {i}: file_path differs");
+            assert_eq!(c.1, w.1, "rank {i}: function_name differs");
+            assert!(
+                (c.2 - w.2).abs() < 1e-6,
+                "rank {i}: score differs cold {} vs warm {}",
+                c.2,
+                w.2
+            );
+        }
     }
 
     #[test]
