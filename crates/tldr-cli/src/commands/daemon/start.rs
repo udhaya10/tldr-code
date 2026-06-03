@@ -62,6 +62,32 @@ pub struct DaemonStartOutput {
 }
 
 // =============================================================================
+// Project root resolution
+// =============================================================================
+
+/// Resolve the `--project` argument to a canonical absolute root.
+///
+/// FAIL-CLOSED single-instance hardening: if the path can't be canonicalized we
+/// REFUSE to start rather than falling back to a non-canonical path. The socket
+/// path and PID-lock key are both derived from this root (`compute_socket_path`
+/// / `compute_pid_path` hash it), so an ambiguous fallback could hash to a
+/// *different* key for the *same* folder — letting a second daemon index it
+/// concurrently. That same-folder duplication is exactly what drove the
+/// cold-build storm (multiple ~90-min/7GB rebuilds racing on one project). Same
+/// folder must always resolve to the same key, so a path we can't resolve is a
+/// hard error, not a guess.
+fn resolve_project_root(project: &Path) -> anyhow::Result<PathBuf> {
+    project.canonicalize().map_err(|e| {
+        anyhow::anyhow!(
+            "cannot resolve project root {}: {} — refusing to start so a second \
+             daemon can't index the same folder under a different path key",
+            project.display(),
+            e
+        )
+    })
+}
+
+// =============================================================================
 // Command Implementation
 // =============================================================================
 
@@ -75,12 +101,11 @@ impl DaemonStartArgs {
 
     /// Async implementation of the daemon start command.
     async fn run_async(&self, format: OutputFormat, quiet: bool) -> anyhow::Result<()> {
-        // Resolve project path to absolute
-        let project = self.project.canonicalize().unwrap_or_else(|_| {
-            std::env::current_dir()
-                .unwrap_or_else(|_| PathBuf::from("."))
-                .join(&self.project)
-        });
+        // Resolve project path to a canonical absolute root. FAIL-CLOSED: an
+        // unresolvable path is a hard error, never a non-canonical fallback,
+        // so the socket/PID-lock key is stable per folder (see
+        // resolve_project_root — single-instance hardening).
+        let project = resolve_project_root(&self.project)?;
 
         // Note: stale PID cleanup is intentionally NOT performed here. The
         // flock-based `try_acquire_lock` (called below in foreground mode and
@@ -245,6 +270,48 @@ impl DaemonStartArgs {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An existing directory resolves to its canonical absolute form.
+    #[test]
+    fn resolve_project_root_canonicalizes_existing_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let resolved = resolve_project_root(tmp.path()).unwrap();
+        assert_eq!(resolved, tmp.path().canonicalize().unwrap());
+        assert!(resolved.is_absolute());
+    }
+
+    /// FAIL-CLOSED: an unresolvable path is a hard error, never a fallback —
+    /// so the socket/PID key can't drift to a second value for one folder.
+    #[test]
+    fn resolve_project_root_fails_closed_on_missing_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("does-not-exist-1a2b3c");
+        let err = resolve_project_root(&missing).unwrap_err();
+        assert!(
+            err.to_string().contains("cannot resolve project root"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// SAME FOLDER ⇒ SAME KEY: reaching a folder through a symlink resolves to
+    /// the identical canonical root as reaching it directly. This is what
+    /// guarantees two `daemon start`s on the same folder (one via a symlinked
+    /// path) compute the same lock/socket key and so can't both index it.
+    #[cfg(unix)]
+    #[test]
+    fn resolve_project_root_symlink_resolves_to_same_root() {
+        let real = tempfile::tempdir().unwrap();
+        let link_base = tempfile::tempdir().unwrap();
+        let link = link_base.path().join("link");
+        std::os::unix::fs::symlink(real.path(), &link).unwrap();
+
+        let via_direct = resolve_project_root(real.path()).unwrap();
+        let via_link = resolve_project_root(&link).unwrap();
+        assert_eq!(
+            via_direct, via_link,
+            "symlinked and direct paths must resolve to the same canonical root"
+        );
+    }
 
     #[test]
     fn test_daemon_start_args_default() {
