@@ -205,11 +205,17 @@ pub struct IpcListener {
     #[cfg(windows)]
     inner: tokio::net::TcpListener,
     /// Path to socket file (for cleanup)
-    #[allow(dead_code)]
     socket_path: PathBuf,
 }
 
 impl IpcListener {
+    /// The stream socket path this listener is bound to. On Windows the
+    /// value is informational (transport is TCP); on Unix the datagram poke
+    /// receiver (TLDR-nke) derives its sibling path from it.
+    pub fn socket_path(&self) -> &Path {
+        &self.socket_path
+    }
+
     /// Bind a new IPC listener for the given project.
     ///
     /// # Unix
@@ -610,10 +616,19 @@ pub fn cleanup_socket(project: &Path) -> DaemonResult<()> {
 /// Remove the socket file at an explicit path. Use this when the caller has
 /// already resolved the path (e.g. via [`snapshot_socket_path`]) to avoid a
 /// second registry lookup that may see pruned state.
+///
+/// Also removes the sibling datagram poke socket (TLDR-nke): it shares the
+/// stream socket's lifetime, so every stream-cleanup site (stop, stale
+/// cleanup, abnormal-exit handlers) covers it for free. Best-effort — the
+/// poke file may legitimately not exist (bind failed, pre-nke daemon).
 pub fn cleanup_socket_at(socket_path: &Path) -> DaemonResult<()> {
     if socket_path.exists() {
         check_not_symlink(socket_path)?;
         std::fs::remove_file(socket_path)?;
+    }
+    let poke_path = super::poke::poke_path_for(socket_path);
+    if poke_path.exists() && check_not_symlink(&poke_path).is_ok() {
+        let _ = std::fs::remove_file(&poke_path);
     }
     Ok(())
 }

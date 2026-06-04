@@ -59,6 +59,7 @@ pub mod ipc;
 pub mod list;
 pub mod notify;
 pub mod pid;
+pub mod poke;
 pub mod query;
 pub mod salsa;
 pub mod start;

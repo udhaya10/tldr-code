@@ -616,6 +616,13 @@ fn run_command(cli: &Cli) -> Result<()> {
     // for machine-readable formats — no need to pierce the dispatch table.
     let q = cli.quiet;
 
+    // CLI-wide liveness poke (TLDR-nke): EVERY invocation — not just the
+    // ~18 daemon-routed commands — defers a registered daemon's idle
+    // shutdown. Cost contract: one env check, one registry file read, one
+    // non-blocking datagram send; silent on all failures; opt out with
+    // TLDR_NO_POKE=1.
+    tldr_cli::commands::daemon::poke::poke_registered_daemons();
+
     match &cli.command {
         Command::Tree(args) => args.run(cli.format, q),
         Command::Structure(args) => args.run(cli.format, q),

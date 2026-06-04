@@ -281,6 +281,14 @@ impl TLDRDaemon {
             });
         }
 
+        // CLI-wide liveness poke receiver (TLDR-nke): datagram side channel at
+        // `<socket>.poke`; every `tldr` invocation in this project defers idle
+        // shutdown. NAMED guard — dropping it on shutdown removes the socket
+        // file (Unix socket files don't vanish on close).
+        #[cfg(unix)]
+        let _poke_guard =
+            super::poke::spawn_poke_receiver(listener.socket_path(), Arc::clone(&self.activity));
+
         // In-daemon filesystem watcher (TLDR-ac0.2). Bound to a NAMED guard:
         // `let _ = ...` would drop the Debouncer at the end of the statement and
         // silently stop watching. The guard lives for the whole run loop and

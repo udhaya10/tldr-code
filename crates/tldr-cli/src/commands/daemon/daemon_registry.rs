@@ -210,6 +210,21 @@ fn read_registry_unpruned() -> DaemonRegistry {
     }
 }
 
+/// All unpruned entries whose project path CONTAINS `path` (ancestor match):
+/// the liveness poke's registry gate (TLDR-nke). `tldr` invoked from a
+/// subdirectory is presence for the project's daemon.
+///
+/// Strictly read-only — never prunes, migrates, or writes — because this
+/// runs on EVERY CLI invocation and must cost exactly one small file read.
+/// A dead entry is harmless here: the poke's `send_to` fails silently.
+pub fn entries_containing(path: &Path) -> Vec<DaemonRegistryEntry> {
+    read_registry_unpruned()
+        .daemons
+        .into_iter()
+        .filter(|d| path.starts_with(&d.project))
+        .collect()
+}
+
 /// Look up a registry entry by canonicalized project path WITHOUT pruning dead
 /// PIDs. The returned entry's [`is_pid_alive`] status is the caller's to check.
 /// See [`read_registry_unpruned`] for why cleanup must not prune.
