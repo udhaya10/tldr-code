@@ -22,10 +22,14 @@ tldr daemon start --project /path/to/project
 
 # TCP mode (Windows)
 tldr daemon start --tcp --port 7890
-
-# Custom idle timeout (seconds)
-tldr daemon start --idle-timeout 600
 ```
+
+**Lifetime (presence-based liveness, epic TLDR-cxa):** the daemon
+self-terminates after 30 minutes with **no project presence** — no client
+connection, no `tldr`/`tldr_mcp` invocation in the project (every invocation
+sends a liveness poke; opt out with `TLDR_NO_POKE=1`), and no project file
+writes — and **never** while an index build or re-index delta is in flight.
+`tldr daemon status` shows what is keeping it alive and the idle deadline.
 
 **How it works:**
 1. Creates Unix socket at `~/.cache/tldr/<project_hash>.sock`

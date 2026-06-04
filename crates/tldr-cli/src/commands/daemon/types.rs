@@ -49,7 +49,20 @@ pub struct DaemonConfig {
     /// Embedding model for semantic search
     pub semantic_model: String,
 
-    /// Idle timeout in seconds (default: 1800 = 30 min)
+    /// PROJECT-PRESENCE idle timeout in seconds (default: 1800 = 30 min).
+    ///
+    /// SEMANTICS CHANGE (epic TLDR-cxa, 2026-06-04; migration note
+    /// TLDR-d26): this used to be a CLIENT idle timeout — the daemon died
+    /// after this long without a socket connection, even mid-build. It now
+    /// measures PROJECT dormancy: the countdown resets on any client
+    /// connection, any `tldr`/`tldr_mcp` invocation in the project (liveness
+    /// poke), any watcher-observed file write, and is suspended entirely
+    /// while internal work (index build, delta) is in flight. The key is
+    /// deliberately UNCHANGED — the duration concept is the same; only what
+    /// counts as "activity" broadened. Consequence (accepted trade-off): on
+    /// machines with long-running builds the daemon effectively never idles
+    /// out — warm availability is chosen over memory thrift (escape hatch:
+    /// TLDR-yll).
     pub idle_timeout_secs: u64,
 
     /// Whether the in-daemon filesystem watcher is active (TLDR-ac0.2).

@@ -378,6 +378,17 @@ impl TLDRDaemon {
             *status = DaemonStatus::Ready;
         }
 
+        // One-line effective liveness policy (TLDR-d26): idle_timeout_secs
+        // changed meaning from client-idle to project-presence-idle (epic
+        // TLDR-cxa) — state it where an operator reading the daemon log will
+        // see it.
+        eprintln!(
+            "[liveness] presence-based idle: shutdown after {}s with no client, \
+             tldr/MCP invocation, or project file event — never during an \
+             in-flight build/delta (epic TLDR-cxa)",
+            self.config.idle_timeout_secs
+        );
+
         // Set up signal handlers for graceful shutdown
         #[cfg(unix)]
         {

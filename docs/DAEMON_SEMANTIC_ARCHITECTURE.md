@@ -341,17 +341,38 @@ Division of labor:
 | daemon | owns the long build, in the background; serves only when warm |
 | `tldr embed` (CLI) | legacy **foreground** builder; shares the chunk cache but exercises none of the daemon flow (notice task: TLDR-e0b) |
 
-Known operational pitfalls (open issues, verified live):
+`tldr warm` acks **immediately** with `warm build started — poll 'tldr daemon
+status' for progress` (a duplicate `warm` answers `already in progress`); the
+build runs as a detached task inside the daemon. `tldr daemon status` shows
+the live build (`busy: warm-build` with age, `Index: building`) and flips to
+`warm (N vectors)` at completion (TLDR-utj.7 / TLDR-qzc).
 
-- **`tldr warm` client times out at 30 s** with a misleading
-  `Failed to send warm command` error while the daemon keeps building
-  (TLDR-utj.7). Ignore it; poll with `daemon status` — do **not** re-run
-  `warm`.
-- **The daemon idle-timeout kills an in-progress build** (TLDR-3w5, P1):
-  `daemon.rs` judges idleness purely by client connections, so an unattended
-  build longer than `idle_timeout_secs` (default config 1800 s) self-terminates
-  mid-build. Until fixed, keep the daemon alive during long builds:
-  `while true; do tldr daemon status >/dev/null 2>&1; sleep 600; done`.
+### 11.2b Presence-based liveness (epic TLDR-cxa, shipped 2026-06-04)
+
+The daemon self-terminates only when the **project is dormant**, not merely
+its socket. Two operational pitfalls this replaced — an unattended build
+longer than `idle_timeout_secs` self-terminated mid-build (TLDR-3w5), and the
+warm client printed a misleading 30 s timeout error (TLDR-utj.7) — are fixed;
+the old keep-alive polling workaround is no longer needed.
+
+`idle_timeout_secs` (default 1800 s) now measures **project-presence idle**
+(semantics migration: TLDR-d26 — same key, broadened meaning). The countdown
+resets on ANY of:
+
+| Presence source | Mechanism |
+| --- | --- |
+| `socket` | any accepted client connection (the old, only signal) |
+| `cli_poke` | **every** `tldr` CLI invocation and `tldr_mcp` tool call in the project — registry-gated unix-datagram poke at `<socket>.poke` (TLDR-nke / TLDR-axz); opt out with `TLDR_NO_POKE=1` |
+| `watcher` | any project file **write** (pre-corpus-filter — a `cargo build` writing `target/` is proof of life), excluding the daemon's own store writes and read events (immortality guards) |
+| `internal` | touched when internal work completes, so the countdown restarts at build **completion**, not start |
+
+While internal work (warm build, per-file delta) is in flight, idle shutdown
+is suspended outright ("never abandon your own job") — `daemon status` shows
+the busy token with its age, so a hung build is visible rather than silently
+immortal. `daemon status` also reports per-source presence ages and the
+computed `idle stop` deadline. Accepted trade-off: a machine with constant
+file activity keeps its daemon alive indefinitely — warm availability over
+memory thrift (escape hatch: TLDR-yll).
 
 ### 11.3 Persistence: the three layers
 
