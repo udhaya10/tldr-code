@@ -50,8 +50,12 @@ Roughly **9,000 lines across 69 files**, built issue-by-issue under beads
                           • persisted store dir (manifest + sidecar + index)
 ```
 
-A cold CLI invocation (no daemon) uses the same `VectorStore` directly via
-`search_with_store`, so the daemon is an optimization, not a separate code path.
+> **Phase 1 update (TLDR-7xz, two-modes contract):** `tldr semantic` no longer
+> cold-serves from the CLI. The daemon is the **only** serve path — a query
+> either gets full-quality warm results or an honest error saying exactly what
+> to do (see §11). `search_with_store` remains the shared build/load engine
+> (used by `warm` inside the daemon and by the legacy `embed` builder), but the
+> CLI query path requires a warm daemon.
 
 ---
 
@@ -121,11 +125,14 @@ cannot load, build, or search, the error propagates with a detailed message.
 
 Two entry points:
 
-- **`search_with_store(...)`** — cold CLI one-shot. Loads or builds the store,
-  runs the freshness gate, embeds the query, searches. One call does everything.
+- **`search_with_store(...)`** — one-shot load-or-build + query. Loads or builds
+  the store, runs the freshness gate, embeds the query, searches. Post-Phase-1
+  this is **not** reachable from `tldr semantic` (no cold CLI serve); it backs
+  the daemon's own warm path and the legacy `embed` builder.
 - **`query_store(...)` / `query_store_with_vector(...)`** — daemon reuse. Takes
   an already-resident `VectorStore` and embeds + searches only; no load/build/
-  freshness cost per query.
+  freshness cost per query. `query_store_with_vector` is the production daemon
+  path (resident embedder, TLDR-ac0.5).
 
 Helpers: `load_or_build_store`, `empty_search_report`.
 
@@ -286,3 +293,116 @@ than hard-coded.
   daemons for the same tree.
 - **`load()` over `view()`** is a deliberate scale-bounded choice; revisit for
   very large indexes or many concurrent resident daemons.
+
+---
+
+## 11. Operational lifecycle — serve matrix, warm flow, and what survives a restart (Phase 1, TLDR-7xz)
+
+This section documents the **runtime contract** as shipped by Phase 1
+("one warm path — works beautifully or says why") and the persistence
+behavior verified live on 2026-06-04.
+
+### 11.1 The two-modes serve matrix
+
+`tldr semantic` never silently degrades. Every state has exactly one honest
+answer:
+
+| State | `tldr semantic "query"` answers |
+| --- | --- |
+| No daemon for this project | `daemon not started — run tldr daemon start` |
+| Daemon up, no index | `index not built — run tldr warm` |
+| Daemon up, index building | `index build in progress — retry when warm completes` |
+| Daemon up, index warm | full-quality ranked results (~3 ms serve) |
+
+Parked surfaces (capability exists but the warm path for it does not yet)
+answer with the standardized message
+`not available in this version, <reason>`:
+
+| Surface | Status | Un-parked by |
+| --- | --- | --- |
+| `tldr similar` | parked (seeded similarity needs a warm daemon API) | TLDR-utj.4 |
+| `tldr semantic --hybrid` | parked (BM25 fusion moving into the daemon) | TLDR-utj.3 |
+| MCP `tldr_semantic` | parked (MCP has no daemon client) | TLDR-utj.5 |
+
+### 11.2 The warm flow (the blessed sequence)
+
+```bash
+tldr daemon start     # 1. start the per-project daemon (instant, starts COLD)
+tldr warm             # 2. trigger the index build INSIDE the daemon
+tldr daemon status    # 3. poll while it builds
+tldr semantic "..."   # 4. honest "build in progress" → ranked results when warm
+```
+
+Division of labor:
+
+| Actor | Role |
+| --- | --- |
+| `tldr warm` (CLI) | thin client: sends the build request, exits |
+| daemon | owns the long build, in the background; serves only when warm |
+| `tldr embed` (CLI) | legacy **foreground** builder; shares the chunk cache but exercises none of the daemon flow (notice task: TLDR-e0b) |
+
+Known operational pitfalls (open issues, verified live):
+
+- **`tldr warm` client times out at 30 s** with a misleading
+  `Failed to send warm command` error while the daemon keeps building
+  (TLDR-utj.7). Ignore it; poll with `daemon status` — do **not** re-run
+  `warm`.
+- **The daemon idle-timeout kills an in-progress build** (TLDR-3w5, P1):
+  `daemon.rs` judges idleness purely by client connections, so an unattended
+  build longer than `idle_timeout_secs` (default config 1800 s) self-terminates
+  mid-build. Until fixed, keep the daemon alive during long builds:
+  `while true; do tldr daemon status >/dev/null 2>&1; sleep 600; done`.
+
+### 11.3 Persistence: the three layers
+
+| Layer | Where | Survives daemon restart? | Survives reboot? | Invalidated by |
+| --- | --- | --- | --- | --- |
+| **Vector store** (usearch index + sidecar + manifest) | `<cache_dir>/tldr/stores/<hash>/` | **yes** (reloaded, §11.4) | yes | source-tree change (corpus digest) or model/config change |
+| **Per-chunk embedding cache** | `<cache_dir>/tldr/embeddings/` | **yes** | yes | per chunk, on content-hash change — never wholesale |
+| **In-memory daemon state** (salsa, call-graph caches, resident embedder, resident store copy) | daemon RAM | no — recomputed lazily | no | every restart, by design |
+
+The per-chunk cache is the expensive part and is the reason interrupted builds
+are not catastrophic: every chunk embedded up to the last completed batch is
+reused by the next `warm`, which only embeds what is missing. (The ONNX model
+itself lives in `<cache_dir>/tldr/fastembed/`, downloaded once.)
+
+### 11.4 Restart over a committed index: the reload path
+
+`tldr warm` on a fresh daemon → `IndexManager::warm()` → `load_or_build_store`
+(`store_search.rs`):
+
+1. **Cold start is deliberate.** A new daemon holds no store and no embedder;
+   queries before `warm` get the honest cold message (pinned by test —
+   cold queries must not trigger a load).
+2. **Freshness gate** — compute the expected manifest ID (model + dims + root)
+   and a stat-only **corpus digest** over the source tree; both must match the
+   persisted store.
+3. **Verified load** (`vector_store.rs::load_generation`) — all-or-nothing:
+   read `CURRENT` → manifest generation; verify manifest format/config/
+   generation; checksum-verify the sidecar and the usearch index file; verify
+   keys digest, index size == sidecar count, and that the index contains every
+   sidecar key. Any mismatch → `Corrupt` → fall back to an older generation or
+   rebuild. A half-written or drifted index is never served.
+4. **Resident from then on** — the store lives in the `IndexManager` RwLock;
+   queries are pure in-memory (`exact_search`). Note: this is usearch
+   **`load()` (full copy into RAM)**, not `view()`/mmap — see §3.3 and §10.
+5. **ONNX embedder loads lazily, once** (TLDR-ac0.5) — a few seconds on the
+   first query, then resident.
+
+Cost of restart-warm over a committed, fresh index: file reads + checksums +
+lazy model load — **seconds, not the build time**.
+
+| | Restart after build **committed** | Restart **mid-build** |
+| --- | --- | --- |
+| Vector store | reloaded from disk, warm in seconds | last *committed* generation only; in-flight assembly lost |
+| Embedding cache | intact | intact up to last completed batch — next `warm` skips those chunks |
+| In-memory state | recomputed lazily | recomputed lazily |
+| If source changed while down | corpus digest mismatch → logged rebuild (cheap via chunk cache) | same |
+
+### 11.5 While the daemon runs
+
+Disk is not re-read per query. File edits flow through the in-process watcher
+(§6) → per-file delta (§5.2): re-chunk one file, re-embed only changed chunks,
+apply under a brief write lock. Saves are generation-numbered and committed via
+the atomic `CURRENT` rename (§3.3), so a crash at any point leaves the previous
+committed generation loadable.
