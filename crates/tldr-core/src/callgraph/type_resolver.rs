@@ -1062,8 +1062,30 @@ pub struct RustReceiverIndex<'s> {
     /// Enclosing-impl snapshot per 0-based line index, replicating
     /// `find_rust_enclosing_impl`'s brace-depth walk state at that line.
     impl_by_line: Vec<Option<String>>,
-    /// (receiver, kind) -> ascending (line_idx, extracted_type) successes.
-    cache: std::collections::HashMap<(String, RustScanKind), Vec<(usize, String)>>,
+    /// All-identifier bindings extracted in ONE inverted pass:
+    /// (ident, kind) -> ascending (line_idx, extracted_type) successes.
+    /// Covers every receiver that is a plain Rust identifier — the 99% case.
+    all_bindings: std::collections::HashMap<(String, RustScanKind), Vec<(usize, String)>>,
+    /// Fallback per-(receiver, kind) scans for NON-identifier receivers
+    /// (e.g. "self.config", "x[0]") whose legacy patterns could in principle
+    /// match arbitrary line content (comments, strings) that the inverted
+    /// identifier parse cannot see. Memoized. These receivers are the
+    /// MAJORITY in real Rust (dotted field accesses), so their scans are
+    /// restricted to `let_lines` below.
+    weird_cache: std::collections::HashMap<(String, RustScanKind), Vec<(usize, String)>>,
+    /// (line_idx, trimmed line) for every line whose trimmed text contains
+    /// "let " — the only lines a legacy pattern (`let {var}: ` / `let {var} = `)
+    /// can possibly match, since every pattern begins with "let ". Restricting
+    /// weird-path scans to these lines is output-identical by construction.
+    let_lines: Vec<(usize, &'s str)>,
+}
+
+/// True when the legacy pattern `let {var}: ` / `let {var} = ` can ONLY match
+/// where the inverted identifier parse would also record `var`: plain idents.
+fn is_plain_ident(s: &str) -> bool {
+    !s.is_empty()
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_')
 }
 
 impl<'s> RustReceiverIndex<'s> {
@@ -1099,20 +1121,118 @@ impl<'s> RustReceiverIndex<'s> {
             }
         }
 
+        // ONE inverted pass extracting every identifier binding. Per line,
+        // legacy semantics are reproduced exactly: for each (var, kind),
+        // prefix "let " is consulted before "let mut "; only the FIRST
+        // occurrence of a given full pattern in the line is attempted; a
+        // failed extraction at that occurrence yields nothing for that
+        // prefix (it does NOT retry later occurrences) but the next prefix
+        // is still tried.
+        let mut all_bindings: std::collections::HashMap<(String, RustScanKind), Vec<(usize, String)>> =
+            std::collections::HashMap::new();
+        let kinds = [
+            RustScanKind::Annotation,
+            RustScanKind::AssociatedFn,
+            RustScanKind::StructLiteral,
+        ];
+        // Per-line state per (var, kind): (prefix_idx of last attempt, outcome).
+        // Legacy rules encoded: a SUCCESS is final (earlier prefix wins); a
+        // failed attempt blocks later occurrences of the SAME prefix (legacy
+        // only ever tries the first occurrence of a pattern) but the next
+        // prefix still gets its own first-occurrence attempt.
+        let mut line_outcome: std::collections::HashMap<
+            (String, RustScanKind),
+            (usize, Option<String>),
+        > = std::collections::HashMap::new();
+        for (line_idx, raw) in lines.iter().enumerate() {
+            let line = raw.trim();
+            if !line.contains("let ") {
+                continue;
+            }
+            line_outcome.clear();
+            for (prefix_idx, prefix) in ["let ", "let mut "].into_iter().enumerate() {
+                for (pos, _) in line.match_indices(prefix) {
+                    let rest = &line[pos + prefix.len()..];
+                    let ident_len = rest
+                        .bytes()
+                        .take_while(|b| b.is_ascii_alphanumeric() || *b == b'_')
+                        .count();
+                    if ident_len == 0 {
+                        continue;
+                    }
+                    let ident = &rest[..ident_len];
+                    let after_ident = &rest[ident_len..];
+                    for kind in kinds {
+                        let after = match kind {
+                            RustScanKind::Annotation => after_ident.strip_prefix(": "),
+                            _ => after_ident.strip_prefix(" = "),
+                        };
+                        let Some(after) = after else { continue };
+                        let key = (ident.to_string(), kind);
+                        match line_outcome.get(&key) {
+                            Some((_, Some(_))) => continue, // success is final
+                            Some((p, None)) if *p == prefix_idx => continue, // same-prefix retry
+                            _ => {}
+                        }
+                        let extracted = match kind {
+                            RustScanKind::Annotation => extract_rust_type_from_annotation(after),
+                            RustScanKind::AssociatedFn => {
+                                after.find("::").map(|c| after[..c].trim()).and_then(|t| {
+                                    (!t.is_empty()
+                                        && t.chars().next().is_some_and(char::is_uppercase)
+                                        && t != "Self")
+                                        .then(|| t.to_string())
+                                })
+                            }
+                            RustScanKind::StructLiteral => {
+                                after.find('{').map(|b| after[..b].trim()).and_then(|t| {
+                                    (!t.is_empty()
+                                        && t.chars().next().is_some_and(char::is_uppercase)
+                                        && !t.contains("::"))
+                                        .then(|| t.to_string())
+                                })
+                            }
+                        };
+                        line_outcome.insert(key, (prefix_idx, extracted));
+                    }
+                }
+            }
+            for ((var, kind), (_, outcome)) in line_outcome.drain() {
+                if let Some(ty) = outcome {
+                    all_bindings
+                        .entry((var, kind))
+                        .or_default()
+                        .push((line_idx, ty));
+                }
+            }
+        }
+        // drain() order is arbitrary, but pushes happen per line in line
+        // order across iterations, so each Vec is ascending by line_idx.
+
+        let let_lines: Vec<(usize, &str)> = lines
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, raw)| {
+                let trimmed = raw.trim();
+                trimmed.contains("let ").then_some((idx, trimmed))
+            })
+            .collect();
+
         Self {
             lines,
             impl_by_line,
-            cache: std::collections::HashMap::new(),
+            all_bindings,
+            weird_cache: std::collections::HashMap::new(),
+            let_lines,
         }
     }
 
-    /// Forward-collect every line whose ORIGINAL loop body would succeed for
-    /// (var_name, kind). Per line, prefixes are tried in the original order
-    /// and only the first success is recorded — exactly one candidate per
-    /// line, as the legacy backward scan could only ever return one.
-    fn scan(&mut self, var_name: &str, kind: RustScanKind) -> &Vec<(usize, String)> {
+    /// Legacy-faithful per-(var, kind) scan for NON-identifier receivers,
+    /// whose patterns can match arbitrary line content the inverted ident
+    /// parse cannot represent. Memoized; rare in practice.
+    fn scan_weird(&mut self, var_name: &str, kind: RustScanKind) -> &Vec<(usize, String)> {
         let key = (var_name.to_string(), kind);
-        if !self.cache.contains_key(&key) {
+        if !self.weird_cache.contains_key(&key) {
             let mut matches: Vec<(usize, String)> = Vec::new();
             let patterns: [String; 2] = match kind {
                 RustScanKind::Annotation => [
@@ -1124,8 +1244,7 @@ impl<'s> RustReceiverIndex<'s> {
                     format!("let mut {} = ", var_name),
                 ],
             };
-            for (line_num, raw) in self.lines.iter().enumerate() {
-                let line = raw.trim();
+            for &(line_num, line) in &self.let_lines {
                 for pattern in &patterns {
                     if let Some(idx) = line.find(pattern.as_str()) {
                         let after = &line[idx + pattern.len()..];
@@ -1157,9 +1276,9 @@ impl<'s> RustReceiverIndex<'s> {
                     }
                 }
             }
-            self.cache.insert(key.clone(), matches);
+            self.weird_cache.insert(key.clone(), matches);
         }
-        &self.cache[&key]
+        &self.weird_cache[&key]
     }
 
     /// Nearest successful match at-or-before `call_line`, replicating the
@@ -1169,7 +1288,14 @@ impl<'s> RustReceiverIndex<'s> {
         if call_line as usize > self.lines.len() {
             return None;
         }
-        let matches = self.scan(var_name, kind);
+        static EMPTY: Vec<(usize, String)> = Vec::new();
+        let matches: &Vec<(usize, String)> = if is_plain_ident(var_name) {
+            self.all_bindings
+                .get(&(var_name.to_string(), kind))
+                .unwrap_or(&EMPTY)
+        } else {
+            self.scan_weird(var_name, kind)
+        };
         let pp = matches.partition_point(|(idx, _)| *idx < call_line as usize);
         (pp > 0).then(|| matches[pp - 1].1.clone())
     }
@@ -1684,9 +1810,33 @@ fn free() {
     let cfg: Other = Other::new();
     cfg.apply();
 }
+fn nasty() {
+    // let ghost: Phantom = comment-text pattern must match like legacy
+    let s = "let fake: InString = lie"; // string literal content
+    let a: A = x; let a = B::make(); // two bindings, same var, same line
+    let mut a: C = y; // prefix priority vs proximity
+    outlet plug: Socket = z; // "let " inside another word
+    let dotted = 1; // receiver "self.cfg" never binds as ident
+}
 "#;
         let receivers = [
-            "self", "&self", "&mut self", "Self", "cfg", "store", "lit", "missing", "pseudo",
+            "self",
+            "&self",
+            "&mut self",
+            "Self",
+            "cfg",
+            "store",
+            "lit",
+            "missing",
+            "pseudo",
+            "ghost",
+            "fake",
+            "a",
+            "plug",
+            "s",
+            "self.cfg",
+            "x[0]",
+            "mut",
         ];
         let enclosings = [None, Some("Hint")];
         let n_lines = source.lines().count() as u32;
