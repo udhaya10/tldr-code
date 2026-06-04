@@ -71,3 +71,4 @@ META-INF/
 *.db
 .beads-credential-key
 .beads/proxieddb/
+tldr-smoke-report/
