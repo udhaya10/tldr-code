@@ -1028,6 +1028,192 @@ fn find_rust_struct_literal(source: &str, var_name: &str, call_line: u32) -> Opt
 }
 
 // =============================================================================
+// Per-file Rust receiver-type index (TLDR-zde Gate-1 fix #2)
+// =============================================================================
+//
+// `resolve_rust_receiver_type` and its `find_rust_*` helpers re-scan the WHOLE
+// file source for EVERY call site (collecting a fresh `Vec` of lines, building
+// two `format!` pattern strings and running a substring search per line).
+// Profiling the call-graph build on tldr-code showed this text-scanning at
+// ~70% of the entire build (str::find + format! under apply_type_resolution).
+//
+// This index keeps the ORIGINAL per-line decision logic byte-for-byte (same
+// prefix order, same first-occurrence-of-pattern semantics, same
+// failed-extraction-continues behavior, same beyond-EOF early-None) but runs
+// each (variable, scan-kind) scan ONCE per file, memoized, and answers each
+// call site with a binary search for the nearest match at-or-before its line.
+// Cost goes from O(call_sites x file_lines) to O(distinct_receivers x
+// file_lines + call_sites x log matches), with identical outputs.
+
+/// Which legacy backward-scan a cached match list replicates.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum RustScanKind {
+    /// `let name: Type = ...` (find_rust_annotation)
+    Annotation,
+    /// `let name = Type::...` (find_rust_associated_function)
+    AssociatedFn,
+    /// `let name = Type { ...` (find_rust_struct_literal)
+    StructLiteral,
+}
+
+/// Per-file memoized index for Rust receiver-type resolution.
+pub struct RustReceiverIndex<'s> {
+    lines: Vec<&'s str>,
+    /// Enclosing-impl snapshot per 0-based line index, replicating
+    /// `find_rust_enclosing_impl`'s brace-depth walk state at that line.
+    impl_by_line: Vec<Option<String>>,
+    /// (receiver, kind) -> ascending (line_idx, extracted_type) successes.
+    cache: std::collections::HashMap<(String, RustScanKind), Vec<(usize, String)>>,
+}
+
+impl<'s> RustReceiverIndex<'s> {
+    pub fn new(source: &'s str) -> Self {
+        let lines: Vec<&str> = source.lines().collect();
+
+        // Single forward pass replicating find_rust_enclosing_impl: snapshot
+        // the answer it would give for every target line. Loop-body order
+        // matches the original exactly: depth update -> impl-start check ->
+        // target-line answer -> impl-exit check.
+        let mut impl_by_line: Vec<Option<String>> = Vec::with_capacity(lines.len());
+        let mut current_impl: Option<(String, i32)> = None;
+        let mut brace_depth: i32 = 0;
+        for line_content in &lines {
+            let trimmed = line_content.trim();
+            brace_depth += line_content.matches('{').count() as i32;
+            brace_depth -= line_content.matches('}').count() as i32;
+            if trimmed.starts_with("impl ") || trimmed.starts_with("impl<") {
+                if let Some(impl_type) = extract_rust_impl_type(trimmed) {
+                    current_impl = Some((impl_type, brace_depth));
+                }
+            }
+            impl_by_line.push(match &current_impl {
+                Some((impl_type, start_depth)) if brace_depth >= *start_depth => {
+                    Some(impl_type.clone())
+                }
+                _ => None,
+            });
+            if let Some((_, start_depth)) = &current_impl {
+                if brace_depth < *start_depth {
+                    current_impl = None;
+                }
+            }
+        }
+
+        Self {
+            lines,
+            impl_by_line,
+            cache: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Forward-collect every line whose ORIGINAL loop body would succeed for
+    /// (var_name, kind). Per line, prefixes are tried in the original order
+    /// and only the first success is recorded — exactly one candidate per
+    /// line, as the legacy backward scan could only ever return one.
+    fn scan(&mut self, var_name: &str, kind: RustScanKind) -> &Vec<(usize, String)> {
+        let key = (var_name.to_string(), kind);
+        if !self.cache.contains_key(&key) {
+            let mut matches: Vec<(usize, String)> = Vec::new();
+            let patterns: [String; 2] = match kind {
+                RustScanKind::Annotation => [
+                    format!("let {}: ", var_name),
+                    format!("let mut {}: ", var_name),
+                ],
+                _ => [
+                    format!("let {} = ", var_name),
+                    format!("let mut {} = ", var_name),
+                ],
+            };
+            for (line_num, raw) in self.lines.iter().enumerate() {
+                let line = raw.trim();
+                for pattern in &patterns {
+                    if let Some(idx) = line.find(pattern.as_str()) {
+                        let after = &line[idx + pattern.len()..];
+                        let extracted = match kind {
+                            RustScanKind::Annotation => {
+                                extract_rust_type_from_annotation(after)
+                            }
+                            RustScanKind::AssociatedFn => {
+                                after.find("::").map(|c| after[..c].trim()).and_then(|t| {
+                                    (!t.is_empty()
+                                        && t.chars().next().is_some_and(char::is_uppercase)
+                                        && t != "Self")
+                                        .then(|| t.to_string())
+                                })
+                            }
+                            RustScanKind::StructLiteral => {
+                                after.find('{').map(|b| after[..b].trim()).and_then(|t| {
+                                    (!t.is_empty()
+                                        && t.chars().next().is_some_and(char::is_uppercase)
+                                        && !t.contains("::"))
+                                        .then(|| t.to_string())
+                                })
+                            }
+                        };
+                        if let Some(ty) = extracted {
+                            matches.push((line_num, ty));
+                            break; // first successful prefix wins for this line
+                        }
+                    }
+                }
+            }
+            self.cache.insert(key.clone(), matches);
+        }
+        &self.cache[&key]
+    }
+
+    /// Nearest successful match at-or-before `call_line`, replicating the
+    /// legacy `(0..call_line).rev()` scan INCLUDING its quirk of returning
+    /// None outright when call_line points beyond EOF (`lines.get(..)?`).
+    fn lookup(&mut self, var_name: &str, kind: RustScanKind, call_line: u32) -> Option<String> {
+        if call_line as usize > self.lines.len() {
+            return None;
+        }
+        let matches = self.scan(var_name, kind);
+        let pp = matches.partition_point(|(idx, _)| *idx < call_line as usize);
+        (pp > 0).then(|| matches[pp - 1].1.clone())
+    }
+
+    /// Drop-in equivalent of [`resolve_rust_receiver_type`], answered from
+    /// the per-file index. Step order and confidences mirror the original.
+    pub fn resolve(
+        &mut self,
+        call_line: u32,
+        receiver_name: &str,
+        enclosing_impl: Option<&str>,
+    ) -> (Option<String>, Confidence) {
+        if receiver_name == "self"
+            || receiver_name == "&self"
+            || receiver_name == "&mut self"
+            || receiver_name == "Self"
+        {
+            if let Some(impl_type) = enclosing_impl {
+                return (Some(impl_type.to_string()), Confidence::High);
+            }
+            let snap = (call_line as usize)
+                .checked_sub(1)
+                .and_then(|i| self.impl_by_line.get(i))
+                .and_then(|o| o.clone());
+            if let Some(impl_type) = snap {
+                return (Some(impl_type), Confidence::High);
+            }
+            return (None, Confidence::Low);
+        }
+
+        if let Some(t) = self.lookup(receiver_name, RustScanKind::Annotation, call_line) {
+            return (Some(t), Confidence::High);
+        }
+        if let Some(t) = self.lookup(receiver_name, RustScanKind::AssociatedFn, call_line) {
+            return (Some(t), Confidence::High);
+        }
+        if let Some(t) = self.lookup(receiver_name, RustScanKind::StructLiteral, call_line) {
+            return (Some(t), Confidence::High);
+        }
+        (None, Confidence::Low)
+    }
+}
+
+// =============================================================================
 // Generic Type Resolution (Phase 9+)
 // =============================================================================
 
@@ -1466,6 +1652,58 @@ pub fn create_typed_edge(params: TypedEdgeParams<'_>) -> TypedCallEdge {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// DIFFERENTIAL GATE (TLDR-zde fix #2): the per-file RustReceiverIndex
+    /// must produce byte-identical results to the legacy per-call-site
+    /// scanners for EVERY (receiver, line, enclosing) combination — including
+    /// beyond-EOF lines (legacy quirk: early None) and line 0.
+    #[test]
+    fn rust_receiver_index_matches_legacy_exhaustively() {
+        let source = r#"
+struct Engine { rpm: u32 }
+impl Engine {
+    fn start(&self) {
+        self.ignite();
+        let cfg: Config = Config::default();
+        cfg.load();
+        let mut store = VectorStore::open("p");
+        store.flush();
+        let lit = Payload { size: 1 };
+        lit.send();
+    }
+}
+impl<T> Wrapper<T> {
+    fn run(&mut self) {
+        Self::helper();
+        let outlet pseudo = 1; // contains "let " mid-token shapes
+        let cfg = make(); // shadow without type info
+        cfg.reload();
+    }
+}
+fn free() {
+    let cfg: Other = Other::new();
+    cfg.apply();
+}
+"#;
+        let receivers = [
+            "self", "&self", "&mut self", "Self", "cfg", "store", "lit", "missing", "pseudo",
+        ];
+        let enclosings = [None, Some("Hint")];
+        let n_lines = source.lines().count() as u32;
+        let mut idx = RustReceiverIndex::new(source);
+        for line in 0..=(n_lines + 3) {
+            for recv in &receivers {
+                for enc in &enclosings {
+                    let legacy = resolve_rust_receiver_type(source, line, recv, *enc);
+                    let indexed = idx.resolve(line, recv, *enc);
+                    assert_eq!(
+                        legacy, indexed,
+                        "divergence at line={line} recv={recv} enclosing={enc:?}"
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn test_find_enclosing_class_simple() {
