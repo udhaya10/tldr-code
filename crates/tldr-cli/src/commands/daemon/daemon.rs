@@ -22,6 +22,7 @@ use std::time::Instant;
 use dashmap::DashMap;
 use tokio::sync::{watch, RwLock};
 
+use super::activity::{ActivityTracker, Source};
 use super::error::{DaemonError, DaemonResult};
 use super::ipc::{read_command, send_response, IpcListener, IpcStream};
 use super::salsa::{QueryCache, QueryKey};
@@ -127,8 +128,10 @@ pub struct TLDRDaemon {
     shutdown_tx: watch::Sender<bool>,
     /// Flag to track if we've been signaled to stop
     stopping: AtomicBool,
-    /// Last time a client command was handled (for idle timeout)
-    last_activity: Arc<RwLock<Instant>>,
+    /// Presence-based liveness (TLDR-3w5): per-source last-activity
+    /// timestamps + busy tokens for in-flight internal work. The idle loop
+    /// shuts down only when the PROJECT is dormant, not merely the socket.
+    activity: Arc<ActivityTracker>,
     /// Number of indexed files (for status reporting)
     indexed_files: Arc<RwLock<usize>>,
     /// Resident vector store with read/write split (TLDR-ac0.1). Concurrent
@@ -156,7 +159,7 @@ impl TLDRDaemon {
             dirty_files: Arc::new(RwLock::new(HashSet::new())),
             shutdown_tx,
             stopping: AtomicBool::new(false),
-            last_activity: Arc::new(RwLock::new(Instant::now())),
+            activity: Arc::new(ActivityTracker::new()),
             indexed_files: Arc::new(RwLock::new(0)),
             #[cfg(feature = "semantic")]
             semantic_store: Arc::new(IndexManager::new()),
@@ -190,6 +193,12 @@ impl TLDRDaemon {
     /// Get the project path.
     pub fn project(&self) -> &PathBuf {
         &self.project
+    }
+
+    /// Presence tracker (TLDR-3w5). The watcher taps it for file-event
+    /// liveness; `daemon status` (TLDR-qzc) reads its snapshots.
+    pub(crate) fn activity(&self) -> &Arc<ActivityTracker> {
+        &self.activity
     }
 
     /// Get the number of indexed files.
@@ -301,16 +310,18 @@ impl TLDRDaemon {
                 break;
             }
 
-            // Self-terminate after idle timeout with no client activity
-            {
-                let last = self.last_activity.read().await;
-                if last.elapsed() > idle_timeout {
-                    eprintln!(
-                        "No client activity for {}s, shutting down",
-                        self.config.idle_timeout_secs
-                    );
-                    break;
-                }
+            // Presence-based idle shutdown (TLDR-3w5): self-terminate only
+            // when the PROJECT is dormant — no client connection, no watcher
+            // -observed file write, and no in-flight internal work (index
+            // build / delta) for a full idle_timeout. A busy token (any
+            // in-progress build) unconditionally defers shutdown: never
+            // abandon your own job.
+            if self.activity.is_idle(idle_timeout) {
+                eprintln!(
+                    "No project presence for {}s (no client, file activity, or internal work), shutting down",
+                    self.config.idle_timeout_secs
+                );
+                break;
             }
 
             // Accept connection with timeout
@@ -319,8 +330,8 @@ impl TLDRDaemon {
 
             match tokio::time::timeout(timeout, accept_future).await {
                 Ok(Ok(mut stream)) => {
-                    // Update activity timestamp
-                    *self.last_activity.write().await = Instant::now();
+                    // Record socket presence for the idle check
+                    self.activity.touch(Source::Socket);
 
                     // Handle the connection
                     let daemon = Arc::clone(&self);
@@ -487,7 +498,16 @@ impl TLDRDaemon {
                         Ok(model) => {
                             let mgr = Arc::clone(&self.semantic_store);
                             let project = self.project.clone();
+                            // Busy guard owned by the CLOSURE, not this async
+                            // task (TLDR-3w5): if the client times out and
+                            // this connection task is cancelled, the blocking
+                            // build keeps running — the guard must live
+                            // exactly as long as the build so the idle loop
+                            // never kills it mid-flight. A hung warm shows up
+                            // as a stale-busy token with growing age (qzc).
+                            let busy = self.activity.begin("warm-build");
                             let res = tokio::task::spawn_blocking(move || {
+                                let _busy = busy;
                                 mgr.warm(&project, model)
                             })
                             .await;
@@ -1180,7 +1200,12 @@ impl TLDRDaemon {
             let mgr = Arc::clone(&self.semantic_store);
             let project = self.project.clone();
             let changed = file.clone();
+            // Busy guard owned by the closure (see Warm handler note): the
+            // delta must defer idle shutdown for exactly as long as it runs,
+            // regardless of what happens to this awaiting task.
+            let busy = self.activity.begin("delta");
             let _ = tokio::task::spawn_blocking(move || {
+                let _busy = busy;
                 use super::index_manager::DeltaOutcome;
                 match mgr.apply_delta(&project, &changed) {
                     Ok(DeltaOutcome::NeedsRebuild) => mgr.invalidate(),
@@ -2360,25 +2385,45 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_daemon_last_activity_updated_on_command() {
+    async fn test_daemon_command_handling_leaks_no_busy_tokens() {
+        // TLDR-3w5: socket presence is recorded at connection ACCEPT (run
+        // loop), not per-command; command handling itself must leave no busy
+        // tokens behind (a leaked token would make the daemon immortal).
         let temp = tempfile::tempdir().unwrap();
         let config = DaemonConfig::default();
         let daemon = TLDRDaemon::new(temp.path().to_path_buf(), config);
 
-        // Record initial activity time
-        let before = *daemon.last_activity.read().await;
-
-        // Small delay to ensure time difference
-        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-
-        // Any command should NOT update last_activity (only connections do),
-        // but handle_command is what we can test. Verify the field exists and is accessible.
         let _ = daemon.handle_command(DaemonCommand::Ping).await;
 
-        // last_activity is set at connection accept, not command handling,
-        // so it should still be the initial value
-        let after = *daemon.last_activity.read().await;
-        assert_eq!(before, after);
+        assert_eq!(daemon.activity().busy_count(), 0);
+    }
+
+    #[cfg(feature = "semantic")]
+    #[tokio::test]
+    async fn test_delta_releases_busy_token_and_touches_internal_presence() {
+        // TLDR-3w5: the per-file delta wraps its spawn_blocking in a busy
+        // guard owned by the closure. After the delta completes the token
+        // must be gone and Internal presence refreshed (idle countdown
+        // restarts at work COMPLETION, not work start).
+        let temp = tempfile::tempdir().unwrap();
+        let config = DaemonConfig::default();
+        let daemon = TLDRDaemon::new(temp.path().to_path_buf(), config);
+
+        let file = temp.path().join("example.py");
+        std::fs::write(&file, "def f():\n    pass\n").unwrap();
+
+        let _ = daemon.process_dirty_file(file).await;
+
+        assert_eq!(
+            daemon.activity().busy_count(),
+            0,
+            "delta busy token must be released on completion"
+        );
+        let ages = daemon.activity().presence_ages();
+        assert!(
+            ages[Source::Internal as usize] < std::time::Duration::from_secs(5),
+            "Internal presence must be touched at delta completion"
+        );
     }
 
     #[tokio::test]

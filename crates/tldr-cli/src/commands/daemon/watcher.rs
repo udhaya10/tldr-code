@@ -33,6 +33,7 @@ use tokio::sync::mpsc;
 
 use tldr_core::semantic::{is_corpus_file, store_dir_for};
 
+use super::activity::Source;
 use super::daemon::TLDRDaemon;
 
 /// Debounce window: editor save-storms and `git checkout` bursts collapse to a
@@ -77,10 +78,7 @@ pub(crate) fn watch_decision(
     path: &Path,
     kind: &EventKind,
 ) -> bool {
-    if matches!(kind, EventKind::Access(_)) {
-        return false;
-    }
-    if path.starts_with(cache_excl) || path.starts_with(store_dir) {
+    if !presence_decision(cache_excl, store_dir, path, kind) {
         return false;
     }
     if path.exists() {
@@ -88,6 +86,33 @@ pub(crate) fn watch_decision(
     } else {
         true
     }
+}
+
+/// Decide whether a single event counts as project PRESENCE for the daemon's
+/// idle timer (TLDR-3w5) — deliberately looser than [`watch_decision`]: a
+/// `cargo build` writing to `target/` is filtered from indexing (not corpus)
+/// but is still proof someone is alive in this project, so liveness taps the
+/// event stream BEFORE the corpus filter.
+///
+/// Two exclusions, both immortality-safe by design (a daemon must never count
+/// its own activity as presence):
+/// - Self-writes (`<root>/.tldr` cache subtree + resident store dir): counting
+///   our own store/stats writes would be a self-perpetuating liveness loop.
+/// - `Access` (read) events — INTENTIONAL, do not "restore" raw-event
+///   behavior: the daemon's own corpus READS during build/delta (plus
+///   Spotlight/backup/AV scanners) fire `Access` events, which would make an
+///   actively-building daemon immortal via its own reads. Writes-only loses
+///   nothing the presence philosophy wants — human/agent/build activity
+///   manifests as `Modify`/`Create`/`Remove`.
+pub(crate) fn presence_decision(
+    cache_excl: &Path,
+    store_dir: &Path,
+    path: &Path,
+    kind: &EventKind,
+) -> bool {
+    !matches!(kind, EventKind::Access(_))
+        && !path.starts_with(cache_excl)
+        && !path.starts_with(store_dir)
 }
 
 /// Spawn the recursive project watcher and its serialized reindex worker.
@@ -144,10 +169,12 @@ pub(crate) fn spawn_watcher(daemon: Arc<TLDRDaemon>) -> Option<WatcherGuard> {
     });
 
     // The debouncer handler runs on notify's OWN thread (sync). It must never
-    // block — `try_send` drops on a full channel (drop-before-persist). The
-    // filter is pure, so the handler needs no daemon handle.
+    // block — `try_send` drops on a full channel (drop-before-persist), and
+    // the presence tap is a relaxed atomic store. The filters are pure, so
+    // the handler needs no daemon handle beyond the activity Arc.
     let handler_project = project.clone();
     let handler_store_dir = store_dir.clone();
+    let handler_activity = Arc::clone(daemon.activity());
     let result = new_debouncer(DEBOUNCE, None, move |res: DebounceEventResult| {
         let events = match res {
             Ok(events) => events,
@@ -160,6 +187,12 @@ pub(crate) fn spawn_watcher(daemon: Arc<TLDRDaemon>) -> Option<WatcherGuard> {
         };
         for event in events {
             for path in &event.paths {
+                // Presence tap (TLDR-3w5): post-debounce, PRE-corpus-filter —
+                // any non-self, non-read project event defers idle shutdown,
+                // even if it never reaches the index (e.g. target/ writes).
+                if presence_decision(&cache_excl, &handler_store_dir, path, &event.kind) {
+                    handler_activity.touch(Source::Watcher);
+                }
                 if watch_decision(
                     &handler_project,
                     &cache_excl,
@@ -321,6 +354,70 @@ mod tests {
         ));
     }
 
+    /// PRESENCE TAP (TLDR-3w5): a write to a NON-corpus project path (e.g.
+    /// `cargo build` writing into `target/`) is filtered from indexing but IS
+    /// proof of life — presence says yes where watch says no.
+    #[test]
+    fn presence_counts_non_corpus_project_writes() {
+        let root = tempfile::tempdir().unwrap();
+        let store_dir = store_dir_for(root.path());
+        let cache_excl = root.path().join(".tldr");
+        let artifact = root.path().join("target").join("debug").join("build.bin");
+        std::fs::create_dir_all(artifact.parent().unwrap()).unwrap();
+        std::fs::write(&artifact, [0u8; 4]).unwrap();
+
+        assert!(
+            presence_decision(&cache_excl, &store_dir, &artifact, &modify_kind()),
+            "non-corpus project write must count as presence"
+        );
+        assert!(
+            !watch_decision(root.path(), &cache_excl, &store_dir, &artifact, &modify_kind()),
+            "…while still being excluded from indexing"
+        );
+    }
+
+    /// PRESENCE IMMORTALITY TRAP (TLDR-3w5): the daemon's own writes
+    /// (`.tldr` cache subtree + resident store dir) must NOT count as
+    /// presence — counting our own store writes would be a self-perpetuating
+    /// liveness loop. Covers writes AND deletes (prefix check, not exists()).
+    #[test]
+    fn presence_excludes_daemon_self_writes() {
+        let root = tempfile::tempdir().unwrap();
+        let store_dir = store_dir_for(root.path());
+        let cache_excl = root.path().join(".tldr");
+
+        let stats = cache_excl.join("cache").join("salsa_stats.json");
+        assert!(!presence_decision(&cache_excl, &store_dir, &stats, &modify_kind()));
+        assert!(!presence_decision(&cache_excl, &store_dir, &stats, &remove_kind()));
+
+        let store_file = store_dir.join("index.usearch");
+        assert!(!presence_decision(&cache_excl, &store_dir, &store_file, &modify_kind()));
+        assert!(!presence_decision(&cache_excl, &store_dir, &store_file, &remove_kind()));
+    }
+
+    /// PRESENCE READ-EXCLUSION (TLDR-3w5): `Access` events must not count —
+    /// the daemon's own corpus reads during build/delta (plus Spotlight,
+    /// backups, AV scanners) would otherwise make a building daemon immortal
+    /// via its own reads.
+    #[test]
+    fn presence_excludes_access_events() {
+        let root = tempfile::tempdir().unwrap();
+        let store_dir = store_dir_for(root.path());
+        let cache_excl = root.path().join(".tldr");
+        let py = root.path().join("m.py");
+
+        assert!(!presence_decision(
+            &cache_excl,
+            &store_dir,
+            &py,
+            &EventKind::Access(AccessKind::Read)
+        ));
+        // …but a real write to the same path does count.
+        assert!(presence_decision(&cache_excl, &store_dir, &py, &modify_kind()));
+        assert!(presence_decision(&cache_excl, &store_dir, &py, &create_kind()));
+        assert!(presence_decision(&cache_excl, &store_dir, &py, &remove_kind()));
+    }
+
     /// END-TO-END WIRING SMOKE TEST: prove the notify → channel → worker path
     /// actually fires (the pure `watch_decision` tests above cover the filter;
     /// this covers the plumbing). Tolerant by construction — skips if the OS
@@ -359,6 +456,13 @@ mod tests {
         assert!(
             detected,
             "watcher should route a new .py file through process_dirty_file"
+        );
+        // Presence tap wiring (TLDR-3w5): the same event must have refreshed
+        // Watcher presence on its way through the debounce handler.
+        let watcher_age = daemon.activity().presence_ages()[Source::Watcher as usize];
+        assert!(
+            watcher_age < Duration::from_secs(10),
+            "watcher event should have touched Watcher presence (age: {watcher_age:?})"
         );
     }
 
