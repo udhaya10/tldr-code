@@ -1170,6 +1170,10 @@ impl TLDRDaemon {
             hook_stats,
             liveness: Some(self.liveness_stats()),
             semantic_index: self.semantic_index_stats(),
+            memory: Some(super::types::MemoryStats {
+                rss_bytes: super::rss::current_rss_bytes(),
+                peak_rss_bytes: super::rss::peak_rss_bytes(),
+            }),
         }
     }
 

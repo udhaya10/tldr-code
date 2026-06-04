@@ -61,6 +61,7 @@ pub mod notify;
 pub mod pid;
 pub mod poke;
 pub mod query;
+pub(crate) mod rss;
 pub mod salsa;
 pub mod start;
 pub mod stats;

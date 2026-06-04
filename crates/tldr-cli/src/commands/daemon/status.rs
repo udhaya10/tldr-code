@@ -22,7 +22,7 @@ use super::daemon_registry::live_entries;
 use super::error::DaemonError;
 use super::ipc::send_command;
 use super::types::{
-    DaemonCommand, DaemonResponse, DaemonStatus, LivenessStats, SalsaCacheStats,
+    DaemonCommand, DaemonResponse, DaemonStatus, LivenessStats, MemoryStats, SalsaCacheStats,
     SemanticIndexStats,
 };
 
@@ -77,6 +77,9 @@ pub struct DaemonStatusOutput {
     /// Resident semantic index state: warm/building/cold (TLDR-qzc).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub semantic_index: Option<SemanticIndexStats>,
+    /// Daemon process memory: current + peak RSS (TLDR-yll).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory: Option<MemoryStats>,
     /// Optional message
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
@@ -151,6 +154,7 @@ impl DaemonStatusArgs {
                     salsa_stats: None,
                     liveness: None,
                     semantic_index: None,
+                    memory: None,
                     message: Some("Daemon not running".to_string()),
                 };
 
@@ -187,6 +191,7 @@ impl DaemonStatusArgs {
                 salsa_stats,
                 liveness,
                 semantic_index,
+                memory,
                 ..
             } => {
                 let status_str = format_status(status);
@@ -201,6 +206,7 @@ impl DaemonStatusArgs {
                     salsa_stats: Some(salsa_stats.clone()),
                     liveness: liveness.clone(),
                     semantic_index: semantic_index.clone(),
+                    memory: memory.clone(),
                     message: None,
                 };
 
@@ -218,6 +224,11 @@ impl DaemonStatusArgs {
                             println!("Files:   {}", files);
                             if let Some(idx) = &semantic_index {
                                 println!("Index:   {}", format_semantic_index(idx));
+                            }
+                            if let Some(mem) = &memory {
+                                if let Some(line) = format_memory(mem) {
+                                    println!("Memory:  {}", line);
+                                }
                             }
                             if let Some(live) = &liveness {
                                 println!();
@@ -249,6 +260,7 @@ impl DaemonStatusArgs {
                     salsa_stats: None,
                     liveness: None,
                     semantic_index: None,
+                    memory: None,
                     message,
                 };
 
@@ -296,6 +308,32 @@ fn format_uptime(secs: f64) -> String {
     let minutes = (total_secs % 3600) / 60;
     let seconds = total_secs % 60;
     format!("{}h {}m {}s", hours, minutes, seconds)
+}
+
+/// Human bytes: `1.2 GB`, `850.0 MB`. Round numbers beat precision here —
+/// the point is spotting a 22.7 GB daemon at a glance (TLDR-yll).
+fn format_bytes(bytes: u64) -> String {
+    const GB: f64 = 1024.0 * 1024.0 * 1024.0;
+    const MB: f64 = 1024.0 * 1024.0;
+    let b = bytes as f64;
+    if b >= GB {
+        format!("{:.1} GB", b / GB)
+    } else {
+        format!("{:.1} MB", b / MB)
+    }
+}
+
+/// One-line memory readout: `1.2 GB (peak 22.7 GB)`. `None` when neither
+/// figure is readable on this platform.
+fn format_memory(mem: &MemoryStats) -> Option<String> {
+    match (mem.rss_bytes, mem.peak_rss_bytes) {
+        (Some(rss), Some(peak)) => {
+            Some(format!("{} (peak {})", format_bytes(rss), format_bytes(peak)))
+        }
+        (Some(rss), None) => Some(format_bytes(rss)),
+        (None, Some(peak)) => Some(format!("peak {}", format_bytes(peak))),
+        (None, None) => None,
+    }
 }
 
 /// One-line semantic index state: `warm (12,345 vectors)` / `building` /
@@ -435,6 +473,10 @@ mod tests {
                 state: "building".to_string(),
                 vectors: None,
             }),
+            memory: Some(MemoryStats {
+                rss_bytes: Some(1024 * 1024 * 1024),
+                peak_rss_bytes: Some(22 * 1024 * 1024 * 1024),
+            }),
             message: None,
         };
 
@@ -460,6 +502,7 @@ mod tests {
             salsa_stats: None,
             liveness: None,
             semantic_index: None,
+            memory: None,
             message: Some("Daemon not running".to_string()),
         };
 

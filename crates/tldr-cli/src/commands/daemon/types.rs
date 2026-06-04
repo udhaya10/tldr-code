@@ -559,6 +559,19 @@ pub struct SemanticIndexStats {
     pub vectors: Option<usize>,
 }
 
+/// Daemon process memory (TLDR-yll): the observability counterweight to
+/// presence-based liveness — a never-idle daemon's footprint must be a
+/// visible number. Best-effort per platform; absent fields mean unreadable.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryStats {
+    /// Current resident set size in bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rss_bytes: Option<u64>,
+    /// Peak (high-water) resident set size in bytes since daemon start.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peak_rss_bytes: Option<u64>,
+}
+
 /// Response from daemon
 ///
 /// IMPORTANT: Variant order matters for serde(untagged)!
@@ -596,6 +609,9 @@ pub enum DaemonResponse {
         /// `liveness`. `None` on non-semantic builds.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         semantic_index: Option<SemanticIndexStats>,
+        /// Daemon process memory (TLDR-yll). Same compat rules as `liveness`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        memory: Option<MemoryStats>,
     },
 
     /// Notify response (4 required fields)
@@ -651,9 +667,10 @@ mod tests {
             hook_stats: None,
             liveness: None,
             semantic_index: None,
+            memory: None,
         };
-        // liveness/semantic_index are skip_serializing_if=None → this JSON is
-        // byte-identical to an old server's payload.
+        // liveness/semantic_index/memory are skip_serializing_if=None → this
+        // JSON is byte-identical to an old server's payload.
         let json = serde_json::to_string(&old_shape).unwrap();
         assert!(!json.contains("liveness"));
         let decoded: DaemonResponse = serde_json::from_str(&json).unwrap();
@@ -684,6 +701,10 @@ mod tests {
             semantic_index: Some(SemanticIndexStats {
                 state: "building".to_string(),
                 vectors: None,
+            }),
+            memory: Some(MemoryStats {
+                rss_bytes: Some(1024 * 1024 * 1024),
+                peak_rss_bytes: Some(22 * 1024 * 1024 * 1024),
             }),
         };
         let json = serde_json::to_string(&new_shape).unwrap();
