@@ -140,8 +140,12 @@ impl WarmJob {
         } else {
             match build_project_call_graph(&self.project, self.lang, None, true) {
                 Ok(result) => {
-                    let val = serde_json::to_value(&result).unwrap_or_default();
-                    self.cache.insert(calls_key, &val, vec![]);
+                    // TLDR-9ae (F1): insert the native result directly — insert()
+                    // serializes once via to_vec. The former to_value() built a
+                    // whole-project JSON DOM (5-15x the JSON text size) that
+                    // coexisted with `result` AND the serialized bytes, a major
+                    // contributor to the measured 22GB warm plateau (TLDR-k8s).
+                    self.cache.insert(calls_key, &result, vec![]);
                     warmed.push("call_graph");
                 }
                 Err(e) => errors.push(format!("call_graph: {}", e)),
@@ -159,8 +163,8 @@ impl WarmJob {
         } else {
             match get_code_structure(&self.project, self.lang, 0, None) {
                 Ok(result) => {
-                    let val = serde_json::to_value(&result).unwrap_or_default();
-                    self.cache.insert(struct_key, &val, vec![]);
+                    // TLDR-9ae (F1): no to_value DOM — see call_graph step above.
+                    self.cache.insert(struct_key, &result, vec![]);
                     warmed.push("structure");
                 }
                 Err(e) => errors.push(format!("structure: {}", e)),
@@ -179,8 +183,8 @@ impl WarmJob {
             match get_file_tree(&self.project, None, true, None) {
                 Ok(result) => {
                     let file_count = count_tree_files(&result);
-                    let val = serde_json::to_value(&result).unwrap_or_default();
-                    self.cache.insert(tree_key, &val, vec![]);
+                    // TLDR-9ae (F1): no to_value DOM — see call_graph step above.
+                    self.cache.insert(tree_key, &result, vec![]);
                     *self.indexed_files.write().await = file_count;
                     warmed.push("file_tree");
                 }

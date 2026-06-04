@@ -626,8 +626,16 @@ pub fn build_project_call_graph_v2(
         return Err(BuildError::UnsupportedLanguage(config.language.clone()));
     }
 
+    // Gate-1 phase timers (TLDR-zde): env-gated, zero cost when unset. Splits
+    // the build into SCAN / PARSE (per-file, memoizable) / COMPOSE (global
+    // resolution) so the chunk-store design's compose budget can be measured
+    // on the real pipeline before any storage work. Enable: TLDR_PHASE_TIMING=1.
+    let phase_timing = std::env::var_os("TLDR_PHASE_TIMING").is_some();
+    let t_start = std::time::Instant::now();
+
     // Step 2: Scan project files (Phase 14b)
     let scanned_files = scan_project_files(root, &config.language, &config)?;
+    let t_scan = t_start.elapsed();
 
     // Step 3: Create IR with capacity hint
     let mut ir =
@@ -637,6 +645,7 @@ pub fn build_project_call_graph_v2(
     // Per M1.9: Build indices completely before resolution phase
     let (_func_index, _class_index, file_irs) =
         build_indices_parallel(&scanned_files, root, &config.language, &config);
+    let t_parse = t_start.elapsed() - t_scan;
 
     // Step 5: Add FileIRs to the CallGraphIR
     for file_ir in file_irs {
@@ -984,6 +993,21 @@ pub fn build_project_call_graph_v2(
             .then_with(|| a.dst_func.cmp(&b.dst_func))
             .then_with(|| format!("{:?}", a.call_type).cmp(&format!("{:?}", b.call_type)))
     });
+
+    if phase_timing {
+        let t_compose = t_start.elapsed() - t_scan - t_parse;
+        eprintln!(
+            "[phase-timing] lang={} files={} funcs={} edges={} | scan={}ms parse={}ms compose={}ms total={}ms",
+            config.language,
+            ir.files.len(),
+            ir.function_count(),
+            ir.edges.len(),
+            t_scan.as_millis(),
+            t_parse.as_millis(),
+            t_compose.as_millis(),
+            t_start.elapsed().as_millis(),
+        );
+    }
 
     Ok(ir)
 }
