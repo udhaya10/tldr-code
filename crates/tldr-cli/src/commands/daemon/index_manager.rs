@@ -48,6 +48,18 @@ impl std::fmt::Display for QueryError {
     }
 }
 
+/// Point-in-time resident index state, for `daemon status` (TLDR-qzc).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndexState {
+    /// Resident store loaded; queries serve at full quality.
+    Warm { vectors: usize },
+    /// The store write lock is held — a `warm` build (or, briefly, a delta)
+    /// is in progress.
+    Building,
+    /// Never warmed or invalidated; `tldr warm` is the fix.
+    Cold,
+}
+
 /// Result of an incremental delta on a single file change (TLDR-t8f).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeltaOutcome {
@@ -407,6 +419,25 @@ impl IndexManager {
         self.store.read().is_some()
     }
 
+    /// Bounded-wait index state probe for `daemon status` (TLDR-qzc).
+    ///
+    /// MUST NOT block on the store lock: during a long `warm` build the write
+    /// lock is held for the build's whole duration, and `status` exists
+    /// precisely to answer "is it building or done?" DURING that window. The
+    /// short `try_read_for` rides out brief writers (a delta's apply holds the
+    /// write lock for milliseconds) while a long-held write lock maps to
+    /// [`IndexState::Building`] — same pattern as the query path's readiness
+    /// pre-check above.
+    pub fn state(&self) -> IndexState {
+        match self.store.try_read_for(Duration::from_millis(100)) {
+            None => IndexState::Building,
+            Some(guard) => match guard.as_ref() {
+                Some((_, store)) => IndexState::Warm { vectors: store.len() },
+                None => IndexState::Cold,
+            },
+        }
+    }
+
     /// Number of vectors in the resident store, or `None` if cold. A delta's
     /// effect is observable here — an edit keeps the count (no orphaned keys),
     /// a delete drops it by the file's chunk count.
@@ -439,6 +470,24 @@ fn deleted_file_rel(project: &Path, file: &Path) -> String {
 mod tests {
     use super::*;
     use std::sync::{Arc, Barrier};
+
+    /// TLDR-qzc: the status state probe must answer without blocking on the
+    /// store lock — Cold on an empty store, Building while a writer (a warm
+    /// build) holds the write lock. A blocking probe would hang `daemon
+    /// status` for the full duration of a 90-minute build.
+    #[test]
+    fn state_probe_reports_cold_and_building_without_blocking() {
+        let mgr = IndexManager::new();
+        assert_eq!(mgr.state(), IndexState::Cold);
+
+        let _writer = mgr.store.write(); // simulate in-progress warm build
+        let started = std::time::Instant::now();
+        assert_eq!(mgr.state(), IndexState::Building);
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "probe must not block on the held write lock"
+        );
+    }
 
     /// Prove that two concurrent warm-path queries overlap under shared read
     /// locks (not serialize). The production `query()` fast path takes

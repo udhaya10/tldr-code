@@ -505,6 +505,47 @@ fn default_top_k() -> usize {
     10
 }
 
+/// Liveness observability (TLDR-qzc): answers "what is keeping the daemon
+/// alive" and "when will it idle out" — per-source presence ages, live busy
+/// tokens with age (a hung build is VISIBLE as `busy 4h: warm-build`, not
+/// silently immortal), and the computed idle deadline.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LivenessStats {
+    /// Seconds since each source last proved presence, keyed by source name
+    /// (`socket` / `cli_poke` / `watcher` / `internal`). BTreeMap for stable
+    /// key order in output.
+    pub presence_age_secs: std::collections::BTreeMap<String, f64>,
+    /// Live internal work, oldest first. Non-empty means idle shutdown is
+    /// unconditionally deferred ("never abandon your own job").
+    pub busy: Vec<BusyTokenStats>,
+    /// The configured idle timeout.
+    pub idle_timeout_secs: u64,
+    /// Seconds until idle shutdown if no further presence arrives. `None`
+    /// while busy (the deadline does not run during internal work).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_shutdown_in_secs: Option<f64>,
+}
+
+/// One live unit of internal daemon work (TLDR-qzc).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BusyTokenStats {
+    /// What the work is (`warm-build`, `delta`).
+    pub label: String,
+    /// How long it has been running.
+    pub age_secs: f64,
+}
+
+/// Resident semantic index state (TLDR-qzc): kills the "is it building or
+/// done?" blindness during a multi-minute warm build.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SemanticIndexStats {
+    /// `warm` | `building` | `cold`.
+    pub state: String,
+    /// Vector count when warm.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vectors: Option<usize>,
+}
+
 /// Response from daemon
 ///
 /// IMPORTANT: Variant order matters for serde(untagged)!
@@ -531,6 +572,17 @@ pub enum DaemonResponse {
         all_sessions: Option<AllSessionsSummary>,
         #[serde(skip_serializing_if = "Option::is_none")]
         hook_stats: Option<HashMap<String, HookStats>>,
+        /// Liveness observability (TLDR-qzc). OPTIONAL-WITH-DEFAULT for
+        /// untagged compat both ways: an old server's payload (field absent)
+        /// still decodes as FullStatus here, and an old client simply ignores
+        /// the extra key. Required-field count is unchanged, preserving the
+        /// untagged variant decode order.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        liveness: Option<LivenessStats>,
+        /// Resident semantic index state (TLDR-qzc). Same compat rules as
+        /// `liveness`. `None` on non-semantic builds.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        semantic_index: Option<SemanticIndexStats>,
     },
 
     /// Notify response (4 required fields)
@@ -566,6 +618,75 @@ pub enum DaemonResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// TLDR-qzc untagged-compat: FullStatus is decoded by required-field
+    /// shape, so the new OPTIONAL fields must not change the variant match
+    /// in either direction — an old server's payload (fields absent) still
+    /// decodes as FullStatus, and a new server's payload (fields present)
+    /// round-trips them intact.
+    #[test]
+    fn full_status_qzc_fields_are_optional_and_round_trip() {
+        let old_shape = DaemonResponse::FullStatus {
+            status: DaemonStatus::Ready,
+            uptime: 1.0,
+            files: 3,
+            project: PathBuf::from("/p"),
+            salsa_stats: SalsaCacheStats::default(),
+            dedup_stats: None,
+            session_stats: None,
+            all_sessions: None,
+            hook_stats: None,
+            liveness: None,
+            semantic_index: None,
+        };
+        // liveness/semantic_index are skip_serializing_if=None → this JSON is
+        // byte-identical to an old server's payload.
+        let json = serde_json::to_string(&old_shape).unwrap();
+        assert!(!json.contains("liveness"));
+        let decoded: DaemonResponse = serde_json::from_str(&json).unwrap();
+        assert!(
+            matches!(decoded, DaemonResponse::FullStatus { liveness: None, .. }),
+            "old-shape payload must still decode as FullStatus"
+        );
+
+        let new_shape = DaemonResponse::FullStatus {
+            status: DaemonStatus::Ready,
+            uptime: 1.0,
+            files: 3,
+            project: PathBuf::from("/p"),
+            salsa_stats: SalsaCacheStats::default(),
+            dedup_stats: None,
+            session_stats: None,
+            all_sessions: None,
+            hook_stats: None,
+            liveness: Some(LivenessStats {
+                presence_age_secs: [("socket".to_string(), 2.0)].into_iter().collect(),
+                busy: vec![BusyTokenStats {
+                    label: "warm-build".to_string(),
+                    age_secs: 60.0,
+                }],
+                idle_timeout_secs: 1800,
+                idle_shutdown_in_secs: None,
+            }),
+            semantic_index: Some(SemanticIndexStats {
+                state: "building".to_string(),
+                vectors: None,
+            }),
+        };
+        let json = serde_json::to_string(&new_shape).unwrap();
+        let decoded: DaemonResponse = serde_json::from_str(&json).unwrap();
+        match decoded {
+            DaemonResponse::FullStatus {
+                liveness: Some(live),
+                semantic_index: Some(idx),
+                ..
+            } => {
+                assert_eq!(live.busy[0].label, "warm-build");
+                assert_eq!(idx.state, "building");
+            }
+            other => panic!("expected FullStatus with qzc fields, got {:?}", other),
+        }
+    }
 
     #[test]
     fn test_daemon_config_default() {

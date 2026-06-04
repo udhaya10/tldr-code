@@ -1139,7 +1139,78 @@ impl TLDRDaemon {
             session_stats,
             all_sessions,
             hook_stats,
+            liveness: Some(self.liveness_stats()),
+            semantic_index: self.semantic_index_stats(),
         }
+    }
+
+    /// Snapshot the presence tracker for `daemon status` (TLDR-qzc): what is
+    /// keeping the daemon alive, what internal work is in flight (with age —
+    /// a hung build must be visible as `busy 4h: warm-build`), and when idle
+    /// shutdown would fire.
+    fn liveness_stats(&self) -> super::types::LivenessStats {
+        use super::activity::SOURCE_NAMES;
+
+        let ages = self.activity.presence_ages();
+        let presence_age_secs = SOURCE_NAMES
+            .iter()
+            .zip(ages.iter())
+            .map(|(name, age)| (name.to_string(), age.as_secs_f64()))
+            .collect();
+
+        let busy: Vec<super::types::BusyTokenStats> = self
+            .activity
+            .busy_snapshot()
+            .into_iter()
+            .map(|b| super::types::BusyTokenStats {
+                label: b.label.to_string(),
+                age_secs: b.age.as_secs_f64(),
+            })
+            .collect();
+
+        // Deadline only runs while NOT busy (busy defers shutdown
+        // unconditionally). Clamped at 0: a stale-but-not-yet-reaped daemon
+        // reports "0s" rather than a negative countdown.
+        let idle_shutdown_in_secs = if busy.is_empty() {
+            let remaining = self.config.idle_timeout_secs as f64
+                - self.activity.freshest_presence_age().as_secs_f64();
+            Some(remaining.max(0.0))
+        } else {
+            None
+        };
+
+        super::types::LivenessStats {
+            presence_age_secs,
+            busy,
+            idle_timeout_secs: self.config.idle_timeout_secs,
+            idle_shutdown_in_secs,
+        }
+    }
+
+    /// Resident semantic index state for `daemon status` (TLDR-qzc). `None`
+    /// on non-semantic builds.
+    #[cfg(feature = "semantic")]
+    fn semantic_index_stats(&self) -> Option<super::types::SemanticIndexStats> {
+        use super::index_manager::IndexState;
+        Some(match self.semantic_store.state() {
+            IndexState::Warm { vectors } => super::types::SemanticIndexStats {
+                state: "warm".to_string(),
+                vectors: Some(vectors),
+            },
+            IndexState::Building => super::types::SemanticIndexStats {
+                state: "building".to_string(),
+                vectors: None,
+            },
+            IndexState::Cold => super::types::SemanticIndexStats {
+                state: "cold".to_string(),
+                vectors: None,
+            },
+        })
+    }
+
+    #[cfg(not(feature = "semantic"))]
+    fn semantic_index_stats(&self) -> Option<super::types::SemanticIndexStats> {
+        None
     }
 
     /// Handle the Notify command (file change notification).
@@ -2381,6 +2452,83 @@ mod tests {
                 assert_eq!(status, "ok");
             }
             other => panic!("Expected Status response, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_status_reports_liveness_busy_and_idle_deadline() {
+        // TLDR-qzc: during internal work, status must show the busy token
+        // (with label) and a DEFERRED idle deadline; after the work drops,
+        // the deadline runs again. This is the "is it building or done?"
+        // observability the 90-min-build blindness demanded.
+        let temp = tempfile::tempdir().unwrap();
+        let config = DaemonConfig::default();
+        let daemon = TLDRDaemon::new(temp.path().to_path_buf(), config);
+
+        let guard = daemon.activity().begin("warm-build");
+        let resp = daemon
+            .handle_command(DaemonCommand::Status { session: None })
+            .await;
+        match &resp {
+            DaemonResponse::FullStatus {
+                liveness: Some(live),
+                ..
+            } => {
+                assert_eq!(live.busy.len(), 1);
+                assert_eq!(live.busy[0].label, "warm-build");
+                assert!(
+                    live.idle_shutdown_in_secs.is_none(),
+                    "deadline must be deferred while busy"
+                );
+                assert_eq!(
+                    live.presence_age_secs.len(),
+                    4,
+                    "all four sources reported"
+                );
+            }
+            other => panic!("expected FullStatus with liveness, got {:?}", other),
+        }
+
+        drop(guard);
+        let resp = daemon
+            .handle_command(DaemonCommand::Status { session: None })
+            .await;
+        match &resp {
+            DaemonResponse::FullStatus {
+                liveness: Some(live),
+                ..
+            } => {
+                assert!(live.busy.is_empty());
+                let deadline = live
+                    .idle_shutdown_in_secs
+                    .expect("deadline must run when not busy");
+                assert!(deadline > 0.0 && deadline <= live.idle_timeout_secs as f64);
+            }
+            other => panic!("expected FullStatus with liveness, got {:?}", other),
+        }
+    }
+
+    #[cfg(feature = "semantic")]
+    #[tokio::test]
+    async fn test_status_reports_semantic_index_state() {
+        // Cold daemon → "cold"; the warm/building transitions are covered by
+        // IndexManager tests (state probe) — here we assert the wiring.
+        let temp = tempfile::tempdir().unwrap();
+        let config = DaemonConfig::default();
+        let daemon = TLDRDaemon::new(temp.path().to_path_buf(), config);
+
+        let resp = daemon
+            .handle_command(DaemonCommand::Status { session: None })
+            .await;
+        match &resp {
+            DaemonResponse::FullStatus {
+                semantic_index: Some(idx),
+                ..
+            } => {
+                assert_eq!(idx.state, "cold");
+                assert!(idx.vectors.is_none());
+            }
+            other => panic!("expected FullStatus with semantic_index, got {:?}", other),
         }
     }
 

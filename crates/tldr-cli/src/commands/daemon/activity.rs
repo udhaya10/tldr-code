@@ -54,19 +54,16 @@ pub(crate) enum Source {
 const SOURCE_COUNT: usize = 4;
 
 /// Display names in `Source` order, for `daemon status` (TLDR-qzc).
-#[allow(dead_code)] // consumed by TLDR-qzc (status observability)
 pub(crate) const SOURCE_NAMES: [&str; SOURCE_COUNT] =
     ["socket", "cli_poke", "watcher", "internal"];
 
 /// A live unit of internal work, for the busy snapshot (TLDR-qzc).
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // consumed by TLDR-qzc (status observability)
 pub(crate) struct BusyInfo {
     pub label: &'static str,
     pub age: Duration,
 }
 
-#[allow(dead_code)] // fields read by busy_snapshot, which TLDR-qzc consumes
 struct BusyEntry {
     label: &'static str,
     started: Instant,
@@ -128,7 +125,6 @@ impl ActivityTracker {
     }
 
     /// Snapshot of live busy tokens with ages, oldest first (TLDR-qzc).
-    #[allow(dead_code)] // consumed by TLDR-qzc (status observability)
     pub(crate) fn busy_snapshot(&self) -> Vec<BusyInfo> {
         let mut infos: Vec<BusyInfo> = self
             .busy
