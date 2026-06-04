@@ -95,6 +95,120 @@ pub(crate) struct ReindexOutcome {
     pub reindex_triggered: bool,
 }
 
+/// Clears the warm single-flight latch when the background build task ends —
+/// including via panic-unwind, so a crashed build never wedges Warm into
+/// permanent `already_building`.
+struct ClearFlagOnDrop(Arc<AtomicBool>);
+
+impl Drop for ClearFlagOnDrop {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
+/// The background warm build (TLDR-utj.7). Carries CLONED handles of the
+/// daemon components it needs rather than the daemon itself: the Warm handler
+/// only has `&self`, and the detached task must be `'static`.
+struct WarmJob {
+    project: PathBuf,
+    lang: Language,
+    cache: Arc<QueryCache>,
+    indexed_files: Arc<RwLock<usize>>,
+    #[cfg(feature = "semantic")]
+    semantic_store: Arc<IndexManager>,
+    /// `None` when model resolution failed at ack time (already reported in
+    /// the ack); the semantic step is skipped.
+    #[cfg(feature = "semantic")]
+    model: Option<EmbeddingModel>,
+}
+
+impl WarmJob {
+    /// Run all warm steps; returns (warmed, errors) for the daemon log. Same
+    /// steps as the old inline handler — only the execution context changed.
+    async fn run(self) -> (Vec<&'static str>, Vec<String>) {
+        let mut warmed = Vec::new();
+        let mut errors = Vec::new();
+
+        // 1. Warm call graph
+        let calls_key = QueryKey::new(
+            "calls",
+            hash_str_args(&[&self.project.to_string_lossy()]),
+            self.lang,
+        );
+        if self.cache.get::<serde_json::Value>(&calls_key).is_some() {
+            warmed.push("call_graph (cached)");
+        } else {
+            match build_project_call_graph(&self.project, self.lang, None, true) {
+                Ok(result) => {
+                    let val = serde_json::to_value(&result).unwrap_or_default();
+                    self.cache.insert(calls_key, &val, vec![]);
+                    warmed.push("call_graph");
+                }
+                Err(e) => errors.push(format!("call_graph: {}", e)),
+            }
+        }
+
+        // 2. Warm code structure
+        let struct_key = QueryKey::new(
+            "structure",
+            hash_str_args(&[&self.project.to_string_lossy(), ""]),
+            self.lang,
+        );
+        if self.cache.get::<serde_json::Value>(&struct_key).is_some() {
+            warmed.push("structure (cached)");
+        } else {
+            match get_code_structure(&self.project, self.lang, 0, None) {
+                Ok(result) => {
+                    let val = serde_json::to_value(&result).unwrap_or_default();
+                    self.cache.insert(struct_key, &val, vec![]);
+                    warmed.push("structure");
+                }
+                Err(e) => errors.push(format!("structure: {}", e)),
+            }
+        }
+
+        // 3. Warm file tree
+        let tree_key = QueryKey::new(
+            "tree",
+            hash_str_args(&[&self.project.to_string_lossy()]),
+            self.lang,
+        );
+        if self.cache.get::<serde_json::Value>(&tree_key).is_some() {
+            warmed.push("file_tree (cached)");
+        } else {
+            match get_file_tree(&self.project, None, true, None) {
+                Ok(result) => {
+                    let file_count = count_tree_files(&result);
+                    let val = serde_json::to_value(&result).unwrap_or_default();
+                    self.cache.insert(tree_key, &val, vec![]);
+                    *self.indexed_files.write().await = file_count;
+                    warmed.push("file_tree");
+                }
+                Err(e) => errors.push(format!("file_tree: {}", e)),
+            }
+        }
+
+        // 4. Warm the vector store: load from disk (near-instant if fresh)
+        //    or build+save on miss. Uses the project-config model so a later
+        //    query with the same model hits the resident store
+        //    (TLDR-atc / TLDR-zxb).
+        #[cfg(feature = "semantic")]
+        if let Some(model) = self.model {
+            let mgr = Arc::clone(&self.semantic_store);
+            let project = self.project.clone();
+            let res = tokio::task::spawn_blocking(move || mgr.warm(&project, model)).await;
+            match res {
+                Ok(Ok(true)) => warmed.push("semantic_store"),
+                Ok(Ok(false)) => warmed.push("semantic_store (cached)"),
+                Ok(Err(e)) => errors.push(format!("semantic_store: {}", e)),
+                Err(e) => errors.push(format!("semantic_store: {}", e)),
+            }
+        }
+
+        (warmed, errors)
+    }
+}
+
 // =============================================================================
 // TLDRDaemon - Main Daemon Process
 // =============================================================================
@@ -116,8 +230,9 @@ pub struct TLDRDaemon {
     start_time: Instant,
     /// Current daemon status
     status: Arc<RwLock<DaemonStatus>>,
-    /// Salsa-style query cache
-    cache: QueryCache,
+    /// Salsa-style query cache. Behind `Arc` so the detached warm-build task
+    /// (TLDR-utj.7) can own a handle without holding the whole daemon.
+    cache: Arc<QueryCache>,
     /// Per-session statistics
     sessions: DashMap<String, SessionStats>,
     /// Per-hook activity statistics
@@ -132,6 +247,10 @@ pub struct TLDRDaemon {
     /// timestamps + busy tokens for in-flight internal work. The idle loop
     /// shuts down only when the PROJECT is dormant, not merely the socket.
     activity: Arc<ActivityTracker>,
+    /// Single-flight latch for the background warm build (TLDR-utj.7): a
+    /// second Warm while one is in flight is acked with `already_building`
+    /// instead of stacking builds.
+    warm_in_flight: Arc<AtomicBool>,
     /// Number of indexed files (for status reporting)
     indexed_files: Arc<RwLock<usize>>,
     /// Resident vector store with read/write split (TLDR-ac0.1). Concurrent
@@ -153,13 +272,14 @@ impl TLDRDaemon {
             config,
             start_time: Instant::now(),
             status: Arc::new(RwLock::new(DaemonStatus::Initializing)),
-            cache: QueryCache::with_defaults(),
+            cache: Arc::new(QueryCache::with_defaults()),
             sessions: DashMap::new(),
             hooks: DashMap::new(),
             dirty_files: Arc::new(RwLock::new(HashSet::new())),
             shutdown_tx,
             stopping: AtomicBool::new(false),
             activity: Arc::new(ActivityTracker::new()),
+            warm_in_flight: Arc::new(AtomicBool::new(false)),
             indexed_files: Arc::new(RwLock::new(0)),
             #[cfg(feature = "semantic")]
             semantic_store: Arc::new(IndexManager::new()),
@@ -433,117 +553,7 @@ impl TLDRDaemon {
             DaemonCommand::Warm { language } => {
                 let parsed = language.as_deref().and_then(|l| l.parse::<Language>().ok());
                 let lang = resolve_language(parsed);
-
-                let mut warmed = Vec::new();
-                let mut errors = Vec::new();
-
-                // 1. Warm call graph
-                let calls_key = QueryKey::new(
-                    "calls",
-                    hash_str_args(&[&self.project.to_string_lossy()]),
-                    lang,
-                );
-                if self.cache.get::<serde_json::Value>(&calls_key).is_some() {
-                    warmed.push("call_graph (cached)");
-                } else {
-                    match build_project_call_graph(&self.project, lang, None, true) {
-                        Ok(result) => {
-                            let val = serde_json::to_value(&result).unwrap_or_default();
-                            self.cache.insert(calls_key, &val, vec![]);
-                            warmed.push("call_graph");
-                        }
-                        Err(e) => errors.push(format!("call_graph: {}", e)),
-                    }
-                }
-
-                // 2. Warm code structure
-                let struct_key = QueryKey::new(
-                    "structure",
-                    hash_str_args(&[&self.project.to_string_lossy(), ""]),
-                    lang,
-                );
-                if self.cache.get::<serde_json::Value>(&struct_key).is_some() {
-                    warmed.push("structure (cached)");
-                } else {
-                    match get_code_structure(&self.project, lang, 0, None) {
-                        Ok(result) => {
-                            let val = serde_json::to_value(&result).unwrap_or_default();
-                            self.cache.insert(struct_key, &val, vec![]);
-                            warmed.push("structure");
-                        }
-                        Err(e) => errors.push(format!("structure: {}", e)),
-                    }
-                }
-
-                // 3. Warm file tree
-                let tree_key = QueryKey::new(
-                    "tree",
-                    hash_str_args(&[&self.project.to_string_lossy()]),
-                    lang,
-                );
-                if self.cache.get::<serde_json::Value>(&tree_key).is_some() {
-                    warmed.push("file_tree (cached)");
-                } else {
-                    match get_file_tree(&self.project, None, true, None) {
-                        Ok(result) => {
-                            let file_count = count_tree_files(&result);
-                            let val = serde_json::to_value(&result).unwrap_or_default();
-                            self.cache.insert(tree_key, &val, vec![]);
-                            *self.indexed_files.write().await = file_count;
-                            warmed.push("file_tree");
-                        }
-                        Err(e) => errors.push(format!("file_tree: {}", e)),
-                    }
-                }
-
-                // 4. Warm the vector store: load from disk (near-instant if
-                //    fresh) or build+save on miss. Uses the project-config
-                //    model so a later query with the same model hits the
-                //    resident store (TLDR-atc / TLDR-zxb).
-                #[cfg(feature = "semantic")]
-                {
-                    match self.resolve_semantic_model(None) {
-                        Ok(model) => {
-                            let mgr = Arc::clone(&self.semantic_store);
-                            let project = self.project.clone();
-                            // Busy guard owned by the CLOSURE, not this async
-                            // task (TLDR-3w5): if the client times out and
-                            // this connection task is cancelled, the blocking
-                            // build keeps running — the guard must live
-                            // exactly as long as the build so the idle loop
-                            // never kills it mid-flight. A hung warm shows up
-                            // as a stale-busy token with growing age (qzc).
-                            let busy = self.activity.begin("warm-build");
-                            let res = tokio::task::spawn_blocking(move || {
-                                let _busy = busy;
-                                mgr.warm(&project, model)
-                            })
-                            .await;
-                            match res {
-                                Ok(Ok(true)) => warmed.push("semantic_store"),
-                                Ok(Ok(false)) => warmed.push("semantic_store (cached)"),
-                                Ok(Err(e)) => errors.push(format!("semantic_store: {}", e)),
-                                Err(e) => errors.push(format!("semantic_store: {}", e)),
-                            }
-                        }
-                        Err(e) => errors.push(format!("semantic_store: {}", e)),
-                    }
-                }
-
-                let message = if errors.is_empty() {
-                    format!("Warmed: {}", warmed.join(", "))
-                } else {
-                    format!(
-                        "Warmed: {}. Errors: {}",
-                        warmed.join(", "),
-                        errors.join("; ")
-                    )
-                };
-
-                DaemonResponse::Status {
-                    status: "ok".to_string(),
-                    message: Some(message),
-                }
+                self.start_warm_build(lang)
             }
 
             #[cfg(feature = "semantic")]
@@ -1149,6 +1159,81 @@ impl TLDRDaemon {
             hook_stats,
             liveness: Some(self.liveness_stats()),
             semantic_index: self.semantic_index_stats(),
+        }
+    }
+
+    /// Start the warm build as a DETACHED background task and ack immediately
+    /// (TLDR-utj.7). The old inline shape was structurally doomed: the
+    /// handler awaited the full build while the client blocked on a 30s IPC
+    /// read timeout — any build over 30s printed a misleading "Failed to
+    /// send" while the daemon kept building. Now the ack returns in
+    /// microseconds and the client is pointed at `tldr daemon status`
+    /// (busy `warm-build` + semantic_index state, TLDR-qzc) for progress.
+    fn start_warm_build(&self, lang: Language) -> DaemonResponse {
+        // Single-flight: a second Warm during a build is answered honestly
+        // instead of stacking a duplicate build behind the store write lock.
+        if self
+            .warm_in_flight
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return DaemonResponse::Status {
+                status: "already_building".to_string(),
+                message: Some(
+                    "warm build already in progress — poll 'tldr daemon status' for progress"
+                        .to_string(),
+                ),
+            };
+        }
+
+        // Resolve the embedding model BEFORE spawning so a config error is
+        // reported synchronously in the ack instead of buried in the log.
+        #[cfg(feature = "semantic")]
+        let (model, model_note) = match self.resolve_semantic_model(None) {
+            Ok(m) => (Some(m), String::new()),
+            Err(e) => (None, format!(" (semantic skipped: {e})")),
+        };
+        #[cfg(not(feature = "semantic"))]
+        let model_note = String::new();
+
+        let job = WarmJob {
+            project: self.project.clone(),
+            lang,
+            cache: Arc::clone(&self.cache),
+            indexed_files: Arc::clone(&self.indexed_files),
+            #[cfg(feature = "semantic")]
+            semantic_store: Arc::clone(&self.semantic_store),
+            #[cfg(feature = "semantic")]
+            model,
+        };
+
+        // Busy guard created BEFORE the ack (no status-misses-busy window)
+        // and owned by the DETACHED task — unlike the requesting connection
+        // task, a tokio::spawn'd task is never cancelled by a client
+        // timeout/disconnect, so the guard lives exactly as long as the
+        // build (TLDR-3w5 invariant preserved).
+        let busy = self.activity.begin("warm-build");
+        let in_flight = Arc::clone(&self.warm_in_flight);
+        tokio::spawn(async move {
+            let _busy = busy;
+            let _clear = ClearFlagOnDrop(in_flight);
+            let (warmed, errors) = job.run().await;
+            if errors.is_empty() {
+                eprintln!("[warm] background build complete: {}", warmed.join(", "));
+            } else {
+                eprintln!(
+                    "[warm] background build finished — warmed: {}; errors: {}",
+                    warmed.join(", "),
+                    errors.join("; ")
+                );
+            }
+        });
+
+        DaemonResponse::Status {
+            status: "started".to_string(),
+            message: Some(format!(
+                "warm build started — poll 'tldr daemon status' for progress{model_note}"
+            )),
         }
     }
 
@@ -2315,10 +2400,11 @@ mod tests {
 
         // Warm explicitly — queries never build the store anymore (TLDR-7xz.2).
         // Warms iff ONNX is available in this env; the assertion below is
-        // robust either way.
+        // robust either way. Warm is async now (TLDR-utj.7) — join it.
         let _ = daemon
             .handle_command(DaemonCommand::Warm { language: None })
             .await;
+        wait_warm_complete(&daemon).await;
         let warm_before = daemon.semantic_store.is_warm();
 
         // Edit the file on disk so the delta has a changed body to re-embed.
@@ -2359,10 +2445,11 @@ mod tests {
         let daemon = TLDRDaemon::new(temp.path().to_path_buf(), DaemonConfig::default());
 
         // Warm the store explicitly (builds iff ONNX is present in this env) —
-        // queries never build it anymore (TLDR-7xz.2).
+        // queries never build it anymore (TLDR-7xz.2). Async warm: join it.
         let _ = daemon
             .handle_command(DaemonCommand::Warm { language: None })
             .await;
+        wait_warm_complete(&daemon).await;
         let Some(len0) = daemon.semantic_store.store_len() else {
             return; // No ONNX here — nothing to assert about deltas.
         };
@@ -2404,8 +2491,26 @@ mod tests {
         );
     }
 
+    /// Join a started background warm build (TLDR-utj.7): the Warm ack
+    /// returns before the build, so tests asserting post-warm state must
+    /// wait for the single-flight latch to clear. Generous budget: the
+    /// debug-profile ONNX first load alone can exceed 30s (TLDR-6q2), and
+    /// several warm tests run concurrently.
+    async fn wait_warm_complete(daemon: &TLDRDaemon) {
+        for _ in 0..3000 {
+            if !daemon.warm_in_flight.load(Ordering::SeqCst) {
+                return;
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        }
+        panic!("warm build did not complete within 300s");
+    }
+
     #[tokio::test]
-    async fn test_daemon_warm_wires_caches() {
+    async fn test_daemon_warm_acks_immediately_and_wires_caches() {
+        // TLDR-utj.7: the ack must come back instantly with "started" (the
+        // old inline shape blocked the client for the build's duration), and
+        // the BACKGROUND build must actually warm the caches.
         let temp = tempfile::tempdir().unwrap();
         let py_file = temp.path().join("example.py");
         std::fs::write(
@@ -2417,23 +2522,71 @@ mod tests {
         let config = DaemonConfig::default();
         let daemon = TLDRDaemon::new(temp.path().to_path_buf(), config);
 
+        let started = std::time::Instant::now();
         let response = daemon
             .handle_command(DaemonCommand::Warm { language: None })
             .await;
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "Warm ack must not wait for the build"
+        );
 
         match &response {
             DaemonResponse::Status { status, message } => {
-                assert_eq!(status, "ok");
+                assert_eq!(status, "started");
                 let msg = message.as_deref().unwrap_or("");
-                // Should mention what was warmed, not just "Warm completed"
                 assert!(
-                    msg.contains("Warmed"),
-                    "Expected warm details, got: {}",
+                    msg.contains("daemon status"),
+                    "ack must point at the status poll, got: {}",
                     msg
                 );
             }
             other => panic!("Expected Status response, got {:?}", other),
         }
+
+        // The ack precedes the build — a busy token must already be visible
+        // (guard created before the ack, owned by the detached task).
+        assert!(
+            daemon.activity.busy_count() > 0
+                || !daemon.warm_in_flight.load(Ordering::SeqCst),
+            "warm must be visibly busy (or already finished)"
+        );
+
+        wait_warm_complete(&daemon).await;
+        assert!(
+            daemon.indexed_files().await > 0,
+            "background build must have warmed the file tree"
+        );
+        assert_eq!(
+            daemon.activity().busy_count(),
+            0,
+            "busy token must be released at build completion"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_daemon_warm_single_flight() {
+        // TLDR-utj.7: a second Warm during a build answers "already_building"
+        // instead of stacking a duplicate build.
+        let temp = tempfile::tempdir().unwrap();
+        let py_file = temp.path().join("example.py");
+        std::fs::write(&py_file, "def f():\n    pass\n").unwrap();
+
+        let config = DaemonConfig::default();
+        let daemon = TLDRDaemon::new(temp.path().to_path_buf(), config);
+
+        // Hold the latch manually to make the race deterministic.
+        daemon.warm_in_flight.store(true, Ordering::SeqCst);
+        let response = daemon
+            .handle_command(DaemonCommand::Warm { language: None })
+            .await;
+        match &response {
+            DaemonResponse::Status { status, .. } => {
+                assert_eq!(status, "already_building");
+            }
+            other => panic!("Expected Status response, got {:?}", other),
+        }
+        daemon.warm_in_flight.store(false, Ordering::SeqCst);
     }
 
     #[tokio::test]
@@ -2457,10 +2610,11 @@ mod tests {
 
         match &response {
             DaemonResponse::Status { status, .. } => {
-                assert_eq!(status, "ok");
+                assert_eq!(status, "started");
             }
             other => panic!("Expected Status response, got {:?}", other),
         }
+        wait_warm_complete(&daemon).await;
     }
 
     #[tokio::test]
