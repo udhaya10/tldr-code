@@ -168,6 +168,11 @@ fn handle_tools_call(
     // an agent using only MCP tools reproduces the original TLDR-3w5 bug
     // (the project's daemon idles out underneath it). Same contract: one
     // registry read + one non-blocking datagram, silent on all failures.
+    // KNOWN LIMITATION: the poke gates on this PROCESS's cwd (fixed at MCP
+    // server launch), not the per-tool `path` argument — a tool analyzing a
+    // project outside the server's cwd does not defer that project's daemon.
+    // Mirrors the CLI's own cwd behavior; revisit with TLDR-utj.5's real
+    // MCP daemon client if per-path routing lands.
     tldr_core::liveness::poke_registered_daemons();
 
     let params: ToolsCallParams = request
