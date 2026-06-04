@@ -24,21 +24,22 @@
 //!   buffer (EAGAIN), or an unsupported platform must never surface.
 //! - Opt-out for CI/bulk callers via `TLDR_NO_POKE=1`.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
+#[cfg(unix)]
+use std::path::Path;
 #[cfg(unix)]
 use std::sync::Arc;
 
 #[cfg(unix)]
 use super::activity::{ActivityTracker, Source};
 
-/// Datagram poke path derived from a STREAM socket path: `tldr-{hash}.sock`
-/// → `tldr-{hash}.poke`. Derive from the registry-RECORDED socket (not a
-/// locally recomputed one): the daemon binds in ITS temp dir, which can
-/// differ from this process's `TMPDIR` (the W6 cross-TMPDIR class).
-pub(crate) fn poke_path_for(socket_path: &Path) -> PathBuf {
-    socket_path.with_extension("poke")
-}
+/// Sender-side pieces (path derivation, registry-gated fire-and-forget send)
+/// live in `tldr_core::liveness` — shared with the `tldr_mcp` binary
+/// (TLDR-axz), which cannot depend on this crate (cycle: `tldr-cli` already
+/// depends on `tldr-mcp` for the bin re-export). This module keeps only the
+/// DAEMON-side receiver.
+pub(crate) use tldr_core::liveness::poke_path_for;
 
 /// Removes the poke socket file on drop (daemon shutdown). Mirrors the
 /// stream socket's cleanup discipline — Unix socket files do not vanish on
@@ -104,43 +105,9 @@ pub(crate) fn spawn_poke_receiver(
     Some(PokeGuard { path })
 }
 
-/// Fire-and-forget liveness poke from the CLI side, called once per `tldr`
-/// invocation at the top of command dispatch. See module docs for the cost
-/// contract; every failure path is silent by design.
-pub fn poke_registered_daemons() {
-    if std::env::var_os("TLDR_NO_POKE").is_some() {
-        return;
-    }
-    #[cfg(unix)]
-    {
-        let Ok(cwd) = std::env::current_dir() else {
-            return;
-        };
-        let cwd = cwd.canonicalize().unwrap_or(cwd);
-        // Ancestor match (not exact): `tldr loc` from a subdirectory is
-        // presence for the project's daemon. Unpruned read = one small file
-        // read, zero writes; a dead entry's send_to just ENOENTs silently.
-        for entry in super::daemon_registry::entries_containing(&cwd) {
-            let poke = poke_path_for(&entry.socket);
-            if let Ok(sock) = std::os::unix::net::UnixDatagram::unbound() {
-                let _ = sock.set_nonblocking(true);
-                let _ = sock.send_to(b"1", &poke);
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn poke_path_replaces_sock_extension() {
-        assert_eq!(
-            poke_path_for(Path::new("/tmp/tldr-abc123.sock")),
-            PathBuf::from("/tmp/tldr-abc123.poke")
-        );
-    }
 
     /// End-to-end over a real datagram socket: receiver bound, unbound
     /// sender pokes, CliPoke presence refreshed. This is the macOS
@@ -214,12 +181,4 @@ mod tests {
         assert!(!poke.exists(), "guard drop must remove the poke file");
     }
 
-    #[test]
-    fn env_opt_out_short_circuits() {
-        // Must not panic or touch the registry; observable behavior is just
-        // "returns immediately" — this is a smoke for the env gate.
-        std::env::set_var("TLDR_NO_POKE", "1");
-        poke_registered_daemons();
-        std::env::remove_var("TLDR_NO_POKE");
-    }
 }

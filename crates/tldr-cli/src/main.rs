@@ -620,8 +620,9 @@ fn run_command(cli: &Cli) -> Result<()> {
     // ~18 daemon-routed commands — defers a registered daemon's idle
     // shutdown. Cost contract: one env check, one registry file read, one
     // non-blocking datagram send; silent on all failures; opt out with
-    // TLDR_NO_POKE=1.
-    tldr_cli::commands::daemon::poke::poke_registered_daemons();
+    // TLDR_NO_POKE=1. Shared with the tldr_mcp binary (TLDR-axz) via
+    // tldr-core.
+    tldr_core::liveness::poke_registered_daemons();
 
     match &cli.command {
         Command::Tree(args) => args.run(cli.format, q),

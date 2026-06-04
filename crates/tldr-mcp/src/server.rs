@@ -163,6 +163,13 @@ fn handle_tools_call(
     request: &JsonRpcRequest,
     registry: &ToolRegistry,
 ) -> Result<Value, JsonRpcError> {
+    // MCP liveness parity (TLDR-axz): tldr_mcp is a SEPARATE binary, so the
+    // CLI's per-invocation poke (TLDR-nke) never fires here — without this,
+    // an agent using only MCP tools reproduces the original TLDR-3w5 bug
+    // (the project's daemon idles out underneath it). Same contract: one
+    // registry read + one non-blocking datagram, silent on all failures.
+    tldr_core::liveness::poke_registered_daemons();
+
     let params: ToolsCallParams = request
         .params
         .as_ref()

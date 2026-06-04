@@ -38,6 +38,7 @@
 pub mod config;
 pub mod error;
 pub mod git;
+pub mod liveness;
 pub mod types;
 pub mod validation;
 pub mod walker;

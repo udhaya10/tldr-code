@@ -58,41 +58,14 @@ pub struct DaemonRegistry {
 
 /// Path to the daemon registry file.
 ///
-/// Resolution order:
-/// 1. `TLDR_DAEMON_REGISTRY_DIR` env override (used by tests for isolation).
-/// 2. `<dirs::cache_dir()>/tldr/daemon-registry.json`.
-/// 3. `./.cache/tldr/daemon-registry.json` fallback (mirrors `daemon_active`).
+/// Delegates to `tldr_core::liveness::registry_file_path` — the resolution
+/// (env override → cache dir → fallback) is shared with the liveness-poke
+/// SENDERS in other binaries (`tldr_mcp`, TLDR-axz) and must not drift from
+/// this writer side. Includes the one-time `TLDR_DAEMON_REGISTRY_DIR`
+/// override warning (W5).
 pub fn registry_file_path() -> PathBuf {
-    if let Ok(dir) = std::env::var("TLDR_DAEMON_REGISTRY_DIR") {
-        warn_registry_override_once();
-        return PathBuf::from(dir).join("daemon-registry.json");
-    }
-    dirs::cache_dir()
-        .unwrap_or_else(|| PathBuf::from(".cache"))
-        .join("tldr")
-        .join("daemon-registry.json")
+    tldr_core::liveness::registry_file_path()
 }
-
-/// Emit a one-time stderr warning when the `TLDR_DAEMON_REGISTRY_DIR` override
-/// is honored in a production build (W5). The override is a test-isolation
-/// hook; in normal operation it silently redirects every daemon lookup, so a
-/// caller (or attacker) who controls the environment could point clients at a
-/// registry they own. Surfacing it once keeps the diagnostic visible without
-/// spamming the many `registry_file_path` callers.
-#[cfg(not(test))]
-fn warn_registry_override_once() {
-    use std::sync::Once;
-    static WARN: Once = Once::new();
-    WARN.call_once(|| {
-        eprintln!(
-            "warning: TLDR_DAEMON_REGISTRY_DIR is set — daemon registry lookups are \
-             redirected to a non-default location. Unset it for normal operation."
-        );
-    });
-}
-
-#[cfg(test)]
-fn warn_registry_override_once() {}
 
 /// Create `dir` (if missing) and constrain it to owner-only access (`0700` on
 /// unix). The registry records project paths and PIDs, so the directory must
@@ -208,21 +181,6 @@ fn read_registry_unpruned() -> DaemonRegistry {
         Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
         Err(_) => DaemonRegistry::default(),
     }
-}
-
-/// All unpruned entries whose project path CONTAINS `path` (ancestor match):
-/// the liveness poke's registry gate (TLDR-nke). `tldr` invoked from a
-/// subdirectory is presence for the project's daemon.
-///
-/// Strictly read-only — never prunes, migrates, or writes — because this
-/// runs on EVERY CLI invocation and must cost exactly one small file read.
-/// A dead entry is harmless here: the poke's `send_to` fails silently.
-pub fn entries_containing(path: &Path) -> Vec<DaemonRegistryEntry> {
-    read_registry_unpruned()
-        .daemons
-        .into_iter()
-        .filter(|d| path.starts_with(&d.project))
-        .collect()
 }
 
 /// Look up a registry entry by canonicalized project path WITHOUT pruning dead
