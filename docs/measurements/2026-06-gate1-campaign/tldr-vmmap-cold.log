@@ -1,0 +1,1479 @@
+=== 20:38:58
+Physical footprint:         22.0G
+Physical footprint (peak):  22.0G
+MALLOC_LARGE                      28.2G    14.3G    14.3G     7.3G       0K       0K       0K      375         see MALLOC ZONE table below
+MALLOC_LARGE (empty)             161.0M      32K      32K   155.4M       0K       0K       0K        6         see MALLOC ZONE table below
+MALLOC_SMALL                     264.0M   164.8M   164.8M    77.6M       0K       0K       0K       66         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              4096K       0K       0K     384K       0K       0K       0K        1         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 20:40:00
+Physical footprint:         22.0G
+Physical footprint (peak):  22.0G
+MALLOC_LARGE                      28.2G    15.1G    15.1G     6.6G       0K       0K       0K      375         see MALLOC ZONE table below
+MALLOC_LARGE (empty)             161.0M      32K      32K   155.4M       0K       0K       0K        6         see MALLOC ZONE table below
+MALLOC_SMALL                     264.0M   192.3M   192.3M    51.3M       0K       0K       0K       66         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              4096K     176K     176K     208K       0K       0K       0K        1         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 20:41:01
+Physical footprint:         22.0G
+Physical footprint (peak):  22.0G
+MALLOC_LARGE                      28.2G    15.1G    15.1G     6.6G       0K       0K       0K      375         see MALLOC ZONE table below
+MALLOC_LARGE (empty)             161.0M      32K      32K   155.4M       0K       0K       0K        6         see MALLOC ZONE table below
+MALLOC_SMALL                     264.0M   192.3M   192.3M    51.3M       0K       0K       0K       66         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              4096K     176K     176K     208K       0K       0K       0K        1         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 20:42:03
+Physical footprint:         21.9G
+Physical footprint (peak):  22.0G
+MALLOC_LARGE                      28.2G    15.6G    15.6G     6.1G       0K       0K       0K      375         see MALLOC ZONE table below
+MALLOC_SMALL                     264.0M   195.5M   181.6M    37.0M       0K       0K       0K       66         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              4096K     208K      32K       0K       0K       0K       0K        1         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 20:43:04
+Physical footprint:         21.9G
+Physical footprint (peak):  22.0G
+MALLOC_LARGE                      28.2G    15.6G    15.6G     6.1G       0K       0K       0K      375         see MALLOC ZONE table below
+MALLOC_SMALL                     264.0M   195.5M   181.6M    37.0M       0K       0K       0K       66         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              4096K     208K      32K       0K       0K       0K       0K        1         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 20:44:06
+Physical footprint:         21.9G
+Physical footprint (peak):  22.0G
+MALLOC_LARGE                      28.2G    16.1G    16.1G     5.5G       0K       0K       0K      375         see MALLOC ZONE table below
+MALLOC_SMALL                     264.0M   197.9M   184.0M    36.5M       0K       0K       0K       66         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              4096K     400K     224K       0K       0K       0K       0K        1         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 20:45:08
+Physical footprint:         21.9G
+Physical footprint (peak):  22.0G
+MALLOC_LARGE                      28.2G    16.1G    16.1G     5.5G       0K       0K       0K      375         see MALLOC ZONE table below
+MALLOC_SMALL                     264.0M   197.9M   184.0M    36.5M       0K       0K       0K       66         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              4096K     400K     224K       0K       0K       0K       0K        1         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 20:46:09
+Physical footprint:         21.9G
+Physical footprint (peak):  22.0G
+MALLOC_LARGE                      28.2G    16.6G    16.6G     5.0G       0K       0K       0K      375         see MALLOC ZONE table below
+MALLOC_SMALL                     272.0M   204.5M   190.6M    36.4M       0K       0K       0K       68         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              4096K     400K     224K       0K       0K       0K       0K        1         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 20:47:11
+Physical footprint:         21.9G
+Physical footprint (peak):  22.0G
+MALLOC_LARGE                      28.2G    16.6G    16.6G     5.0G       0K       0K       0K      375         see MALLOC ZONE table below
+MALLOC_SMALL                     272.0M   204.5M   190.6M    36.4M       0K       0K       0K       68         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              4096K     400K     224K       0K       0K       0K       0K        1         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 20:48:12
+Physical footprint:         21.9G
+Physical footprint (peak):  22.0G
+MALLOC_LARGE                      28.2G    17.0G    17.0G     4.6G       0K       0K       0K      375         see MALLOC ZONE table below
+MALLOC_SMALL                     268.0M   205.9M   192.0M    36.3M       0K       0K       0K       67         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              8192K     448K     272K       0K       0K       0K       0K        2         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 20:49:14
+Physical footprint:         21.9G
+Physical footprint (peak):  22.0G
+MALLOC_LARGE                      28.2G    17.0G    17.0G     4.6G       0K       0K       0K      375         see MALLOC ZONE table below
+MALLOC_SMALL                     268.0M   205.9M   192.0M    36.3M       0K       0K       0K       67         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              8192K     448K     272K       0K       0K       0K       0K        2         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 20:50:15
+Physical footprint:         21.9G
+Physical footprint (peak):  22.0G
+MALLOC_LARGE                      28.2G    17.4G    17.4G     4.3G       0K       0K       0K      375         see MALLOC ZONE table below
+MALLOC_SMALL                     268.0M   207.8M   194.0M    36.0M       0K       0K       0K       67         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              8192K     464K     288K       0K       0K       0K       0K        2         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 20:51:17
+Physical footprint:         21.9G
+Physical footprint (peak):  22.0G
+MALLOC_LARGE                      28.2G    17.4G    17.4G     4.3G       0K       0K       0K      375         see MALLOC ZONE table below
+MALLOC_SMALL                     268.0M   207.8M   194.0M    36.0M       0K       0K       0K       67         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              8192K     464K     288K       0K       0K       0K       0K        2         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 20:52:19
+Physical footprint:         21.9G
+Physical footprint (peak):  22.0G
+MALLOC_LARGE                      28.2G    17.8G    17.8G     3.9G       0K       0K       0K      375         see MALLOC ZONE table below
+MALLOC_SMALL                     268.0M   209.0M   195.2M    35.9M       0K       0K       0K       67         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              8192K     480K     304K       0K       0K       0K       0K        2         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 20:53:20
+Physical footprint:         21.9G
+Physical footprint (peak):  22.0G
+MALLOC_LARGE                      28.2G    17.8G    17.8G     3.9G       0K       0K       0K      375         see MALLOC ZONE table below
+MALLOC_SMALL                     268.0M   209.0M   195.2M    35.9M       0K       0K       0K       67         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              8192K     480K     304K       0K       0K       0K       0K        2         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 20:54:22
+Physical footprint:         21.9G
+Physical footprint (peak):  22.0G
+MALLOC_LARGE                      28.2G    19.3G    19.3G     2.3G       0K       0K       0K      375         see MALLOC ZONE table below
+MALLOC_SMALL                     272.0M   210.7M   196.8M    35.5M       0K       0K       0K       68         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              8192K     480K     304K       0K       0K       0K       0K        2         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 20:55:24
+Physical footprint:         21.9G
+Physical footprint (peak):  22.0G
+MALLOC_LARGE                      28.2G    19.3G    19.3G     2.3G       0K       0K       0K      375         see MALLOC ZONE table below
+MALLOC_SMALL                     272.0M   210.7M   196.8M    35.5M       0K       0K       0K       68         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              8192K     480K     304K       0K       0K       0K       0K        2         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 20:56:25
+Physical footprint:         21.9G
+Physical footprint (peak):  22.0G
+MALLOC_LARGE                      28.2G    19.3G    19.3G     2.3G       0K       0K       0K      375         see MALLOC ZONE table below
+MALLOC_SMALL                     276.0M   213.3M   199.5M    35.3M       0K       0K       0K       69         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              4096K     400K     224K       0K       0K       0K       0K        1         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 20:57:27
+Physical footprint:         21.9G
+Physical footprint (peak):  22.0G
+MALLOC_LARGE                      28.2G    19.3G    19.3G     2.3G       0K       0K       0K      375         see MALLOC ZONE table below
+MALLOC_SMALL                     276.0M   213.3M   199.5M    35.3M       0K       0K       0K       69         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              4096K     400K     224K       0K       0K       0K       0K        1         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 20:58:29
+Physical footprint:         21.9G
+Physical footprint (peak):  22.0G
+MALLOC_LARGE                      28.2G    19.3G    19.3G     2.3G       0K       0K       0K      375         see MALLOC ZONE table below
+MALLOC_SMALL                     276.0M   213.3M   199.5M    35.3M       0K       0K       0K       69         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              8192K     416K     240K       0K       0K       0K       0K        2         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 20:59:30
+Physical footprint:         21.9G
+Physical footprint (peak):  22.0G
+MALLOC_LARGE                      28.2G    19.3G    19.3G     2.3G       0K       0K       0K      375         see MALLOC ZONE table below
+MALLOC_SMALL                     276.0M   212.7M   198.8M    35.2M       0K       0K       0K       69         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              12.0M    2464K    2288K       0K       0K       0K       0K        3         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 21:00:32
+Physical footprint:         21.9G
+Physical footprint (peak):  22.0G
+MALLOC_LARGE                      28.2G    19.3G    19.3G     2.3G       0K       0K       0K      375         see MALLOC ZONE table below
+MALLOC_SMALL                     276.0M   212.7M   198.8M    35.2M       0K       0K       0K       69         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              12.0M    2464K    2288K       0K       0K       0K       0K        3         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 21:01:34
+Physical footprint:         21.9G
+Physical footprint (peak):  22.0G
+MALLOC_LARGE                      28.2G    19.3G    19.3G     2.3G       0K       0K       0K      375         see MALLOC ZONE table below
+MALLOC_SMALL                     276.0M   213.9M   200.0M    35.1M       0K       0K       0K       69         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              12.0M    2464K    2288K       0K       0K       0K       0K        3         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 21:02:36
+Physical footprint:         21.9G
+Physical footprint (peak):  22.0G
+MALLOC_LARGE                      28.2G    10.9G    10.9G    10.7G       0K       0K       0K      375         see MALLOC ZONE table below
+MALLOC_SMALL                     276.0M    76.5M    76.5M   171.2M       0K       0K       0K       69         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              12.0M       0K       0K    2464K       0K       0K       0K        3         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 21:03:38
+Physical footprint:         21.9G
+Physical footprint (peak):  22.0G
+MALLOC_LARGE                      28.2G     5.5G     5.5G    16.1G       0K       0K       0K      375         see MALLOC ZONE table below
+MALLOC_SMALL                     268.0M    20.2M    20.2M   225.2M       0K       0K       0K       67         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              20.0M     112K     112K    4720K       0K       0K       0K        5         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 21:04:40
+Physical footprint:         21.9G
+Physical footprint (peak):  22.0G
+MALLOC_LARGE                      28.2G     6.8G     6.8G    14.9G       0K       0K       0K      375         see MALLOC ZONE table below
+MALLOC_SMALL                     276.0M    2528K    2528K   246.7M       0K       0K       0K       69         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              12.0M       0K       0K    2464K       0K       0K       0K        3         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 21:05:42
+Physical footprint:         21.9G
+Physical footprint (peak):  22.0G
+MALLOC_LARGE                      28.2G     8.6G     8.6G    13.1G       0K       0K       0K      375         see MALLOC ZONE table below
+MALLOC_SMALL                     276.0M    2320K    2320K   246.9M       0K       0K       0K       69         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              12.0M     256K     256K    2208K       0K       0K       0K        3         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 21:06:44
+Physical footprint:         21.9G
+Physical footprint (peak):  22.0G
+MALLOC_LARGE                      28.2G     7.3G     7.3G    14.3G       0K       0K       0K      375         see MALLOC ZONE table below
+MALLOC_SMALL                     280.0M   160.2M   160.2M    89.0M       0K       0K       0K       70         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              8192K       0K       0K    2448K       0K       0K       0K        2         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 21:07:46
+Physical footprint:         21.9G
+Physical footprint (peak):  22.0G
+MALLOC_LARGE                      28.2G    10.1G    10.1G    11.6G       0K       0K       0K      375         see MALLOC ZONE table below
+MALLOC_SMALL                     280.0M    32.5M    32.5M   219.2M       0K       0K       0K       70         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              8192K     352K     352K     144K       0K       0K       0K        2         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 21:08:48
+Physical footprint:         21.9G
+Physical footprint (peak):  22.0G
+MALLOC_LARGE                      28.2G     6.2G     6.2G    15.5G       0K       0K       0K      375         see MALLOC ZONE table below
+MALLOC_SMALL                     280.0M    1936K    1936K   249.8M       0K       0K       0K       70         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              8192K       0K       0K     496K       0K       0K       0K        2         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 21:09:50
+Physical footprint:         21.9G
+Physical footprint (peak):  22.0G
+MALLOC_LARGE                      28.2G     8.7G     8.7G    12.9G       0K       0K       0K      375         see MALLOC ZONE table below
+MALLOC_SMALL                     280.0M    1616K    1616K   250.2M       0K       0K       0K       70         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              8192K       0K       0K     496K       0K       0K       0K        2         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 21:10:52
+Physical footprint:         21.9G
+Physical footprint (peak):  22.0G
+MALLOC_LARGE                      28.2G     4.6G     4.6G    17.1G       0K       0K       0K      375         see MALLOC ZONE table below
+MALLOC_SMALL                     280.0M    2176K    2176K   249.6M       0K       0K       0K       70         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              8192K       0K       0K     496K       0K       0K       0K        2         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 21:11:55
+Physical footprint:         21.9G
+Physical footprint (peak):  22.0G
+MALLOC_LARGE                      28.2G    12.2G    12.2G     9.4G       0K       0K       0K      375         see MALLOC ZONE table below
+MALLOC_SMALL                     280.0M    32.5M    32.3M   213.0M       0K       0K       0K       70         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              8192K      32K      32K      16K       0K       0K       0K        2         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 21:12:57
+Physical footprint:         21.9G
+Physical footprint (peak):  22.0G
+MALLOC_LARGE                      28.2G    12.8G    12.8G     8.9G       0K       0K       0K      375         see MALLOC ZONE table below
+MALLOC_SMALL                     280.0M   191.1M   190.8M    54.5M       0K       0K       0K       70         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              8192K      48K      48K       0K       0K       0K       0K        2         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 21:13:59
+Physical footprint:         21.9G
+Physical footprint (peak):  22.0G
+MALLOC_LARGE                      28.2G    13.2G    13.2G     8.4G       0K       0K       0K      375         see MALLOC ZONE table below
+MALLOC_SMALL                     280.0M   192.0M   191.8M    53.5M       0K       0K       0K       70         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              8192K      48K      48K       0K       0K       0K       0K        2         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 21:15:00
+Physical footprint:         23.9G
+Physical footprint (peak):  23.9G
+MALLOC_LARGE                      28.2G    15.2G    15.2G     8.4G       0K       0K       0K      375         see MALLOC ZONE table below
+MALLOC_SMALL                     280.0M   198.4M   198.2M    52.6M       0K       0K       0K       70         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              8192K     480K     480K       0K       0K       0K       0K        2         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 21:16:02
+Physical footprint:         23.9G
+Physical footprint (peak):  23.9G
+MALLOC_LARGE                      28.2G    15.1G    15.1G     8.6G       0K       0K       0K      375         see MALLOC ZONE table below
+MALLOC_SMALL                     280.0M   192.6M   192.6M    58.4M       0K       0K       0K       70         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              8192K      48K      48K     432K       0K       0K       0K        2         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 21:17:04
+Physical footprint:         23.9G
+Physical footprint (peak):  23.9G
+MALLOC_LARGE                      28.2G    14.0G    14.0G     9.6G       0K       0K       0K      375         see MALLOC ZONE table below
+MALLOC_SMALL                     284.0M    34.6M    34.6M   217.7M       0K       0K       0K       71         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              8192K     496K     496K      32K       0K       0K       0K        2         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 21:18:06
+Physical footprint:         23.9G
+Physical footprint (peak):  23.9G
+MALLOC_LARGE                      28.2G    13.0G    13.0G    10.6G       0K       0K       0K      375         see MALLOC ZONE table below
+MALLOC_SMALL                     284.0M    33.7M    33.7M   218.5M       0K       0K       0K       71         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              8192K     448K     448K      80K       0K       0K       0K        2         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 21:19:07
+Physical footprint:         23.9G
+Physical footprint (peak):  23.9G
+MALLOC_LARGE                      28.2G    13.7G    13.7G    10.0G       0K       0K       0K      375         see MALLOC ZONE table below
+MALLOC_SMALL                     284.0M    37.3M    37.3M   216.1M       0K       0K       0K       71         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              8192K     448K     448K      80K       0K       0K       0K        2         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 21:20:09
+Physical footprint:         23.9G
+Physical footprint (peak):  23.9G
+MALLOC_LARGE                      28.2G    12.6G    12.6G    11.0G       0K       0K       0K      375         see MALLOC ZONE table below
+MALLOC_SMALL                     284.0M    12.9M    12.9M   240.6M       0K       0K       0K       71         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              8192K       0K       0K     528K       0K       0K       0K        2         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 21:21:11
+Physical footprint:         23.9G
+Physical footprint (peak):  23.9G
+MALLOC_LARGE                      28.2G    12.8G    12.8G    10.8G       0K       0K       0K      375         see MALLOC ZONE table below
+MALLOC_SMALL                     284.0M    34.5M    34.5M   220.3M       0K       0K       0K       71         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              8192K     432K     432K     112K       0K       0K       0K        2         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 21:22:13
+Physical footprint:         23.9G
+Physical footprint (peak):  23.9G
+MALLOC_LARGE                      28.2G    12.1G    12.1G    11.5G       0K       0K       0K      375         see MALLOC ZONE table below
+MALLOC_SMALL                     284.0M   165.4M   165.4M    89.4M       0K       0K       0K       71         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              8192K      16K      16K     528K       0K       0K       0K        2         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 21:23:14
+Physical footprint:         23.9G
+Physical footprint (peak):  23.9G
+MALLOC_LARGE                      28.2G    12.4G    12.4G    11.2G       0K       0K       0K      375         see MALLOC ZONE table below
+MALLOC_SMALL                     284.0M    6656K    6656K   248.3M       0K       0K       0K       71         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              8192K       0K       0K     544K       0K       0K       0K        2         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 21:24:16
+Physical footprint:         24.4G
+Physical footprint (peak):  24.4G
+MALLOC_LARGE                      28.2G    12.1G    12.1G    12.0G       0K       0K       0K      375         see MALLOC ZONE table below
+MALLOC_SMALL                     288.0M    27.6M    27.6M   228.5M       0K       0K       0K       72         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              8192K     288K     288K     256K       0K       0K       0K        2         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 21:25:18
+Physical footprint:         24.4G
+Physical footprint (peak):  24.4G
+MALLOC_LARGE                      28.2G    12.5G    12.5G    11.6G       0K       0K       0K      375         see MALLOC ZONE table below
+MALLOC_SMALL                     288.0M    6784K    6784K   249.4M       0K       0K       0K       72         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              8192K       0K       0K     544K       0K       0K       0K        2         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 21:26:20
+Physical footprint:         24.9G
+Physical footprint (peak):  24.9G
+MALLOC_LARGE                      28.2G    12.6G    12.6G    12.0G       0K       0K       0K      375         see MALLOC ZONE table below
+MALLOC_SMALL                     284.0M    30.9M    30.9M   225.5M       0K       0K       0K       71         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              12.0M     496K     496K    1088K       0K       0K       0K        3         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 21:27:21
+Physical footprint:         24.9G
+Physical footprint (peak):  24.9G
+MALLOC_LARGE                      28.2G    12.0G    12.0G    12.6G       0K       0K       0K      375         see MALLOC ZONE table below
+MALLOC_SMALL                     284.0M    4048K    4048K   252.4M       0K       0K       0K       71         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              12.0M       0K       0K    1584K       0K       0K       0K        3         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 21:28:23
+Physical footprint:         25.4G
+Physical footprint (peak):  25.4G
+MALLOC_LARGE                      28.2G    12.1G    12.1G    13.0G       0K       0K       0K      375         see MALLOC ZONE table below
+MALLOC_SMALL                     288.0M    33.0M    33.0M   224.4M       0K       0K       0K       72         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              12.0M     480K     480K    1104K       0K       0K       0K        3         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 21:29:25
+Physical footprint:         25.4G
+Physical footprint (peak):  25.4G
+MALLOC_LARGE                      28.2G    11.9G    11.9G    13.3G       0K       0K       0K      375         see MALLOC ZONE table below
+MALLOC_SMALL                     288.0M    4080K    4080K   253.5M       0K       0K       0K       72         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              12.0M       0K       0K    1584K       0K       0K       0K        3         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 21:30:27
+Physical footprint:         25.9G
+Physical footprint (peak):  25.9G
+MALLOC_LARGE                      28.2G    12.6G    12.6G    13.1G       0K       0K       0K      375         see MALLOC ZONE table below
+MALLOC_SMALL                     288.0M    26.3M    26.3M   232.2M       0K       0K       0K       72         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              12.0M     256K     256K    1328K       0K       0K       0K        3         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 21:31:29
+Physical footprint:         25.9G
+Physical footprint (peak):  25.9G
+MALLOC_LARGE                      28.2G    11.6G    11.6G    14.0G       0K       0K       0K      375         see MALLOC ZONE table below
+MALLOC_SMALL                     288.0M    3648K    3648K   255.0M       0K       0K       0K       72         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              12.0M       0K       0K    1584K       0K       0K       0K        3         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 21:32:30
+Physical footprint:         26.4G
+Physical footprint (peak):  26.4G
+MALLOC_LARGE                      28.2G    11.4G    11.4G    14.7G       0K       0K       0K      375         see MALLOC ZONE table below
+MALLOC_SMALL                     288.0M    31.7M    31.7M   227.1M       0K       0K       0K       72         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              12.0M     384K     384K    2224K       0K       0K       0K        3         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 21:33:32
+Physical footprint:         26.4G
+Physical footprint (peak):  26.4G
+MALLOC_LARGE                      28.2G     9.9G     9.9G    16.2G       0K       0K       0K      375         see MALLOC ZONE table below
+MALLOC_SMALL                     288.0M    3360K    3360K   255.5M       0K       0K       0K       72         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              12.0M       0K       0K    2608K       0K       0K       0K        3         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 21:34:34
+Physical footprint:         26.9G
+Physical footprint (peak):  26.9G
+MALLOC_LARGE                      28.2G    10.6G    10.6G    16.1G       0K       0K       0K      375         see MALLOC ZONE table below
+MALLOC_SMALL                     288.0M    31.5M    31.5M   228.4M       0K       0K       0K       72         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              12.0M     320K     320K    2288K       0K       0K       0K        3         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 21:35:36
+Physical footprint:         26.9G
+Physical footprint (peak):  26.9G
+MALLOC_LARGE                      28.2G    11.6G    11.6G    15.0G       0K       0K       0K      375         see MALLOC ZONE table below
+MALLOC_SMALL                     288.0M    2864K    2864K   257.1M       0K       0K       0K       72         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              12.0M       0K       0K    2608K       0K       0K       0K        3         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 21:36:37
+Physical footprint:         26.9G
+Physical footprint (peak):  26.9G
+MALLOC_LARGE                      28.2G    11.4G    11.4G    15.3G       0K       0K       0K      375         see MALLOC ZONE table below
+MALLOC_SMALL                     288.0M    2464K    2464K   257.5M       0K       0K       0K       72         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              16.0M       0K       0K    2624K       0K       0K       0K        4         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 21:37:39
+Physical footprint:         27.4G
+Physical footprint (peak):  27.4G
+MALLOC_LARGE                      28.2G    11.3G    11.3G    15.8G       0K       0K       0K      375         see MALLOC ZONE table below
+MALLOC_SMALL                     288.0M    2496K    2496K   258.6M       0K       0K       0K       72         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              16.0M       0K       0K    2672K       0K       0K       0K        4         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 21:38:41
+Physical footprint:         27.4G
+Physical footprint (peak):  27.4G
+MALLOC_LARGE                      28.2G    10.4G    10.4G    16.7G       0K       0K       0K      375         see MALLOC ZONE table below
+MALLOC_SMALL                     288.0M    2416K    2416K   258.7M       0K       0K       0K       72         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              16.0M       0K       0K    2672K       0K       0K       0K        4         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 21:39:43
+Physical footprint:         27.9G
+Physical footprint (peak):  27.9G
+MALLOC_LARGE                      28.2G    11.6G    11.6G    16.0G       0K       0K       0K      375         see MALLOC ZONE table below
+MALLOC_SMALL                     292.0M    3840K    3840K   260.5M       0K       0K       0K       73         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              12.0M       0K       0K     624K       0K       0K       0K        3         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 21:40:45
+Physical footprint:         27.9G
+Physical footprint (peak):  27.9G
+MALLOC_LARGE                      28.2G    10.7G    10.7G    16.9G       0K       0K       0K      375         see MALLOC ZONE table below
+MALLOC_SMALL                     292.0M    2704K    2704K   261.6M       0K       0K       0K       73         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              12.0M       0K       0K     624K       0K       0K       0K        3         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 21:41:47
+Physical footprint:         27.9G
+Physical footprint (peak):  27.9G
+MALLOC_LARGE                      28.2G    10.9G    10.9G    16.8G       0K       0K       0K      375         see MALLOC ZONE table below
+MALLOC_SMALL                     292.0M    2528K    2528K   261.8M       0K       0K       0K       73         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              12.0M       0K       0K     624K       0K       0K       0K        3         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 21:42:48
+Physical footprint:         30.4G
+Physical footprint (peak):  30.4G
+MALLOC_LARGE                      30.7G    11.6G    11.6G    18.6G       0K       0K       0K      395         see MALLOC ZONE table below
+MALLOC_LARGE (reserved)           14.0G       0K       0K       0K       0K       0K       0K        1         see MALLOC ZONE table below
+MALLOC_SMALL                     296.0M    2576K    2576K   262.8M       0K       0K       0K       74         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              12.0M       0K       0K     656K       0K       0K       0K        3         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 21:43:50
+Physical footprint:         30.4G
+Physical footprint (peak):  30.4G
+MALLOC_LARGE                      44.7G    10.2G    10.2G    20.0G       0K       0K       0K      508         see MALLOC ZONE table below
+MALLOC_SMALL                     296.0M    3504K    3504K   261.9M       0K       0K       0K       74         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              12.0M       0K       0K     656K       0K       0K       0K        3         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 21:44:52
+Physical footprint:         30.4G
+Physical footprint (peak):  30.4G
+MALLOC_LARGE                      44.7G    11.2G    11.2G    18.9G       0K       0K       0K      508         see MALLOC ZONE table below
+MALLOC_SMALL                     296.0M    2512K    2512K   264.1M       0K       0K       0K       74         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              12.0M       0K       0K     656K       0K       0K       0K        3         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 21:45:54
+Physical footprint:         30.4G
+Physical footprint (peak):  30.4G
+MALLOC_LARGE                      44.7G    11.7G    11.7G    18.4G       0K       0K       0K      508         see MALLOC ZONE table below
+MALLOC_SMALL                     296.0M    3616K    3616K   263.0M       0K       0K       0K       74         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              12.0M       0K       0K     656K       0K       0K       0K        3         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 21:46:57
+Physical footprint:         30.4G
+Physical footprint (peak):  30.4G
+MALLOC_LARGE                      44.7G    10.0G    10.0G    20.1G       0K       0K       0K      508         see MALLOC ZONE table below
+MALLOC_SMALL                     292.0M    2912K    2912K   262.8M       0K       0K       0K       73         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              16.0M       0K       0K    2704K       0K       0K       0K        4         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 21:47:59
+Physical footprint:         30.4G
+Physical footprint (peak):  30.4G
+MALLOC_LARGE                      44.7G    11.3G    11.3G    18.9G       0K       0K       0K      508         see MALLOC ZONE table below
+MALLOC_SMALL                     292.0M    3424K    3424K   262.3M       0K       0K       0K       73         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              16.0M       0K       0K    2704K       0K       0K       0K        4         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 21:49:01
+Physical footprint:         30.4G
+Physical footprint (peak):  30.4G
+MALLOC_LARGE                      44.7G    11.2G    11.2G    18.9G       0K       0K       0K      508         see MALLOC ZONE table below
+MALLOC_SMALL                     296.0M    32.7M    32.7M   236.0M       0K       0K       0K       74         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              12.0M     320K     320K     336K       0K       0K       0K        3         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 21:50:03
+Physical footprint:         30.4G
+Physical footprint (peak):  30.4G
+MALLOC_LARGE                      44.7G    11.5G    11.5G    18.6G       0K       0K       0K      508         see MALLOC ZONE table below
+MALLOC_SMALL                     296.0M    2544K    2544K   266.2M       0K       0K       0K       74         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              12.0M       0K       0K     656K       0K       0K       0K        3         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 21:51:05
+Physical footprint:         30.4G
+Physical footprint (peak):  30.4G
+MALLOC_LARGE                      44.7G    10.6G    10.6G    19.6G       0K       0K       0K      508         see MALLOC ZONE table below
+MALLOC_SMALL                     300.0M   161.1M   161.1M   107.6M       0K       0K       0K       75         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              8192K      16K      16K     624K       0K       0K       0K        2         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 21:52:07
+Physical footprint:         30.9G
+Physical footprint (peak):  30.9G
+MALLOC_LARGE                      44.7G    11.3G    11.3G    19.3G       0K       0K       0K      508         see MALLOC ZONE table below
+MALLOC_SMALL                     296.0M    3376K    3376K   266.5M       0K       0K       0K       74         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              12.0M       0K       0K     656K       0K       0K       0K        3         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 21:53:10
+Physical footprint:         30.9G
+Physical footprint (peak):  30.9G
+MALLOC_LARGE                      44.7G    10.9G    10.9G    19.7G       0K       0K       0K      508         see MALLOC ZONE table below
+MALLOC_SMALL                     296.0M    2480K    2480K   267.4M       0K       0K       0K       74         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              12.0M       0K       0K     656K       0K       0K       0K        3         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 21:54:12
+Physical footprint:         31.4G
+Physical footprint (peak):  31.4G
+MALLOC_LARGE                      44.7G    11.4G    11.4G    19.7G       0K       0K       0K      508         see MALLOC ZONE table below
+MALLOC_SMALL                     300.0M   161.2M   161.2M   109.6M       0K       0K       0K       75         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              12.0M      16K      16K     640K       0K       0K       0K        3         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 21:55:14
+Physical footprint:         31.4G
+Physical footprint (peak):  31.4G
+MALLOC_LARGE                      44.7G     9.8G     9.8G    21.4G       0K       0K       0K      508         see MALLOC ZONE table below
+MALLOC_SMALL                     300.0M    2864K    2864K   268.1M       0K       0K       0K       75         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              12.0M      16K      16K     640K       0K       0K       0K        3         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 21:56:16
+Physical footprint:         31.4G
+Physical footprint (peak):  31.4G
+MALLOC_LARGE                      44.7G    11.7G    11.7G    19.5G       0K       0K       0K      508         see MALLOC ZONE table below
+MALLOC_SMALL                     300.0M    33.7M    33.7M   237.3M       0K       0K       0K       75         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              16.0M     432K     432K    1248K       0K       0K       0K        4         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 21:57:18
+Physical footprint:         31.9G
+Physical footprint (peak):  31.9G
+MALLOC_LARGE                      44.7G    10.4G    10.4G    21.2G       0K       0K       0K      508         see MALLOC ZONE table below
+MALLOC_SMALL                     300.0M    2704K    2704K   268.3M       0K       0K       0K       75         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              16.0M       0K       0K    1680K       0K       0K       0K        4         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 21:58:20
+Physical footprint:         31.9G
+Physical footprint (peak):  31.9G
+MALLOC_LARGE                      44.7G    11.1G    11.1G    20.5G       0K       0K       0K      508         see MALLOC ZONE table below
+MALLOC_SMALL                     300.0M    3024K    3024K   268.0M       0K       0K       0K       75         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              16.0M       0K       0K    1680K       0K       0K       0K        4         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 21:59:23
+Physical footprint:         32.4G
+Physical footprint (peak):  32.4G
+MALLOC_LARGE                      44.7G    10.7G    10.7G    21.5G       0K       0K       0K      508         see MALLOC ZONE table below
+MALLOC_SMALL                     304.0M   160.6M   160.6M   111.4M       0K       0K       0K       76         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              12.0M      16K      16K    1648K       0K       0K       0K        3         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 22:00:25
+Physical footprint:         32.4G
+Physical footprint (peak):  32.4G
+MALLOC_LARGE                      44.7G    11.8G    11.8G    20.4G       0K       0K       0K      508         see MALLOC ZONE table below
+MALLOC_SMALL                     300.0M    3904K    3904K   268.2M       0K       0K       0K       75         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              16.0M       0K       0K    1680K       0K       0K       0K        4         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 22:01:27
+Physical footprint:         32.9G
+Physical footprint (peak):  32.9G
+MALLOC_LARGE                      44.7G    10.5G    10.5G    22.1G       0K       0K       0K      508         see MALLOC ZONE table below
+MALLOC_SMALL                     300.0M    2416K    2416K   270.7M       0K       0K       0K       75         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              16.0M       0K       0K    1680K       0K       0K       0K        4         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 22:02:29
+Physical footprint:         32.9G
+Physical footprint (peak):  32.9G
+MALLOC_LARGE                      44.7G    11.1G    11.1G    21.5G       0K       0K       0K      508         see MALLOC ZONE table below
+MALLOC_SMALL                     300.0M    2704K    2704K   270.4M       0K       0K       0K       75         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              16.0M       0K       0K    1680K       0K       0K       0K        4         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 22:03:31
+Physical footprint:         33.4G
+Physical footprint (peak):  33.4G
+MALLOC_LARGE                      44.7G    10.5G    10.5G    22.7G       0K       0K       0K      508         see MALLOC ZONE table below
+MALLOC_SMALL                     300.0M    31.5M    31.5M   242.5M       0K       0K       0K       75         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              16.0M     192K     192K    1488K       0K       0K       0K        4         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 22:04:34
+Physical footprint:         33.4G
+Physical footprint (peak):  33.4G
+MALLOC_LARGE                      44.7G    11.1G    11.1G    22.0G       0K       0K       0K      508         see MALLOC ZONE table below
+MALLOC_SMALL                     300.0M    2832K    2832K   271.3M       0K       0K       0K       75         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              16.0M       0K       0K    1680K       0K       0K       0K        4         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 22:05:36
+Physical footprint:         33.4G
+Physical footprint (peak):  33.4G
+MALLOC_LARGE                      44.7G    10.7G    10.7G    22.5G       0K       0K       0K      508         see MALLOC ZONE table below
+MALLOC_SMALL                     300.0M    2448K    2448K   271.7M       0K       0K       0K       75         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              16.0M       0K       0K    1680K       0K       0K       0K        4         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 22:06:38
+Physical footprint:         33.9G
+Physical footprint (peak):  33.9G
+MALLOC_LARGE                      44.7G    10.9G    10.9G    22.7G       0K       0K       0K      508         see MALLOC ZONE table below
+MALLOC_SMALL                     304.0M    2848K    2848K   273.5M       0K       0K       0K       76         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              12.0M       0K       0K     656K       0K       0K       0K        3         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 22:07:40
+Physical footprint:         33.9G
+Physical footprint (peak):  33.9G
+MALLOC_LARGE                      44.7G    10.3G    10.3G    23.4G       0K       0K       0K      508         see MALLOC ZONE table below
+MALLOC_SMALL                     304.0M    2800K    2800K   273.6M       0K       0K       0K       76         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              12.0M       0K       0K     656K       0K       0K       0K        3         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 22:08:42
+Physical footprint:         34.4G
+Physical footprint (peak):  34.4G
+MALLOC_LARGE                      44.7G    11.3G    11.3G    22.9G       0K       0K       0K      508         see MALLOC ZONE table below
+MALLOC_SMALL                     304.0M    2864K    2864K   274.7M       0K       0K       0K       76         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              12.0M       0K       0K     656K       0K       0K       0K        3         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 22:09:45
+Physical footprint:         34.4G
+Physical footprint (peak):  34.4G
+MALLOC_LARGE                      44.7G    11.4G    11.4G    22.8G       0K       0K       0K      508         see MALLOC ZONE table below
+MALLOC_SMALL                     304.0M    3216K    3216K   274.3M       0K       0K       0K       76         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              12.0M       0K       0K     656K       0K       0K       0K        3         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 22:10:47
+Physical footprint:         34.9G
+Physical footprint (peak):  34.9G
+MALLOC_LARGE                      44.7G     9.8G     9.8G    24.9G       0K       0K       0K      508         see MALLOC ZONE table below
+MALLOC_SMALL                     308.0M   161.0M   161.0M   117.5M       0K       0K       0K       77         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              12.0M      16K      16K     640K       0K       0K       0K        3         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 22:11:49
+Physical footprint:         34.9G
+Physical footprint (peak):  34.9G
+MALLOC_LARGE                      44.7G    11.7G    11.7G    23.0G       0K       0K       0K      508         see MALLOC ZONE table below
+MALLOC_SMALL                     312.0M   161.2M   161.2M   117.3M       0K       0K       0K       78         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              8192K       0K       0K     640K       0K       0K       0K        2         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 22:12:51
+Physical footprint:         34.9G
+Physical footprint (peak):  34.9G
+MALLOC_LARGE                      44.7G    11.1G    11.1G    23.6G       0K       0K       0K      508         see MALLOC ZONE table below
+MALLOC_SMALL                     312.0M   161.1M   161.1M   117.4M       0K       0K       0K       78         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              8192K      16K      16K     624K       0K       0K       0K        2         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 22:13:53
+Physical footprint:         35.4G
+Physical footprint (peak):  35.4G
+MALLOC_LARGE                      44.7G    11.2G    11.2G    23.9G       0K       0K       0K      508         see MALLOC ZONE table below
+MALLOC_SMALL                     312.0M    3536K    3536K   276.6M       0K       0K       0K       78         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              8192K       0K       0K      32K       0K       0K       0K        2         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 22:14:55
+Physical footprint:         35.4G
+Physical footprint (peak):  35.4G
+MALLOC_LARGE                      44.7G    10.9G    10.9G    24.3G       0K       0K       0K      508         see MALLOC ZONE table below
+MALLOC_SMALL                     312.0M    48.1M    48.1M   232.0M       0K       0K       0K       78         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              8192K      16K      16K      16K       0K       0K       0K        2         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 22:15:58
+Physical footprint:         35.4G
+Physical footprint (peak):  35.4G
+MALLOC_LARGE                      44.7G    11.6G    11.6G    23.5G       0K       0K       0K      508         see MALLOC ZONE table below
+MALLOC_SMALL                     308.0M    32.8M    32.8M   246.9M       0K       0K       0K       77         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              12.0M     256K     256K     400K       0K       0K       0K        3         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 22:17:00
+Physical footprint:         35.9G
+Physical footprint (peak):  35.9G
+MALLOC_LARGE                      44.7G    10.4G    10.4G    25.2G       0K       0K       0K      508         see MALLOC ZONE table below
+MALLOC_SMALL                     308.0M    2416K    2416K   277.3M       0K       0K       0K       77         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              12.0M       0K       0K     656K       0K       0K       0K        3         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 22:18:02
+Physical footprint:         35.9G
+Physical footprint (peak):  35.9G
+MALLOC_LARGE                      44.7G    11.5G    11.5G    24.1G       0K       0K       0K      508         see MALLOC ZONE table below
+MALLOC_SMALL                     308.0M    3488K    3488K   276.3M       0K       0K       0K       77         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              12.0M       0K       0K     656K       0K       0K       0K        3         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 22:19:04
+Physical footprint:         36.4G
+Physical footprint (peak):  36.4G
+MALLOC_LARGE                      44.7G    10.0G    10.0G    26.1G       0K       0K       0K      508         see MALLOC ZONE table below
+MALLOC_SMALL                     308.0M    2688K    2688K   278.1M       0K       0K       0K       77         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              12.0M       0K       0K     656K       0K       0K       0K        3         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 22:20:06
+Physical footprint:         36.4G
+Physical footprint (peak):  36.4G
+MALLOC_LARGE                      44.7G    10.6G    10.6G    25.6G       0K       0K       0K      508         see MALLOC ZONE table below
+MALLOC_SMALL                     308.0M    3680K    3680K   277.1M       0K       0K       0K       77         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              12.0M       0K       0K     656K       0K       0K       0K        3         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 22:21:08
+Physical footprint:         36.9G
+Physical footprint (peak):  36.9G
+MALLOC_LARGE                      44.7G     9.8G     9.8G    26.9G       0K       0K       0K      508         see MALLOC ZONE table below
+MALLOC_SMALL                     308.0M    2576K    2576K   280.3M       0K       0K       0K       77         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              12.0M       0K       0K     656K       0K       0K       0K        3         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 22:22:11
+Physical footprint:         36.9G
+Physical footprint (peak):  36.9G
+MALLOC_LARGE                      44.7G    10.7G    10.7G    25.9G       0K       0K       0K      508         see MALLOC ZONE table below
+MALLOC_SMALL                     308.0M    2688K    2688K   280.2M       0K       0K       0K       77         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              12.0M       0K       0K     656K       0K       0K       0K        3         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 22:23:13
+Physical footprint:         36.9G
+Physical footprint (peak):  36.9G
+MALLOC_LARGE                      44.7G    10.9G    10.9G    25.7G       0K       0K       0K      508         see MALLOC ZONE table below
+MALLOC_SMALL                     308.0M    2336K    2336K   280.6M       0K       0K       0K       77         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              12.0M       0K       0K     656K       0K       0K       0K        3         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 22:24:15
+Physical footprint:         37.4G
+Physical footprint (peak):  37.4G
+MALLOC_LARGE                      44.7G    11.4G    11.4G    25.8G       0K       0K       0K      508         see MALLOC ZONE table below
+MALLOC_SMALL                     312.0M    2896K    2896K   281.0M       0K       0K       0K       78         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              12.0M       0K       0K     656K       0K       0K       0K        3         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 22:25:18
+Physical footprint:         37.4G
+Physical footprint (peak):  37.4G
+MALLOC_LARGE                      44.7G    11.5G    11.5G    25.7G       0K       0K       0K      508         see MALLOC ZONE table below
+MALLOC_SMALL                     312.0M    2592K    2592K   281.3M       0K       0K       0K       78         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              12.0M       0K       0K     656K       0K       0K       0K        3         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 22:26:20
+Physical footprint:         37.9G
+Physical footprint (peak):  37.9G
+MALLOC_LARGE                      44.7G    10.8G    10.8G    26.9G       0K       0K       0K      508         see MALLOC ZONE table below
+MALLOC_SMALL                     312.0M    2496K    2496K   282.5M       0K       0K       0K       78         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              12.0M       0K       0K     656K       0K       0K       0K        3         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 22:27:22
+Physical footprint:         37.9G
+Physical footprint (peak):  37.9G
+MALLOC_LARGE                      44.7G    11.3G    11.3G    26.3G       0K       0K       0K      508         see MALLOC ZONE table below
+MALLOC_SMALL                     312.0M    2544K    2544K   282.4M       0K       0K       0K       78         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              12.0M       0K       0K     656K       0K       0K       0K        3         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 22:28:24
+Physical footprint:         38.4G
+Physical footprint (peak):  38.4G
+MALLOC_LARGE                      44.7G    10.8G    10.8G    27.4G       0K       0K       0K      508         see MALLOC ZONE table below
+MALLOC_SMALL                     312.0M    29.5M    29.5M   255.4M       0K       0K       0K       78         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              12.0M     144K     144K     512K       0K       0K       0K        3         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 22:29:26
+Physical footprint:         38.4G
+Physical footprint (peak):  38.4G
+MALLOC_LARGE                      44.7G    10.8G    10.8G    27.4G       0K       0K       0K      508         see MALLOC ZONE table below
+MALLOC_SMALL                     312.0M    2432K    2432K   282.5M       0K       0K       0K       78         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              12.0M       0K       0K     656K       0K       0K       0K        3         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 22:30:28
+Physical footprint:         38.4G
+Physical footprint (peak):  38.4G
+MALLOC_LARGE                      44.7G    10.7G    10.7G    27.4G       0K       0K       0K      508         see MALLOC ZONE table below
+MALLOC_SMALL                     312.0M    2864K    2864K   282.1M       0K       0K       0K       78         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              12.0M       0K       0K     656K       0K       0K       0K        3         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 22:31:31
+Physical footprint:         38.9G
+Physical footprint (peak):  38.9G
+MALLOC_LARGE                      44.7G    10.0G    10.0G    28.6G       0K       0K       0K      508         see MALLOC ZONE table below
+MALLOC_SMALL                     312.0M    2880K    2880K   281.1M       0K       0K       0K       78         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              16.0M       0K       0K    2704K       0K       0K       0K        4         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 22:32:33
+Physical footprint:         38.9G
+Physical footprint (peak):  38.9G
+MALLOC_LARGE                      44.7G    11.1G    11.1G    27.5G       0K       0K       0K      508         see MALLOC ZONE table below
+MALLOC_SMALL                     312.0M    3744K    3744K   280.3M       0K       0K       0K       78         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              16.0M      16K      16K    2688K       0K       0K       0K        4         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 22:33:35
+Physical footprint:         39.4G
+Physical footprint (peak):  39.4G
+MALLOC_LARGE                      44.7G    10.5G    10.5G    28.6G       0K       0K       0K      508         see MALLOC ZONE table below
+MALLOC_SMALL                     312.0M    2880K    2880K   284.1M       0K       0K       0K       78         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              16.0M       0K       0K    1680K       0K       0K       0K        4         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 22:34:37
+Physical footprint:         39.4G
+Physical footprint (peak):  39.4G
+MALLOC_LARGE                      44.7G    10.0G    10.0G    29.2G       0K       0K       0K      508         see MALLOC ZONE table below
+MALLOC_SMALL                     312.0M    2208K    2208K   284.8M       0K       0K       0K       78         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              16.0M       0K       0K    1680K       0K       0K       0K        4         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 22:35:40
+Physical footprint:         39.4G
+Physical footprint (peak):  39.4G
+MALLOC_LARGE                      44.7G    12.1G    12.1G    27.0G       0K       0K       0K      508         see MALLOC ZONE table below
+MALLOC_SMALL                     312.0M   163.1M   163.1M   123.9M       0K       0K       0K       78         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              16.0M      48K      48K    1648K       0K       0K       0K        4         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 22:36:42
+Physical footprint:         39.9G
+Physical footprint (peak):  39.9G
+MALLOC_LARGE                      44.7G    13.2G    13.2G    26.5G       0K       0K       0K      508         see MALLOC ZONE table below
+MALLOC_SMALL                     316.0M   190.0M   190.0M    97.9M       0K       0K       0K       79         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              16.0M     128K     128K    1568K       0K       0K       0K        4         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 22:37:44
+Physical footprint:         39.9G
+Physical footprint (peak):  39.9G
+MALLOC_LARGE                      44.7G    13.2G    13.2G    26.4G       0K       0K       0K      508         see MALLOC ZONE table below
+MALLOC_SMALL                     316.0M   192.4M   192.4M    96.6M       0K       0K       0K       79         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              16.0M     320K     320K    1376K       0K       0K       0K        4         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 22:38:45
+Physical footprint:         40.4G
+Physical footprint (peak):  40.4G
+MALLOC_LARGE                      44.7G    13.7G    13.7G    26.4G       0K       0K       0K      508         see MALLOC ZONE table below
+MALLOC_SMALL                     316.0M   192.4M   192.4M    96.6M       0K       0K       0K       79         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              16.0M     320K     320K    1376K       0K       0K       0K        4         see MALLOC ZONE table below
+mapped file                         80K      80K       0K       0K       0K       0K       0K        1 
+    Index:   building
+=== 22:40:13
+Physical footprint:         41.0G
+Physical footprint (peak):  41.0G
+MALLOC_LARGE                      44.7G    14.2G    14.2G    26.4G       0K       0K       0K      508         see MALLOC ZONE table below
+MALLOC_SMALL                     316.0M   195.4M   195.4M    94.6M       0K       0K       0K       79         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              16.0M     544K     544K    1152K       0K       0K       0K        4         see MALLOC ZONE table below
+    Index:   building
+=== 22:42:15
+Physical footprint:         41.5G
+Physical footprint (peak):  41.5G
+MALLOC_LARGE                      44.7G    14.7G    14.7G    26.4G       0K       0K       0K      508         see MALLOC ZONE table below
+MALLOC_SMALL                     320.0M   200.5M   200.5M    91.6M       0K       0K       0K       80         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              12.0M     544K     544K     128K       0K       0K       0K        3         see MALLOC ZONE table below
+    Index:   building
+=== 22:44:17
+Physical footprint:         42.0G
+Physical footprint (peak):  42.0G
+MALLOC_LARGE                      44.7G    15.2G    15.2G    26.4G       0K       0K       0K      508         see MALLOC ZONE table below
+MALLOC_SMALL                     316.0M   200.5M   200.5M    90.6M       0K       0K       0K       79         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              16.0M    2592K    2592K     128K       0K       0K       0K        4         see MALLOC ZONE table below
+    Index:   building
+=== 22:46:19
+Physical footprint:         42.5G
+Physical footprint (peak):  42.5G
+MALLOC_LARGE                      44.7G    15.7G    15.7G    26.4G       0K       0K       0K      508         see MALLOC ZONE table below
+MALLOC_SMALL                     320.0M   203.9M   203.9M    90.2M       0K       0K       0K       80         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              12.0M     560K     560K     112K       0K       0K       0K        3         see MALLOC ZONE table below
+    Index:   building
+=== 22:48:21
+Physical footprint:         43.0G
+Physical footprint (peak):  43.0G
+MALLOC_LARGE                      44.7G    16.2G    16.2G    26.4G       0K       0K       0K      508         see MALLOC ZONE table below
+MALLOC_SMALL                     324.0M   205.2M   205.2M    90.0M       0K       0K       0K       81         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              12.0M     560K     560K     112K       0K       0K       0K        3         see MALLOC ZONE table below
+    Index:   building
+=== 22:50:23
+Physical footprint:         43.5G
+Physical footprint (peak):  43.5G
+MALLOC_LARGE                      44.7G    16.7G    16.7G    26.4G       0K       0K       0K      508         see MALLOC ZONE table below
+MALLOC_SMALL                     320.0M   206.0M   206.0M    89.2M       0K       0K       0K       80         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              16.0M    1584K    1584K     112K       0K       0K       0K        4         see MALLOC ZONE table below
+    Index:   building
+=== 22:52:25
+Physical footprint:         44.0G
+Physical footprint (peak):  44.0G
+MALLOC_LARGE                      44.7G    17.2G    17.2G    26.4G       0K       0K       0K      508         see MALLOC ZONE table below
+MALLOC_SMALL                     324.0M   207.5M   207.5M    88.8M       0K       0K       0K       81         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              16.0M    1584K    1584K     112K       0K       0K       0K        4         see MALLOC ZONE table below
+    Index:   building
+=== 22:54:27
+Physical footprint:         44.5G
+Physical footprint (peak):  44.5G
+MALLOC_LARGE                      44.7G    17.7G    17.7G    26.4G       0K       0K       0K      508         see MALLOC ZONE table below
+MALLOC_SMALL                     328.0M   209.4M   209.4M    88.0M       0K       0K       0K       82         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              12.0M    1552K    1552K     112K       0K       0K       0K        3         see MALLOC ZONE table below
+    Index:   building
+=== 22:56:29
+Physical footprint:         46.5G
+Physical footprint (peak):  46.5G
+MALLOC_LARGE                      46.8G    19.8G    19.8G    26.4G       0K       0K       0K      525         see MALLOC ZONE table below
+MALLOC_LARGE (reserved)             16K       0K       0K       0K       0K       0K       0K        1         see MALLOC ZONE table below
+MALLOC_SMALL                     324.0M   211.2M   211.2M    87.3M       0K       0K       0K       81         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              16.0M    1584K    1584K     112K       0K       0K       0K        4         see MALLOC ZONE table below
+    Index:   building
+=== 22:58:31
+Physical footprint:         46.5G
+Physical footprint (peak):  46.5G
+MALLOC_LARGE                      46.8G    19.8G    19.8G    26.4G       0K       0K       0K      526         see MALLOC ZONE table below
+MALLOC_SMALL                     328.0M   214.0M   214.0M    86.5M       0K       0K       0K       82         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              12.0M     560K     560K     112K       0K       0K       0K        3         see MALLOC ZONE table below
+    Index:   building
+=== 23:00:33
+Physical footprint:         46.5G
+Physical footprint (peak):  46.5G
+MALLOC_LARGE                      46.8G    19.8G    19.8G    26.4G       0K       0K       0K      526         see MALLOC ZONE table below
+MALLOC_SMALL                     328.0M   215.2M   215.2M    86.3M       0K       0K       0K       82         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              12.0M     560K     560K     112K       0K       0K       0K        3         see MALLOC ZONE table below
+    Index:   building
+=== 23:02:36
+Physical footprint:         46.5G
+Physical footprint (peak):  46.5G
+MALLOC_LARGE                      46.8G    19.8G    19.8G    26.4G       0K       0K       0K      526         see MALLOC ZONE table below
+MALLOC_SMALL                     332.0M   215.2M   215.2M    86.3M       0K       0K       0K       83         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              8192K     528K     528K     112K       0K       0K       0K        2         see MALLOC ZONE table below
+    Index:   building
+=== 23:04:38
+Physical footprint:         46.5G
+Physical footprint (peak):  46.5G
+MALLOC_LARGE                      46.8G    19.8G    19.8G    26.4G       0K       0K       0K      526         see MALLOC ZONE table below
+MALLOC_SMALL                     328.0M   217.0M   217.0M    85.6M       0K       0K       0K       82         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              12.0M     560K     560K     112K       0K       0K       0K        3         see MALLOC ZONE table below
+    Index:   building
+=== 23:06:40
+Physical footprint:         48.6G
+Physical footprint (peak):  48.6G
+MALLOC_LARGE                      48.8G    21.9G    21.9G    26.4G       0K       0K       0K      543         see MALLOC ZONE table below
+MALLOC_LARGE (reserved)             16K       0K       0K       0K       0K       0K       0K        1         see MALLOC ZONE table below
+MALLOC_SMALL                     336.0M   218.8M   218.8M    84.8M       0K       0K       0K       84         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              8192K     528K     528K     112K       0K       0K       0K        2         see MALLOC ZONE table below
+    Index:   building
+=== 23:08:42
+Physical footprint:         48.6G
+Physical footprint (peak):  48.6G
+MALLOC_LARGE                      48.8G    21.9G    21.9G    26.4G       0K       0K       0K      544         see MALLOC ZONE table below
+MALLOC_SMALL                     328.0M   219.0M   219.0M    84.7M       0K       0K       0K       82         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              16.0M    1584K    1584K     112K       0K       0K       0K        4         see MALLOC ZONE table below
+    Index:   building
+=== 23:10:44
+Physical footprint:         48.6G
+Physical footprint (peak):  48.6G
+MALLOC_LARGE                      48.8G    21.9G    21.9G    26.4G       0K       0K       0K      544         see MALLOC ZONE table below
+MALLOC_SMALL                     332.0M   221.1M   221.1M    84.5M       0K       0K       0K       83         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              12.0M     560K     560K     112K       0K       0K       0K        3         see MALLOC ZONE table below
+    Index:   building
+=== 23:12:46
+Physical footprint:         48.6G
+Physical footprint (peak):  48.6G
+MALLOC_LARGE                      48.8G    21.9G    21.9G    26.4G       0K       0K       0K      544         see MALLOC ZONE table below
+MALLOC_SMALL                     332.0M   222.4M   222.4M    84.2M       0K       0K       0K       83         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              12.0M     560K     560K     112K       0K       0K       0K        3         see MALLOC ZONE table below
+    Index:   building
+=== 23:14:48
+Physical footprint:         50.7G
+Physical footprint (peak):  50.7G
+MALLOC_LARGE                      50.9G    23.9G    23.9G    26.4G       0K       0K       0K      561         see MALLOC ZONE table below
+MALLOC_LARGE (reserved)             16K       0K       0K       0K       0K       0K       0K        1         see MALLOC ZONE table below
+MALLOC_SMALL                     340.0M   223.7M   223.7M    84.0M       0K       0K       0K       85         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              8192K     528K     528K     112K       0K       0K       0K        2         see MALLOC ZONE table below
+    Index:   building
+=== 23:16:50
+Physical footprint:         50.7G
+Physical footprint (peak):  50.7G
+MALLOC_LARGE                      50.9G    23.9G    23.9G    26.4G       0K       0K       0K      562         see MALLOC ZONE table below
+MALLOC_SMALL                     336.0M   224.8M   224.8M    83.9M       0K       0K       0K       84         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              12.0M     560K     560K     112K       0K       0K       0K        3         see MALLOC ZONE table below
+    Index:   building
+=== 23:18:52
+Physical footprint:         50.7G
+Physical footprint (peak):  50.7G
+MALLOC_LARGE                      50.9G    23.9G    23.9G    26.4G       0K       0K       0K      562         see MALLOC ZONE table below
+MALLOC_SMALL                     336.0M   226.0M   226.0M    83.7M       0K       0K       0K       84         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              12.0M     560K     560K     112K       0K       0K       0K        3         see MALLOC ZONE table below
+    Index:   building
+=== 23:20:54
+Physical footprint:         50.7G
+Physical footprint (peak):  50.7G
+MALLOC_LARGE                      50.9G    23.9G    23.9G    26.4G       0K       0K       0K      562         see MALLOC ZONE table below
+MALLOC_SMALL                     336.0M   227.1M   227.1M    83.6M       0K       0K       0K       84         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              12.0M     560K     560K     112K       0K       0K       0K        3         see MALLOC ZONE table below
+    Index:   building
+=== 23:22:57
+Physical footprint:         52.7G
+Physical footprint (peak):  52.7G
+MALLOC_LARGE                      52.9G    26.0G    26.0G    26.4G       0K       0K       0K      579         see MALLOC ZONE table below
+MALLOC_LARGE (reserved)             16K       0K       0K       0K       0K       0K       0K        1         see MALLOC ZONE table below
+MALLOC_SMALL                     336.0M   228.3M   228.3M    83.4M       0K       0K       0K       84         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              12.0M     560K     560K     112K       0K       0K       0K        3         see MALLOC ZONE table below
+    Index:   building
+=== 23:24:59
+Physical footprint:         52.7G
+Physical footprint (peak):  52.7G
+MALLOC_LARGE                      52.9G    26.0G    26.0G    26.4G       0K       0K       0K      580         see MALLOC ZONE table below
+MALLOC_SMALL                     340.0M   229.6M   229.6M    83.1M       0K       0K       0K       85         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              12.0M     560K     560K     112K       0K       0K       0K        3         see MALLOC ZONE table below
+    Index:   building
+=== 23:27:01
+Physical footprint:         52.7G
+Physical footprint (peak):  52.7G
+MALLOC_LARGE                      52.9G    26.0G    26.0G    26.4G       0K       0K       0K      580         see MALLOC ZONE table below
+MALLOC_SMALL                     340.0M   230.0M   230.0M    82.7M       0K       0K       0K       85         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              16.0M    1696K    1696K      80K       0K       0K       0K        4         see MALLOC ZONE table below
+    Index:   building
+=== 23:29:03
+Physical footprint:         52.7G
+Physical footprint (peak):  52.7G
+MALLOC_LARGE                      52.9G    26.0G    26.0G    26.4G       0K       0K       0K      580         see MALLOC ZONE table below
+MALLOC_SMALL                     340.0M   231.1M   231.1M    82.6M       0K       0K       0K       85         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              16.0M    1696K    1696K      80K       0K       0K       0K        4         see MALLOC ZONE table below
+    Index:   building
+=== 23:31:06
+Physical footprint:         54.8G
+Physical footprint (peak):  54.8G
+MALLOC_LARGE                      55.0G    20.1G    20.1G    34.4G       0K       0K       0K      597         see MALLOC ZONE table below
+MALLOC_LARGE (reserved)             16K       0K       0K       0K       0K       0K       0K        1         see MALLOC ZONE table below
+MALLOC_SMALL                     344.0M   216.4M   216.4M    98.5M       0K       0K       0K       86         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              12.0M     560K     560K    1184K       0K       0K       0K        3         see MALLOC ZONE table below
+    Index:   building
+=== 23:33:08
+Physical footprint:         54.8G
+Physical footprint (peak):  54.8G
+MALLOC_LARGE                      55.0G    20.1G    20.1G    34.4G       0K       0K       0K      598         see MALLOC ZONE table below
+MALLOC_SMALL                     344.0M   219.7M   219.7M    97.2M       0K       0K       0K       86         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              12.0M     592K     592K     160K       0K       0K       0K        3         see MALLOC ZONE table below
+    Index:   building
+=== 23:35:10
+Physical footprint:         54.8G
+Physical footprint (peak):  54.8G
+MALLOC_LARGE                      55.0G    17.6G    17.6G    36.9G       0K       0K       0K      598         see MALLOC ZONE table below
+MALLOC_SMALL                     344.0M   211.8M   211.8M   106.1M       0K       0K       0K       86         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              12.0M     592K     592K     160K       0K       0K       0K        3         see MALLOC ZONE table below
+    Index:   building
+=== 23:37:12
+Physical footprint:         54.8G
+Physical footprint (peak):  54.8G
+MALLOC_LARGE                      55.0G    17.7G    17.7G    36.8G       0K       0K       0K      598         see MALLOC ZONE table below
+MALLOC_SMALL                     344.0M   207.9M   207.9M   111.0M       0K       0K       0K       86         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              12.0M     352K     352K     400K       0K       0K       0K        3         see MALLOC ZONE table below
+    Index:   building
+=== 23:39:15
+Physical footprint:         56.9G
+Physical footprint (peak):  56.9G
+MALLOC_LARGE                      57.1G    13.2G    13.2G    43.3G       0K       0K       0K      615         see MALLOC ZONE table below
+MALLOC_LARGE (reserved)             16K       0K       0K       0K       0K       0K       0K        1         see MALLOC ZONE table below
+MALLOC_SMALL                     348.0M   187.6M   187.6M   132.4M       0K       0K       0K       87         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              12.0M     176K     176K     576K       0K       0K       0K        3         see MALLOC ZONE table below
+    Index:   building
+=== 23:41:17
+Physical footprint:         56.9G
+Physical footprint (peak):  56.9G
+MALLOC_LARGE                      57.1G    11.7G    11.7G    44.8G       0K       0K       0K      616         see MALLOC ZONE table below
+MALLOC_SMALL                     352.0M   161.2M   161.2M   158.8M       0K       0K       0K       88         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              8192K       0K       0K     720K       0K       0K       0K        2         see MALLOC ZONE table below
+    Index:   building
+=== 23:43:20
+Physical footprint:         56.9G
+Physical footprint (peak):  56.9G
+MALLOC_LARGE                      57.1G    12.4G    12.4G    44.1G       0K       0K       0K      616         see MALLOC ZONE table below
+MALLOC_SMALL                     348.0M   163.9M   163.9M   156.2M       0K       0K       0K       87         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              12.0M      16K      16K    1728K       0K       0K       0K        3         see MALLOC ZONE table below
+    Index:   building
+=== 23:45:23
+Physical footprint:         56.9G
+Physical footprint (peak):  56.9G
+MALLOC_LARGE                      57.1G    12.6G    12.6G    43.9G       0K       0K       0K      616         see MALLOC ZONE table below
+MALLOC_SMALL                     352.0M   190.9M   190.9M   131.2M       0K       0K       0K       88         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              8192K     448K     448K     288K       0K       0K       0K        2         see MALLOC ZONE table below
+    
+=== 23:47:55
+Physical footprint:         56.9G
+Physical footprint (peak):  56.9G
+MALLOC_LARGE                      57.1G    12.1G    12.1G    44.4G       0K       0K       0K      616         see MALLOC ZONE table below
+MALLOC_SMALL                     352.0M   190.0M   190.0M   132.0M       0K       0K       0K       88         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              8192K     432K     432K     304K       0K       0K       0K        2         see MALLOC ZONE table below
+    
+=== 23:50:27
+Physical footprint:         56.9G
+Physical footprint (peak):  56.9G
+MALLOC_LARGE                      57.1G    11.0G    11.0G    45.5G       0K       0K       0K      616         see MALLOC ZONE table below
+MALLOC_SMALL                     352.0M   189.0M   189.0M   133.0M       0K       0K       0K       88         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              8192K     432K     432K     304K       0K       0K       0K        2         see MALLOC ZONE table below
+    
+=== 23:52:59
+Physical footprint:         56.9G
+Physical footprint (peak):  56.9G
+MALLOC_LARGE                      57.1G    10.6G    10.6G    45.9G       0K       0K       0K      616         see MALLOC ZONE table below
+MALLOC_SMALL                     352.0M   189.0M   189.0M   133.0M       0K       0K       0K       88         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              8192K     432K     432K     304K       0K       0K       0K        2         see MALLOC ZONE table below
+    
+=== 23:55:31
+Physical footprint:         56.9G
+Physical footprint (peak):  56.9G
+MALLOC_LARGE                      57.1G    10.4G    10.4G    46.2G       0K       0K       0K      616         see MALLOC ZONE table below
+MALLOC_SMALL                     352.0M   189.0M   189.0M   133.0M       0K       0K       0K       88         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              8192K     432K     432K     304K       0K       0K       0K        2         see MALLOC ZONE table below
+    Index:   building
+=== 23:57:56
+Physical footprint:         56.9G
+Physical footprint (peak):  56.9G
+MALLOC_LARGE                      57.1G    12.5G    12.5G    44.0G       0K       0K       0K      616         see MALLOC ZONE table below
+MALLOC_SMALL                     352.0M   170.0M   170.0M   152.0M       0K       0K       0K       88         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              8192K      16K      16K     704K       0K       0K       0K        2         see MALLOC ZONE table below
+    Index:   building
+=== 23:59:58
+Physical footprint:         56.9G
+Physical footprint (peak):  56.9G
+MALLOC_LARGE                      57.1G    12.0G    12.0G    44.5G       0K       0K       0K      616         see MALLOC ZONE table below
+MALLOC_SMALL                     360.0M   163.7M   163.7M   160.2M       0K       0K       0K       90         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              8192K      16K      16K     720K       0K       0K       0K        2         see MALLOC ZONE table below
+    Index:   building
+=== 00:02:01
+Physical footprint:         58.9G
+Physical footprint (peak):  58.9G
+MALLOC_LARGE                      59.1G    11.8G    11.8G    46.8G       0K       0K       0K      633         see MALLOC ZONE table below
+MALLOC_LARGE (reserved)             16K       0K       0K       0K       0K       0K       0K        1         see MALLOC ZONE table below
+MALLOC_SMALL                     356.0M   162.4M   162.4M   162.5M       0K       0K       0K       89         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              12.0M      16K      16K     736K       0K       0K       0K        3         see MALLOC ZONE table below
+    Index:   building
+=== 00:04:03
+Physical footprint:         58.9G
+Physical footprint (peak):  58.9G
+MALLOC_LARGE                      59.1G    12.5G    12.5G    46.1G       0K       0K       0K      634         see MALLOC ZONE table below
+MALLOC_SMALL                     364.0M   191.3M   191.3M   134.7M       0K       0K       0K       91         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              8192K      96K      96K     624K       0K       0K       0K        2         see MALLOC ZONE table below
+    Index:   building
+=== 00:06:06
+Physical footprint:         58.9G
+Physical footprint (peak):  58.9G
+MALLOC_LARGE                      59.1G    12.0G    12.0G    46.5G       0K       0K       0K      634         see MALLOC ZONE table below
+MALLOC_SMALL                     364.0M   163.8M   163.8M   162.1M       0K       0K       0K       91         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              8192K      16K      16K     720K       0K       0K       0K        2         see MALLOC ZONE table below
+    
+=== 00:08:38
+Physical footprint:         58.9G
+Physical footprint (peak):  58.9G
+MALLOC_LARGE                      59.1G    13.2G    13.2G    45.4G       0K       0K       0K      634         see MALLOC ZONE table below
+MALLOC_SMALL                     364.0M   192.9M   192.9M   134.1M       0K       0K       0K       91         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              8192K      96K      96K     624K       0K       0K       0K        2         see MALLOC ZONE table below
+    Index:   building
+=== 00:10:40
+Physical footprint:         58.9G
+Physical footprint (peak):  58.9G
+MALLOC_LARGE                      59.1G    13.7G    13.7G    44.9G       0K       0K       0K      634         see MALLOC ZONE table below
+MALLOC_SMALL                     360.0M   196.6M   196.6M   131.4M       0K       0K       0K       90         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              12.0M     304K     304K     448K       0K       0K       0K        3         see MALLOC ZONE table below
+    Index:   building
+=== 00:12:43
+Physical footprint:         61.0G
+Physical footprint (peak):  61.0G
+MALLOC_LARGE                      61.2G    12.7G    12.7G    47.9G       0K       0K       0K      651         see MALLOC ZONE table below
+MALLOC_LARGE (reserved)             16K       0K       0K       0K       0K       0K       0K        1         see MALLOC ZONE table below
+MALLOC_SMALL                     360.0M   166.2M   166.2M   162.8M       0K       0K       0K       90         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              12.0M      32K      32K     720K       0K       0K       0K        3         see MALLOC ZONE table below
+    Index:   building
+=== 00:14:45
+Physical footprint:         61.0G
+Physical footprint (peak):  61.0G
+MALLOC_LARGE                      61.2G    13.1G    13.1G    47.5G       0K       0K       0K      652         see MALLOC ZONE table below
+MALLOC_SMALL                     364.0M    37.4M    37.4M   294.6M       0K       0K       0K       91         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              8192K       0K       0K      48K       0K       0K       0K        2         see MALLOC ZONE table below
+    Index:   building
+=== 00:16:48
+Physical footprint:         61.0G
+Physical footprint (peak):  61.0G
+MALLOC_LARGE                      61.2G    12.8G    12.8G    47.9G       0K       0K       0K      652         see MALLOC ZONE table below
+MALLOC_SMALL                     364.0M    8768K    8768K   323.5M       0K       0K       0K       91         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              8192K       0K       0K      48K       0K       0K       0K        2         see MALLOC ZONE table below
+    Index:   building
+=== 00:18:50
+Physical footprint:         61.0G
+Physical footprint (peak):  61.0G
+MALLOC_LARGE                      61.2G    11.7G    11.7G    48.9G       0K       0K       0K      652         see MALLOC ZONE table below
+MALLOC_SMALL                     368.0M    3248K    3248K   330.9M       0K       0K       0K       92         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              8192K       0K       0K      48K       0K       0K       0K        2         see MALLOC ZONE table below
+    Index:   building
+=== 00:20:53
+Physical footprint:         63.1G
+Physical footprint (peak):  63.1G
+MALLOC_LARGE                      63.3G    11.7G    11.7G    51.0G       0K       0K       0K      669         see MALLOC ZONE table below
+MALLOC_LARGE (reserved)             16K       0K       0K       0K       0K       0K       0K        1         see MALLOC ZONE table below
+MALLOC_SMALL                     368.0M    3136K    3136K   332.0M       0K       0K       0K       92         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              8192K       0K       0K      48K       0K       0K       0K        2         see MALLOC ZONE table below
+    Index:   building
+=== 00:22:55
+Physical footprint:         63.1G
+Physical footprint (peak):  63.1G
+MALLOC_LARGE                      63.3G    11.9G    11.9G    50.8G       0K       0K       0K      670         see MALLOC ZONE table below
+MALLOC_SMALL                     368.0M    3488K    3488K   332.7M       0K       0K       0K       92         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              8192K       0K       0K      48K       0K       0K       0K        2         see MALLOC ZONE table below
+    Index:   building
+=== 00:24:58
+Physical footprint:         63.1G
+Physical footprint (peak):  63.1G
+MALLOC_LARGE                      63.3G    12.1G    12.1G    50.6G       0K       0K       0K      670         see MALLOC ZONE table below
+MALLOC_SMALL                     368.0M   164.5M   164.5M   171.5M       0K       0K       0K       92         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              8192K      16K      16K      32K       0K       0K       0K        2         see MALLOC ZONE table below
+    Index:   building
+=== 00:27:00
+Physical footprint:         63.1G
+Physical footprint (peak):  63.1G
+MALLOC_LARGE                      63.3G    11.9G    11.9G    50.8G       0K       0K       0K      670         see MALLOC ZONE table below
+MALLOC_SMALL                     372.0M    3744K    3744K   334.4M       0K       0K       0K       93         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              8192K       0K       0K      48K       0K       0K       0K        2         see MALLOC ZONE table below
+    Index:   building
+=== 00:29:03
+Physical footprint:         65.1G
+Physical footprint (peak):  65.1G
+MALLOC_LARGE                      65.3G    11.1G    11.1G    53.7G       0K       0K       0K      687         see MALLOC ZONE table below
+MALLOC_LARGE (reserved)             16K       0K       0K       0K       0K       0K       0K        1         see MALLOC ZONE table below
+MALLOC_SMALL                     376.0M   162.2M   162.2M   176.9M       0K       0K       0K       94         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              4096K       0K       0K      16K       0K       0K       0K        1         see MALLOC ZONE table below
+    Index:   building
+=== 00:31:06
+Physical footprint:         65.1G
+Physical footprint (peak):  65.1G
+MALLOC_LARGE                      65.3G    12.3G    12.3G    52.5G       0K       0K       0K      688         see MALLOC ZONE table below
+MALLOC_SMALL                     376.0M   184.0M   184.0M   156.1M       0K       0K       0K       94         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              4096K      16K      16K      16K       0K       0K       0K        1         see MALLOC ZONE table below
+    
+=== 00:33:38
+Physical footprint:         65.1G
+Physical footprint (peak):  65.1G
+MALLOC_LARGE                      65.3G    12.3G    12.3G    52.5G       0K       0K       0K      688         see MALLOC ZONE table below
+MALLOC_SMALL                     376.0M   184.0M   184.0M   156.1M       0K       0K       0K       94         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              4096K      16K      16K      16K       0K       0K       0K        1         see MALLOC ZONE table below
+    
+=== 00:36:11
+Physical footprint:         65.1G
+Physical footprint (peak):  65.1G
+MALLOC_LARGE                      65.3G     9.8G     9.8G    55.0G       0K       0K       0K      688         see MALLOC ZONE table below
+MALLOC_SMALL                     376.0M   183.7M   183.7M   156.4M       0K       0K       0K       94         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              4096K      16K      16K      16K       0K       0K       0K        1         see MALLOC ZONE table below
+    
+=== 00:38:43
+Physical footprint:         65.1G
+Physical footprint (peak):  65.1G
+MALLOC_LARGE                      65.3G     8.9G     8.9G    55.9G       0K       0K       0K      688         see MALLOC ZONE table below
+MALLOC_SMALL                     376.0M   183.7M   183.7M   156.5M       0K       0K       0K       94         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              4096K      16K      16K      16K       0K       0K       0K        1         see MALLOC ZONE table below
+    
+=== 00:41:15
+Physical footprint:         65.1G
+Physical footprint (peak):  65.1G
+MALLOC_LARGE                      65.3G     7.5G     7.5G    57.3G       0K       0K       0K      688         see MALLOC ZONE table below
+MALLOC_SMALL                     376.0M   163.3M   163.3M   176.8M       0K       0K       0K       94         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              4096K      16K      16K      16K       0K       0K       0K        1         see MALLOC ZONE table below
+    
+=== 00:43:47
+Physical footprint:         65.1G
+Physical footprint (peak):  65.1G
+MALLOC_LARGE                      65.3G    12.5G    12.5G    52.3G       0K       0K       0K      688         see MALLOC ZONE table below
+MALLOC_SMALL                     376.0M   171.2M   171.2M   168.9M       0K       0K       0K       94         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              4096K      16K      16K       0K       0K       0K       0K        1         see MALLOC ZONE table below
+    Index:   building
+=== 00:45:50
+Physical footprint:         65.1G
+Physical footprint (peak):  65.1G
+MALLOC_LARGE                      65.3G    13.2G    13.2G    51.6G       0K       0K       0K      688         see MALLOC ZONE table below
+MALLOC_SMALL                     376.0M   193.0M   193.0M   148.1M       0K       0K       0K       94         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              8192K      32K      32K      16K       0K       0K       0K        2         see MALLOC ZONE table below
+    Index:   building
+=== 00:47:53
+Physical footprint:         65.1G
+Physical footprint (peak):  65.1G
+MALLOC_LARGE                      65.3G    13.7G    13.7G    51.1G       0K       0K       0K      688         see MALLOC ZONE table below
+MALLOC_SMALL                     376.0M   197.7M   197.7M   144.4M       0K       0K       0K       94         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              8192K      32K      32K      16K       0K       0K       0K        2         see MALLOC ZONE table below
+    Index:   building
+=== 00:49:55
+Physical footprint:         67.2G
+Physical footprint (peak):  67.2G
+MALLOC_LARGE                      67.4G    11.0G    11.0G    55.8G       0K       0K       0K      705         see MALLOC ZONE table below
+MALLOC_LARGE (reserved)             16K       0K       0K       0K       0K       0K       0K        1         see MALLOC ZONE table below
+MALLOC_SMALL                     380.0M   161.7M   161.7M   181.6M       0K       0K       0K       95         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              4096K       0K       0K      16K       0K       0K       0K        1         see MALLOC ZONE table below
+    Index:   building
+=== 00:51:58
+Physical footprint:         67.2G
+Physical footprint (peak):  67.2G
+MALLOC_LARGE                      67.4G     9.4G     9.4G    57.4G       0K       0K       0K      706         see MALLOC ZONE table below
+MALLOC_SMALL                     380.0M   162.0M   162.0M   181.3M       0K       0K       0K       95         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              4096K      16K      16K       0K       0K       0K       0K        1         see MALLOC ZONE table below
+    Index:   building
+=== 00:54:01
+Physical footprint:         67.2G
+Physical footprint (peak):  67.2G
+MALLOC_LARGE                      67.4G     9.6G     9.6G    57.2G       0K       0K       0K      706         see MALLOC ZONE table below
+MALLOC_SMALL                     380.0M    30.9M    30.9M   314.4M       0K       0K       0K       95         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              8192K       0K       0K      48K       0K       0K       0K        2         see MALLOC ZONE table below
+    Index:   building
+=== 00:56:04
+Physical footprint:         67.2G
+Physical footprint (peak):  67.2G
+MALLOC_LARGE                      67.4G    11.1G    11.1G    55.8G       0K       0K       0K      706         see MALLOC ZONE table below
+MALLOC_SMALL                     384.0M   163.4M   163.4M   181.9M       0K       0K       0K       96         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              4096K      16K      16K       0K       0K       0K       0K        1         see MALLOC ZONE table below
+    Index:   building
+=== 00:58:07
+Physical footprint:         67.2G
+Physical footprint (peak):  67.2G
+MALLOC_LARGE                      67.4G    11.5G    11.5G    55.3G       0K       0K       0K      706         see MALLOC ZONE table below
+MALLOC_SMALL                     384.0M   103.3M   103.3M   243.0M       0K       0K       0K       96         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              4096K       0K       0K      32K       0K       0K       0K        1         see MALLOC ZONE table below
+    
+=== 01:00:39
+Physical footprint:         67.2G
+Physical footprint (peak):  67.2G
+MALLOC_LARGE                      67.4G    10.7G    10.7G    56.2G       0K       0K       0K      706         see MALLOC ZONE table below
+MALLOC_SMALL                     384.0M   103.1M   103.1M   243.2M       0K       0K       0K       96         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              4096K       0K       0K      32K       0K       0K       0K        1         see MALLOC ZONE table below
+    
+=== 01:03:12
+Physical footprint:         67.2G
+Physical footprint (peak):  67.2G
+MALLOC_LARGE                      67.4G    10.2G    10.2G    56.6G       0K       0K       0K      706         see MALLOC ZONE table below
+MALLOC_SMALL                     384.0M    78.7M    78.7M   267.6M       0K       0K       0K       96         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              4096K       0K       0K      32K       0K       0K       0K        1         see MALLOC ZONE table below
+    
+=== 01:05:44
+Physical footprint:         67.2G
+Physical footprint (peak):  67.2G
+MALLOC_LARGE                      67.4G    12.0G    12.0G    54.8G       0K       0K       0K      706         see MALLOC ZONE table below
+MALLOC_SMALL                     384.0M   164.0M   164.0M   182.3M       0K       0K       0K       96         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              4096K      16K      16K       0K       0K       0K       0K        1         see MALLOC ZONE table below
+    Index:   building
+=== 01:07:46
+Physical footprint:         69.3G
+Physical footprint (peak):  69.3G
+MALLOC_LARGE                      69.4G    11.3G    11.3G    57.6G       0K       0K       0K      723         see MALLOC ZONE table below
+MALLOC_LARGE (reserved)             16K       0K       0K       0K       0K       0K       0K        1         see MALLOC ZONE table below
+MALLOC_SMALL                     384.0M   162.3M   162.3M   184.0M       0K       0K       0K       96         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              4096K       0K       0K      16K       0K       0K       0K        1         see MALLOC ZONE table below
+    Index:   building
+=== 01:09:49
+Physical footprint:         69.3G
+Physical footprint (peak):  69.3G
+MALLOC_LARGE                      69.4G    12.5G    12.5G    56.4G       0K       0K       0K      724         see MALLOC ZONE table below
+MALLOC_SMALL                     384.0M   191.1M   191.1M   156.2M       0K       0K       0K       96         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              4096K      16K      16K       0K       0K       0K       0K        1         see MALLOC ZONE table below
+    Index:   building
+=== 01:11:52
+Physical footprint:         69.3G
+Physical footprint (peak):  69.3G
+MALLOC_LARGE                      69.4G    12.0G    12.0G    56.9G       0K       0K       0K      724         see MALLOC ZONE table below
+MALLOC_SMALL                     384.0M   162.8M   162.8M   184.6M       0K       0K       0K       96         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              4096K       0K       0K      16K       0K       0K       0K        1         see MALLOC ZONE table below
+    
+=== 01:14:24
+Physical footprint:         69.3G
+Physical footprint (peak):  69.3G
+MALLOC_LARGE                      69.4G    13.2G    13.2G    55.7G       0K       0K       0K      724         see MALLOC ZONE table below
+MALLOC_SMALL                     388.0M   194.1M   194.1M   155.2M       0K       0K       0K       97         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              4096K      16K      16K       0K       0K       0K       0K        1         see MALLOC ZONE table below
+    Index:   building
+=== 01:16:27
+Physical footprint:         69.3G
+Physical footprint (peak):  69.3G
+MALLOC_LARGE                      69.4G    13.6G    13.6G    55.3G       0K       0K       0K      724         see MALLOC ZONE table below
+MALLOC_SMALL                     388.0M   195.2M   195.2M   155.2M       0K       0K       0K       97         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              4096K      16K      16K       0K       0K       0K       0K        1         see MALLOC ZONE table below
+    Index:   building
+=== 01:18:30
+Physical footprint:         555.6M
+Physical footprint (peak):  70.0G
+MALLOC_LARGE                      69.3M    69.3M    69.3M       0K       0K       0K       0K        2         see MALLOC ZONE table below
+MALLOC_LARGE (empty)             136.5M   129.8M   129.8M       0K       0K       0K       0K        6         see MALLOC ZONE table below
+MALLOC_SMALL                     284.0M   238.7M   209.4M    14.1M       0K       0K       0K       71         see MALLOC ZONE table below
+MALLOC_SMALL (empty)             336.0M   215.1M    6688K       0K       0K       0K       0K       84         see MALLOC ZONE table below
+    Index:   warm (28,200 vectors)
+BUILD COMPLETE 01:18:31
