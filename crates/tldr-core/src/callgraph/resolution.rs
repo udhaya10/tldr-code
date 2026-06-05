@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use super::cross_file_types::{CallSite, CallType, ClassDef, FileIR, FuncDef, VarType};
 use super::import_resolver::{ReExportTracer, DEFAULT_MAX_DEPTH};
-use super::type_resolver::{resolve_receiver_type, RustReceiverIndex};
+use super::type_resolver::{resolve_receiver_type, PythonReceiverIndex, RustReceiverIndex};
 use crate::types::Language;
 
 // From new sibling modules:
@@ -284,12 +284,15 @@ pub fn apply_type_resolution(file_ir: &mut FileIR, source: &str, language: Langu
         &mut file_ir.calls,
     );
 
-    // TLDR-zde Gate-1 fix #2: for Rust, build the per-file receiver-type
+    // TLDR-zde Gate-1 fix #2 / TLDR-olg: build the per-file receiver-type
     // index ONCE and answer every call site from it. The legacy path
-    // re-scanned the whole file source per call site (~70% of the entire
-    // call-graph build on tldr-code, profiled). Outputs are identical —
-    // the index replicates the legacy per-line decision logic exactly.
+    // re-scanned the whole file source per call site (~70% of the rust
+    // build; 97.6% of the django python build, both profiled). Outputs are
+    // identical — each index replicates the legacy per-line decision logic
+    // exactly (differential-gated in type_resolver.rs).
     let rust_index = (language == Language::Rust).then(|| RustReceiverIndex::new(source));
+    let mut python_index =
+        (language == Language::Python).then(|| PythonReceiverIndex::new(source));
 
     for (caller_name, call_sites) in calls.iter_mut() {
         for call_site in call_sites.iter_mut() {
@@ -324,15 +327,18 @@ pub fn apply_type_resolution(file_ir: &mut FileIR, source: &str, language: Langu
                 .and_then(|class_name| first_base_for_class(classes, class_name));
 
             if supports_type_resolution {
-                let (resolved, confidence) = match rust_index.as_ref() {
-                    Some(idx) => idx.resolve(line, receiver_key, enclosing_class.as_deref()),
-                    None => resolve_receiver_type(
+                let (resolved, confidence) = if let Some(idx) = rust_index.as_ref() {
+                    idx.resolve(line, receiver_key, enclosing_class.as_deref())
+                } else if let Some(idx) = python_index.as_mut() {
+                    idx.resolve(line, receiver_key, enclosing_class.as_deref())
+                } else {
+                    resolve_receiver_type(
                         language,
                         source,
                         line,
                         receiver_key,
                         enclosing_class.as_deref(),
-                    ),
+                    )
                 };
                 if resolved.is_some() && confidence != crate::types::Confidence::Low {
                     call_site.receiver_type = resolved;

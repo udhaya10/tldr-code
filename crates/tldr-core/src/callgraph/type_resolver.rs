@@ -411,6 +411,209 @@ pub fn resolve_annotation(annotation: &str) -> Option<String> {
 }
 
 // =============================================================================
+// Python Per-File Receiver Index (TLDR-olg — mirrors the rust Gate-1 rounds)
+// =============================================================================
+
+/// Per-file Python receiver-type index. The legacy path rebuilt a `lines`
+/// Vec TWICE per call site and ran backwards whole-file scans per call —
+/// 97.6% of the django call-graph build (profiled). This index builds the
+/// line table and the enclosing-class snapshot once, then memoizes the
+/// annotation/constructor scans per DISTINCT receiver, answered per call
+/// site via `partition_point`. Primitive-level drop-ins: `annotation`,
+/// `constructor`, and `enclosing_class` return exactly what
+/// `find_type_annotation`, `find_constructor_assignment`, and
+/// `find_enclosing_class` return (differential-gated below).
+pub struct PythonReceiverIndex<'s> {
+    lines: Vec<&'s str>,
+    /// `find_enclosing_class(source, L)` answer when its at-target-line
+    /// condition FIRES at L (1-based); `None` = fall through to the EOF
+    /// fallback (`final_class`), replicating the legacy walk exactly.
+    enclosing_fired: Vec<Option<String>>,
+    /// Legacy EOF fallback: the last class def seen in the whole file.
+    final_class: Option<String>,
+    /// 0-based indices of lines containing ": " — the only lines a
+    /// `"{var}: "` annotation pattern can match (output-identical filter).
+    colon_lines: Vec<usize>,
+    /// 0-based indices of lines containing '=' — the only lines the
+    /// constructor chain (`=` / `:=` after the var) can succeed on.
+    eq_lines: Vec<usize>,
+    /// Per-var: EVERY line containing `"{var}: "`, with its extraction
+    /// result. Legacy `find_type_annotation` ABORTS at the nearest match
+    /// even when extraction fails (the `?`), so failures are stored too.
+    annotation_cache: std::collections::HashMap<String, Vec<(usize, Option<String>)>>,
+    /// Per-var: lines where the full constructor chain SUCCEEDS. Legacy
+    /// `find_constructor_assignment` CONTINUES past failures, so only
+    /// successes are stored.
+    constructor_cache: std::collections::HashMap<String, Vec<(usize, String)>>,
+}
+
+impl<'s> PythonReceiverIndex<'s> {
+    /// Builds the line table and the enclosing-class snapshot in one pass.
+    pub fn new(source: &'s str) -> Self {
+        let lines: Vec<&str> = source.lines().collect();
+
+        // Single forward pass replicating find_enclosing_class: snapshot
+        // the at-target-line answer for every L; the EOF fallback (last
+        // class def) covers all non-firing lines and L beyond EOF.
+        let mut enclosing_fired: Vec<Option<String>> = Vec::with_capacity(lines.len());
+        let mut current_class: Option<String> = None;
+        let mut indent_level = 0usize;
+        for line_content in &lines {
+            let trimmed = line_content.trim_start();
+            if trimmed.starts_with("class ") {
+                if let Some(class_name) = extract_class_name(trimmed) {
+                    indent_level = line_content.len() - trimmed.len();
+                    current_class = Some(class_name);
+                }
+            }
+            let fired = match &current_class {
+                Some(class_name) => {
+                    let line_indent = line_content.len() - line_content.trim_start().len();
+                    (line_indent > indent_level || line_content.trim().is_empty())
+                        .then(|| class_name.clone())
+                }
+                None => None,
+            };
+            enclosing_fired.push(fired);
+        }
+        let final_class = current_class;
+
+        let colon_lines = lines
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, l)| l.contains(": ").then_some(idx))
+            .collect();
+        let eq_lines = lines
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, l)| l.contains('=').then_some(idx))
+            .collect();
+
+        Self {
+            lines,
+            enclosing_fired,
+            final_class,
+            colon_lines,
+            eq_lines,
+            annotation_cache: std::collections::HashMap::new(),
+            constructor_cache: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Drop-in for [`find_enclosing_class`]: fired-at-line answer, else the
+    /// EOF fallback (covers L == 0, L beyond EOF, and non-firing lines).
+    fn enclosing_class(&self, line: u32) -> Option<String> {
+        if line >= 1 {
+            if let Some(Some(class_name)) = self.enclosing_fired.get(line as usize - 1) {
+                return Some(class_name.clone());
+            }
+        }
+        self.final_class.clone()
+    }
+
+    /// Drop-in for `find_type_annotation`: nearest line at-or-below the
+    /// call line containing `"{var}: "`; its extraction result is returned
+    /// VERBATIM (legacy aborts there whether extraction succeeded or not).
+    fn annotation(&mut self, var_name: &str, call_line: u32) -> Option<String> {
+        // Legacy quirk: first access is lines.get(call_line - 1)? — a call
+        // line beyond EOF (or 0) returns None outright.
+        if call_line == 0 || call_line as usize > self.lines.len() {
+            return None;
+        }
+        if !self.annotation_cache.contains_key(var_name) {
+            let pattern = format!("{}: ", var_name);
+            let mut entries: Vec<(usize, Option<String>)> = Vec::new();
+            for &idx in &self.colon_lines {
+                let line = self.lines[idx];
+                if let Some(i) = line.find(&pattern) {
+                    let after_colon = &line[i + pattern.len()..];
+                    entries.push((idx, extract_type_from_annotation(after_colon)));
+                }
+            }
+            self.annotation_cache
+                .insert(var_name.to_string(), entries);
+        }
+        let entries = &self.annotation_cache[var_name];
+        let pp = entries.partition_point(|(idx, _)| *idx < call_line as usize);
+        (pp > 0).then(|| entries[pp - 1].1.clone()).flatten()
+    }
+
+    /// Drop-in for `find_constructor_assignment`: nearest line at-or-below
+    /// the call line where the full chain (boundary-checked var match,
+    /// `=`/`:=`, `(`, normalize) succeeds — legacy continues past failures.
+    fn constructor(&mut self, var_name: &str, call_line: u32) -> Option<String> {
+        if call_line == 0 || call_line as usize > self.lines.len() {
+            return None;
+        }
+        if !self.constructor_cache.contains_key(var_name) {
+            let mut entries: Vec<(usize, String)> = Vec::new();
+            for &idx in &self.eq_lines {
+                let line = self.lines[idx];
+                let Some(i) = find_var_in_line(line, var_name) else {
+                    continue;
+                };
+                let mut tail = line[i + var_name.len()..].trim_start();
+                if let Some(rest) = tail.strip_prefix(":=") {
+                    tail = rest.trim_start();
+                } else if let Some(rest) = tail.strip_prefix('=') {
+                    tail = rest.trim_start();
+                } else {
+                    continue;
+                }
+                if let Some(paren_idx) = tail.find('(') {
+                    let potential_type = tail[..paren_idx].trim();
+                    if let Some(type_name) = normalize_type_name(potential_type) {
+                        entries.push((idx, type_name));
+                    }
+                }
+            }
+            self.constructor_cache
+                .insert(var_name.to_string(), entries);
+        }
+        let entries = &self.constructor_cache[var_name];
+        let pp = entries.partition_point(|(idx, _)| *idx < call_line as usize);
+        (pp > 0).then(|| entries[pp - 1].1.clone())
+    }
+
+    /// Drop-in equivalent of [`resolve_python_receiver_type`], answered
+    /// from the per-file index. The wrapper logic (self handling, Union /
+    /// confidence rules) is copied verbatim; only the three scan
+    /// primitives are swapped for indexed lookups.
+    pub fn resolve(
+        &mut self,
+        call_line: u32,
+        receiver_name: &str,
+        enclosing_class: Option<&str>,
+    ) -> (Option<String>, Confidence) {
+        if receiver_name == "self" {
+            if let Some(class_name) = enclosing_class {
+                return (Some(class_name.to_string()), Confidence::High);
+            }
+            if let Some(class_name) = self.enclosing_class(call_line) {
+                return (Some(class_name), Confidence::High);
+            }
+            return (None, Confidence::Low);
+        }
+
+        if let Some(type_name) = self.annotation(receiver_name, call_line) {
+            if type_name.starts_with("Union[") || type_name.contains('|') {
+                if expand_union_type(&type_name, None).is_none() {
+                    return (None, Confidence::Low);
+                }
+                return (Some(type_name), Confidence::Medium);
+            }
+            return (Some(type_name), Confidence::High);
+        }
+
+        if let Some(type_name) = self.constructor(receiver_name, call_line) {
+            return (Some(type_name), Confidence::High);
+        }
+
+        (None, Confidence::Low)
+    }
+}
+
+// =============================================================================
 // TypeScript Type Resolution (Phase 9)
 // =============================================================================
 
@@ -1847,6 +2050,153 @@ fn nasty() {
                 }
             }
         }
+    }
+
+    /// DIFFERENTIAL GATE (TLDR-olg, python): PythonReceiverIndex must match
+    /// the legacy scanners PRIMITIVE-level (annotation / constructor /
+    /// enclosing-class) AND resolve()-level for every (receiver, line,
+    /// enclosing) — including line 0, beyond-EOF lines, substring-match
+    /// false positives ("x" matching "max: int"), walrus :=, Union types,
+    /// failed-extraction-aborts, and multi-class indent quirks.
+    #[test]
+    fn python_receiver_index_matches_legacy_exhaustively() {
+        let source = r#"
+class Engine:
+    def start(self):
+        self.ignite()
+        cfg: Config = Config()
+        cfg.load()
+        store = VectorStore("p")
+        store.flush()
+        u: Union[A, B] = make()
+        u.go()
+        bad: lowercase = thing()
+        opt: Optional[User] = None
+        gen: List[Item] = []
+
+class Wrapper:
+    def run(self):
+        cfg = remake()
+        cfg.reload()
+        w := Walrus()
+        max: int = 5
+        x.method()
+        result = obj.attr(1)
+
+def free():
+    cfg: Other = Other()
+    cfg.apply()
+    # cfg: Phantom = comment text must match like legacy
+    s = "x: InString = lie"
+"#;
+        let receivers = [
+            "self", "cfg", "store", "u", "bad", "opt", "gen", "w", "max",
+            "x", "result", "missing", "self.cfg", "obj.attr", "s", "",
+            "a, b", "t: int",
+        ];
+        let enclosings = [None, Some("Hint")];
+        let n_lines = source.lines().count() as u32;
+        let mut idx = PythonReceiverIndex::new(source);
+        for line in 0..=(n_lines + 3) {
+            for recv in &receivers {
+                // Primitive level (tighter localization than resolve()).
+                assert_eq!(
+                    find_type_annotation(source, recv, line),
+                    idx.annotation(recv, line),
+                    "annotation divergence at line={line} recv={recv}"
+                );
+                assert_eq!(
+                    find_constructor_assignment(source, recv, line),
+                    idx.constructor(recv, line),
+                    "constructor divergence at line={line} recv={recv}"
+                );
+                for enc in &enclosings {
+                    let legacy = resolve_python_receiver_type(source, line, recv, *enc);
+                    let indexed = idx.resolve(line, recv, *enc);
+                    assert_eq!(
+                        legacy, indexed,
+                        "resolve divergence at line={line} recv={recv} enclosing={enc:?}"
+                    );
+                }
+            }
+            assert_eq!(
+                find_enclosing_class(source, line),
+                idx.enclosing_class(line),
+                "enclosing-class divergence at line={line}"
+            );
+        }
+    }
+
+    /// CORPUS-LEVEL DIFFERENTIAL GATE (TLDR-olg, python): value-level
+    /// agreement on real Method/Attr call-site receivers extracted from
+    /// this repo's own python files (continuum/, scripts/).
+    #[test]
+    fn python_receiver_index_matches_legacy_on_real_corpus() {
+        use crate::callgraph::cross_file_types::CallType;
+
+        fn collect_py(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            if let Ok(rd) = std::fs::read_dir(dir) {
+                for e in rd.flatten() {
+                    let p = e.path();
+                    if p.is_dir() {
+                        collect_py(&p, out);
+                    } else if p.extension().and_then(|x| x.to_str()) == Some("py") {
+                        out.push(p);
+                    }
+                }
+            }
+        }
+        let core_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut files: Vec<std::path::PathBuf> = Vec::new();
+        collect_py(&core_root.join("tests/fixtures"), &mut files);
+        collect_py(
+            &core_root.join("../tldr-cli/tests/fixtures"),
+            &mut files,
+        );
+        files.sort();
+
+        const MAX_SITES_PER_FILE: usize = 80;
+        let mut checked = 0usize;
+        for path in &files {
+            let Ok(source) = std::fs::read_to_string(path) else {
+                continue;
+            };
+            let Ok(calls) = crate::callgraph::languages::extract_calls_for_language(
+                "python", path, &source,
+            ) else {
+                continue;
+            };
+            let mut idx = PythonReceiverIndex::new(&source);
+
+            let mut sites: Vec<(String, u32)> = calls
+                .values()
+                .flatten()
+                .filter(|c| matches!(c.call_type, CallType::Method | CallType::Attr))
+                .filter_map(|c| Some((c.receiver.clone()?, c.line?)))
+                .collect();
+            sites.sort();
+            sites.dedup();
+
+            for (receiver, line) in sites.into_iter().take(MAX_SITES_PER_FILE) {
+                for enclosing in [None, Some("Hint")] {
+                    let legacy =
+                        resolve_python_receiver_type(&source, line, &receiver, enclosing);
+                    let indexed = idx.resolve(line, &receiver, enclosing);
+                    assert_eq!(
+                        legacy,
+                        indexed,
+                        "divergence in {} at line={line} recv={receiver} enclosing={enclosing:?}",
+                        path.display()
+                    );
+                }
+                checked += 1;
+            }
+        }
+        // The repo's python surface is test fixtures only (~26 sites today).
+        // The heavyweight external gate is the frozen-corpus byte-hash
+        // (django@8c2d3dc, see TLDR-hqb); this in-repo gate is the cheap
+        // always-on backstop.
+        assert!(checked >= 20, "python corpus gate too small: {checked} sites");
     }
 
     /// CORPUS-LEVEL DIFFERENTIAL GATE (TLDR-zde round 5): the synthetic test
