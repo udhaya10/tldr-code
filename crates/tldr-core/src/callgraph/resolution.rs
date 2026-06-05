@@ -10,7 +10,9 @@ use std::path::{Path, PathBuf};
 
 use super::cross_file_types::{CallSite, CallType, ClassDef, FileIR, FuncDef, VarType};
 use super::import_resolver::{ReExportTracer, DEFAULT_MAX_DEPTH};
-use super::type_resolver::{resolve_receiver_type, PythonReceiverIndex, RustReceiverIndex};
+use super::type_resolver::{
+    resolve_receiver_type, PythonReceiverIndex, RustReceiverIndex, TypeScriptReceiverIndex,
+};
 use crate::types::Language;
 
 // From new sibling modules:
@@ -293,6 +295,10 @@ pub fn apply_type_resolution(file_ir: &mut FileIR, source: &str, language: Langu
     let rust_index = (language == Language::Rust).then(|| RustReceiverIndex::new(source));
     let mut python_index =
         (language == Language::Python).then(|| PythonReceiverIndex::new(source));
+    // The legacy dispatcher routes TypeScript AND JavaScript through the
+    // same resolver — the index must serve both.
+    let mut ts_index = matches!(language, Language::TypeScript | Language::JavaScript)
+        .then(|| TypeScriptReceiverIndex::new(source));
 
     for (caller_name, call_sites) in calls.iter_mut() {
         for call_site in call_sites.iter_mut() {
@@ -330,6 +336,8 @@ pub fn apply_type_resolution(file_ir: &mut FileIR, source: &str, language: Langu
                 let (resolved, confidence) = if let Some(idx) = rust_index.as_ref() {
                     idx.resolve(line, receiver_key, enclosing_class.as_deref())
                 } else if let Some(idx) = python_index.as_mut() {
+                    idx.resolve(line, receiver_key, enclosing_class.as_deref())
+                } else if let Some(idx) = ts_index.as_mut() {
                     idx.resolve(line, receiver_key, enclosing_class.as_deref())
                 } else {
                     resolve_receiver_type(

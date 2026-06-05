@@ -816,6 +816,196 @@ fn is_likely_interface(type_name: &str) -> bool {
 }
 
 // =============================================================================
+// TypeScript/JavaScript Per-File Receiver Index (TLDR-olg)
+// =============================================================================
+
+/// Per-file TypeScript/JavaScript receiver-type index (the dispatcher routes
+/// BOTH languages through the same legacy resolver). Same shape as the
+/// python index: line table + enclosing-class snapshot built once, scan
+/// results memoized per distinct receiver. Unlike python, BOTH legacy scans
+/// here CONTINUE past failed extractions (no abort quirk), so both caches
+/// store successes only; and the enclosing-class walk has NO EOF fallback.
+pub struct TypeScriptReceiverIndex<'s> {
+    lines: Vec<&'s str>,
+    /// `find_typescript_enclosing_class(source, L)` answer at L (1-based);
+    /// `None` everywhere else — the legacy walk returns None at EOF.
+    enclosing_fired: Vec<Option<String>>,
+    /// 0-based indices of lines containing ": " (annotation candidates).
+    colon_lines: Vec<usize>,
+    /// 0-based indices of lines containing " = new " (constructor candidates).
+    new_lines: Vec<usize>,
+    /// Per-var: lines where the 4-prefix annotation attempt SUCCEEDS.
+    annotation_cache: std::collections::HashMap<String, Vec<(usize, String)>>,
+    /// Per-var: lines where the 4-prefix constructor attempt SUCCEEDS.
+    constructor_cache: std::collections::HashMap<String, Vec<(usize, String)>>,
+}
+
+const TS_DECL_PREFIXES: [&str; 4] = ["const ", "let ", "var ", ""];
+
+impl<'s> TypeScriptReceiverIndex<'s> {
+    /// Builds the line table and enclosing-class snapshot in one pass.
+    pub fn new(source: &'s str) -> Self {
+        let lines: Vec<&str> = source.lines().collect();
+
+        // Single forward pass replicating find_typescript_enclosing_class:
+        // brace-depth walk, loop-body order preserved exactly (depth update
+        // -> class-def check -> at-target answer -> class-exit check).
+        let mut enclosing_fired: Vec<Option<String>> = Vec::with_capacity(lines.len());
+        let mut current_class: Option<String> = None;
+        let mut brace_depth: i32 = 0;
+        let mut class_start_brace_depth: i32 = 0;
+        for line_content in &lines {
+            brace_depth += line_content.matches('{').count() as i32;
+            brace_depth -= line_content.matches('}').count() as i32;
+            let trimmed = line_content.trim();
+            if let Some(class_name) = extract_typescript_class_name(trimmed) {
+                class_start_brace_depth = brace_depth;
+                current_class = Some(class_name);
+            }
+            enclosing_fired.push(match &current_class {
+                Some(class_name) if brace_depth >= class_start_brace_depth => {
+                    Some(class_name.clone())
+                }
+                _ => None,
+            });
+            if brace_depth < class_start_brace_depth && current_class.is_some() {
+                current_class = None;
+            }
+        }
+
+        let colon_lines = lines
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, l)| l.contains(": ").then_some(idx))
+            .collect();
+        let new_lines = lines
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, l)| l.contains(" = new ").then_some(idx))
+            .collect();
+
+        Self {
+            lines,
+            enclosing_fired,
+            colon_lines,
+            new_lines,
+            annotation_cache: std::collections::HashMap::new(),
+            constructor_cache: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Drop-in for `find_typescript_enclosing_class` (no EOF fallback).
+    fn enclosing_class(&self, line: u32) -> Option<String> {
+        if line >= 1 {
+            if let Some(fired) = self.enclosing_fired.get(line as usize - 1) {
+                return fired.clone();
+            }
+        }
+        None
+    }
+
+    /// Drop-in for `find_typescript_annotation`: nearest line at-or-below
+    /// the call line where any of the 4 prefix patterns yields a successful
+    /// extraction (prefix order is priority WITHIN a line; failures fall
+    /// through to the next prefix, then the next line — successes only).
+    fn annotation(&mut self, var_name: &str, call_line: u32) -> Option<String> {
+        // Legacy quirk: first access is lines.get(call_line - 1)? — a call
+        // line of 0 or beyond EOF returns None outright.
+        if call_line == 0 || call_line as usize > self.lines.len() {
+            return None;
+        }
+        if !self.annotation_cache.contains_key(var_name) {
+            let mut entries: Vec<(usize, String)> = Vec::new();
+            for &idx in &self.colon_lines {
+                let line = self.lines[idx];
+                for prefix in &TS_DECL_PREFIXES {
+                    let pattern = format!("{}{}: ", prefix, var_name);
+                    if let Some(i) = line.find(&pattern) {
+                        if let Some(type_name) =
+                            extract_typescript_type(&line[i + pattern.len()..])
+                        {
+                            entries.push((idx, type_name));
+                            break; // first successful prefix wins the line
+                        }
+                    }
+                }
+            }
+            self.annotation_cache
+                .insert(var_name.to_string(), entries);
+        }
+        let entries = &self.annotation_cache[var_name];
+        let pp = entries.partition_point(|(idx, _)| *idx < call_line as usize);
+        (pp > 0).then(|| entries[pp - 1].1.clone())
+    }
+
+    /// Drop-in for `find_typescript_constructor`: same 4-prefix per-line
+    /// attempt against `"{prefix}{var} = new "`, successes only.
+    fn constructor(&mut self, var_name: &str, call_line: u32) -> Option<String> {
+        if call_line == 0 || call_line as usize > self.lines.len() {
+            return None;
+        }
+        if !self.constructor_cache.contains_key(var_name) {
+            let mut entries: Vec<(usize, String)> = Vec::new();
+            for &idx in &self.new_lines {
+                let line = self.lines[idx];
+                for prefix in &TS_DECL_PREFIXES {
+                    let pattern = format!("{}{} = new ", prefix, var_name);
+                    if let Some(i) = line.find(&pattern) {
+                        let after_new = &line[i + pattern.len()..];
+                        let type_end = after_new.find(['(', '<']).unwrap_or(after_new.len());
+                        let type_name = after_new[..type_end].trim();
+                        if let Some(normalized) = normalize_type_name(type_name) {
+                            entries.push((idx, normalized));
+                            break; // first successful prefix wins the line
+                        }
+                    }
+                }
+            }
+            self.constructor_cache
+                .insert(var_name.to_string(), entries);
+        }
+        let entries = &self.constructor_cache[var_name];
+        let pp = entries.partition_point(|(idx, _)| *idx < call_line as usize);
+        (pp > 0).then(|| entries[pp - 1].1.clone())
+    }
+
+    /// Drop-in equivalent of [`resolve_typescript_receiver_type`], answered
+    /// from the per-file index. Wrapper logic copied verbatim; only the
+    /// three scan primitives are swapped.
+    pub fn resolve(
+        &mut self,
+        call_line: u32,
+        receiver_name: &str,
+        enclosing_class: Option<&str>,
+    ) -> (Option<String>, Confidence) {
+        if receiver_name == "this" {
+            if let Some(class_name) = enclosing_class {
+                return (Some(class_name.to_string()), Confidence::High);
+            }
+            if let Some(class_name) = self.enclosing_class(call_line) {
+                return (Some(class_name), Confidence::High);
+            }
+            return (None, Confidence::Low);
+        }
+
+        if let Some(type_name) = self.annotation(receiver_name, call_line) {
+            let confidence = if is_likely_interface(&type_name) {
+                Confidence::Medium
+            } else {
+                Confidence::High
+            };
+            return (Some(type_name), confidence);
+        }
+
+        if let Some(type_name) = self.constructor(receiver_name, call_line) {
+            return (Some(type_name), Confidence::High);
+        }
+
+        (None, Confidence::Low)
+    }
+}
+
+// =============================================================================
 // Go Type Resolution (Phase 9)
 // =============================================================================
 
@@ -2125,6 +2315,141 @@ def free():
                 "enclosing-class divergence at line={line}"
             );
         }
+    }
+
+    /// DIFFERENTIAL GATE (TLDR-olg, typescript/javascript): the index must
+    /// match the legacy scanners primitive-level AND resolve()-level —
+    /// including the 4-prefix priority within a line, failed-extraction
+    /// fallthrough (NO abort, unlike python), brace-depth class tracking
+    /// with single-line open/close, no-EOF-fallback, line 0 / beyond-EOF,
+    /// and substring false-matches.
+    #[test]
+    fn typescript_receiver_index_matches_legacy_exhaustively() {
+        let source = r#"
+export class Engine {
+    start(): void {
+        this.ignite();
+        const cfg: Config = load();
+        cfg.run();
+        let store = new VectorStore("p");
+        store.flush();
+        var legacy: ILegacyService = make();
+        legacy.poke();
+        gen: Map<string, Item> = wat();
+        u: A | B = pick();
+        const max: number = 5;
+        x.method();
+        bad: = broken();
+        item = new Widget<Big>(1);
+    }
+}
+class Wrapper { run() { this.cfg.go(); } }
+function free() {
+    const cfg = new Other();
+    cfg.apply();
+    // cfg: Phantom = comment text must match like legacy
+    s = "x: InString = lie";
+    obj = new lowercase();
+}
+"#;
+        let receivers = [
+            "this", "cfg", "store", "legacy", "gen", "u", "max", "x",
+            "item", "missing", "this.cfg", "obj", "s", "", "a, b",
+        ];
+        let enclosings = [None, Some("Hint")];
+        let n_lines = source.lines().count() as u32;
+        let mut idx = TypeScriptReceiverIndex::new(source);
+        for line in 0..=(n_lines + 3) {
+            for recv in &receivers {
+                assert_eq!(
+                    find_typescript_annotation(source, recv, line),
+                    idx.annotation(recv, line),
+                    "ts annotation divergence at line={line} recv={recv}"
+                );
+                assert_eq!(
+                    find_typescript_constructor(source, recv, line),
+                    idx.constructor(recv, line),
+                    "ts constructor divergence at line={line} recv={recv}"
+                );
+                for enc in &enclosings {
+                    assert_eq!(
+                        resolve_typescript_receiver_type(source, line, recv, *enc),
+                        idx.resolve(line, recv, *enc),
+                        "ts resolve divergence at line={line} recv={recv} enclosing={enc:?}"
+                    );
+                }
+            }
+            assert_eq!(
+                find_typescript_enclosing_class(source, line),
+                idx.enclosing_class(line),
+                "ts enclosing-class divergence at line={line}"
+            );
+        }
+    }
+
+    /// CORPUS-LEVEL DIFFERENTIAL GATE (TLDR-olg, ts/js): value-level
+    /// agreement on real call-site receivers from this repo's fixtures.
+    #[test]
+    fn typescript_receiver_index_matches_legacy_on_real_corpus() {
+        use crate::callgraph::cross_file_types::CallType;
+
+        fn collect(dir: &std::path::Path, out: &mut Vec<(std::path::PathBuf, &'static str)>) {
+            if let Ok(rd) = std::fs::read_dir(dir) {
+                for e in rd.flatten() {
+                    let p = e.path();
+                    if p.is_dir() {
+                        collect(&p, out);
+                    } else {
+                        match p.extension().and_then(|x| x.to_str()) {
+                            Some("ts") | Some("tsx") => out.push((p, "typescript")),
+                            Some("js") => out.push((p, "javascript")),
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+        let core_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut files: Vec<(std::path::PathBuf, &str)> = Vec::new();
+        collect(&core_root.join("tests/fixtures"), &mut files);
+        collect(&core_root.join("../tldr-cli/tests/fixtures"), &mut files);
+        files.sort();
+
+        const MAX_SITES_PER_FILE: usize = 80;
+        let mut checked = 0usize;
+        for (path, lang) in &files {
+            let Ok(source) = std::fs::read_to_string(path) else {
+                continue;
+            };
+            let Ok(calls) =
+                crate::callgraph::languages::extract_calls_for_language(lang, path, &source)
+            else {
+                continue;
+            };
+            let mut idx = TypeScriptReceiverIndex::new(&source);
+
+            let mut sites: Vec<(String, u32)> = calls
+                .values()
+                .flatten()
+                .filter(|c| matches!(c.call_type, CallType::Method | CallType::Attr))
+                .filter_map(|c| Some((c.receiver.clone()?, c.line?)))
+                .collect();
+            sites.sort();
+            sites.dedup();
+
+            for (receiver, line) in sites.into_iter().take(MAX_SITES_PER_FILE) {
+                for enclosing in [None, Some("Hint")] {
+                    assert_eq!(
+                        resolve_typescript_receiver_type(&source, line, &receiver, enclosing),
+                        idx.resolve(line, &receiver, enclosing),
+                        "divergence in {} at line={line} recv={receiver} enclosing={enclosing:?}",
+                        path.display()
+                    );
+                }
+                checked += 1;
+            }
+        }
+        assert!(checked >= 20, "ts corpus gate too small: {checked} sites");
     }
 
     /// CORPUS-LEVEL DIFFERENTIAL GATE (TLDR-olg, python): value-level
