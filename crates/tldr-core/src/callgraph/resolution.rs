@@ -289,7 +289,7 @@ pub fn apply_type_resolution(file_ir: &mut FileIR, source: &str, language: Langu
     // re-scanned the whole file source per call site (~70% of the entire
     // call-graph build on tldr-code, profiled). Outputs are identical —
     // the index replicates the legacy per-line decision logic exactly.
-    let mut rust_index = (language == Language::Rust).then(|| RustReceiverIndex::new(source));
+    let rust_index = (language == Language::Rust).then(|| RustReceiverIndex::new(source));
 
     for (caller_name, call_sites) in calls.iter_mut() {
         for call_site in call_sites.iter_mut() {
@@ -324,7 +324,7 @@ pub fn apply_type_resolution(file_ir: &mut FileIR, source: &str, language: Langu
                 .and_then(|class_name| first_base_for_class(classes, class_name));
 
             if supports_type_resolution {
-                let (resolved, confidence) = match rust_index.as_mut() {
+                let (resolved, confidence) = match rust_index.as_ref() {
                     Some(idx) => idx.resolve(line, receiver_key, enclosing_class.as_deref()),
                     None => resolve_receiver_type(
                         language,
@@ -1524,10 +1524,15 @@ fn resolve_local_fuzzy_match(
         return None;
     }
 
+    // O(matches) via the by_name secondary index (TLDR-zde Gate-1 round 5).
+    // Formerly a full func_index.iter() scan (~40k entries, with a Path
+    // compare in the predicate) PER CALL SITE — 21% of compose, profiled.
+    // find_by_name yields exactly the entries the old name filter kept,
+    // with identical multiplicity (one per (module, name) alias).
     let local_matches: Vec<_> = func_index
-        .iter()
-        .filter(|((_module, func_name), entry)| {
-            if *func_name != bare_target || entry.file_path != current_file {
+        .find_by_name(bare_target)
+        .filter(|entry| {
+            if entry.file_path != current_file {
                 return false;
             }
             if let Some(type_name) = type_filter {
@@ -1540,7 +1545,7 @@ fn resolve_local_fuzzy_match(
         .collect();
 
     if local_matches.len() == 1 || (type_filter.is_some() && !local_matches.is_empty()) {
-        let (_, entry) = local_matches[0];
+        let entry = local_matches[0];
         return Some(ResolvedTarget {
             file: entry.file_path.clone(),
             name: bare_target.to_string(),
@@ -1675,7 +1680,7 @@ fn resolve_type_aware_fallback(
 ) -> Option<ResolvedTarget> {
     let type_name = receiver_type?;
     if let Some(class_entry) = class_index.get(type_name) {
-        if class_entry.methods.contains(&bare_target.to_string()) {
+        if class_entry.methods.iter().any(|m| m == bare_target) {
             return Some(ResolvedTarget {
                 file: class_entry.file_path.clone(),
                 name: bare_target.to_string(),
@@ -1686,7 +1691,7 @@ fn resolve_type_aware_fallback(
         }
         for base in &class_entry.bases {
             if let Some(base_entry) = class_index.get(base.as_str()) {
-                if base_entry.methods.contains(&bare_target.to_string()) {
+                if base_entry.methods.iter().any(|m| m == bare_target) {
                     return Some(ResolvedTarget {
                         file: base_entry.file_path.clone(),
                         name: bare_target.to_string(),
@@ -1699,8 +1704,10 @@ fn resolve_type_aware_fallback(
         }
     }
 
-    for ((_module, func_name), entry) in func_index.iter() {
-        if func_name == bare_target && entry.class_name.as_deref() == Some(type_name) {
+    // O(matches) via the by_name secondary index (TLDR-zde Gate-1 round 5);
+    // formerly a full func_index.iter() scan per call site (4% of compose).
+    for entry in func_index.find_by_name(bare_target) {
+        if entry.class_name.as_deref() == Some(type_name) {
             return Some(ResolvedTarget {
                 file: entry.file_path.clone(),
                 name: bare_target.to_string(),
