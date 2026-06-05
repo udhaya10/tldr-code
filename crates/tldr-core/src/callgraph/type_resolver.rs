@@ -1849,6 +1849,62 @@ fn nasty() {
         }
     }
 
+    /// CORPUS-LEVEL DIFFERENTIAL GATE (TLDR-zde round 5): the synthetic test
+    /// above proves shape coverage; this one proves the index agrees with the
+    /// legacy scanner VALUE-level on REAL call-site receivers — every
+    /// Method/Attr receiver the actual Rust extractor finds in this crate's
+    /// own callgraph sources. Catches same-count-different-type divergence
+    /// that edge-count comparison cannot. Caps bound debug-profile runtime.
+    #[test]
+    fn rust_receiver_index_matches_legacy_on_real_corpus() {
+        use crate::callgraph::cross_file_types::CallType;
+
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/callgraph");
+        let mut files: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| {
+                let p = e.unwrap().path();
+                (p.extension().and_then(|x| x.to_str()) == Some("rs")).then_some(p)
+            })
+            .collect();
+        files.sort();
+
+        const MAX_SITES_PER_FILE: usize = 60;
+        let mut checked = 0usize;
+        for path in &files {
+            let source = std::fs::read_to_string(path).unwrap();
+            let calls = crate::callgraph::languages::extract_calls_for_language(
+                "rust", path, &source,
+            )
+            .unwrap();
+            let idx = RustReceiverIndex::new(&source);
+
+            let mut sites: Vec<(String, u32)> = calls
+                .values()
+                .flatten()
+                .filter(|c| matches!(c.call_type, CallType::Method | CallType::Attr))
+                .filter_map(|c| Some((c.receiver.clone()?, c.line?)))
+                .collect();
+            sites.sort();
+            sites.dedup();
+
+            for (receiver, line) in sites.into_iter().take(MAX_SITES_PER_FILE) {
+                for enclosing in [None, Some("Hint")] {
+                    let legacy = resolve_rust_receiver_type(&source, line, &receiver, enclosing);
+                    let indexed = idx.resolve(line, &receiver, enclosing);
+                    assert_eq!(
+                        legacy,
+                        indexed,
+                        "divergence in {} at line={line} recv={receiver} enclosing={enclosing:?}",
+                        path.display()
+                    );
+                }
+                checked += 1;
+            }
+        }
+        assert!(checked >= 400, "corpus gate too small: {checked} sites checked");
+    }
+
     #[test]
     fn test_find_enclosing_class_simple() {
         let source = r#"
