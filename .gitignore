@@ -72,3 +72,4 @@ META-INF/
 .beads-credential-key
 .beads/proxieddb/
 tldr-smoke-report/
+.DS_Store

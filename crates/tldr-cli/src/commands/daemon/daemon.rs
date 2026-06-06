@@ -1021,11 +1021,17 @@ impl TLDRDaemon {
                         // root and the daemon project root — raw-path hashing
                         // means /tmp vs /private/tmp aliases hash differently,
                         // and process_dirty_file invalidates the PROJECT hash.
-                        self.cache.insert(
-                            key,
-                            &val,
-                            vec![hash_path(&root), hash_path(&self.project)],
-                        );
+                        //
+                        // Codex r4 Q3: a root OUTSIDE this daemon's project is
+                        // beyond the watcher's freshness contract — never cache
+                        // it (always rebuild fresh) instead of serving stale.
+                        if root == self.project || root.starts_with(&self.project) {
+                            self.cache.insert(
+                                key,
+                                &val,
+                                vec![hash_path(&root), hash_path(&self.project)],
+                            );
+                        }
                         DaemonResponse::Result(val)
                     }
                     Err(e) => DaemonResponse::Error {
@@ -1131,12 +1137,15 @@ impl TLDRDaemon {
                 match dead_code_analysis(&graph, &all_functions, entry_refs) {
                     Ok(result) => {
                         let val = serde_json::to_value(&result).unwrap_or_default();
-                        // TLDR-iqr freshness: both hashes (see Calls arm).
-                        self.cache.insert(
-                            key,
-                            &val,
-                            vec![hash_path(&root), hash_path(&self.project)],
-                        );
+                        // TLDR-iqr freshness: both hashes; external roots
+                        // never cached (see Calls arm, Codex r4 Q3).
+                        if root == self.project || root.starts_with(&self.project) {
+                            self.cache.insert(
+                                key,
+                                &val,
+                                vec![hash_path(&root), hash_path(&self.project)],
+                            );
+                        }
                         DaemonResponse::Result(val)
                     }
                     Err(e) => DaemonResponse::Error {
@@ -1166,12 +1175,15 @@ impl TLDRDaemon {
                 match architecture_analysis(&graph) {
                     Ok(result) => {
                         let val = serde_json::to_value(&result).unwrap_or_default();
-                        // TLDR-iqr freshness: both hashes (see Calls arm).
-                        self.cache.insert(
-                            key,
-                            &val,
-                            vec![hash_path(&root), hash_path(&self.project)],
-                        );
+                        // TLDR-iqr freshness: both hashes; external roots
+                        // never cached (see Calls arm, Codex r4 Q3).
+                        if root == self.project || root.starts_with(&self.project) {
+                            self.cache.insert(
+                                key,
+                                &val,
+                                vec![hash_path(&root), hash_path(&self.project)],
+                            );
+                        }
                         DaemonResponse::Result(val)
                     }
                     Err(e) => DaemonResponse::Error {
