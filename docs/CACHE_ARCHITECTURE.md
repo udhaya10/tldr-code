@@ -1,5 +1,13 @@
 # Cache Architecture
 
+> **Note (2026-06-06):** this document describes the **current** caching
+> behavior. A replacement layered architecture is designed and ratified — see
+> [CACHE_LAYERS_DESIGN.md](./CACHE_LAYERS_DESIGN.md). Under that design the
+> `QueryCache` described below is **retired** (answer-blob memoization is
+> replaced by a resident snapshot + content-addressed fact layers). The new
+> design is gated behind the measurement issue `TLDR-rfz`; until it ships,
+> this document remains accurate.
+
 This document describes how caching currently works in `tldr-code`, with a
 focus on daemon warm-up, query memoization, invalidation, and the search
 callgraph timeout observed during daemon debugging.
