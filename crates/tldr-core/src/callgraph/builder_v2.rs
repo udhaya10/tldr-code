@@ -34,7 +34,6 @@ use rayon::prelude::*;
 use super::cross_file_types::{CallGraphIR, CallSite, CallType, FileIR};
 use super::import_resolver::{ImportResolver, ReExportTracer};
 use super::module_index::ModuleIndex;
-use super::type_aware_resolver::TypeAwareCallResolver;
 use super::type_resolver::{expand_union_type, MAX_UNION_EXPANSION};
 use crate::types::Language;
 
@@ -879,18 +878,12 @@ pub fn build_project_call_graph_v2(
         }
     }
 
-    // Step 9b: Create type-aware resolver for chained calls and MRO-based resolution
-    let func_path_map = func_index.to_path_map();
-    let class_path_map = class_index.to_path_map();
-    let mut type_resolver =
-        TypeAwareCallResolver::new(&module_index, &func_path_map, &class_path_map);
-
-    // Feed all FileIRs and class defs into the resolver.
-    // high-bundle-progress-determinism-coverage-v1 (N2): sorted insertion
-    // so the resolver builds the same internal type tables on every run.
-    for (file_path, file_ir) in &sorted_files {
-        type_resolver.add_file_ir((*file_path).clone(), (*file_ir).clone());
-    }
+    // Step 9b (REMOVED, TLDR-zro / Codex round-1 Q3 VERIFIED): a
+    // TypeAwareCallResolver was constructed here and fed a full clone of
+    // every FileIR, then never read — pure dead work in the compose hot
+    // path (django: 2,917 FileIR clones per build). add_file_ir only
+    // populates resolver-local maps (type_aware_resolver.rs), so removal
+    // is behavior-preserving; verified by the 7-corpus sha256 gate.
 
     // Step 10: For each file, resolve imports and then resolve calls.
     //
