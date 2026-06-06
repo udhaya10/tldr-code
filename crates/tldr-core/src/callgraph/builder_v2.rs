@@ -636,15 +636,75 @@ pub fn build_project_call_graph_v2(
     let scanned_files = scan_project_files(root, &config.language, &config)?;
     let t_scan = t_start.elapsed();
 
-    // Step 3: Create IR with capacity hint
-    let mut ir =
-        CallGraphIR::with_capacity(root.to_path_buf(), &config.language, scanned_files.len());
-
     // Step 4: Build function and class indices in parallel (Phase 14c)
     // Per M1.9: Build indices completely before resolution phase
     let (_func_index, _class_index, file_irs) =
         build_indices_parallel(&scanned_files, root, &config.language, &config);
     let t_parse = t_start.elapsed() - t_scan;
+
+    // Steps 3 + 5-11 (TLDR-iqr seam): compose the graph from the per-file IRs.
+    let ir = compose_call_graph_v2(root, &config, file_irs)?;
+
+    if phase_timing {
+        let t_compose = t_start.elapsed() - t_scan - t_parse;
+        eprintln!(
+            "[phase-timing] lang={} files={} funcs={} edges={} | scan={}ms parse={}ms compose={}ms total={}ms",
+            config.language,
+            ir.files.len(),
+            ir.function_count(),
+            ir.edges.len(),
+            t_scan.as_millis(),
+            t_parse.as_millis(),
+            t_compose.as_millis(),
+            t_start.elapsed().as_millis(),
+        );
+    }
+
+    return Ok(ir);
+}
+
+/// TLDR-iqr seam: scan + parse phase only — produces the per-file IRs that
+/// [`compose_call_graph_v2`] consumes. Behavior-identical to the front half
+/// of [`build_project_call_graph_v2`]; the daemon's FileIR memo re-parses
+/// single changed files by calling [`build_indices_parallel`] on a one-file
+/// slice and composing with memoized IRs for the rest.
+pub fn parse_project_file_irs(
+    root: &Path,
+    config: &BuildConfig,
+) -> Result<Vec<FileIR>, BuildError> {
+    if !root.exists() || !root.is_dir() {
+        return Err(BuildError::RootNotFound(root.to_path_buf()));
+    }
+    let language = normalize_language_string(&config.language);
+    if !is_supported_language(&language) {
+        return Err(BuildError::UnsupportedLanguage(language));
+    }
+    let scanned_files = scan_project_files(root, &language, config)?;
+    let (_func_index, _class_index, file_irs) =
+        build_indices_parallel(&scanned_files, root, &language, config);
+    Ok(file_irs)
+}
+
+/// TLDR-iqr seam: compose phase — everything after parse (IR assembly,
+/// module/function/class indexes, import resolution, call resolution, edge
+/// dedup + canonical sort). Pure function of (root manifests/disk, config,
+/// file_irs): chaining [`parse_project_file_irs`] into this function is
+/// byte-identical to [`build_project_call_graph_v2`] (7-corpus sha256 gate,
+/// TLDR-iqr). NOTE: when `config.use_type_resolution` is set, the resolution
+/// loop still reads source files for receiver-type enrichment — folding that
+/// into parse-time FileIR artifacts is TLDR-726 (S3) scope, deliberately NOT
+/// done here (it would change observable FileIR serialization; Codex round-3
+/// Q6 finding on TLDR-iqr).
+pub fn compose_call_graph_v2(
+    root: &Path,
+    config: &BuildConfig,
+    file_irs: Vec<FileIR>,
+) -> Result<CallGraphIR, BuildError> {
+    let mut config = config.clone();
+    config.language = normalize_language_string(&config.language);
+
+    // Step 3: Create IR with capacity hint
+    let mut ir = CallGraphIR::with_capacity(root.to_path_buf(), &config.language, file_irs.len());
 
     // Step 5: Add FileIRs to the CallGraphIR
     for file_ir in file_irs {
@@ -1016,21 +1076,6 @@ pub fn build_project_call_graph_v2(
             .then_with(|| a.dst_func.cmp(&b.dst_func))
             .then_with(|| format!("{:?}", a.call_type).cmp(&format!("{:?}", b.call_type)))
     });
-
-    if phase_timing {
-        let t_compose = t_start.elapsed() - t_scan - t_parse;
-        eprintln!(
-            "[phase-timing] lang={} files={} funcs={} edges={} | scan={}ms parse={}ms compose={}ms total={}ms",
-            config.language,
-            ir.files.len(),
-            ir.function_count(),
-            ir.edges.len(),
-            t_scan.as_millis(),
-            t_parse.as_millis(),
-            t_compose.as_millis(),
-            t_start.elapsed().as_millis(),
-        );
-    }
 
     Ok(ir)
 }
