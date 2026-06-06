@@ -2,20 +2,24 @@
 //!
 //! Finds all callers of a function (reverse call graph traversal).
 //! Supports `--type-aware` flag for Python type resolution (Phase 7-8).
-//! Auto-routes through daemon when available for ~35x speedup.
+//!
+//! ALWAYS computes locally — daemon routing deliberately removed (TLDR-94j):
+//! the daemon Impact arm uses plain `impact_analysis` (no AST fallback for
+//! isolated functions, no reference enrichment), defaults depth to 3 vs the
+//! CLI's 5, and drops the file disambiguation filter — strictly weaker
+//! answers than the local path. Correctness > speed until the n74 CSR
+//! rebuild restores daemon routing with full flag parity (TLDR-n74).
 
 use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::Args;
 
-use tldr_core::types::ImpactReport;
 use tldr_core::{
     build_project_call_graph, enrich_impact_with_references, impact_analysis_with_ast_fallback,
     Language,
 };
 
-use crate::commands::daemon_router::{params_with_func_depth, try_daemon_route};
 use crate::output::{format_impact_dot, format_impact_text, OutputFormat, OutputWriter};
 use crate::path_validation::require_directory;
 
@@ -65,29 +69,7 @@ impl ImpactArgs {
 
         let type_aware_msg = if self.type_aware { " (type-aware)" } else { "" };
 
-        // Try daemon first for cached result
-        if let Some(report) = try_daemon_route::<ImpactReport>(
-            &self.path,
-            "impact",
-            params_with_func_depth(&self.function, Some(self.depth)),
-        ) {
-            // Output based on format
-            if writer.is_text() {
-                let text = format_impact_text(&report, self.type_aware);
-                writer.write_text(&text)?;
-                return Ok(());
-            } else if writer.is_dot() {
-                // surface-gaps-v1 (BUG-19): DOT impact graph (reverse calls).
-                let dot = format_impact_dot(&report);
-                writer.write_text(&dot)?;
-                return Ok(());
-            } else {
-                writer.write(&report)?;
-                return Ok(());
-            }
-        }
-
-        // Fallback to direct compute
+        // Direct local compute (TLDR-94j: only correct path until n74 flag parity)
         writer.progress(&format!(
             "Building call graph for {} ({:?}){}...",
             self.path.display(),

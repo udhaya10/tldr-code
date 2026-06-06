@@ -1,7 +1,12 @@
 //! Slice command - Program slicing
 //!
 //! Computes backward or forward program slices from a line.
-//! Auto-routes through daemon when available for ~35x speedup.
+//!
+//! ALWAYS computes locally — daemon routing deliberately removed (TLDR-94j):
+//! the daemon Slice arm hardcodes `SliceDirection::Backward` and ignores
+//! `--variable`, so any daemon-served answer is WRONG for `-d forward` or
+//! variable-filtered slices. Correctness > speed until the n74 CSR rebuild
+//! restores daemon routing with full flag parity (TLDR-n74).
 
 use std::path::PathBuf;
 
@@ -12,7 +17,6 @@ use serde::{Deserialize, Serialize};
 use tldr_core::ast::function_finder::find_function_bounds_from_path_or_source;
 use tldr_core::{get_slice_rich, Language, SliceDirection};
 
-use crate::commands::daemon_router::{params_with_file_function_line, try_daemon_route};
 use crate::output::{OutputFormat, OutputWriter};
 
 /// Compute program slice from a line
@@ -108,18 +112,6 @@ struct SliceOutput {
     explanation: Option<String>,
 }
 
-/// Legacy daemon output (old format without rich data)
-#[derive(Debug, Serialize, Deserialize)]
-struct LegacySliceOutput {
-    file: PathBuf,
-    function: String,
-    criterion_line: u32,
-    direction: String,
-    variable: Option<String>,
-    lines: Vec<u32>,
-    line_count: usize,
-}
-
 impl SliceArgs {
     /// Run the slice command
     pub fn run(&self, format: OutputFormat, quiet: bool) -> Result<()> {
@@ -136,118 +128,7 @@ impl SliceArgs {
             SliceDirection::Forward => "forward",
         };
 
-        // Try daemon first for cached result (use file's parent as project root)
-        let project = self.file.parent().unwrap_or(&self.file);
-        if let Some(output) = try_daemon_route::<LegacySliceOutput>(
-            project,
-            "slice",
-            params_with_file_function_line(&self.file, &self.function, self.line),
-        ) {
-            // Daemon returns legacy format -- enrich with source code if possible
-            let source_lines = read_file_lines(&self.file);
-            if writer.is_text() {
-                let mut text = String::new();
-                text.push_str(&format!(
-                    "Program Slice ({} from line {})\n",
-                    output.direction, output.criterion_line
-                ));
-                text.push_str(&format!(
-                    "Function: {}::{}\n",
-                    output.file.display(),
-                    output.function
-                ));
-                if let Some(var) = &output.variable {
-                    text.push_str(&format!("Variable: {}\n", var));
-                }
-                // P12.AGG12-15: surface OOR diagnostic in text output too.
-                if output.lines.is_empty() {
-                    if let Some(diag) = slice_oor_explanation(
-                        self.file.to_str().unwrap_or_default(),
-                        &self.function,
-                        self.line,
-                        language,
-                    ) {
-                        text.push_str(&format!("\n{}\n", diag));
-                        writer.write_text(&text)?;
-                        return Ok(());
-                    }
-                }
-                text.push_str(&format!(
-                    "\nSlice contains {} lines:\n\n",
-                    output.lines.len()
-                ));
-                for &line_num in &output.lines {
-                    let code = source_lines
-                        .get((line_num as usize).wrapping_sub(1))
-                        .map(|s| s.trim_end())
-                        .unwrap_or("");
-                    let marker = if line_num == output.criterion_line {
-                        ">"
-                    } else {
-                        " "
-                    };
-                    let criterion_flag = if line_num == output.criterion_line {
-                        "  <-- criterion"
-                    } else {
-                        ""
-                    };
-                    text.push_str(&format!(
-                        "{} {:>5} | {}{}\n",
-                        marker, line_num, code, criterion_flag
-                    ));
-                }
-                writer.write_text(&text)?;
-                return Ok(());
-            } else {
-                // Convert legacy to new format for JSON
-                let slice_lines: Vec<SliceLine> = output
-                    .lines
-                    .iter()
-                    .map(|&l| {
-                        let code = source_lines
-                            .get((l as usize).wrapping_sub(1))
-                            .map(|s| s.trim_end().to_string())
-                            .unwrap_or_default();
-                        SliceLine {
-                            line: l,
-                            code,
-                            definitions: Vec::new(),
-                            uses: Vec::new(),
-                            dep_type: None,
-                            dep_label: None,
-                        }
-                    })
-                    .collect();
-                // P12.AGG12-15: same OOR diagnostic as the direct-compute
-                // path, applied to the daemon's legacy output.
-                let explanation = if output.lines.is_empty() {
-                    slice_oor_explanation(
-                        self.file.to_str().unwrap_or_default(),
-                        &self.function,
-                        self.line,
-                        language,
-                    )
-                } else {
-                    None
-                };
-                let rich_output = SliceOutput {
-                    file: output.file,
-                    function: output.function,
-                    criterion_line: output.criterion_line,
-                    direction: output.direction,
-                    variable: output.variable,
-                    line_count: output.line_count,
-                    lines: output.lines,
-                    slice_lines,
-                    edges: Vec::new(),
-                    explanation,
-                };
-                writer.write(&rich_output)?;
-                return Ok(());
-            }
-        }
-
-        // Fallback to direct compute with rich output
+        // Direct local compute (TLDR-94j: only correct path until n74 flag parity)
         writer.progress(&format!(
             "Computing {} slice for line {} in {}::{}...",
             direction_str,
@@ -479,13 +360,4 @@ fn slice_oor_explanation(
     } else {
         None
     }
-}
-
-// Optional helper accessor used in tests and richtext path; matches
-// `read_file_lines` location in the file.
-/// Read file lines for source enrichment
-fn read_file_lines(path: &PathBuf) -> Vec<String> {
-    std::fs::read_to_string(path)
-        .map(|c| c.lines().map(|l| l.to_string()).collect())
-        .unwrap_or_default()
 }
