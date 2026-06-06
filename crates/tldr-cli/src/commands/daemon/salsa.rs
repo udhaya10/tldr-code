@@ -637,6 +637,16 @@ pub fn hash_path(path: &Path) -> u64 {
     hasher.finish()
 }
 
+/// Hash file CONTENT bytes (TLDR-iqr): the single shared convention for the
+/// daemon's FileIR memo freshness check. Same `DefaultHasher` family as
+/// `hash_path`/`hash_str_args` — RAM-only use; if a memo is ever persisted
+/// to disk the hash choice must be versioned explicitly (Codex round-3 Q3).
+pub fn hash_bytes(bytes: &[u8]) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    hasher.finish()
+}
+
 // =============================================================================
 // Tests
 // =============================================================================

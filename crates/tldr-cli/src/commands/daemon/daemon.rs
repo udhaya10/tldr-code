@@ -14,7 +14,7 @@
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
@@ -25,7 +25,12 @@ use tokio::sync::{watch, RwLock};
 use super::activity::{ActivityTracker, Source};
 use super::error::{DaemonError, DaemonResult};
 use super::ipc::{read_command, send_response, IpcListener, IpcStream};
-use super::salsa::{QueryCache, QueryKey};
+use super::salsa::{hash_bytes, hash_path, QueryCache, QueryKey};
+use tldr_core::callgraph::cross_file_types::FileIR;
+use tldr_core::callgraph::{
+    build_indices_parallel, compose_call_graph_v2, scan_project_files, BuildConfig,
+};
+use tldr_core::types::{CallEdge, ProjectCallGraph, WorkspaceConfig};
 use super::types::{
     AllSessionsSummary, DaemonCommand, DaemonConfig, DaemonResponse, DaemonStatus, HookStats,
     SalsaCacheStats, SessionStats, HOOK_FLUSH_THRESHOLD,
@@ -40,7 +45,7 @@ use tldr_core::semantic::{EmbeddingModel, IndexSearchOptions};
 #[cfg(feature = "semantic")]
 use super::index_manager::IndexManager;
 use tldr_core::{
-    architecture_analysis, build_project_call_graph, change_impact, collect_all_functions,
+    architecture_analysis, change_impact, collect_all_functions,
     dead_code_analysis, detect_or_parse_language, extract_file, find_importers, get_cfg_context,
     get_code_structure, get_dfg_context, get_file_tree, get_imports, get_relevant_context,
     get_slice, impact_analysis, search as tldr_search, FileTree, Language, NodeType,
@@ -106,6 +111,78 @@ impl Drop for ClearFlagOnDrop {
     }
 }
 
+/// TLDR-iqr: per-file FileIR memo — daemon RAM only (ADR-8 stays closed; the
+/// content-hash key means a disk layer could slot beneath later without
+/// interface change). Key = (language, absolute file path); value =
+/// (content_hash, parsed FileIR).
+type FileIrMemo = DashMap<(String, PathBuf), (u64, Arc<FileIR>)>;
+
+/// TLDR-iqr: memoized whole-project graph build. Mirrors
+/// `tldr_core::build_project_call_graph`'s wrapper semantics exactly
+/// (workspace discovery, use_type_resolution=true) but re-parses ONLY files
+/// whose content hash misses the memo; everything else composes from
+/// memoized FileIRs via the parse/compose seam. The content-hash check at
+/// use time is the drift-proof backstop (kkt/1qv lesson); watcher eviction
+/// in `process_dirty_file` is the eager path.
+fn build_project_call_graph_memoized(
+    root: &Path,
+    lang: Language,
+    memo: &FileIrMemo,
+) -> Result<ProjectCallGraph, String> {
+    let mut config = BuildConfig {
+        language: lang.as_str().to_string(),
+        respect_ignore: true,
+        ..Default::default()
+    };
+    config.use_type_resolution = true;
+    let discovered = WorkspaceConfig::discover(root);
+    if let Some(ws) = discovered.as_ref() {
+        if !ws.roots.is_empty() {
+            config.use_workspace_config = true;
+            config.workspace_roots = ws.roots.clone();
+        }
+    }
+
+    let scanned =
+        scan_project_files(root, &config.language, &config).map_err(|e| e.to_string())?;
+
+    let mut file_irs = Vec::with_capacity(scanned.len());
+    for s in &scanned {
+        let memo_key = (config.language.clone(), s.path.clone());
+        let content_hash = std::fs::read(&s.path).ok().map(|b| hash_bytes(&b));
+        if let Some(h) = content_hash {
+            if let Some(entry) = memo.get(&memo_key) {
+                if entry.0 == h {
+                    file_irs.push(entry.1.as_ref().clone());
+                    continue;
+                }
+            }
+        }
+        // Miss / changed / unreadable: parse this ONE file through the
+        // standard parse path (read-error handling identical to full build).
+        let single = std::slice::from_ref(s);
+        let (_f, _c, mut irs) = build_indices_parallel(single, root, &config.language, &config);
+        if let Some(ir1) = irs.pop() {
+            if let Some(h) = content_hash {
+                memo.insert(memo_key, (h, Arc::new(ir1.clone())));
+            }
+            file_irs.push(ir1);
+        }
+    }
+
+    let ir = compose_call_graph_v2(root, &config, file_irs).map_err(|e| e.to_string())?;
+    let mut graph = ProjectCallGraph::new();
+    for edge in ir.edges {
+        graph.add_edge(CallEdge {
+            src_file: edge.src_file,
+            src_func: edge.src_func,
+            dst_file: edge.dst_file,
+            dst_func: edge.dst_func,
+        });
+    }
+    Ok(graph)
+}
+
 /// The background warm build (TLDR-utj.7). Carries CLONED handles of the
 /// daemon components it needs rather than the daemon itself: the Warm handler
 /// only has `&self`, and the detached task must be `'static`.
@@ -113,6 +190,8 @@ struct WarmJob {
     project: PathBuf,
     lang: Language,
     cache: Arc<QueryCache>,
+    /// TLDR-iqr: FileIR memo handle so the warm build populates it.
+    file_ir_memo: Arc<FileIrMemo>,
     indexed_files: Arc<RwLock<usize>>,
     #[cfg(feature = "semantic")]
     semantic_store: Arc<IndexManager>,
@@ -138,14 +217,30 @@ impl WarmJob {
         if self.cache.get::<serde_json::Value>(&calls_key).is_some() {
             warmed.push("call_graph (cached)");
         } else {
-            match build_project_call_graph(&self.project, self.lang, None, true) {
+            // TLDR-iqr: memoized build, off the async runtime (Codex r3 Q8 —
+            // the old direct call blocked the runtime for the whole build).
+            let project = self.project.clone();
+            let lang = self.lang;
+            let memo = Arc::clone(&self.file_ir_memo);
+            let built = tokio::task::spawn_blocking(move || {
+                build_project_call_graph_memoized(&project, lang, &memo)
+            })
+            .await
+            .unwrap_or_else(|e| Err(format!("warm build task failed: {e}")));
+            match built {
                 Ok(result) => {
                     // TLDR-9ae (F1): insert the native result directly — insert()
                     // serializes once via to_vec. The former to_value() built a
                     // whole-project JSON DOM (5-15x the JSON text size) that
                     // coexisted with `result` AND the serialized bytes, a major
                     // contributor to the measured 22GB warm plateau (TLDR-k8s).
-                    self.cache.insert(calls_key, &result, vec![]);
+                    //
+                    // TLDR-iqr freshness: register against the PROJECT ROOT
+                    // hash — process_dirty_file invalidates it on any save, so
+                    // project-level answers can no longer go permanently stale
+                    // (they previously registered vec![] = uninvalidatable).
+                    self.cache
+                        .insert(calls_key, &result, vec![hash_path(&self.project)]);
                     warmed.push("call_graph");
                 }
                 Err(e) => errors.push(format!("call_graph: {}", e)),
@@ -164,7 +259,9 @@ impl WarmJob {
             match get_code_structure(&self.project, self.lang, 0, None) {
                 Ok(result) => {
                     // TLDR-9ae (F1): no to_value DOM — see call_graph step above.
-                    self.cache.insert(struct_key, &result, vec![]);
+                    // TLDR-iqr freshness: root-hash registration (see call_graph).
+                    self.cache
+                        .insert(struct_key, &result, vec![hash_path(&self.project)]);
                     warmed.push("structure");
                 }
                 Err(e) => errors.push(format!("structure: {}", e)),
@@ -184,7 +281,9 @@ impl WarmJob {
                 Ok(result) => {
                     let file_count = count_tree_files(&result);
                     // TLDR-9ae (F1): no to_value DOM — see call_graph step above.
-                    self.cache.insert(tree_key, &result, vec![]);
+                    // TLDR-iqr freshness: root-hash registration (see call_graph).
+                    self.cache
+                        .insert(tree_key, &result, vec![hash_path(&self.project)]);
                     *self.indexed_files.write().await = file_count;
                     warmed.push("file_tree");
                 }
@@ -257,6 +356,8 @@ pub struct TLDRDaemon {
     warm_in_flight: Arc<AtomicBool>,
     /// Number of indexed files (for status reporting)
     indexed_files: Arc<RwLock<usize>>,
+    /// TLDR-iqr: per-file FileIR memo (content-hash keyed). RAM-only.
+    file_ir_memo: Arc<FileIrMemo>,
     /// Resident vector store with read/write split (TLDR-ac0.1). Concurrent
     /// queries take a shared read lock; build and invalidate take a write lock.
     #[cfg(feature = "semantic")]
@@ -285,8 +386,27 @@ impl TLDRDaemon {
             activity: Arc::new(ActivityTracker::new()),
             warm_in_flight: Arc::new(AtomicBool::new(false)),
             indexed_files: Arc::new(RwLock::new(0)),
+            file_ir_memo: Arc::new(FileIrMemo::new()),
             #[cfg(feature = "semantic")]
             semantic_store: Arc::new(IndexManager::new()),
+        }
+    }
+
+    /// TLDR-iqr: run the memoized graph build off the async runtime
+    /// (Codex r3 Q8: the old direct calls blocked the runtime per build).
+    async fn build_graph_memoized_blocking(
+        &self,
+        root: PathBuf,
+        lang: Language,
+    ) -> Result<ProjectCallGraph, String> {
+        let memo = Arc::clone(&self.file_ir_memo);
+        match tokio::task::spawn_blocking(move || {
+            build_project_call_graph_memoized(&root, lang, &memo)
+        })
+        .await
+        {
+            Ok(r) => r,
+            Err(e) => Err(format!("graph build task failed: {e}")),
         }
     }
 
@@ -894,15 +1014,17 @@ impl TLDRDaemon {
                 if let Some(cached) = self.cache.get::<serde_json::Value>(&key) {
                     return DaemonResponse::Result(cached);
                 }
-                match build_project_call_graph(&root, lang, None, true) {
+                match self.build_graph_memoized_blocking(root.clone(), lang).await {
                     Ok(result) => {
                         let val = serde_json::to_value(&result).unwrap_or_default();
-                        self.cache.insert(key, &val, vec![]);
+                        // TLDR-iqr freshness: root-hash registration so saves
+                        // invalidate this answer (was vec![] = permanently stale).
+                        self.cache.insert(key, &val, vec![hash_path(&root)]);
                         DaemonResponse::Result(val)
                     }
                     Err(e) => DaemonResponse::Error {
                         status: "error".to_string(),
-                        error: e.to_string(),
+                        error: e,
                     },
                 }
             }
@@ -922,19 +1044,24 @@ impl TLDRDaemon {
                 if let Some(cached) = self.cache.get::<serde_json::Value>(&key) {
                     return DaemonResponse::Result(cached);
                 }
-                let graph = match build_project_call_graph(&self.project, lang, None, true) {
+                let graph = match self
+                    .build_graph_memoized_blocking(self.project.clone(), lang)
+                    .await
+                {
                     Ok(g) => g,
                     Err(e) => {
                         return DaemonResponse::Error {
                             status: "error".to_string(),
-                            error: e.to_string(),
+                            error: e,
                         }
                     }
                 };
                 match impact_analysis(&graph, &func, d, None) {
                     Ok(result) => {
                         let val = serde_json::to_value(&result).unwrap_or_default();
-                        self.cache.insert(key, &val, vec![]);
+                        // TLDR-iqr freshness: root-hash registration (see Calls).
+                        self.cache
+                            .insert(key, &val, vec![hash_path(&self.project)]);
                         DaemonResponse::Result(val)
                     }
                     Err(e) => DaemonResponse::Error {
@@ -961,12 +1088,12 @@ impl TLDRDaemon {
                 if let Some(cached) = self.cache.get::<serde_json::Value>(&key) {
                     return DaemonResponse::Result(cached);
                 }
-                let graph = match build_project_call_graph(&root, lang, None, true) {
+                let graph = match self.build_graph_memoized_blocking(root.clone(), lang).await {
                     Ok(g) => g,
                     Err(e) => {
                         return DaemonResponse::Error {
                             status: "error".to_string(),
-                            error: e.to_string(),
+                            error: e,
                         }
                     }
                 };
@@ -998,7 +1125,8 @@ impl TLDRDaemon {
                 match dead_code_analysis(&graph, &all_functions, entry_refs) {
                     Ok(result) => {
                         let val = serde_json::to_value(&result).unwrap_or_default();
-                        self.cache.insert(key, &val, vec![]);
+                        // TLDR-iqr freshness: root-hash registration (see Calls).
+                        self.cache.insert(key, &val, vec![hash_path(&root)]);
                         DaemonResponse::Result(val)
                     }
                     Err(e) => DaemonResponse::Error {
@@ -1016,19 +1144,20 @@ impl TLDRDaemon {
                 if let Some(cached) = self.cache.get::<serde_json::Value>(&key) {
                     return DaemonResponse::Result(cached);
                 }
-                let graph = match build_project_call_graph(&root, lang, None, true) {
+                let graph = match self.build_graph_memoized_blocking(root.clone(), lang).await {
                     Ok(g) => g,
                     Err(e) => {
                         return DaemonResponse::Error {
                             status: "error".to_string(),
-                            error: e.to_string(),
+                            error: e,
                         }
                     }
                 };
                 match architecture_analysis(&graph) {
                     Ok(result) => {
                         let val = serde_json::to_value(&result).unwrap_or_default();
-                        self.cache.insert(key, &val, vec![]);
+                        // TLDR-iqr freshness: root-hash registration (see Calls).
+                        self.cache.insert(key, &val, vec![hash_path(&root)]);
                         DaemonResponse::Result(val)
                     }
                     Err(e) => DaemonResponse::Error {
@@ -1216,6 +1345,7 @@ impl TLDRDaemon {
         let model_note = String::new();
 
         let job = WarmJob {
+            file_ir_memo: Arc::clone(&self.file_ir_memo),
             project: self.project.clone(),
             lang,
             cache: Arc::clone(&self.cache),
@@ -1371,6 +1501,18 @@ impl TLDRDaemon {
         // Invalidate cache entries for this file
         let file_hash = super::salsa::hash_path(&file);
         self.cache.invalidate_by_input(file_hash);
+
+        // TLDR-iqr: evict the single FileIR memo entry for this path (any
+        // lang key). Content-hash verification at build time is the backstop
+        // if this raw-path match misses (e.g. /tmp vs /private/tmp aliasing).
+        self.file_ir_memo.retain(|k, _| k.1 != file);
+
+        // TLDR-iqr freshness: project-level answers (calls/structure/tree/
+        // dead/arch/impact) register against the project-root hash; any save
+        // invalidates them so the next query lazily recomposes from the memo
+        // (a 20-save burst = 20 cheap evictions + ONE recompose). Before this,
+        // they registered vec![] and were PERMANENTLY stale (finding on iqr).
+        self.cache.invalidate_by_input(super::salsa::hash_path(&self.project));
 
         // Incrementally re-index the changed file in the resident store instead
         // of dropping it (TLDR-t8f). A warm store applies a per-file delta —
