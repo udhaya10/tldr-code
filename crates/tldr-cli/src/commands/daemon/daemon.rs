@@ -1017,9 +1017,15 @@ impl TLDRDaemon {
                 match self.build_graph_memoized_blocking(root.clone(), lang).await {
                     Ok(result) => {
                         let val = serde_json::to_value(&result).unwrap_or_default();
-                        // TLDR-iqr freshness: root-hash registration so saves
-                        // invalidate this answer (was vec![] = permanently stale).
-                        self.cache.insert(key, &val, vec![hash_path(&root)]);
+                        // TLDR-iqr freshness: register BOTH the query-supplied
+                        // root and the daemon project root — raw-path hashing
+                        // means /tmp vs /private/tmp aliases hash differently,
+                        // and process_dirty_file invalidates the PROJECT hash.
+                        self.cache.insert(
+                            key,
+                            &val,
+                            vec![hash_path(&root), hash_path(&self.project)],
+                        );
                         DaemonResponse::Result(val)
                     }
                     Err(e) => DaemonResponse::Error {
@@ -1125,8 +1131,12 @@ impl TLDRDaemon {
                 match dead_code_analysis(&graph, &all_functions, entry_refs) {
                     Ok(result) => {
                         let val = serde_json::to_value(&result).unwrap_or_default();
-                        // TLDR-iqr freshness: root-hash registration (see Calls).
-                        self.cache.insert(key, &val, vec![hash_path(&root)]);
+                        // TLDR-iqr freshness: both hashes (see Calls arm).
+                        self.cache.insert(
+                            key,
+                            &val,
+                            vec![hash_path(&root), hash_path(&self.project)],
+                        );
                         DaemonResponse::Result(val)
                     }
                     Err(e) => DaemonResponse::Error {
@@ -1156,8 +1166,12 @@ impl TLDRDaemon {
                 match architecture_analysis(&graph) {
                     Ok(result) => {
                         let val = serde_json::to_value(&result).unwrap_or_default();
-                        // TLDR-iqr freshness: root-hash registration (see Calls).
-                        self.cache.insert(key, &val, vec![hash_path(&root)]);
+                        // TLDR-iqr freshness: both hashes (see Calls arm).
+                        self.cache.insert(
+                            key,
+                            &val,
+                            vec![hash_path(&root), hash_path(&self.project)],
+                        );
                         DaemonResponse::Result(val)
                     }
                     Err(e) => DaemonResponse::Error {
