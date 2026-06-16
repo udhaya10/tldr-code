@@ -9,8 +9,12 @@ the `tldr` CLI and focused source inspection.
 LLM-friendly answers about source code. It is exposed through three main entry
 points:
 
-- `tldr-cli`: command-line interface and user-facing command routing.
-- `tldr-daemon`: background server for cached analysis requests.
+- `tldr-cli`: command-line interface and user-facing command routing. Also
+  hosts the live resident daemon under `src/commands/daemon/` (the in-process
+  query cache, FileIR memo, salsa cache, and filesystem watcher that serve
+  warm queries).
+- `tldr-daemon`: the older standalone axum-over-Unix-socket HTTP server. NOT
+  the daemon that backs the warm CLI/MCP path — that lives in `tldr-cli`.
 - `tldr-mcp`: MCP protocol server exposing analysis tools to agents.
 - `tldr-core`: reusable analysis engine shared by the other crates.
 
@@ -19,7 +23,8 @@ and return only the context needed for a task.
 
 ## Size and language mix
 
-`tldr loc crates` reported:
+`tldr loc crates` reported (point-in-time snapshot; counts drift as the tree
+grows — re-run `tldr loc crates` for current figures):
 
 - **974 files** under `crates/`
 - **577,658 total lines**
@@ -82,7 +87,8 @@ JSON, DOT, and SARIF for selected commands.
 
 ### Daemon
 
-`tldr-daemon` keeps analysis state alive between commands. It caches expensive
+The live daemon (in `tldr-cli/src/commands/daemon/`, not the `tldr-daemon`
+crate) keeps analysis state alive between commands. It caches expensive
 queries and serves requests over a local IPC/socket path. Recent debugging added
 persistent daemon logging to `.tldr/daemon.log`.
 

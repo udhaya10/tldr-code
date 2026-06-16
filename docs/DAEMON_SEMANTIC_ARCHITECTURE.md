@@ -1,7 +1,8 @@
 # Daemon & Semantic Search Architecture
 
-> Scope: this document describes the work delivered on the
-> `tldr-cli-daemon-support` branch. It explains how tldr's semantic search and
+> Scope: this document describes the daemon + semantic work (originally
+> developed on the `tldr-cli-daemon-support` branch; now merged). It explains
+> how tldr's semantic search and
 > background daemon were redesigned — from a cold, JSON-cached, rebuild-the-world
 > model into a **persistent vector store served by a long-lived daemon that
 > watches the filesystem and incrementally re-indexes only what changed**.
@@ -33,12 +34,12 @@ Roughly **9,000 lines across 69 files**, built issue-by-issue under beads
           CLI (tldr search / semantic / similar / embed)
                           │
                           ▼
-        ┌──────────────── tldr-daemon (resident, per project) ────────────────┐
+        ┌────────── tldr-cli/commands/daemon (resident, per project) ─────────┐
         │                                                                      │
         │   filesystem watcher ──► dirty-file channel ──► serialized worker    │
         │   (notify-debouncer)                              │                  │
         │                                                   ▼                  │
-        │                                   IndexManager (RwLock<VectorStore>) │
+        │            IndexManager (RwLock<Option<(EmbeddingModel, VectorStore)>>) │
         │                                   • query  (shared read lock)        │
         │                                   • warm / invalidate (write lock)   │
         │                                   • apply_delta  (write lock, t8f)   │
@@ -229,9 +230,11 @@ Key properties:
   — same OS primitives. The win is **consolidation into one process** and turning
   the t8f delta into an in-process call rather than an IPC contract.
 
-`spawn_watcher(daemon)` returns a `WatcherGuard` tying the watcher's lifetime to
-the daemon. Coverage includes end-to-end "new file appears → routed → indexed"
-tests.
+`spawn_watcher(daemon)` returns an `Option<WatcherGuard>` tying the watcher's
+lifetime to the daemon. It returns `None` (and logs a warning) when the store
+dir is inside the project root or the OS watcher can't be created — the daemon
+keeps serving IPC `Notify` in that case. Coverage includes end-to-end
+"new file appears → routed → indexed" tests.
 
 ---
 
@@ -250,7 +253,9 @@ Several fixes ensure exactly one daemon owns a project:
 
 ## 8. Project configuration (`tldr-core/src/config.rs`, new)
 
-`TldrConfig` is loaded from `.tldr/config.json` (global, then project override):
+`TldrConfig` is loaded in two layers: a global `~/.tldr/config.json` (in the
+user's HOME), then a project `<project_root>/.tldr/config.json` that overrides
+it:
 
 - `version` — config schema version (defaults to 1).
 - `embedding` — provider/model/endpoint/dimensions.

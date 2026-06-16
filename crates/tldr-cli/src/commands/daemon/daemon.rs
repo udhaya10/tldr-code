@@ -150,12 +150,19 @@ fn build_project_call_graph_memoized(
     for s in &scanned {
         let memo_key = (config.language.clone(), s.path.clone());
         let content_hash = std::fs::read(&s.path).ok().map(|b| hash_bytes(&b));
-        if let Some(h) = content_hash {
-            if let Some(entry) = memo.get(&memo_key) {
-                if entry.0 == h {
-                    file_irs.push(entry.1.as_ref().clone());
-                    continue;
+        match content_hash {
+            Some(h) => {
+                if let Some(entry) = memo.get(&memo_key) {
+                    if entry.0 == h {
+                        file_irs.push(entry.1.as_ref().clone());
+                        continue;
+                    }
                 }
+            }
+            // TLDR-985: unreadable (deleted mid-build / perms) — drop any stale
+            // memo entry so we never retain a FileIR for a file we can't read.
+            None => {
+                memo.remove(&memo_key);
             }
         }
         // Miss / changed / unreadable: parse this ONE file through the
@@ -169,6 +176,15 @@ fn build_project_call_graph_memoized(
             file_irs.push(ir1);
         }
     }
+
+    // TLDR-985: reconcile the memo against the live file set. Files of THIS
+    // language that vanished (deleted/renamed without a Notify, or never
+    // notified because the watcher is off) are pruned so the memo stays
+    // O(live files) rather than growing with project churn. Entries for other
+    // languages are left untouched (different builds populate them).
+    let scanned_set: std::collections::HashSet<PathBuf> =
+        scanned.iter().map(|s| s.path.clone()).collect();
+    memo.retain(|k, _| k.0 != config.language || scanned_set.contains(&k.1));
 
     let ir = compose_call_graph_v2(root, &config, file_irs).map_err(|e| e.to_string())?;
     let mut graph = ProjectCallGraph::new();
@@ -771,7 +787,9 @@ impl TLDRDaemon {
                 match tldr_search(&pattern, &self.project, None, 2, max, 1000, None) {
                     Ok(result) => {
                         let val = serde_json::to_value(&result).unwrap_or_default();
-                        self.cache.insert(key, &val, vec![]);
+                        // TLDR-fct freshness: search scans self.project — register
+                        // the project hash so process_dirty_file evicts on any edit.
+                        self.cache.insert(key, &val, vec![hash_path(&self.project)]);
                         DaemonResponse::Result(val)
                     }
                     Err(e) => DaemonResponse::Error {
@@ -825,7 +843,15 @@ impl TLDRDaemon {
                 match get_file_tree(&root, None, true, None) {
                     Ok(result) => {
                         let val = serde_json::to_value(&result).unwrap_or_default();
-                        self.cache.insert(key, &val, vec![]);
+                        // TLDR-fct freshness: mirror Calls — register root+project
+                        // hashes; never cache a root outside this daemon's project.
+                        if root == self.project || root.starts_with(&self.project) {
+                            self.cache.insert(
+                                key,
+                                &val,
+                                vec![hash_path(&root), hash_path(&self.project)],
+                            );
+                        }
                         DaemonResponse::Result(val)
                     }
                     Err(e) => DaemonResponse::Error {
@@ -858,7 +884,15 @@ impl TLDRDaemon {
                 match get_code_structure(&path, language, 0, None) {
                     Ok(result) => {
                         let val = serde_json::to_value(&result).unwrap_or_default();
-                        self.cache.insert(key, &val, vec![]);
+                        // TLDR-fct freshness: register the target path + project
+                        // hashes; never cache a path outside this daemon's project.
+                        if path == self.project || path.starts_with(&self.project) {
+                            self.cache.insert(
+                                key,
+                                &val,
+                                vec![hash_path(&path), hash_path(&self.project)],
+                            );
+                        }
                         DaemonResponse::Result(val)
                     }
                     Err(e) => DaemonResponse::Error {
@@ -886,7 +920,9 @@ impl TLDRDaemon {
                 match get_relevant_context(&self.project, &entry, d, lang, true, None) {
                     Ok(result) => {
                         let val = serde_json::to_value(&result).unwrap_or_default();
-                        self.cache.insert(key, &val, vec![]);
+                        // TLDR-fct freshness: context spans self.project — register
+                        // the project hash so process_dirty_file evicts on any edit.
+                        self.cache.insert(key, &val, vec![hash_path(&self.project)]);
                         DaemonResponse::Result(val)
                     }
                     Err(e) => DaemonResponse::Error {
@@ -1245,7 +1281,15 @@ impl TLDRDaemon {
                 match find_importers(&root, &module, lang) {
                     Ok(result) => {
                         let val = serde_json::to_value(&result).unwrap_or_default();
-                        self.cache.insert(key, &val, vec![]);
+                        // TLDR-fct freshness: mirror Calls — register root+project
+                        // hashes; never cache a root outside this daemon's project.
+                        if root == self.project || root.starts_with(&self.project) {
+                            self.cache.insert(
+                                key,
+                                &val,
+                                vec![hash_path(&root), hash_path(&self.project)],
+                            );
+                        }
                         DaemonResponse::Result(val)
                     }
                     Err(e) => DaemonResponse::Error {
@@ -1292,7 +1336,9 @@ impl TLDRDaemon {
                 match change_impact(&self.project, changed.as_deref(), lang) {
                     Ok(result) => {
                         let val = serde_json::to_value(&result).unwrap_or_default();
-                        self.cache.insert(key, &val, vec![]);
+                        // TLDR-fct freshness: change-impact spans self.project —
+                        // register the project hash so edits evict it.
+                        self.cache.insert(key, &val, vec![hash_path(&self.project)]);
                         DaemonResponse::Result(val)
                     }
                     Err(e) => DaemonResponse::Error {
@@ -1573,14 +1619,17 @@ impl TLDRDaemon {
         let threshold = self.config.auto_reindex_threshold;
         let reindex_triggered = dirty_count >= threshold;
 
-        // Trigger reindex if threshold reached
+        // TLDR-7dd: freshness is ALREADY applied per-save above — this file's
+        // salsa entries and all project-level answers are invalidated (lines
+        // ~1574/1587) and the semantic store took a per-file delta. The next
+        // query lazily recomposes from the FileIR memo. So there is no separate
+        // rebuild to defer: when the dirty set reaches the threshold we simply
+        // flush the accounting set. `reindex_triggered` reports that the
+        // threshold was reached and the set was flushed — not a pending async
+        // rebuild (which would be redundant given the per-save invalidation).
         if reindex_triggered {
-            // Clear dirty set
             let mut dirty = self.dirty_files.write().await;
             dirty.clear();
-
-            // In full implementation, would spawn background reindex task
-            // For now, just clear the dirty set
         }
 
         ReindexOutcome {

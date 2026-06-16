@@ -1,11 +1,18 @@
 # Incremental Re-indexing — Design (TLDR-t8f)
 
-Status: **Design** (not yet implemented). Owner: semantic search.
+Status: **✅ Implemented** (TLDR-t8f shipped). Owner: semantic search.
 Depends on: **TLDR-l5d** (usearch vector store) → **TLDR-atc** (daemon warm path, ✅ done).
 Parent epic: **TLDR-ac0** (replace JSON embedding cache with usearch).
 
-This document plans incremental re-indexing *before* code, because the current
-file-change handling is a coarse placeholder that needs replacing, not patching.
+> This document was written as a design *before* the code landed. The per-file
+> delta is now shipped: `VectorStore::apply_file_delta`
+> (`tldr-core/src/semantic/vector_store.rs`), `IndexManager::apply_delta`
+> (`tldr-cli/src/commands/daemon/index_manager.rs`), called from
+> `process_dirty_file` (`daemon.rs`) under `spawn_blocking`. The "nuke the
+> whole index" path below NO LONGER exists. Section 1 is retained as the
+> historical problem statement that motivated the design; the only remaining
+> stub is the threshold-based *full* reindex (per-save invalidation + delta
+> already keep results fresh — see `daemon.rs` `process_dirty_file`).
 
 ---
 
@@ -404,10 +411,13 @@ re-chunking the whole tree:
 
 ## 8. Concurrency
 
-- The writable index + sidecar live behind the daemon's existing
-  `Arc<std::sync::Mutex<…>>` (introduced in TLDR-atc). All mutation (delta jobs,
-  saves) and search happen while holding it **inside `spawn_blocking`**, so the
-  async event loop never blocks and `daemon stop` stays responsive.
+- The writable index + sidecar live behind the daemon's `IndexManager`, which
+  holds a `parking_lot::RwLock<Option<(EmbeddingModel, VectorStore)>>` (the
+  read/write split lets concurrent queries share a read lock while delta/warm
+  take the write lock; the embedder is a separate `parking_lot::Mutex`). All
+  mutation (delta jobs, saves) and search happen while holding the appropriate
+  guard **inside `spawn_blocking`**, so the async event loop never blocks and
+  `daemon stop` stays responsive.
 - **`handle_notify` MUST NOT take the index mutex on the async thread** (Codex
   review — today it does, `daemon.rs::handle_notify`, which parks a Tokio worker
   for the *whole build* if a Notify lands mid-build). Notify is async and must stay

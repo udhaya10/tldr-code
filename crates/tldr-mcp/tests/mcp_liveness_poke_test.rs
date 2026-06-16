@@ -15,10 +15,17 @@
 #![cfg(unix)]
 
 use std::os::unix::net::UnixDatagram;
+use std::sync::Mutex;
 
 use serde_json::json;
 use tldr_mcp::server::process_request;
 use tldr_mcp::tools::ToolRegistry;
+
+/// TLDR-rml: `TLDR_DAEMON_REGISTRY_DIR` is process-global. Serialize any test
+/// in this binary that mutates it (and any future test that pokes via
+/// `process_request`) so they cannot observe each other's registry path,
+/// mirroring the `ENV_LOCK` convention in `tldr-core/src/liveness.rs`.
+static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
 fn tools_call_pokes_registered_daemon() {
@@ -54,6 +61,9 @@ fn tools_call_pokes_registered_daemon() {
     .to_string();
 
     let registry = ToolRegistry::new();
+    // Hold the lock across the whole set/read/remove window so a parallel test
+    // cannot see (or clobber) this registry path.
+    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     std::env::set_var("TLDR_DAEMON_REGISTRY_DIR", dir.path());
     let response = process_request(&frame, &registry);
     std::env::remove_var("TLDR_DAEMON_REGISTRY_DIR");
