@@ -401,7 +401,18 @@ pub enum DaemonCommand {
     },
 
     /// Get file tree
-    Tree { path: Option<PathBuf> },
+    Tree {
+        path: Option<PathBuf>,
+        /// Normalized extension filters (each already includes a leading dot,
+        /// e.g. ".py"). Empty = no filter. TLDR-7pp.1.5 flag parity: the CLI's
+        /// `--ext` was previously dropped on the daemon path.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        extensions: Vec<String>,
+        /// Include hidden files/dirs (CLI `--include-hidden`). Previously the
+        /// daemon always skipped hidden, diverging from local compute.
+        #[serde(default)]
+        include_hidden: bool,
+    },
 
     /// Get code structure
     Structure {

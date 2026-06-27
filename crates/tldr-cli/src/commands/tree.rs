@@ -12,7 +12,7 @@ use clap::Args;
 use tldr_core::types::FileTree;
 use tldr_core::{get_file_tree, IgnoreSpec};
 
-use crate::commands::daemon_router::{params_with_path, try_daemon_route};
+use crate::commands::daemon_router::{is_oneshot, route_for_path};
 use crate::output::{format_file_tree_text, OutputFormat, OutputWriter};
 
 /// Show file tree structure
@@ -36,57 +36,54 @@ impl TreeArgs {
     pub fn run(&self, format: OutputFormat, quiet: bool) -> Result<()> {
         let writer = OutputWriter::new(format, quiet);
 
-        // Try daemon first for cached result
-        if let Some(tree) =
-            try_daemon_route::<FileTree>(&self.path, "tree", params_with_path(Some(&self.path)))
-        {
-            // Output based on format
-            if writer.is_text() {
-                let text = format_file_tree_text(&tree, 0);
-                writer.write_text(&text)?;
-                return Ok(());
-            } else {
-                writer.write(&tree)?;
-                return Ok(());
-            }
-        }
+        // Normalize extension filters once (leading dot), shared by both paths
+        // so the daemon and --oneshot results are byte-identical.
+        let ext_vec: Vec<String> = self
+            .extensions
+            .iter()
+            .map(|s| {
+                if s.starts_with('.') {
+                    s.clone()
+                } else {
+                    format!(".{}", s)
+                }
+            })
+            .collect();
 
-        // Fallback to direct compute
-
-        // Build extensions set if provided
-        let extensions: Option<HashSet<String>> = if self.extensions.is_empty() {
-            None
+        // ADR-10 (TLDR-7pp.1.5): daemon is the only serve path; --oneshot is the
+        // sole explicit local-compute escape. No silent fallback.
+        let tree: FileTree = if is_oneshot() {
+            self.compute_local(&ext_vec)?
         } else {
-            Some(
-                self.extensions
-                    .iter()
-                    .map(|s| {
-                        if s.starts_with('.') {
-                            s.clone()
-                        } else {
-                            format!(".{}", s)
-                        }
-                    })
-                    .collect(),
-            )
+            let params = serde_json::json!({
+                "path": self.path,
+                "extensions": ext_vec,
+                "include_hidden": self.include_hidden,
+            });
+            route_for_path::<FileTree>(&self.path, "tree", params).into_hit_or_bail("tree")?
         };
 
-        // Get file tree
-        let tree = get_file_tree(
+        // Single renderer for both paths.
+        if writer.is_text() {
+            writer.write_text(&format_file_tree_text(&tree, 0))?;
+        } else {
+            writer.write(&tree)?;
+        }
+        Ok(())
+    }
+
+    /// Local in-process file tree — reached only via `--oneshot`.
+    fn compute_local(&self, ext_vec: &[String]) -> Result<FileTree> {
+        let extensions: Option<HashSet<String>> = if ext_vec.is_empty() {
+            None
+        } else {
+            Some(ext_vec.iter().cloned().collect())
+        };
+        Ok(get_file_tree(
             &self.path,
             extensions.as_ref(),
             !self.include_hidden,
             Some(&IgnoreSpec::default()),
-        )?;
-
-        // Output based on format
-        if writer.is_text() {
-            let text = format_file_tree_text(&tree, 0);
-            writer.write_text(&text)?;
-        } else {
-            writer.write(&tree)?;
-        }
-
-        Ok(())
+        )?)
     }
 }

@@ -289,13 +289,20 @@ impl WarmJob {
         // 3. Warm file tree
         let tree_key = QueryKey::new(
             "tree",
-            hash_str_args(&[&self.project.to_string_lossy()]),
-            self.lang,
+            // Match the Tree handler's default-flags key (TLDR-7pp.1.5):
+            // [root, extensions="", include_hidden="false"], language-agnostic.
+            hash_str_args(&[&self.project.to_string_lossy(), "", "false"]),
+            resolve_language(None),
         );
         if self.cache.get::<serde_json::Value>(&tree_key).is_some() {
             warmed.push("file_tree (cached)");
         } else {
-            match get_file_tree(&self.project, None, true, None) {
+            match get_file_tree(
+                &self.project,
+                None,
+                true,
+                Some(&tldr_core::IgnoreSpec::default()),
+            ) {
                 Ok(result) => {
                     let file_count = count_tree_files(&result);
                     // TLDR-9ae (F1): no to_value DOM — see call_graph step above.
@@ -830,16 +837,41 @@ impl TLDRDaemon {
                 }
             }
 
-            DaemonCommand::Tree { path } => {
+            DaemonCommand::Tree {
+                path,
+                extensions,
+                include_hidden,
+            } => {
                 let root = path.unwrap_or_else(|| self.project.clone());
                 let root_str = root.to_string_lossy().to_string();
                 // File tree is language-agnostic; tag with default language.
-                let key =
-                    QueryKey::new("tree", hash_str_args(&[&root_str]), resolve_language(None));
+                // TLDR-7pp.1.5: extensions + include_hidden are part of the key
+                // so flag-varied requests don't collide.
+                let key = QueryKey::new(
+                    "tree",
+                    hash_str_args(&[
+                        &root_str,
+                        &extensions.join(","),
+                        &include_hidden.to_string(),
+                    ]),
+                    resolve_language(None),
+                );
                 if let Some(cached) = self.cache.get::<serde_json::Value>(&key) {
                     return DaemonResponse::Result(cached);
                 }
-                match get_file_tree(&root, None, true, None) {
+                // Mirror the CLI local path EXACTLY (tree.rs): extension set,
+                // skip-hidden = !include_hidden, and the default IgnoreSpec.
+                let ext_set: Option<std::collections::HashSet<String>> = if extensions.is_empty() {
+                    None
+                } else {
+                    Some(extensions.iter().cloned().collect())
+                };
+                match get_file_tree(
+                    &root,
+                    ext_set.as_ref(),
+                    !include_hidden,
+                    Some(&tldr_core::IgnoreSpec::default()),
+                ) {
                     Ok(result) => {
                         let val = serde_json::to_value(&result).unwrap_or_default();
                         // TLDR-fct freshness: mirror Calls — register root+project
@@ -2249,7 +2281,11 @@ mod tests {
         let daemon = TLDRDaemon::new(temp.path().to_path_buf(), config);
 
         let response = daemon
-            .handle_command(DaemonCommand::Tree { path: None })
+            .handle_command(DaemonCommand::Tree {
+                path: None,
+                extensions: Vec::new(),
+                include_hidden: false,
+            })
             .await;
 
         match response {
