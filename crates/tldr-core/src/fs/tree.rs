@@ -169,20 +169,41 @@ pub fn get_file_tree(
     Ok(FileTree::dir(root_name, children))
 }
 
-/// Build gitignore matcher from IgnoreSpec patterns
+/// Build gitignore matcher from IgnoreSpec patterns + the project `.tldrignore`.
+///
+/// TLDR-vti: `tree` previously consulted only the explicit `IgnoreSpec`
+/// patterns passed by the caller (which is `IgnoreSpec::default()` — empty — on
+/// both the daemon and `--oneshot` paths), so it silently ignored the project's
+/// `<root>/.tldrignore` that every index/corpus command honors. Load it here so
+/// both `tree` serve paths respect the same exclusion contract. Root-level
+/// `.tldrignore` only (matches the file the warm build auto-creates); nested
+/// `.tldrignore` files are out of scope for the bespoke tree walker.
 fn build_gitignore(
     root: &Path,
     ignore_spec: Option<&IgnoreSpec>,
 ) -> Option<ignore::gitignore::Gitignore> {
-    let patterns = ignore_spec?.patterns.as_slice();
-    if patterns.is_empty() {
-        return None;
+    let mut builder = GitignoreBuilder::new(root);
+    let mut added = false;
+
+    // `<root>/.tldrignore` first (TLDR-vti). `GitignoreBuilder::add` returns
+    // `Some(err)` on failure, `None` on success.
+    let tldrignore = root.join(crate::walker::TLDRIGNORE_FILE);
+    if tldrignore.is_file() && builder.add(&tldrignore).is_none() {
+        added = true;
     }
 
-    let mut builder = GitignoreBuilder::new(root);
-    for pattern in patterns {
-        // Add pattern - ignore errors for invalid patterns
-        let _ = builder.add_line(None, pattern);
+    // Explicit caller-supplied patterns (existing behavior).
+    if let Some(spec) = ignore_spec {
+        for pattern in &spec.patterns {
+            // Add pattern - ignore errors for invalid patterns
+            if builder.add_line(None, pattern).is_ok() {
+                added = true;
+            }
+        }
+    }
+
+    if !added {
+        return None;
     }
 
     builder.build().ok()

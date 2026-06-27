@@ -38,6 +38,81 @@ use std::path::{Path, PathBuf};
 
 use ignore::{DirEntry, WalkBuilder};
 
+/// The conventional tldr-specific ignore filename, honored alongside
+/// `.gitignore` by every project walk (TLDR-1j2 / TLDR-vti, epic TLDR-bpf).
+///
+/// Registered on the [`ignore::WalkBuilder`] of each walker via
+/// [`WalkBuilder::add_custom_ignore_filename`], so it gets full gitignore
+/// semantics (per-directory scope, negation, parent matching) for free — the
+/// same engine that already powers `.gitignore` support.
+pub const TLDRIGNORE_FILE: &str = ".tldrignore";
+
+/// An opaque, thread-safe `.tldrignore`/`.gitignore` matcher for per-path
+/// ignore checks, returned by [`build_path_ignore_matcher`].
+///
+/// Wraps the `ignore` crate's [`ignore::gitignore::Gitignore`] so callers
+/// (e.g. the `tldr-cli` daemon watcher) get the matching semantics without
+/// taking a direct dependency on the `ignore` crate.
+#[derive(Debug, Clone)]
+pub struct PathIgnoreMatcher(ignore::gitignore::Gitignore);
+
+impl PathIgnoreMatcher {
+    /// Returns `true` when `path` is excluded by the loaded `.tldrignore` /
+    /// `.gitignore` patterns. Uses `matched_path_or_any_parents` so a
+    /// directory pattern (e.g. `vendored/`) also excludes files nested under
+    /// it — essential for the watcher's vanished-path (delete) branch, where
+    /// only the parent dir pattern can be consulted. `is_dir` should be
+    /// `false` for a path that no longer exists.
+    pub fn is_ignored(&self, path: &Path, is_dir: bool) -> bool {
+        self.0
+            .matched_path_or_any_parents(path, is_dir)
+            .is_ignore()
+    }
+}
+
+/// Build a standalone gitignore-semantics matcher for per-path ignore checks
+/// where a full [`WalkBuilder`] traversal isn't available — notably the
+/// in-daemon watcher's vanished-path (delete) branch, which cannot walk a path
+/// that no longer exists on disk (TLDR-1j2).
+///
+/// Honors `<root>/.tldrignore` and, when `include_gitignore` is set, also
+/// `<root>/.gitignore` (to drop deleted gitignored files before a wasted
+/// reindex hop). Returns `None` when neither file contributes a usable pattern,
+/// in which case callers treat every path as non-ignored.
+///
+/// This is the single shared `.tldrignore` matcher loader for the matcher-only
+/// callers (epic TLDR-bpf / TLDR-9w8 direction); the walker paths register the
+/// filename on their `WalkBuilder` directly. Root-level only by design — nested
+/// `.tldrignore`/`.gitignore` files are covered by the full walkers
+/// ([`ProjectWalker`], `is_corpus_file`) for paths that still exist.
+pub fn build_path_ignore_matcher(
+    root: &Path,
+    include_gitignore: bool,
+) -> Option<PathIgnoreMatcher> {
+    use ignore::gitignore::GitignoreBuilder;
+
+    let mut builder = GitignoreBuilder::new(root);
+    let mut added = false;
+
+    let tldrignore = root.join(TLDRIGNORE_FILE);
+    // `GitignoreBuilder::add` returns `Some(err)` on failure, `None` on success.
+    if tldrignore.is_file() && builder.add(&tldrignore).is_none() {
+        added = true;
+    }
+
+    if include_gitignore {
+        let gitignore = root.join(".gitignore");
+        if gitignore.is_file() && builder.add(&gitignore).is_none() {
+            added = true;
+        }
+    }
+
+    if !added {
+        return None;
+    }
+    builder.build().ok().map(PathIgnoreMatcher)
+}
+
 /// Directories skipped by default regardless of `.gitignore` presence.
 ///
 /// Commands that explicitly need to scan vendored code (e.g. auditing
@@ -237,6 +312,16 @@ impl ProjectWalker {
             .git_exclude(self.respect_gitignore)
             .parents(self.respect_gitignore)
             .follow_links(false); // CRITICAL: avoid pnpm symlink loops
+
+        // Honor `.tldrignore` with full gitignore semantics at every directory
+        // level (TLDR-1j2 / TLDR-vti). Tied to the same `respect_gitignore`
+        // gate as `.gitignore`: a caller that opts out of ignore files
+        // (`--no-respect-ignore`) opts out of both. This is THE shared corpus
+        // walk (`enumerate_corpus_files`), so honoring it here keeps the full
+        // warm build consistent with the single-file gate (`is_corpus_file`).
+        if self.respect_gitignore {
+            builder.add_custom_ignore_filename(TLDRIGNORE_FILE);
+        }
 
         if let Some(depth) = self.max_depth {
             builder.max_depth(Some(depth));
@@ -459,6 +544,51 @@ mod tests {
 
         let files = collect_rel_files(root, walk_project(root));
         assert_eq!(files, vec!["foo.rs".to_string()]);
+    }
+
+    #[test]
+    fn test_respects_tldrignore() {
+        // TLDR-1j2/vti: `.tldrignore` is registered as a custom ignore filename,
+        // so — unlike `.gitignore` — it's honored even WITHOUT a git repo. This
+        // is the shared corpus walk (`enumerate_corpus_files`), so honoring it
+        // here keeps the warm build consistent with the single-file gate.
+        let tmp = tempdir().unwrap();
+        let root = tmp.path();
+        write_file(&root.join(".tldrignore"), "vendored/\n*.gen.rs\n");
+        write_file(&root.join("foo.rs"), "fn main() {}");
+        write_file(&root.join("model.gen.rs"), "fn g() {}");
+        write_file(&root.join("vendored/x.rs"), "fn x() {}");
+
+        let files = collect_rel_files(root, walk_project(root));
+        assert_eq!(files, vec!["foo.rs".to_string()]);
+    }
+
+    #[test]
+    fn test_no_respect_ignore_disables_tldrignore() {
+        // Opting out of ignore files (`respect_gitignore(false)`) also opts out
+        // of `.tldrignore` — the two share one gate.
+        let tmp = tempdir().unwrap();
+        let root = tmp.path();
+        write_file(&root.join(".tldrignore"), "vendored/\n");
+        write_file(&root.join("foo.rs"), "fn main() {}");
+        write_file(&root.join("vendored/x.rs"), "fn x() {}");
+
+        let mut files: Vec<String> = ProjectWalker::new(root)
+            .respect_gitignore(false)
+            .iter()
+            .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
+            .filter_map(|e| {
+                e.path()
+                    .strip_prefix(root)
+                    .ok()
+                    .map(|p| p.to_string_lossy().replace('\\', "/"))
+            })
+            .collect();
+        files.sort();
+        assert!(
+            files.iter().any(|f| f == "vendored/x.rs"),
+            "with ignore disabled, tldrignored file should appear: {files:?}"
+        );
     }
 
     #[test]

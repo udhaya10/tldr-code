@@ -32,6 +32,7 @@ use notify_debouncer_full::{new_debouncer, DebounceEventResult, Debouncer, Recom
 use tokio::sync::mpsc;
 
 use tldr_core::semantic::{is_corpus_file, store_dir_for};
+use tldr_core::walker::{build_path_ignore_matcher, PathIgnoreMatcher};
 
 use super::activity::Source;
 use super::daemon::TLDRDaemon;
@@ -67,19 +68,36 @@ pub(crate) type WatcherGuard = Debouncer<RecommendedWatcher, RecommendedCache>;
 ///    works for deletes — `is_corpus_file` canonicalizes the file and so always
 ///    returns `false` for a vanished path, which would otherwise let a deleted
 ///    `.tldr/*` file fall through to the passthrough branch.
-/// 3. An existing path must be a corpus member (same walker rules as the build).
-/// 4. A vanished path (delete / rename-away) can't be walker-checked, so it is
+/// 3. `.tldrignore` / `.gitignore` exclusion (TLDR-1j2): consulted via the
+///    root-level `ignore_matcher` BEFORE the `exists()` branch so it ALSO drops
+///    DELETES inside ignored dirs (a vanished path can't be walked). For paths
+///    that still exist, the deeper per-directory matching is handled by
+///    `is_corpus_file` in step 4; this matcher is the only mechanism that can
+///    drop a deleted ignored file before a wasted southbound reindex hop.
+/// 4. An existing path must be a corpus member (same walker rules as the build,
+///    `.tldrignore`-aware via `add_custom_ignore_filename`).
+/// 5. A vanished path (delete / rename-away) that survived the ignore matcher is
 ///    passed through; `apply_delta`'s store-side delete filter cleanly drops it
 ///    (`removed == 0` → `Filtered`) if it was never indexed.
 pub(crate) fn watch_decision(
     project: &Path,
     cache_excl: &Path,
     store_dir: &Path,
+    ignore_matcher: Option<&PathIgnoreMatcher>,
     path: &Path,
     kind: &EventKind,
 ) -> bool {
     if !presence_decision(cache_excl, store_dir, path, kind) {
         return false;
+    }
+    // `.tldrignore`/`.gitignore` drop (TLDR-1j2), BEFORE exists() so deletes
+    // inside ignored dirs are dropped too. `path.is_dir()` is `false` for a
+    // vanished path; parent-dir patterns (`vendored/`) still match via
+    // `matched_path_or_any_parents`.
+    if let Some(ig) = ignore_matcher {
+        if ig.is_ignored(path, path.is_dir()) {
+            return false;
+        }
     }
     if path.exists() {
         is_corpus_file(project, path)
@@ -143,6 +161,16 @@ pub(crate) fn spawn_watcher(daemon: Arc<TLDRDaemon>) -> Option<WatcherGuard> {
     // The in-tree cache subtree (`<root>/.tldr`) IS inside the watched root.
     let cache_excl = project.join(".tldr");
 
+    // Root-level `.tldrignore` (+ `.gitignore`) matcher for the reindex filter
+    // (TLDR-1j2). Loaded ONCE here; editing either file mid-session needs a
+    // daemon restart (documented v1 limitation). `presence_decision` is
+    // deliberately NOT gated on this — an ignored-dir write still counts as
+    // project presence (the TLDR-3w5 `cargo build` → `target/` liveness rule).
+    let handler_ignore = build_path_ignore_matcher(&project, true);
+    if handler_ignore.is_some() {
+        eprintln!("[ac0.2] reindex filter honoring .tldrignore/.gitignore");
+    }
+
     let (tx, mut rx) = mpsc::channel::<PathBuf>(CHANNEL_CAP);
 
     // Serialized reindex worker: one file at a time (`process_dirty_file` awaits
@@ -197,6 +225,7 @@ pub(crate) fn spawn_watcher(daemon: Arc<TLDRDaemon>) -> Option<WatcherGuard> {
                     &handler_project,
                     &cache_excl,
                     &handler_store_dir,
+                    handler_ignore.as_ref(),
                     path,
                     &event.kind,
                 ) {
@@ -255,6 +284,7 @@ mod tests {
             root.path(),
             &cache_excl,
             &store_dir,
+            None,
             &py,
             &create_kind()
         ));
@@ -262,6 +292,7 @@ mod tests {
             root.path(),
             &cache_excl,
             &store_dir,
+            None,
             &py,
             &modify_kind()
         ));
@@ -286,6 +317,7 @@ mod tests {
             root.path(),
             &cache_excl,
             &store_dir,
+            None,
             &stats,
             &modify_kind()
         ));
@@ -296,6 +328,7 @@ mod tests {
             root.path(),
             &cache_excl,
             &store_dir,
+            None,
             &stats,
             &remove_kind()
         ));
@@ -314,6 +347,7 @@ mod tests {
             root.path(),
             &cache_excl,
             &store_dir,
+            None,
             &gone,
             &remove_kind()
         ));
@@ -332,6 +366,7 @@ mod tests {
             root.path(),
             &cache_excl,
             &store_dir,
+            None,
             &blob,
             &create_kind()
         ));
@@ -349,8 +384,168 @@ mod tests {
             root.path(),
             &cache_excl,
             &store_dir,
+            None,
             &py,
             &EventKind::Access(AccessKind::Read)
+        ));
+    }
+
+    // -- .tldrignore / .gitignore reindex filter (TLDR-1j2) --------------------
+
+    /// Helper: build the root-level `.tldrignore` + `.gitignore` matcher the
+    /// watcher loads once in `spawn_watcher`.
+    fn matcher_for(root: &Path) -> Option<PathIgnoreMatcher> {
+        build_path_ignore_matcher(root, true)
+    }
+
+    /// TLDRIGNORED EXISTING FILE: an edit to a source file inside a
+    /// `.tldrignore`d-but-not-`.gitignore`d dir must NOT reindex — proven via
+    /// BOTH mechanisms: the explicit root matcher AND `is_corpus_file` (which is
+    /// now `.tldrignore`-aware via `add_custom_ignore_filename`, so even a
+    /// `None` matcher drops it). Presence is UNCHANGED (reindex-only scope).
+    #[test]
+    fn tldrignored_existing_file_is_dropped_but_counts_presence() {
+        let root = tempfile::tempdir().unwrap();
+        let store_dir = store_dir_for(root.path());
+        let cache_excl = root.path().join(".tldr");
+        std::fs::write(root.path().join(".tldrignore"), "vendored/\n").unwrap();
+        let vfile = root.path().join("vendored").join("v2.py");
+        std::fs::create_dir_all(vfile.parent().unwrap()).unwrap();
+        std::fs::write(&vfile, "def f():\n    return 1\n").unwrap();
+
+        let matcher = matcher_for(root.path());
+
+        // With the explicit matcher → dropped.
+        assert!(!watch_decision(
+            root.path(),
+            &cache_excl,
+            &store_dir,
+            matcher.as_ref(),
+            &vfile,
+            &modify_kind()
+        ));
+        // Even WITHOUT the matcher → still dropped, proving is_corpus_file now
+        // honors .tldrignore (keeps the warm build + delta path consistent).
+        assert!(!watch_decision(
+            root.path(),
+            &cache_excl,
+            &store_dir,
+            None,
+            &vfile,
+            &modify_kind()
+        ));
+        // …but the edit still counts as project presence (TLDR-3w5 unchanged).
+        assert!(
+            presence_decision(&cache_excl, &store_dir, &vfile, &modify_kind()),
+            "tldrignored edit must still defer idle shutdown"
+        );
+    }
+
+    /// TLDRIGNORED DELETE TRAP: a DELETED file inside a `.tldrignore`d dir must
+    /// be dropped. This is the case `is_corpus_file` CANNOT catch (it bails on a
+    /// vanished path), so the explicit matcher — checked before the exists()
+    /// branch — is the only thing that stops a wasted southbound reindex hop.
+    #[test]
+    fn tldrignored_deleted_file_is_dropped() {
+        let root = tempfile::tempdir().unwrap();
+        let store_dir = store_dir_for(root.path());
+        let cache_excl = root.path().join(".tldr");
+        std::fs::write(root.path().join(".tldrignore"), "vendored/\n").unwrap();
+        let gone = root.path().join("vendored").join("gone.py"); // never created
+
+        let matcher = matcher_for(root.path());
+        assert!(!watch_decision(
+            root.path(),
+            &cache_excl,
+            &store_dir,
+            matcher.as_ref(),
+            &gone,
+            &remove_kind()
+        ));
+    }
+
+    /// GITIGNORED DELETE GAP (secondary fix): a DELETED `.gitignore`d file also
+    /// falls through the vanished-path branch today (apply_delta drops it, but
+    /// only after a wasted hop). The matcher includes root `.gitignore`, so it
+    /// is dropped up front.
+    #[test]
+    fn gitignored_deleted_file_is_dropped() {
+        let root = tempfile::tempdir().unwrap();
+        let store_dir = store_dir_for(root.path());
+        let cache_excl = root.path().join(".tldr");
+        std::fs::write(root.path().join(".gitignore"), "secrets/\n").unwrap();
+        let gone = root.path().join("secrets").join("key.py"); // never created
+
+        let matcher = matcher_for(root.path());
+        assert!(!watch_decision(
+            root.path(),
+            &cache_excl,
+            &store_dir,
+            matcher.as_ref(),
+            &gone,
+            &remove_kind()
+        ));
+    }
+
+    /// NO `.tldrignore`: behavior is identical to before — the matcher loader
+    /// returns `None` and a normal corpus file is still enqueued.
+    #[test]
+    fn absent_tldrignore_behaves_as_before() {
+        let root = tempfile::tempdir().unwrap();
+        let store_dir = store_dir_for(root.path());
+        let cache_excl = root.path().join(".tldr");
+        let py = root.path().join("m.py");
+        std::fs::write(&py, "def f():\n    return 1\n").unwrap();
+
+        assert!(matcher_for(root.path()).is_none(), "no ignore files → None");
+        assert!(watch_decision(
+            root.path(),
+            &cache_excl,
+            &store_dir,
+            None,
+            &py,
+            &modify_kind()
+        ));
+    }
+
+    /// GLOB + NESTED-DIR patterns are respected (delete-path, via the matcher):
+    /// `*.gen.py` and `gen/sub/` both drop vanished paths that match.
+    #[test]
+    fn tldrignore_glob_and_nested_dir_patterns_respected() {
+        let root = tempfile::tempdir().unwrap();
+        let store_dir = store_dir_for(root.path());
+        let cache_excl = root.path().join(".tldr");
+        std::fs::write(root.path().join(".tldrignore"), "*.gen.py\ngen/sub/\n").unwrap();
+        let matcher = matcher_for(root.path());
+
+        let glob_gone = root.path().join("module.gen.py"); // matches *.gen.py
+        let nested_gone = root.path().join("gen").join("sub").join("x.py"); // gen/sub/
+        let kept_gone = root.path().join("real.py"); // matches nothing
+
+        assert!(!watch_decision(
+            root.path(),
+            &cache_excl,
+            &store_dir,
+            matcher.as_ref(),
+            &glob_gone,
+            &remove_kind()
+        ));
+        assert!(!watch_decision(
+            root.path(),
+            &cache_excl,
+            &store_dir,
+            matcher.as_ref(),
+            &nested_gone,
+            &remove_kind()
+        ));
+        // A non-matching vanished path is still passed through.
+        assert!(watch_decision(
+            root.path(),
+            &cache_excl,
+            &store_dir,
+            matcher.as_ref(),
+            &kept_gone,
+            &remove_kind()
         ));
     }
 
@@ -375,6 +570,7 @@ mod tests {
                 root.path(),
                 &cache_excl,
                 &store_dir,
+                None,
                 &artifact,
                 &modify_kind()
             ),
@@ -507,6 +703,45 @@ mod tests {
         );
     }
 
+    /// END-TO-END `.tldrignore`: a new file created inside a `.tldrignore`d dir
+    /// must NOT reach the dirty set, while a normal source file does. Proves the
+    /// filter is wired through the live watcher (not just the pure decision fn).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn watcher_skips_tldrignored_dir_end_to_end() {
+        use super::super::types::DaemonConfig;
+
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join(".tldrignore"), "vendored/\n").unwrap();
+        std::fs::create_dir_all(root.path().join("vendored")).unwrap();
+
+        let config = DaemonConfig {
+            enable_watcher: true,
+            ..DaemonConfig::default()
+        };
+        let daemon = Arc::new(TLDRDaemon::new(root.path().to_path_buf(), config));
+
+        let Some(_guard) = spawn_watcher(Arc::clone(&daemon)) else {
+            return; // watcher couldn't start here — nothing to smoke-test.
+        };
+
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        // Write into the tldrignored dir.
+        std::fs::write(
+            root.path().join("vendored").join("v.py"),
+            "def f():\n    return 1\n",
+        )
+        .unwrap();
+
+        // Give the debounce window + margin to elapse; the dirty set must stay
+        // empty (the ignored write was filtered before the channel).
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        assert_eq!(
+            daemon.dirty_file_count().await,
+            0,
+            "a write inside a .tldrignored dir must not reach the reindex worker"
+        );
+    }
+
     /// SYMLINKED ROOT: when the daemon watches via a symlinked root path, events
     /// arrive prefixed with that symlinked form. `is_corpus_file` canonicalizes
     /// both sides, so a corpus file under the symlinked root is still detected.
@@ -529,6 +764,7 @@ mod tests {
             &link_root,
             &cache_excl,
             &store_dir,
+            None,
             &py_via_link,
             &create_kind()
         ));

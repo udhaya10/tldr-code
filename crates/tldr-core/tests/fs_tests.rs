@@ -251,6 +251,43 @@ fn test_get_file_tree_ignore_directory() {
 }
 
 #[test]
+fn test_get_file_tree_honors_tldrignore_file() {
+    // TLDR-vti: `tree` must honor the project `.tldrignore`, like the index
+    // commands do. The production call passes `IgnoreSpec::default()` (empty),
+    // so the exclusion has to come from loading `<root>/.tldrignore` itself.
+    let temp_dir = tempfile::tempdir().unwrap();
+    let vendored = temp_dir.path().join("vendored");
+    fs::create_dir(&vendored).unwrap();
+
+    fs::write(temp_dir.path().join(".tldrignore"), "vendored/\n*.gen.py\n").unwrap();
+    fs::write(temp_dir.path().join("main.py"), "# main").unwrap();
+    fs::write(temp_dir.path().join("model.gen.py"), "# generated").unwrap();
+    fs::write(vendored.join("dep.py"), "# vendored").unwrap();
+
+    // Mirror the production/daemon call: default (empty) IgnoreSpec.
+    let tree = get_file_tree(temp_dir.path(), None, true, Some(&IgnoreSpec::default())).unwrap();
+
+    let mut names = Vec::new();
+    fn collect(node: &FileTree, names: &mut Vec<String>) {
+        names.push(node.name.clone());
+        for child in &node.children {
+            collect(child, names);
+        }
+    }
+    collect(&tree, &mut names);
+
+    assert!(names.iter().any(|n| n == "main.py"), "main.py should remain");
+    assert!(
+        !names.iter().any(|n| n == "vendored"),
+        "vendored/ dir must be excluded by .tldrignore, got: {names:?}"
+    );
+    assert!(
+        !names.iter().any(|n| n == "model.gen.py"),
+        "*.gen.py glob must be excluded by .tldrignore, got: {names:?}"
+    );
+}
+
+#[test]
 fn test_get_file_tree_empty_ignore() {
     let temp_dir = tempfile::tempdir().unwrap();
 

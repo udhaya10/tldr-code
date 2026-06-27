@@ -365,6 +365,12 @@ pub fn is_corpus_file(root: &Path, file: &Path) -> bool {
         .follow_links(false)
         .max_depth(Some(rel.components().count()));
 
+    // Honor `.tldrignore` (TLDR-1j2): the single-file corpus gate must agree
+    // with `enumerate_corpus_files` (which walks via `ProjectWalker`, also
+    // `.tldrignore`-aware), so the watcher delta path and the full warm build
+    // make the same membership decision for an excluded dir.
+    builder.add_custom_ignore_filename(crate::walker::TLDRIGNORE_FILE);
+
     builder.filter_entry(move |entry| {
         let is_dir = entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
         if is_dir {
@@ -1392,5 +1398,46 @@ fn bar() {}
         let file = tmp.path().join("src/gone.rs");
         // Never created — canonicalize fails, so it can't be in the corpus.
         assert!(!is_corpus_file(tmp.path(), &file));
+    }
+
+    #[test]
+    fn is_corpus_file_rejects_tldrignored() {
+        // TLDR-1j2: `.tldrignore` is a custom ignore filename, honored even
+        // without a git repo. The single-file gate must drop excluded paths so
+        // the watcher delta path agrees with `enumerate_corpus_files`.
+        let tmp = TempDir::new().unwrap();
+        fs::write(tmp.path().join(".tldrignore"), "vendored/\n").unwrap();
+        let file = tmp.path().join("vendored/dep.py");
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(&file, "def f(): pass\n").unwrap();
+        assert!(!is_corpus_file(tmp.path(), &file));
+
+        // A normal source file alongside it is still accepted.
+        let ok = tmp.path().join("main.py");
+        fs::write(&ok, "def g(): pass\n").unwrap();
+        assert!(is_corpus_file(tmp.path(), &ok));
+    }
+
+    #[test]
+    fn enumerate_corpus_files_excludes_tldrignored() {
+        // TLDR-1qv (closed-as-bonus here): the full warm-build corpus must also
+        // honor `.tldrignore`, or the build over-indexes excluded dirs and
+        // disagrees with the single-file gate.
+        let tmp = TempDir::new().unwrap();
+        fs::write(tmp.path().join(".tldrignore"), "vendored/\n").unwrap();
+        fs::write(tmp.path().join("main.py"), "def g(): pass\n").unwrap();
+        let v = tmp.path().join("vendored/dep.py");
+        fs::create_dir_all(v.parent().unwrap()).unwrap();
+        fs::write(&v, "def f(): pass\n").unwrap();
+
+        let files = enumerate_corpus_files(tmp.path());
+        assert!(
+            files.iter().any(|p| p.ends_with("main.py")),
+            "main.py should be enumerated: {files:?}"
+        );
+        assert!(
+            !files.iter().any(|p| p.ends_with("dep.py")),
+            "tldrignored file must not be enumerated: {files:?}"
+        );
     }
 }
