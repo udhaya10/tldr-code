@@ -115,3 +115,4 @@
 {"id":"int-620bf8c4","kind":"field_change","created_at":"2026-06-27T18:47:53.852307Z","actor":"Udhayakumar","issue_id":"TLDR-vti","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"Closed"}}
 {"id":"int-43a77046","kind":"field_change","created_at":"2026-06-27T18:48:08.870008Z","actor":"Udhayakumar","issue_id":"TLDR-1j2","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"Closed"}}
 {"id":"int-0b1cf38e","kind":"field_change","created_at":"2026-06-27T18:48:10.092979Z","actor":"Udhayakumar","issue_id":"TLDR-1qv","extra":{"field":"status","new_value":"closed","old_value":"open","reason":"Closed"}}
+{"id":"int-cd6d119e","kind":"field_change","created_at":"2026-06-27T20:34:10.781521Z","actor":"Udhayakumar","issue_id":"TLDR-ami","extra":{"field":"status","new_value":"closed","old_value":"open","reason":"Closed"}}
