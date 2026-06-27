@@ -13,7 +13,7 @@ use tldr_core::{
     SmellType, SmellsReport, SmellsWalkerOpts, ThresholdPreset,
 };
 
-use crate::commands::daemon_router::{params_for_smells, try_daemon_route};
+use crate::commands::daemon_router::{is_oneshot, route_for_path, DaemonRoute};
 use crate::output::{format_smells_text, OutputFormat, OutputWriter};
 
 /// Detect code smells
@@ -198,36 +198,11 @@ impl SmellsArgs {
             validated_files.push(canonical);
         }
 
-        // Try daemon first for cached result
-        if let Some(report) = try_daemon_route::<SmellsReport>(
-            &self.path,
-            "smells",
-            params_for_smells(Some(&self.path), &validated_files, include_tests),
-        ) {
-            // Output based on format
-            if writer.is_text() {
-                let text = format_smells_text(&report);
-                writer.write_text(&text)?;
-                return Ok(());
-            } else {
-                writer.write(&report)?;
-                return Ok(());
-            }
-        }
-
-        // determinism-and-stderr-hygiene-v1 (BUG-18): the M14
-        // (med-cleanup-bundle-v1) deep-only-smells hint used to be
-        // unconditionally written to stderr via `eprintln!`, which
-        // broke the JSON-mode contract (`tldr smells <path> 2>err >
-        // out.json` always produced a non-empty stderr stream).
-        //
-        // Relocate the same advisory into `SmellsReport.warnings` so
-        // BOTH JSON consumers (introspectable via `report.warnings[]`)
-        // AND text consumers (rendered to stdout by the text
-        // formatter — see `format_smells_text`) still see it. Skip
-        // injection when `--quiet`, when the user asked for a single
-        // smell type via `--smell-type` (warning would be misleading),
-        // or when `--deep` is set (the analyzers ARE running).
+        // determinism-and-stderr-hygiene-v1 (BUG-18): the deep-only advisory
+        // lives in `SmellsReport.warnings` (NOT stderr) so both JSON and text
+        // consumers see it. TLDR-7pp.1.5: injection now happens ONCE here, for
+        // BOTH the daemon and --oneshot paths (previously the daemon branch
+        // silently skipped it — a latent parity break this conversion fixes).
         let deep_only_warning: Option<String> = (!self.deep && !quiet && self.smell_type.is_none())
             .then(|| {
                 const DEEP_ONLY_SMELLS: &[&str] = &[
@@ -247,43 +222,36 @@ impl SmellsArgs {
                 )
             });
 
-        // Fallback to direct compute
-        writer.progress(&format!(
-            "Scanning for code smells in {}{}...",
-            self.path.display(),
-            if self.deep { " (deep analysis)" } else { "" }
-        ));
-
-        // Detect smells - use aggregated analysis when --deep is set
-        let walker_opts = SmellsWalkerOpts {
-            no_default_ignore: self.no_default_ignore,
-            lang: self.lang,
-            files: validated_files,
-            include_tests,
-        };
-        let mut report = if self.deep {
-            analyze_smells_aggregated_with_walker_opts(
-                &self.path,
-                self.threshold.into(),
-                self.smell_type.map(|s| s.into()),
-                self.suggest,
-                walker_opts,
-            )?
+        // ADR-10 (TLDR-7pp.1.5): daemon is the only serve path; `--oneshot` is
+        // the sole explicit local-compute escape. No silent fallback.
+        let mut report = if is_oneshot() {
+            self.compute_local(&validated_files, include_tests, &writer)?
         } else {
-            detect_smells_with_walker_opts(
-                &self.path,
-                self.threshold.into(),
-                self.smell_type.map(|s| s.into()),
-                self.suggest,
-                walker_opts,
-            )?
+            // Full flag envelope on the wire (TLDR-npl flag-parity rule): every
+            // behavior-affecting flag travels so the daemon computes EXACTLY
+            // what the user asked. Typed enums (de)serialize via their derives.
+            let params = serde_json::json!({
+                "path": self.path,
+                "threshold": tldr_core::ThresholdPreset::from(self.threshold),
+                "smell_type": self.smell_type.map(tldr_core::SmellType::from),
+                "suggest": self.suggest,
+                "deep": self.deep,
+                "no_default_ignore": self.no_default_ignore,
+                "files": validated_files,
+                "include_tests": include_tests,
+                "language": self.lang,
+            });
+            match route_for_path::<SmellsReport>(&self.path, "smells", params) {
+                DaemonRoute::Hit(r) => r,
+                other => return other.into_hit_or_bail("smells").map(|_| ()),
+            }
         };
 
         if let Some(msg) = deep_only_warning {
             report.warnings.push(msg);
         }
 
-        // Output based on format
+        // Output based on format (single renderer for both paths).
         if writer.is_text() {
             let text = format_smells_text(&report);
             writer.write_text(&text)?;
@@ -292,5 +260,45 @@ impl SmellsArgs {
         }
 
         Ok(())
+    }
+
+    /// Local in-process smell detection — reached only via `--oneshot`.
+    fn compute_local(
+        &self,
+        validated_files: &[PathBuf],
+        include_tests: bool,
+        writer: &OutputWriter,
+    ) -> Result<SmellsReport> {
+        writer.progress(&format!(
+            "Scanning for code smells in {}{}...",
+            self.path.display(),
+            if self.deep { " (deep analysis)" } else { "" }
+        ));
+
+        let walker_opts = SmellsWalkerOpts {
+            no_default_ignore: self.no_default_ignore,
+            lang: self.lang,
+            files: validated_files.to_vec(),
+            include_tests,
+        };
+        if self.deep {
+            analyze_smells_aggregated_with_walker_opts(
+                &self.path,
+                self.threshold.into(),
+                self.smell_type.map(|s| s.into()),
+                self.suggest,
+                walker_opts,
+            )
+            .map_err(Into::into)
+        } else {
+            detect_smells_with_walker_opts(
+                &self.path,
+                self.threshold.into(),
+                self.smell_type.map(|s| s.into()),
+                self.suggest,
+                walker_opts,
+            )
+            .map_err(Into::into)
+        }
     }
 }

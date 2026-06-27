@@ -257,6 +257,179 @@ pub async fn is_daemon_running_async(project: &Path) -> bool {
 }
 
 // =============================================================================
+// DaemonRoute — the no-silent-fallback routing primitive (ADR-10 / TLDR-14i)
+// =============================================================================
+//
+// Generalizes `SemanticRoute` to every daemon-capable command. Unlike
+// `try_daemon_route` (whose `None` collapses "daemon down" and "daemon errored"
+// into the same silent-fallback signal), `DaemonRoute` keeps the states
+// machine-distinguishable so the CLI can fail LOUDLY and honestly — the daemon
+// is the only serve path, with `--oneshot` as the sole explicit local escape.
+
+/// Environment flag set by the global `--oneshot`/`--local` CLI flag. When set,
+/// a command bypasses the daemon entirely and computes locally — the ONLY
+/// sanctioned non-daemon path under ADR-10. Checked here (not threaded through
+/// every command signature) mirroring the existing `TLDR_QUIET` convention.
+pub fn is_oneshot() -> bool {
+    std::env::var("TLDR_ONESHOT").is_ok_and(|v| v == "1")
+}
+
+/// Outcome of routing a command to the daemon.
+///
+/// `DaemonDown` and `Error` are deliberately separate (the whole point of this
+/// type vs `try_daemon_route`): "no daemon" is an onboarding/UX state, while a
+/// real daemon error is a failure to surface. `NotReady` is reserved for
+/// index-backed commands (e.g. semantic) whose store must be warmed first;
+/// compute-on-miss commands never produce it.
+#[derive(Debug)]
+pub enum DaemonRoute<T> {
+    /// Daemon served the query.
+    Hit(T),
+    /// No daemon is listening for this project.
+    DaemonDown,
+    /// Daemon is up but cannot serve yet (e.g. index not built).
+    NotReady(String),
+    /// Daemon returned a real error, or the response was malformed.
+    Error(String),
+}
+
+impl<T> DaemonRoute<T> {
+    /// Collapse a route into `Ok(value)` on `Hit`, or an honest non-`Hit`
+    /// error per ADR-10. `cmd` names the command for the daemon-down guidance.
+    /// This is the single place the no-silent-fallback error text lives, so
+    /// every converted command fails identically.
+    pub fn into_hit_or_bail(self, cmd: &str) -> anyhow::Result<T> {
+        match self {
+            DaemonRoute::Hit(v) => Ok(v),
+            DaemonRoute::DaemonDown => anyhow::bail!(
+                "daemon not running — start it with: tldr daemon start  (or run `tldr {cmd} --oneshot` for a one-off local compute)"
+            ),
+            DaemonRoute::NotReady(msg) => anyhow::bail!("{msg}"),
+            DaemonRoute::Error(e) => anyhow::bail!("daemon request failed: {e}"),
+        }
+    }
+}
+
+/// Route a command to the daemon, preserving the DaemonDown vs Error
+/// distinction. Sync wrapper over [`route_async`].
+pub fn route<T: DeserializeOwned>(
+    project: &Path,
+    endpoint: &str,
+    params: serde_json::Value,
+) -> DaemonRoute<T> {
+    let runtime = match tokio::runtime::Runtime::new() {
+        Ok(rt) => rt,
+        Err(e) => return DaemonRoute::Error(format!("failed to start tokio runtime: {e}")),
+    };
+    runtime.block_on(route_async(project, endpoint, params))
+}
+
+/// Find the project root of a RUNNING daemon that covers `path` — the path
+/// itself or any ancestor of it.
+///
+/// Registry-driven (robust): unlike marker-sniffing (`find_project_root`), this
+/// never anchors to a stale `.tldr`/`.git` left in a subdirectory. A per-file
+/// command (e.g. `complexity`) deep inside the tree resolves to the repo-root
+/// daemon that actually watches it. When several daemons cover the path, the
+/// most specific (deepest project) wins.
+pub fn daemon_project_for(path: &Path) -> Option<PathBuf> {
+    let canon = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    crate::commands::daemon::daemon_registry::live_entries()
+        .into_iter()
+        .filter(|e| canon == e.project || canon.starts_with(&e.project))
+        .map(|e| e.project)
+        .max_by_key(|p| p.components().count())
+}
+
+/// Resolve the covering daemon for `path` and route `endpoint` to it.
+///
+/// The per-file/per-path entry point for converted commands: it pairs
+/// [`daemon_project_for`] with [`route`] so callers don't have to guess a
+/// project root. No covering daemon => [`DaemonRoute::DaemonDown`] (honest,
+/// never a silent local fallback).
+pub fn route_for_path<T: DeserializeOwned>(
+    path: &Path,
+    endpoint: &str,
+    params: serde_json::Value,
+) -> DaemonRoute<T> {
+    match daemon_project_for(path) {
+        Some(project) => route(&project, endpoint, params),
+        None => DaemonRoute::DaemonDown,
+    }
+}
+
+/// Async version of [`route`].
+pub async fn route_async<T: DeserializeOwned>(
+    project: &Path,
+    endpoint: &str,
+    params: serde_json::Value,
+) -> DaemonRoute<T> {
+    let project = project.canonicalize().unwrap_or_else(|_| {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(project)
+    });
+
+    let mut cmd_obj = serde_json::json!({ "cmd": endpoint.to_lowercase() });
+    if let (serde_json::Value::Object(params_obj), serde_json::Value::Object(cmd_map)) =
+        (params, &mut cmd_obj)
+    {
+        for (key, value) in params_obj {
+            cmd_map.insert(key, value);
+        }
+    }
+    let command_json = match serde_json::to_string(&cmd_obj) {
+        Ok(json) => json,
+        Err(e) => return DaemonRoute::Error(format!("failed to encode request: {e}")),
+    };
+
+    let response = match send_raw_command(&project, &command_json).await {
+        Ok(resp) => resp,
+        Err(DaemonError::NotRunning) => return DaemonRoute::DaemonDown,
+        Err(DaemonError::ConnectionRefused) => return DaemonRoute::DaemonDown,
+        Err(e) => return DaemonRoute::Error(format!("daemon request failed: {e}")),
+    };
+
+    let response_value: serde_json::Value = match serde_json::from_str(&response) {
+        Ok(v) => v,
+        Err(e) => return DaemonRoute::Error(format!("malformed daemon response: {e}")),
+    };
+
+    match response_value.get("status").and_then(|s| s.as_str()) {
+        Some("not_ready") => {
+            let msg = response_value
+                .get("error")
+                .and_then(|e| e.as_str())
+                .unwrap_or("daemon not ready — run tldr warm")
+                .to_string();
+            return DaemonRoute::NotReady(msg);
+        }
+        Some("error") => {
+            let msg = response_value
+                .get("error")
+                .and_then(|e| e.as_str())
+                .unwrap_or("daemon error")
+                .to_string();
+            return DaemonRoute::Error(msg);
+        }
+        _ => {}
+    }
+
+    let result_value = if response_value.get("result").is_some() {
+        response_value
+            .get("result")
+            .cloned()
+            .unwrap_or(response_value)
+    } else {
+        response_value
+    };
+    match serde_json::from_value(result_value) {
+        Ok(v) => DaemonRoute::Hit(v),
+        Err(e) => DaemonRoute::Error(format!("malformed daemon result: {e}")),
+    }
+}
+
+// =============================================================================
 // Convenience Builders
 // =============================================================================
 
@@ -286,6 +459,24 @@ pub fn params_with_file(file: &Path) -> serde_json::Value {
 pub fn params_with_file_lang(file: &Path, lang: Option<&str>) -> serde_json::Value {
     let mut obj = serde_json::Map::new();
     obj.insert("file".to_string(), serde_json::json!(file));
+    if let Some(l) = lang {
+        obj.insert("language".to_string(), serde_json::json!(l));
+    }
+    serde_json::Value::Object(obj)
+}
+
+/// Build JSON params with file, function, and optional language hint.
+///
+/// Used by `complexity` which accepts `--lang`. JSON key is `language` to match
+/// the daemon `Complexity` variant (alias `lang` also accepted).
+pub fn params_with_file_function_lang(
+    file: &Path,
+    function: &str,
+    lang: Option<&str>,
+) -> serde_json::Value {
+    let mut obj = serde_json::Map::new();
+    obj.insert("file".to_string(), serde_json::json!(file));
+    obj.insert("function".to_string(), serde_json::json!(function));
     if let Some(l) = lang {
         obj.insert("language".to_string(), serde_json::json!(l));
     }
@@ -472,5 +663,95 @@ mod tests {
         let params = params_with_file_lang(Path::new("/tmp/myscript"), None);
         assert!(params.get("language").is_none());
         assert_eq!(params["file"], "/tmp/myscript");
+    }
+
+    #[test]
+    fn test_route_daemon_down_when_no_daemon() {
+        // No daemon for a fresh tempdir => DaemonDown (NOT a silent None).
+        let temp = TempDir::new().unwrap();
+        let route: DaemonRoute<serde_json::Value> =
+            route(temp.path(), "ping", serde_json::json!({}));
+        assert!(matches!(route, DaemonRoute::DaemonDown));
+    }
+
+    #[test]
+    fn test_into_hit_or_bail_hit_returns_value() {
+        let route: DaemonRoute<u32> = DaemonRoute::Hit(42);
+        assert_eq!(route.into_hit_or_bail("calls").unwrap(), 42);
+    }
+
+    #[test]
+    fn test_into_hit_or_bail_daemon_down_names_start_and_oneshot() {
+        let route: DaemonRoute<u32> = DaemonRoute::DaemonDown;
+        let err = route.into_hit_or_bail("calls").unwrap_err().to_string();
+        assert!(err.contains("tldr daemon start"), "got: {err}");
+        assert!(err.contains("--oneshot"), "got: {err}");
+    }
+
+    #[test]
+    fn test_into_hit_or_bail_error_surfaces_message() {
+        let route: DaemonRoute<u32> = DaemonRoute::Error("boom".to_string());
+        let err = route.into_hit_or_bail("calls").unwrap_err().to_string();
+        assert!(err.contains("boom"), "got: {err}");
+    }
+
+    #[test]
+    fn test_into_hit_or_bail_not_ready_surfaces_message() {
+        let route: DaemonRoute<u32> = DaemonRoute::NotReady("index not built".to_string());
+        let err = route.into_hit_or_bail("semantic").unwrap_err().to_string();
+        assert!(err.contains("index not built"), "got: {err}");
+    }
+
+    #[test]
+    fn test_is_oneshot_reads_env() {
+        // Note: env is process-global; restore afterward to avoid cross-test leak.
+        let prev = std::env::var("TLDR_ONESHOT").ok();
+        std::env::set_var("TLDR_ONESHOT", "1");
+        assert!(is_oneshot());
+        std::env::remove_var("TLDR_ONESHOT");
+        assert!(!is_oneshot());
+        if let Some(p) = prev {
+            std::env::set_var("TLDR_ONESHOT", p);
+        }
+    }
+
+    #[test]
+    fn test_daemon_project_for_resolves_ancestor_daemon() {
+        // Registry-driven resolution must return the daemon whose project is an
+        // ANCESTOR of a deep file — NOT anchor to a stale marker in a subdir
+        // (the bug this fix targets, TLDR-7pp.1.3).
+        use crate::commands::daemon::daemon_registry::{
+            add_entry, test_support::with_registry_dir,
+        };
+        with_registry_dir(|dir| {
+            let project = dir.join("proj");
+            let sub = project.join("a/b");
+            std::fs::create_dir_all(&sub).unwrap();
+            let file = sub.join("f.rs");
+            std::fs::write(&file, "x").unwrap();
+            // Register a live daemon (this process's pid is alive) at the root.
+            add_entry(&project, std::process::id(), &dir.join("p.sock")).unwrap();
+
+            let got = daemon_project_for(&file);
+            let canon_project = project.canonicalize().unwrap();
+            assert_eq!(
+                got,
+                Some(canon_project),
+                "deep file should resolve to the ancestor daemon"
+            );
+        });
+    }
+
+    #[test]
+    fn test_daemon_project_for_none_when_no_daemon() {
+        use crate::commands::daemon::daemon_registry::test_support::with_registry_dir;
+        with_registry_dir(|dir| {
+            let file = dir.join("x.rs");
+            std::fs::write(&file, "x").unwrap();
+            assert!(
+                daemon_project_for(&file).is_none(),
+                "no registered daemon => None (honest DaemonDown, never silent fallback)"
+            );
+        });
     }
 }

@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use tldr_core::Language;
+use tldr_core::{Language, SmellType, ThresholdPreset};
 
 // =============================================================================
 // Constants
@@ -505,6 +505,54 @@ pub enum DaemonCommand {
         git: Option<bool>,
         /// Optional language override. Falls back to auto-detection when
         /// `None`. Accepts the legacy `lang` key for v0.2.x clients.
+        #[serde(default, alias = "lang", skip_serializing_if = "Option::is_none")]
+        language: Option<Language>,
+    },
+
+    /// Calculate complexity metrics for one function in a file.
+    ///
+    /// TLDR-7pp.1.3: previously `tldr complexity` routed to the endpoint
+    /// `"complexity"` which had NO variant here, so the daemon dropped the
+    /// connection and the CLI silently computed locally. This variant gives it
+    /// a real compute-on-miss handler.
+    Complexity {
+        file: PathBuf,
+        function: String,
+        /// Optional language override. Falls back to auto-detection from the
+        /// file path when `None`. Accepts the legacy `lang` key.
+        #[serde(default, alias = "lang", skip_serializing_if = "Option::is_none")]
+        language: Option<Language>,
+    },
+
+    /// Detect code smells over a path (file or directory).
+    ///
+    /// TLDR-7pp.1.3: companion fix to `Complexity` — `tldr smells` had the same
+    /// missing-variant silent-fallback bug. The full flag envelope travels on
+    /// the wire so the daemon produces output identical to local compute.
+    Smells {
+        path: PathBuf,
+        /// Threshold preset. Serializes as "strict"/"default"/"relaxed".
+        #[serde(default)]
+        threshold: ThresholdPreset,
+        /// Optional smell-type filter (snake_case value, e.g. "god_class").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        smell_type: Option<SmellType>,
+        /// Include fix suggestions.
+        #[serde(default)]
+        suggest: bool,
+        /// Deep analysis (aggregate cohesion/coupling/dead/clone/cognitive).
+        #[serde(default)]
+        deep: bool,
+        /// Walk vendored/build dirs that are normally ignored.
+        #[serde(default)]
+        no_default_ignore: bool,
+        /// Explicit file list (already validated by the CLI). Empty => walk.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        files: Vec<PathBuf>,
+        /// Include findings from test files.
+        #[serde(default)]
+        include_tests: bool,
+        /// Optional language filter.
         #[serde(default, alias = "lang", skip_serializing_if = "Option::is_none")]
         language: Option<Language>,
     },

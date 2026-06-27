@@ -45,6 +45,10 @@ use tldr_core::config::TldrConfig;
 #[cfg(feature = "semantic")]
 use tldr_core::semantic::{EmbeddingModel, IndexSearchOptions};
 use tldr_core::{
+    analyze_smells_aggregated_with_walker_opts, calculate_complexity,
+    detect_smells_with_walker_opts, SmellsWalkerOpts,
+};
+use tldr_core::{
     architecture_analysis, change_impact, collect_all_functions, dead_code_analysis,
     detect_or_parse_language, extract_file, find_importers, get_cfg_context, get_code_structure,
     get_dfg_context, get_file_tree, get_imports, get_relevant_context, get_slice, impact_analysis,
@@ -1295,6 +1299,131 @@ impl TLDRDaemon {
                         // TLDR-fct freshness: change-impact spans self.project —
                         // register the project hash so edits evict it.
                         self.cache.insert(key, &val, vec![hash_path(&self.project)]);
+                        DaemonResponse::Result(val)
+                    }
+                    Err(e) => DaemonResponse::Error {
+                        status: "error".to_string(),
+                        error: e.to_string(),
+                    },
+                }
+            }
+
+            // TLDR-7pp.1.3: real handler for `tldr complexity` (was a missing
+            // variant => silent local fallback). Compute-on-miss + per-file
+            // freshness, mirroring the CLI local path exactly.
+            DaemonCommand::Complexity {
+                file,
+                function,
+                language,
+            } => {
+                let file_str = file.to_string_lossy().to_string();
+                // Mirror complexity.rs: language hint > auto-detect from path.
+                let lang = match detect_or_parse_language(language.map(|l| l.as_str()), &file) {
+                    Ok(l) => l,
+                    Err(e) => {
+                        return DaemonResponse::Error {
+                            status: "error".to_string(),
+                            error: e.to_string(),
+                        }
+                    }
+                };
+                let key = QueryKey::new("complexity", hash_str_args(&[&file_str, &function]), lang);
+                if let Some(cached) = self.cache.get::<serde_json::Value>(&key) {
+                    return DaemonResponse::Result(cached);
+                }
+                let file_hash = hash_path(&file);
+                match calculate_complexity(&file_str, &function, lang) {
+                    Ok(result) => {
+                        let val = serde_json::to_value(&result).unwrap_or_default();
+                        self.cache.insert(key, &val, vec![file_hash]);
+                        DaemonResponse::Result(val)
+                    }
+                    Err(e) => DaemonResponse::Error {
+                        status: "error".to_string(),
+                        error: e.to_string(),
+                    },
+                }
+            }
+
+            // TLDR-7pp.1.3: real handler for `tldr smells`. Returns the raw
+            // SmellsReport; the deep-only advisory warning is injected
+            // CLI-side (presentation concern) so daemon and --oneshot paths
+            // stay byte-identical.
+            DaemonCommand::Smells {
+                path,
+                threshold,
+                smell_type,
+                suggest,
+                deep,
+                no_default_ignore,
+                files,
+                include_tests,
+                language,
+            } => {
+                let path_str = path.to_string_lossy().to_string();
+                // smell_type Display/Debug + the bool flags fully determine the
+                // result, so fold them all into the cache key.
+                let st_str = smell_type
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| "all".to_string());
+                let key = QueryKey::new(
+                    "smells",
+                    hash_str_args(&[
+                        &path_str,
+                        &format!("{threshold:?}"),
+                        &st_str,
+                        &suggest.to_string(),
+                        &deep.to_string(),
+                        &no_default_ignore.to_string(),
+                        &include_tests.to_string(),
+                        &files
+                            .iter()
+                            .map(|p| p.to_string_lossy().to_string())
+                            .collect::<Vec<_>>()
+                            .join(","),
+                    ]),
+                    resolve_language(language),
+                );
+                if let Some(cached) = self.cache.get::<serde_json::Value>(&key) {
+                    return DaemonResponse::Result(cached);
+                }
+                let walker_opts = SmellsWalkerOpts {
+                    no_default_ignore,
+                    lang: language,
+                    files,
+                    include_tests,
+                };
+                let computed = if deep {
+                    analyze_smells_aggregated_with_walker_opts(
+                        &path,
+                        threshold,
+                        smell_type,
+                        suggest,
+                        walker_opts,
+                    )
+                } else {
+                    detect_smells_with_walker_opts(
+                        &path,
+                        threshold,
+                        smell_type,
+                        suggest,
+                        walker_opts,
+                    )
+                };
+                match computed {
+                    Ok(result) => {
+                        let val = serde_json::to_value(&result).unwrap_or_default();
+                        // Freshness: smells scans `path`; register both the
+                        // query path and the daemon project root (only when the
+                        // path is inside the project — outside paths aren't
+                        // covered by the watcher, so never cache them).
+                        if path == self.project || path.starts_with(&self.project) {
+                            self.cache.insert(
+                                key,
+                                &val,
+                                vec![hash_path(&path), hash_path(&self.project)],
+                            );
+                        }
                         DaemonResponse::Result(val)
                     }
                     Err(e) => DaemonResponse::Error {

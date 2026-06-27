@@ -112,6 +112,14 @@ pub struct Cli {
     /// Enable verbose/debug output
     #[arg(long, short = 'v', global = true)]
     pub verbose: bool,
+
+    /// Compute locally in-process instead of routing through the daemon.
+    ///
+    /// ADR-10 (no silent fallback): daemon-capable commands require a running
+    /// daemon by default and fail loudly when it is absent. `--oneshot` is the
+    /// ONLY sanctioned way to run a one-off local compute without a daemon.
+    #[arg(long, visible_alias = "local", global = true)]
+    pub oneshot: bool,
 }
 
 /// Available commands
@@ -608,6 +616,14 @@ fn run_command(cli: &Cli) -> Result<()> {
     );
     if cli.quiet || auto_quiet_env {
         std::env::set_var("TLDR_QUIET", "1");
+    }
+
+    // ADR-10 (TLDR-14i): propagate the global `--oneshot`/`--local` flag via
+    // `TLDR_ONESHOT=1` so daemon-capable commands can detect it through
+    // `daemon_router::is_oneshot()` without threading a bool through every
+    // command's `run()` signature (mirrors the `TLDR_QUIET` convention above).
+    if cli.oneshot {
+        std::env::set_var("TLDR_ONESHOT", "1");
     }
     // Keep `q == cli.quiet` for the dispatch table so that commands which
     // (legitimately or not) wrap their *actual* JSON emission in

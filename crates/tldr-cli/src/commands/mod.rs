@@ -140,10 +140,11 @@ pub use daemon::{StatsArgs, WarmArgs};
 
 // Daemon router for auto-routing commands through daemon cache
 pub use daemon_router::{
-    is_daemon_running, params_for_dead, params_for_smells, params_with_entry_depth,
-    params_with_file, params_with_file_function, params_with_file_function_line,
-    params_with_func_depth, params_with_module, params_with_path, params_with_path_lang,
-    params_with_pattern, try_daemon_route, try_daemon_route_async,
+    daemon_project_for, is_daemon_running, is_oneshot, params_for_dead, params_for_smells,
+    params_with_entry_depth, params_with_file, params_with_file_function,
+    params_with_file_function_lang, params_with_file_function_line, params_with_func_depth,
+    params_with_module, params_with_path, params_with_path_lang, params_with_pattern, route,
+    route_async, route_for_path, try_daemon_route, try_daemon_route_async, DaemonRoute,
 };
 
 // API Surface command Args
