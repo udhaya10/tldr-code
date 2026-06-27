@@ -91,6 +91,10 @@ md5 = "0.7"
 # PINNED per premortem P0 - do not use ^5.8 or 5
 fastembed = "=5.8.1"
 
+# TLDR-l5d: usearch vector store (exact_search_f32 + save/load). C++/cxx dep
+# (decision-locked TLDR-rgc). Pinned to match the researched API (rust/lib.rs).
+usearch = "=2.25.3"
+
 # Session 16 Phase 5: File locking for cache (P0 mitigation)
 fs2 = "0.4"
 
@@ -118,6 +122,12 @@ chrono = { version = "0.4", features = ["serde"] }
 walkdir = "2"
 ignore = "0.4"
 dunce = "1.0"
+
+# In-daemon filesystem watcher (TLDR-ac0.2). PINNED (=X.Y.Z) per the workspace
+# convention. `notify` is consumed via debouncer-full's re-export
+# (`notify_debouncer_full::notify`) so there is only ever one `notify` version
+# in the tree — no two-version skew between a direct dep and the debouncer's.
+notify-debouncer-full = "=0.7.0"
 
 # Difftastic L1/L2 graft - Phase 1
 bumpalo = "3.16.0"

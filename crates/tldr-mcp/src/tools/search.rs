@@ -117,46 +117,20 @@ pub fn handle_bm25(args: Value) -> ToolsCallResult {
     }
 }
 
-/// Handle tldr_semantic tool call (hybrid search with embeddings)
-pub fn handle_semantic(args: Value) -> ToolsCallResult {
-    let query = match get_required_string(&args, "query") {
-        Ok(q) => q,
-        Err(e) => return ToolsCallResult::error(e),
-    };
-
-    let path = match get_required_string(&args, "path") {
-        Ok(p) => p,
-        Err(e) => return ToolsCallResult::error(e),
-    };
-
-    let top_k = get_optional_int(&args, "top_k").unwrap_or(10) as usize;
-
-    let path = to_path(&path);
-    if !path.exists() {
-        return ToolsCallResult::error(format!("Path not found: {}", path.display()));
-    }
-
-    // Auto-detect language from path or use provided
-    let language = get_optional_string(&args, "language");
-    let lang = if let Some(l) = language {
-        match l.parse::<tldr_core::Language>() {
-            Ok(lang) => lang,
-            Err(e) => return ToolsCallResult::error(e),
-        }
-    } else {
-        // Default to Python for directory searches
-        tldr_core::Language::Python
-    };
-
-    // Hybrid search (falls back to BM25-only if embedding service unavailable)
-    // M8: Graceful degradation when embedding service is not available
-    match tldr_core::hybrid_search(&query, &path, lang, top_k, 60.0, None) {
-        Ok(report) => match serde_json::to_string_pretty(&report) {
-            Ok(json) => ToolsCallResult::text(json),
-            Err(e) => ToolsCallResult::error(format!("Serialization error: {}", e)),
-        },
-        Err(e) => ToolsCallResult::error(format!("Error: {}", e)),
-    }
+/// Handle tldr_semantic tool call — PARKED in this version (TLDR-7xz.5).
+///
+/// The old implementation cold-built a `SemanticIndex` (full corpus embed +
+/// ONNX model load) on EVERY agent tool call — the worst silent-slow-path
+/// offender in the codebase. tldr-mcp has no daemon IPC client today, so it
+/// cannot reach the warm resident store; the tool stays listed (parked, not
+/// silently removed) and fails fast with a structured isError an agent can
+/// relay. Returns at full warm quality with the MCP daemon client (TLDR-utj.5).
+/// `tldr_search` (regex) and `tldr_bm25` (keyword) remain fully available.
+pub fn handle_semantic(_args: Value) -> ToolsCallResult {
+    ToolsCallResult::error(
+        "not available in this version, semantic search is moving to the warm daemon engine (it cold-built an index per call) — use tldr_search or tldr_bm25 instead"
+            .to_string(),
+    )
 }
 
 #[cfg(test)]
@@ -185,5 +159,23 @@ mod tests {
         }));
         assert!(result.is_error == Some(true));
         assert!(result.content[0].text.contains("Path not found"));
+    }
+
+    /// TLDR-7xz.5: tldr_semantic is parked — it must fail fast with the
+    /// standardized structured isError (never cold-build an index per call)
+    /// and point the agent at the live alternatives.
+    #[test]
+    fn test_handle_semantic_parked() {
+        let result = handle_semantic(json!({
+            "query": "anything",
+            "path": "."
+        }));
+        assert!(result.is_error == Some(true));
+        let msg = &result.content[0].text;
+        assert!(
+            msg.starts_with("not available in this version,"),
+            "parked message must use the standardized format, got: {msg}"
+        );
+        assert!(msg.contains("tldr_search") && msg.contains("tldr_bm25"));
     }
 }

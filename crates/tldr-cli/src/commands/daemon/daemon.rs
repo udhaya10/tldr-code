@@ -14,7 +14,7 @@
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
@@ -22,9 +22,15 @@ use std::time::Instant;
 use dashmap::DashMap;
 use tokio::sync::{watch, RwLock};
 
+use super::activity::{ActivityTracker, Source};
 use super::error::{DaemonError, DaemonResult};
 use super::ipc::{read_command, send_response, IpcListener, IpcStream};
-use super::salsa::{QueryCache, QueryKey};
+use super::salsa::{hash_bytes, hash_path, QueryCache, QueryKey};
+use tldr_core::callgraph::cross_file_types::FileIR;
+use tldr_core::callgraph::{
+    build_indices_parallel, compose_call_graph_v2, scan_project_files, BuildConfig,
+};
+use tldr_core::types::{CallEdge, ProjectCallGraph, WorkspaceConfig};
 use super::types::{
     AllSessionsSummary, DaemonCommand, DaemonConfig, DaemonResponse, DaemonStatus, HookStats,
     SalsaCacheStats, SessionStats, HOOK_FLUSH_THRESHOLD,
@@ -33,9 +39,13 @@ use super::types::{
 #[cfg(test)]
 use super::types::DEFAULT_REINDEX_THRESHOLD;
 #[cfg(feature = "semantic")]
-use tldr_core::semantic::{BuildOptions, CacheConfig, IndexSearchOptions, SemanticIndex};
+use tldr_core::config::TldrConfig;
+#[cfg(feature = "semantic")]
+use tldr_core::semantic::{EmbeddingModel, IndexSearchOptions};
+#[cfg(feature = "semantic")]
+use super::index_manager::IndexManager;
 use tldr_core::{
-    architecture_analysis, build_project_call_graph, change_impact, collect_all_functions,
+    architecture_analysis, change_impact, collect_all_functions,
     dead_code_analysis, detect_or_parse_language, extract_file, find_importers, get_cfg_context,
     get_code_structure, get_dfg_context, get_file_tree, get_imports, get_relevant_context,
     get_slice, impact_analysis, search as tldr_search, FileTree, Language, NodeType,
@@ -78,6 +88,246 @@ fn count_tree_files(tree: &FileTree) -> usize {
     }
 }
 
+/// Result of applying one changed file via [`TLDRDaemon::process_dirty_file`].
+/// The IPC `Notify` handler turns this into a `NotifyResponse`; the in-daemon
+/// watcher worker (TLDR-ac0.2) discards it (no client to answer).
+pub(crate) struct ReindexOutcome {
+    /// Number of files in the dirty set after this one was added.
+    pub dirty_count: usize,
+    /// The auto-reindex threshold in effect.
+    pub threshold: usize,
+    /// Whether this file pushed the dirty count to the threshold.
+    pub reindex_triggered: bool,
+}
+
+/// Clears the warm single-flight latch when the background build task ends —
+/// including via panic-unwind, so a crashed build never wedges Warm into
+/// permanent `already_building`.
+struct ClearFlagOnDrop(Arc<AtomicBool>);
+
+impl Drop for ClearFlagOnDrop {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
+/// TLDR-iqr: per-file FileIR memo — daemon RAM only (ADR-8 stays closed; the
+/// content-hash key means a disk layer could slot beneath later without
+/// interface change). Key = (language, absolute file path); value =
+/// (content_hash, parsed FileIR).
+type FileIrMemo = DashMap<(String, PathBuf), (u64, Arc<FileIR>)>;
+
+/// TLDR-iqr: memoized whole-project graph build. Mirrors
+/// `tldr_core::build_project_call_graph`'s wrapper semantics exactly
+/// (workspace discovery, use_type_resolution=true) but re-parses ONLY files
+/// whose content hash misses the memo; everything else composes from
+/// memoized FileIRs via the parse/compose seam. The content-hash check at
+/// use time is the drift-proof backstop (kkt/1qv lesson); watcher eviction
+/// in `process_dirty_file` is the eager path.
+fn build_project_call_graph_memoized(
+    root: &Path,
+    lang: Language,
+    memo: &FileIrMemo,
+) -> Result<ProjectCallGraph, String> {
+    let mut config = BuildConfig {
+        language: lang.as_str().to_string(),
+        respect_ignore: true,
+        ..Default::default()
+    };
+    config.use_type_resolution = true;
+    let discovered = WorkspaceConfig::discover(root);
+    if let Some(ws) = discovered.as_ref() {
+        if !ws.roots.is_empty() {
+            config.use_workspace_config = true;
+            config.workspace_roots = ws.roots.clone();
+        }
+    }
+
+    let scanned =
+        scan_project_files(root, &config.language, &config).map_err(|e| e.to_string())?;
+
+    let mut file_irs = Vec::with_capacity(scanned.len());
+    for s in &scanned {
+        let memo_key = (config.language.clone(), s.path.clone());
+        let content_hash = std::fs::read(&s.path).ok().map(|b| hash_bytes(&b));
+        match content_hash {
+            Some(h) => {
+                if let Some(entry) = memo.get(&memo_key) {
+                    if entry.0 == h {
+                        file_irs.push(entry.1.as_ref().clone());
+                        continue;
+                    }
+                }
+            }
+            // TLDR-985: unreadable (deleted mid-build / perms) — drop any stale
+            // memo entry so we never retain a FileIR for a file we can't read.
+            None => {
+                memo.remove(&memo_key);
+            }
+        }
+        // Miss / changed / unreadable: parse this ONE file through the
+        // standard parse path (read-error handling identical to full build).
+        let single = std::slice::from_ref(s);
+        let (_f, _c, mut irs) = build_indices_parallel(single, root, &config.language, &config);
+        if let Some(ir1) = irs.pop() {
+            if let Some(h) = content_hash {
+                memo.insert(memo_key, (h, Arc::new(ir1.clone())));
+            }
+            file_irs.push(ir1);
+        }
+    }
+
+    // TLDR-985: reconcile the memo against the live file set. Files of THIS
+    // language that vanished (deleted/renamed without a Notify, or never
+    // notified because the watcher is off) are pruned so the memo stays
+    // O(live files) rather than growing with project churn. Entries for other
+    // languages are left untouched (different builds populate them).
+    let scanned_set: std::collections::HashSet<PathBuf> =
+        scanned.iter().map(|s| s.path.clone()).collect();
+    memo.retain(|k, _| k.0 != config.language || scanned_set.contains(&k.1));
+
+    let ir = compose_call_graph_v2(root, &config, file_irs).map_err(|e| e.to_string())?;
+    let mut graph = ProjectCallGraph::new();
+    for edge in ir.edges {
+        graph.add_edge(CallEdge {
+            src_file: edge.src_file,
+            src_func: edge.src_func,
+            dst_file: edge.dst_file,
+            dst_func: edge.dst_func,
+        });
+    }
+    Ok(graph)
+}
+
+/// The background warm build (TLDR-utj.7). Carries CLONED handles of the
+/// daemon components it needs rather than the daemon itself: the Warm handler
+/// only has `&self`, and the detached task must be `'static`.
+struct WarmJob {
+    project: PathBuf,
+    lang: Language,
+    cache: Arc<QueryCache>,
+    /// TLDR-iqr: FileIR memo handle so the warm build populates it.
+    file_ir_memo: Arc<FileIrMemo>,
+    indexed_files: Arc<RwLock<usize>>,
+    #[cfg(feature = "semantic")]
+    semantic_store: Arc<IndexManager>,
+    /// `None` when model resolution failed at ack time (already reported in
+    /// the ack); the semantic step is skipped.
+    #[cfg(feature = "semantic")]
+    model: Option<EmbeddingModel>,
+}
+
+impl WarmJob {
+    /// Run all warm steps; returns (warmed, errors) for the daemon log. Same
+    /// steps as the old inline handler — only the execution context changed.
+    async fn run(self) -> (Vec<&'static str>, Vec<String>) {
+        let mut warmed = Vec::new();
+        let mut errors = Vec::new();
+
+        // 1. Warm call graph
+        let calls_key = QueryKey::new(
+            "calls",
+            hash_str_args(&[&self.project.to_string_lossy()]),
+            self.lang,
+        );
+        if self.cache.get::<serde_json::Value>(&calls_key).is_some() {
+            warmed.push("call_graph (cached)");
+        } else {
+            // TLDR-iqr: memoized build, off the async runtime (Codex r3 Q8 —
+            // the old direct call blocked the runtime for the whole build).
+            let project = self.project.clone();
+            let lang = self.lang;
+            let memo = Arc::clone(&self.file_ir_memo);
+            let built = tokio::task::spawn_blocking(move || {
+                build_project_call_graph_memoized(&project, lang, &memo)
+            })
+            .await
+            .unwrap_or_else(|e| Err(format!("warm build task failed: {e}")));
+            match built {
+                Ok(result) => {
+                    // TLDR-9ae (F1): insert the native result directly — insert()
+                    // serializes once via to_vec. The former to_value() built a
+                    // whole-project JSON DOM (5-15x the JSON text size) that
+                    // coexisted with `result` AND the serialized bytes, a major
+                    // contributor to the measured 22GB warm plateau (TLDR-k8s).
+                    //
+                    // TLDR-iqr freshness: register against the PROJECT ROOT
+                    // hash — process_dirty_file invalidates it on any save, so
+                    // project-level answers can no longer go permanently stale
+                    // (they previously registered vec![] = uninvalidatable).
+                    self.cache
+                        .insert(calls_key, &result, vec![hash_path(&self.project)]);
+                    warmed.push("call_graph");
+                }
+                Err(e) => errors.push(format!("call_graph: {}", e)),
+            }
+        }
+
+        // 2. Warm code structure
+        let struct_key = QueryKey::new(
+            "structure",
+            hash_str_args(&[&self.project.to_string_lossy(), ""]),
+            self.lang,
+        );
+        if self.cache.get::<serde_json::Value>(&struct_key).is_some() {
+            warmed.push("structure (cached)");
+        } else {
+            match get_code_structure(&self.project, self.lang, 0, None) {
+                Ok(result) => {
+                    // TLDR-9ae (F1): no to_value DOM — see call_graph step above.
+                    // TLDR-iqr freshness: root-hash registration (see call_graph).
+                    self.cache
+                        .insert(struct_key, &result, vec![hash_path(&self.project)]);
+                    warmed.push("structure");
+                }
+                Err(e) => errors.push(format!("structure: {}", e)),
+            }
+        }
+
+        // 3. Warm file tree
+        let tree_key = QueryKey::new(
+            "tree",
+            hash_str_args(&[&self.project.to_string_lossy()]),
+            self.lang,
+        );
+        if self.cache.get::<serde_json::Value>(&tree_key).is_some() {
+            warmed.push("file_tree (cached)");
+        } else {
+            match get_file_tree(&self.project, None, true, None) {
+                Ok(result) => {
+                    let file_count = count_tree_files(&result);
+                    // TLDR-9ae (F1): no to_value DOM — see call_graph step above.
+                    // TLDR-iqr freshness: root-hash registration (see call_graph).
+                    self.cache
+                        .insert(tree_key, &result, vec![hash_path(&self.project)]);
+                    *self.indexed_files.write().await = file_count;
+                    warmed.push("file_tree");
+                }
+                Err(e) => errors.push(format!("file_tree: {}", e)),
+            }
+        }
+
+        // 4. Warm the vector store: load from disk (near-instant if fresh)
+        //    or build+save on miss. Uses the project-config model so a later
+        //    query with the same model hits the resident store
+        //    (TLDR-atc / TLDR-zxb).
+        #[cfg(feature = "semantic")]
+        if let Some(model) = self.model {
+            let mgr = Arc::clone(&self.semantic_store);
+            let project = self.project.clone();
+            let res = tokio::task::spawn_blocking(move || mgr.warm(&project, model)).await;
+            match res {
+                Ok(Ok(true)) => warmed.push("semantic_store"),
+                Ok(Ok(false)) => warmed.push("semantic_store (cached)"),
+                Ok(Err(e)) => errors.push(format!("semantic_store: {}", e)),
+                Err(e) => errors.push(format!("semantic_store: {}", e)),
+            }
+        }
+
+        (warmed, errors)
+    }
+}
+
 // =============================================================================
 // TLDRDaemon - Main Daemon Process
 // =============================================================================
@@ -99,8 +349,9 @@ pub struct TLDRDaemon {
     start_time: Instant,
     /// Current daemon status
     status: Arc<RwLock<DaemonStatus>>,
-    /// Salsa-style query cache
-    cache: QueryCache,
+    /// Salsa-style query cache. Behind `Arc` so the detached warm-build task
+    /// (TLDR-utj.7) can own a handle without holding the whole daemon.
+    cache: Arc<QueryCache>,
     /// Per-session statistics
     sessions: DashMap<String, SessionStats>,
     /// Per-hook activity statistics
@@ -111,13 +362,22 @@ pub struct TLDRDaemon {
     shutdown_tx: watch::Sender<bool>,
     /// Flag to track if we've been signaled to stop
     stopping: AtomicBool,
-    /// Last time a client command was handled (for idle timeout)
-    last_activity: Arc<RwLock<Instant>>,
+    /// Presence-based liveness (TLDR-3w5): per-source last-activity
+    /// timestamps + busy tokens for in-flight internal work. The idle loop
+    /// shuts down only when the PROJECT is dormant, not merely the socket.
+    activity: Arc<ActivityTracker>,
+    /// Single-flight latch for the background warm build (TLDR-utj.7): a
+    /// second Warm while one is in flight is acked with `already_building`
+    /// instead of stacking builds.
+    warm_in_flight: Arc<AtomicBool>,
     /// Number of indexed files (for status reporting)
     indexed_files: Arc<RwLock<usize>>,
-    /// Persistent semantic index (built lazily on first query, invalidated on Notify)
+    /// TLDR-iqr: per-file FileIR memo (content-hash keyed). RAM-only.
+    file_ir_memo: Arc<FileIrMemo>,
+    /// Resident vector store with read/write split (TLDR-ac0.1). Concurrent
+    /// queries take a shared read lock; build and invalidate take a write lock.
     #[cfg(feature = "semantic")]
-    semantic_index: Arc<RwLock<Option<SemanticIndex>>>,
+    semantic_store: Arc<IndexManager>,
 }
 
 impl TLDRDaemon {
@@ -133,16 +393,36 @@ impl TLDRDaemon {
             config,
             start_time: Instant::now(),
             status: Arc::new(RwLock::new(DaemonStatus::Initializing)),
-            cache: QueryCache::with_defaults(),
+            cache: Arc::new(QueryCache::with_defaults()),
             sessions: DashMap::new(),
             hooks: DashMap::new(),
             dirty_files: Arc::new(RwLock::new(HashSet::new())),
             shutdown_tx,
             stopping: AtomicBool::new(false),
-            last_activity: Arc::new(RwLock::new(Instant::now())),
+            activity: Arc::new(ActivityTracker::new()),
+            warm_in_flight: Arc::new(AtomicBool::new(false)),
             indexed_files: Arc::new(RwLock::new(0)),
+            file_ir_memo: Arc::new(FileIrMemo::new()),
             #[cfg(feature = "semantic")]
-            semantic_index: Arc::new(RwLock::new(None)),
+            semantic_store: Arc::new(IndexManager::new()),
+        }
+    }
+
+    /// TLDR-iqr: run the memoized graph build off the async runtime
+    /// (Codex r3 Q8: the old direct calls blocked the runtime per build).
+    async fn build_graph_memoized_blocking(
+        &self,
+        root: PathBuf,
+        lang: Language,
+    ) -> Result<ProjectCallGraph, String> {
+        let memo = Arc::clone(&self.file_ir_memo);
+        match tokio::task::spawn_blocking(move || {
+            build_project_call_graph_memoized(&root, lang, &memo)
+        })
+        .await
+        {
+            Ok(r) => r,
+            Err(e) => Err(format!("graph build task failed: {e}")),
         }
     }
 
@@ -175,9 +455,23 @@ impl TLDRDaemon {
         &self.project
     }
 
+    /// Presence tracker (TLDR-3w5). The watcher taps it for file-event
+    /// liveness; `daemon status` (TLDR-qzc) reads its snapshots.
+    pub(crate) fn activity(&self) -> &Arc<ActivityTracker> {
+        &self.activity
+    }
+
     /// Get the number of indexed files.
     pub async fn indexed_files(&self) -> usize {
         *self.indexed_files.read().await
+    }
+
+    /// Number of files currently in the dirty set. Test-only observable used by
+    /// the watcher end-to-end smoke test (TLDR-ac0.2) to confirm an event was
+    /// routed through `process_dirty_file`.
+    #[cfg(test)]
+    pub(crate) async fn dirty_file_count(&self) -> usize {
+        self.dirty_files.read().await.len()
     }
 
     /// Get a summary of all sessions.
@@ -224,6 +518,17 @@ impl TLDRDaemon {
             *status = DaemonStatus::Ready;
         }
 
+        // One-line effective liveness policy (TLDR-d26): idle_timeout_secs
+        // changed meaning from client-idle to project-presence-idle (epic
+        // TLDR-cxa) — state it where an operator reading the daemon log will
+        // see it.
+        eprintln!(
+            "[liveness] presence-based idle: shutdown after {}s with no client, \
+             tldr/MCP invocation, or project file event — never during an \
+             in-flight build/delta (epic TLDR-cxa)",
+            self.config.idle_timeout_secs
+        );
+
         // Set up signal handlers for graceful shutdown
         #[cfg(unix)]
         {
@@ -247,6 +552,25 @@ impl TLDRDaemon {
             });
         }
 
+        // CLI-wide liveness poke receiver (TLDR-nke): datagram side channel at
+        // `<socket>.poke`; every `tldr` invocation in this project defers idle
+        // shutdown. NAMED guard — dropping it on shutdown removes the socket
+        // file (Unix socket files don't vanish on close).
+        #[cfg(unix)]
+        let _poke_guard =
+            super::poke::spawn_poke_receiver(listener.socket_path(), Arc::clone(&self.activity));
+
+        // In-daemon filesystem watcher (TLDR-ac0.2). Bound to a NAMED guard:
+        // `let _ = ...` would drop the Debouncer at the end of the statement and
+        // silently stop watching. The guard lives for the whole run loop and
+        // drops on shutdown, which stops the OS watcher and ends its worker.
+        #[cfg(feature = "semantic")]
+        let _watcher_guard = if self.config.enable_watcher {
+            super::watcher::spawn_watcher(Arc::clone(&self))
+        } else {
+            None
+        };
+
         // Main event loop
         let idle_timeout = std::time::Duration::from_secs(self.config.idle_timeout_secs);
 
@@ -265,16 +589,18 @@ impl TLDRDaemon {
                 break;
             }
 
-            // Self-terminate after idle timeout with no client activity
-            {
-                let last = self.last_activity.read().await;
-                if last.elapsed() > idle_timeout {
-                    eprintln!(
-                        "No client activity for {}s, shutting down",
-                        self.config.idle_timeout_secs
-                    );
-                    break;
-                }
+            // Presence-based idle shutdown (TLDR-3w5): self-terminate only
+            // when the PROJECT is dormant — no client connection, no watcher
+            // -observed file write, and no in-flight internal work (index
+            // build / delta) for a full idle_timeout. A busy token (any
+            // in-progress build) unconditionally defers shutdown: never
+            // abandon your own job.
+            if self.activity.is_idle(idle_timeout) {
+                eprintln!(
+                    "No project presence for {}s (no client, file activity, or internal work), shutting down",
+                    self.config.idle_timeout_secs
+                );
+                break;
             }
 
             // Accept connection with timeout
@@ -283,8 +609,8 @@ impl TLDRDaemon {
 
             match tokio::time::timeout(timeout, accept_future).await {
                 Ok(Ok(mut stream)) => {
-                    // Update activity timestamp
-                    *self.last_activity.write().await = Instant::now();
+                    // Record socket presence for the idle check
+                    self.activity.touch(Source::Socket);
 
                     // Handle the connection
                     let daemon = Arc::clone(&self);
@@ -337,6 +663,18 @@ impl TLDRDaemon {
         Ok(())
     }
 
+    /// Resolve the embedding model for a semantic request, mirroring the cold
+    /// CLI path (`semantic.rs`): an explicit request override wins, else the
+    /// project config, else the built-in default. Keeping this identical to the
+    /// cold resolver is what makes warm and cold rank the same model (TLDR-atc);
+    /// the daemon's old `BuildOptions::default()` silently pinned ArcticM even
+    /// when the project config asked for ArcticL.
+    #[cfg(feature = "semantic")]
+    fn resolve_semantic_model(&self, override_model: Option<&str>) -> Result<EmbeddingModel, String> {
+        let config = TldrConfig::resolve(Some(&self.project));
+        EmbeddingModel::resolve(override_model, &config)
+    }
+
     /// Handle a daemon command and return the response.
     pub async fn handle_command(&self, cmd: DaemonCommand) -> DaemonResponse {
         match cmd {
@@ -366,158 +704,59 @@ impl TLDRDaemon {
             DaemonCommand::Warm { language } => {
                 let parsed = language.as_deref().and_then(|l| l.parse::<Language>().ok());
                 let lang = resolve_language(parsed);
-
-                let mut warmed = Vec::new();
-                let mut errors = Vec::new();
-
-                // 1. Warm call graph
-                let calls_key = QueryKey::new(
-                    "calls",
-                    hash_str_args(&[&self.project.to_string_lossy()]),
-                    lang,
-                );
-                if self.cache.get::<serde_json::Value>(&calls_key).is_some() {
-                    warmed.push("call_graph (cached)");
-                } else {
-                    match build_project_call_graph(&self.project, lang, None, true) {
-                        Ok(result) => {
-                            let val = serde_json::to_value(&result).unwrap_or_default();
-                            self.cache.insert(calls_key, &val, vec![]);
-                            warmed.push("call_graph");
-                        }
-                        Err(e) => errors.push(format!("call_graph: {}", e)),
-                    }
-                }
-
-                // 2. Warm code structure
-                let struct_key = QueryKey::new(
-                    "structure",
-                    hash_str_args(&[&self.project.to_string_lossy(), ""]),
-                    lang,
-                );
-                if self.cache.get::<serde_json::Value>(&struct_key).is_some() {
-                    warmed.push("structure (cached)");
-                } else {
-                    match get_code_structure(&self.project, lang, 0, None) {
-                        Ok(result) => {
-                            let val = serde_json::to_value(&result).unwrap_or_default();
-                            self.cache.insert(struct_key, &val, vec![]);
-                            warmed.push("structure");
-                        }
-                        Err(e) => errors.push(format!("structure: {}", e)),
-                    }
-                }
-
-                // 3. Warm file tree
-                let tree_key = QueryKey::new(
-                    "tree",
-                    hash_str_args(&[&self.project.to_string_lossy()]),
-                    lang,
-                );
-                if self.cache.get::<serde_json::Value>(&tree_key).is_some() {
-                    warmed.push("file_tree (cached)");
-                } else {
-                    match get_file_tree(&self.project, None, true, None) {
-                        Ok(result) => {
-                            let file_count = count_tree_files(&result);
-                            let val = serde_json::to_value(&result).unwrap_or_default();
-                            self.cache.insert(tree_key, &val, vec![]);
-                            *self.indexed_files.write().await = file_count;
-                            warmed.push("file_tree");
-                        }
-                        Err(e) => errors.push(format!("file_tree: {}", e)),
-                    }
-                }
-
-                // 4. Warm semantic index
-                #[cfg(feature = "semantic")]
-                {
-                    let mut index_guard = self.semantic_index.write().await;
-                    if index_guard.is_some() {
-                        warmed.push("semantic_index (cached)");
-                    } else {
-                        let build_opts = BuildOptions {
-                            show_progress: false,
-                            use_cache: true,
-                            ..Default::default()
-                        };
-                        match SemanticIndex::build(
-                            &self.project,
-                            build_opts,
-                            Some(CacheConfig::default()),
-                        ) {
-                            Ok(idx) => {
-                                *index_guard = Some(idx);
-                                warmed.push("semantic_index");
-                            }
-                            Err(e) => errors.push(format!("semantic_index: {}", e)),
-                        }
-                    }
-                }
-
-                let message = if errors.is_empty() {
-                    format!("Warmed: {}", warmed.join(", "))
-                } else {
-                    format!(
-                        "Warmed: {}. Errors: {}",
-                        warmed.join(", "),
-                        errors.join("; ")
-                    )
-                };
-
-                DaemonResponse::Status {
-                    status: "ok".to_string(),
-                    message: Some(message),
-                }
+                self.start_warm_build(lang)
             }
 
             #[cfg(feature = "semantic")]
-            DaemonCommand::Semantic { query, top_k } => {
-                // Semantic search with persistent index
-                let mut index_guard = self.semantic_index.write().await;
-
-                // Build index lazily on first query
-                if index_guard.is_none() {
-                    let build_opts = BuildOptions {
-                        show_progress: false,
-                        use_cache: true,
-                        ..Default::default()
-                    };
-                    let cache_config = Some(CacheConfig::default());
-
-                    match SemanticIndex::build(&self.project, build_opts, cache_config) {
-                        Ok(idx) => {
-                            *index_guard = Some(idx);
-                        }
-                        Err(e) => {
-                            return DaemonResponse::Error {
-                                status: "error".to_string(),
-                                error: format!("Failed to build semantic index: {}", e),
-                            };
-                        }
+            DaemonCommand::Semantic {
+                query,
+                top_k,
+                model,
+                threshold,
+            } => {
+                let model = match self.resolve_semantic_model(model.as_deref()) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        return DaemonResponse::Error {
+                            status: "error".to_string(),
+                            error: e,
+                        };
                     }
-                }
-
-                // Search the index
-                let index = index_guard.as_mut().unwrap();
-                let search_opts = IndexSearchOptions {
-                    top_k,
-                    threshold: 0.5,
-                    include_snippet: true,
-                    snippet_lines: 5,
                 };
 
-                match index.search(&query, &search_opts) {
-                    Ok(report) => match serde_json::to_value(&report) {
-                        Ok(value) => DaemonResponse::Result(value),
-                        Err(e) => DaemonResponse::Error {
-                            status: "error".to_string(),
-                            error: format!("Serialization error: {}", e),
-                        },
+                let mgr = Arc::clone(&self.semantic_store);
+                let project = self.project.clone();
+                let join = tokio::task::spawn_blocking(move || {
+                    let search_opts = IndexSearchOptions {
+                        top_k,
+                        threshold: threshold.unwrap_or(0.0),
+                        include_snippet: true,
+                        snippet_lines: 5,
+                    };
+                    mgr.query(&project, &query, &search_opts, model)
+                })
+                .await;
+
+                // TLDR-7xz.2: warm serves; cold/building answers honestly with a
+                // machine-distinguishable `status: "not_ready"` (the CLI relays
+                // the message instead of silently falling back to a cold serve).
+                // Real failures keep `status: "error"`.
+                use super::index_manager::QueryError;
+                match join {
+                    Ok(Ok(value)) => DaemonResponse::Result(value),
+                    Ok(Err(e @ (QueryError::NotReady | QueryError::Building))) => {
+                        DaemonResponse::Error {
+                            status: "not_ready".to_string(),
+                            error: e.to_string(),
+                        }
+                    }
+                    Ok(Err(QueryError::Internal(e))) => DaemonResponse::Error {
+                        status: "error".to_string(),
+                        error: e,
                     },
                     Err(e) => DaemonResponse::Error {
                         status: "error".to_string(),
-                        error: format!("Semantic search failed: {}", e),
+                        error: format!("semantic task failed: {e}"),
                     },
                 }
             }
@@ -548,7 +787,9 @@ impl TLDRDaemon {
                 match tldr_search(&pattern, &self.project, None, 2, max, 1000, None) {
                     Ok(result) => {
                         let val = serde_json::to_value(&result).unwrap_or_default();
-                        self.cache.insert(key, &val, vec![]);
+                        // TLDR-fct freshness: search scans self.project — register
+                        // the project hash so process_dirty_file evicts on any edit.
+                        self.cache.insert(key, &val, vec![hash_path(&self.project)]);
                         DaemonResponse::Result(val)
                     }
                     Err(e) => DaemonResponse::Error {
@@ -602,7 +843,15 @@ impl TLDRDaemon {
                 match get_file_tree(&root, None, true, None) {
                     Ok(result) => {
                         let val = serde_json::to_value(&result).unwrap_or_default();
-                        self.cache.insert(key, &val, vec![]);
+                        // TLDR-fct freshness: mirror Calls — register root+project
+                        // hashes; never cache a root outside this daemon's project.
+                        if root == self.project || root.starts_with(&self.project) {
+                            self.cache.insert(
+                                key,
+                                &val,
+                                vec![hash_path(&root), hash_path(&self.project)],
+                            );
+                        }
                         DaemonResponse::Result(val)
                     }
                     Err(e) => DaemonResponse::Error {
@@ -635,7 +884,15 @@ impl TLDRDaemon {
                 match get_code_structure(&path, language, 0, None) {
                     Ok(result) => {
                         let val = serde_json::to_value(&result).unwrap_or_default();
-                        self.cache.insert(key, &val, vec![]);
+                        // TLDR-fct freshness: register the target path + project
+                        // hashes; never cache a path outside this daemon's project.
+                        if path == self.project || path.starts_with(&self.project) {
+                            self.cache.insert(
+                                key,
+                                &val,
+                                vec![hash_path(&path), hash_path(&self.project)],
+                            );
+                        }
                         DaemonResponse::Result(val)
                     }
                     Err(e) => DaemonResponse::Error {
@@ -663,7 +920,9 @@ impl TLDRDaemon {
                 match get_relevant_context(&self.project, &entry, d, lang, true, None) {
                     Ok(result) => {
                         let val = serde_json::to_value(&result).unwrap_or_default();
-                        self.cache.insert(key, &val, vec![]);
+                        // TLDR-fct freshness: context spans self.project — register
+                        // the project hash so process_dirty_file evicts on any edit.
+                        self.cache.insert(key, &val, vec![hash_path(&self.project)]);
                         DaemonResponse::Result(val)
                     }
                     Err(e) => DaemonResponse::Error {
@@ -791,15 +1050,29 @@ impl TLDRDaemon {
                 if let Some(cached) = self.cache.get::<serde_json::Value>(&key) {
                     return DaemonResponse::Result(cached);
                 }
-                match build_project_call_graph(&root, lang, None, true) {
+                match self.build_graph_memoized_blocking(root.clone(), lang).await {
                     Ok(result) => {
                         let val = serde_json::to_value(&result).unwrap_or_default();
-                        self.cache.insert(key, &val, vec![]);
+                        // TLDR-iqr freshness: register BOTH the query-supplied
+                        // root and the daemon project root — raw-path hashing
+                        // means /tmp vs /private/tmp aliases hash differently,
+                        // and process_dirty_file invalidates the PROJECT hash.
+                        //
+                        // Codex r4 Q3: a root OUTSIDE this daemon's project is
+                        // beyond the watcher's freshness contract — never cache
+                        // it (always rebuild fresh) instead of serving stale.
+                        if root == self.project || root.starts_with(&self.project) {
+                            self.cache.insert(
+                                key,
+                                &val,
+                                vec![hash_path(&root), hash_path(&self.project)],
+                            );
+                        }
                         DaemonResponse::Result(val)
                     }
                     Err(e) => DaemonResponse::Error {
                         status: "error".to_string(),
-                        error: e.to_string(),
+                        error: e,
                     },
                 }
             }
@@ -819,19 +1092,24 @@ impl TLDRDaemon {
                 if let Some(cached) = self.cache.get::<serde_json::Value>(&key) {
                     return DaemonResponse::Result(cached);
                 }
-                let graph = match build_project_call_graph(&self.project, lang, None, true) {
+                let graph = match self
+                    .build_graph_memoized_blocking(self.project.clone(), lang)
+                    .await
+                {
                     Ok(g) => g,
                     Err(e) => {
                         return DaemonResponse::Error {
                             status: "error".to_string(),
-                            error: e.to_string(),
+                            error: e,
                         }
                     }
                 };
                 match impact_analysis(&graph, &func, d, None) {
                     Ok(result) => {
                         let val = serde_json::to_value(&result).unwrap_or_default();
-                        self.cache.insert(key, &val, vec![]);
+                        // TLDR-iqr freshness: root-hash registration (see Calls).
+                        self.cache
+                            .insert(key, &val, vec![hash_path(&self.project)]);
                         DaemonResponse::Result(val)
                     }
                     Err(e) => DaemonResponse::Error {
@@ -858,12 +1136,12 @@ impl TLDRDaemon {
                 if let Some(cached) = self.cache.get::<serde_json::Value>(&key) {
                     return DaemonResponse::Result(cached);
                 }
-                let graph = match build_project_call_graph(&root, lang, None, true) {
+                let graph = match self.build_graph_memoized_blocking(root.clone(), lang).await {
                     Ok(g) => g,
                     Err(e) => {
                         return DaemonResponse::Error {
                             status: "error".to_string(),
-                            error: e.to_string(),
+                            error: e,
                         }
                     }
                 };
@@ -895,7 +1173,15 @@ impl TLDRDaemon {
                 match dead_code_analysis(&graph, &all_functions, entry_refs) {
                     Ok(result) => {
                         let val = serde_json::to_value(&result).unwrap_or_default();
-                        self.cache.insert(key, &val, vec![]);
+                        // TLDR-iqr freshness: both hashes; external roots
+                        // never cached (see Calls arm, Codex r4 Q3).
+                        if root == self.project || root.starts_with(&self.project) {
+                            self.cache.insert(
+                                key,
+                                &val,
+                                vec![hash_path(&root), hash_path(&self.project)],
+                            );
+                        }
                         DaemonResponse::Result(val)
                     }
                     Err(e) => DaemonResponse::Error {
@@ -913,19 +1199,27 @@ impl TLDRDaemon {
                 if let Some(cached) = self.cache.get::<serde_json::Value>(&key) {
                     return DaemonResponse::Result(cached);
                 }
-                let graph = match build_project_call_graph(&root, lang, None, true) {
+                let graph = match self.build_graph_memoized_blocking(root.clone(), lang).await {
                     Ok(g) => g,
                     Err(e) => {
                         return DaemonResponse::Error {
                             status: "error".to_string(),
-                            error: e.to_string(),
+                            error: e,
                         }
                     }
                 };
                 match architecture_analysis(&graph) {
                     Ok(result) => {
                         let val = serde_json::to_value(&result).unwrap_or_default();
-                        self.cache.insert(key, &val, vec![]);
+                        // TLDR-iqr freshness: both hashes; external roots
+                        // never cached (see Calls arm, Codex r4 Q3).
+                        if root == self.project || root.starts_with(&self.project) {
+                            self.cache.insert(
+                                key,
+                                &val,
+                                vec![hash_path(&root), hash_path(&self.project)],
+                            );
+                        }
                         DaemonResponse::Result(val)
                     }
                     Err(e) => DaemonResponse::Error {
@@ -987,7 +1281,15 @@ impl TLDRDaemon {
                 match find_importers(&root, &module, lang) {
                     Ok(result) => {
                         let val = serde_json::to_value(&result).unwrap_or_default();
-                        self.cache.insert(key, &val, vec![]);
+                        // TLDR-fct freshness: mirror Calls — register root+project
+                        // hashes; never cache a root outside this daemon's project.
+                        if root == self.project || root.starts_with(&self.project) {
+                            self.cache.insert(
+                                key,
+                                &val,
+                                vec![hash_path(&root), hash_path(&self.project)],
+                            );
+                        }
                         DaemonResponse::Result(val)
                     }
                     Err(e) => DaemonResponse::Error {
@@ -1034,7 +1336,9 @@ impl TLDRDaemon {
                 match change_impact(&self.project, changed.as_deref(), lang) {
                     Ok(result) => {
                         let val = serde_json::to_value(&result).unwrap_or_default();
-                        self.cache.insert(key, &val, vec![]);
+                        // TLDR-fct freshness: change-impact spans self.project —
+                        // register the project hash so edits evict it.
+                        self.cache.insert(key, &val, vec![hash_path(&self.project)]);
                         DaemonResponse::Result(val)
                     }
                     Err(e) => DaemonResponse::Error {
@@ -1069,11 +1373,196 @@ impl TLDRDaemon {
             session_stats,
             all_sessions,
             hook_stats,
+            liveness: Some(self.liveness_stats()),
+            semantic_index: self.semantic_index_stats(),
+            memory: Some(super::types::MemoryStats {
+                rss_bytes: super::rss::current_rss_bytes(),
+                peak_rss_bytes: super::rss::peak_rss_bytes(),
+            }),
         }
     }
 
+    /// Start the warm build as a DETACHED background task and ack immediately
+    /// (TLDR-utj.7). The old inline shape was structurally doomed: the
+    /// handler awaited the full build while the client blocked on a 30s IPC
+    /// read timeout — any build over 30s printed a misleading "Failed to
+    /// send" while the daemon kept building. Now the ack returns in
+    /// microseconds and the client is pointed at `tldr daemon status`
+    /// (busy `warm-build` + semantic_index state, TLDR-qzc) for progress.
+    fn start_warm_build(&self, lang: Language) -> DaemonResponse {
+        // Single-flight: a second Warm during a build is answered honestly
+        // instead of stacking a duplicate build behind the store write lock.
+        if self
+            .warm_in_flight
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return DaemonResponse::Status {
+                status: "already_building".to_string(),
+                message: Some(
+                    "warm build already in progress — poll 'tldr daemon status' for progress"
+                        .to_string(),
+                ),
+            };
+        }
+
+        // Resolve the embedding model BEFORE spawning so a config error is
+        // reported synchronously in the ack instead of buried in the log.
+        #[cfg(feature = "semantic")]
+        let (model, model_note) = match self.resolve_semantic_model(None) {
+            Ok(m) => (Some(m), String::new()),
+            Err(e) => (None, format!(" (semantic skipped: {e})")),
+        };
+        #[cfg(not(feature = "semantic"))]
+        let model_note = String::new();
+
+        let job = WarmJob {
+            file_ir_memo: Arc::clone(&self.file_ir_memo),
+            project: self.project.clone(),
+            lang,
+            cache: Arc::clone(&self.cache),
+            indexed_files: Arc::clone(&self.indexed_files),
+            #[cfg(feature = "semantic")]
+            semantic_store: Arc::clone(&self.semantic_store),
+            #[cfg(feature = "semantic")]
+            model,
+        };
+
+        // Busy guard created BEFORE the ack (no status-misses-busy window)
+        // and owned by the DETACHED task — unlike the requesting connection
+        // task, a tokio::spawn'd task is never cancelled by a client
+        // timeout/disconnect, so the guard lives exactly as long as the
+        // build (TLDR-3w5 invariant preserved).
+        let busy = self.activity.begin("warm-build");
+        let in_flight = Arc::clone(&self.warm_in_flight);
+        tokio::spawn(async move {
+            let _busy = busy;
+            let _clear = ClearFlagOnDrop(in_flight);
+            let (warmed, errors) = job.run().await;
+            if errors.is_empty() {
+                eprintln!("[warm] background build complete: {}", warmed.join(", "));
+            } else {
+                eprintln!(
+                    "[warm] background build finished — warmed: {}; errors: {}",
+                    warmed.join(", "),
+                    errors.join("; ")
+                );
+            }
+        });
+
+        DaemonResponse::Status {
+            status: "started".to_string(),
+            message: Some(format!(
+                "warm build started — poll 'tldr daemon status' for progress{model_note}"
+            )),
+        }
+    }
+
+    /// Snapshot the presence tracker for `daemon status` (TLDR-qzc): what is
+    /// keeping the daemon alive, what internal work is in flight (with age —
+    /// a hung build must be visible as `busy 4h: warm-build`), and when idle
+    /// shutdown would fire.
+    fn liveness_stats(&self) -> super::types::LivenessStats {
+        use super::activity::SOURCE_NAMES;
+
+        let ages = self.activity.presence_ages();
+        let presence_age_secs = SOURCE_NAMES
+            .iter()
+            .zip(ages.iter())
+            .map(|(name, age)| (name.to_string(), age.as_secs_f64()))
+            .collect();
+
+        let busy: Vec<super::types::BusyTokenStats> = self
+            .activity
+            .busy_snapshot()
+            .into_iter()
+            .map(|b| super::types::BusyTokenStats {
+                label: b.label.to_string(),
+                age_secs: b.age.as_secs_f64(),
+            })
+            .collect();
+
+        // Deadline only runs while NOT busy (busy defers shutdown
+        // unconditionally). Clamped at 0: a stale-but-not-yet-reaped daemon
+        // reports "0s" rather than a negative countdown.
+        let idle_shutdown_in_secs = if busy.is_empty() {
+            let remaining = self.config.idle_timeout_secs as f64
+                - self.activity.freshest_presence_age().as_secs_f64();
+            Some(remaining.max(0.0))
+        } else {
+            None
+        };
+
+        super::types::LivenessStats {
+            presence_age_secs,
+            busy,
+            idle_timeout_secs: self.config.idle_timeout_secs,
+            idle_shutdown_in_secs,
+        }
+    }
+
+    /// Resident semantic index state for `daemon status` (TLDR-qzc). `None`
+    /// on non-semantic builds.
+    #[cfg(feature = "semantic")]
+    fn semantic_index_stats(&self) -> Option<super::types::SemanticIndexStats> {
+        use super::index_manager::IndexState;
+        Some(match self.semantic_store.state() {
+            IndexState::Warm { vectors } => super::types::SemanticIndexStats {
+                state: "warm".to_string(),
+                vectors: Some(vectors),
+            },
+            IndexState::Building => super::types::SemanticIndexStats {
+                state: "building".to_string(),
+                vectors: None,
+            },
+            IndexState::Cold => super::types::SemanticIndexStats {
+                state: "cold".to_string(),
+                vectors: None,
+            },
+        })
+    }
+
+    #[cfg(not(feature = "semantic"))]
+    fn semantic_index_stats(&self) -> Option<super::types::SemanticIndexStats> {
+        None
+    }
+
     /// Handle the Notify command (file change notification).
+    ///
+    /// TLDR-7xz.6: this is the external poke's (git/editor hooks via
+    /// `tldr daemon notify`) entry into the SINGLE invalidation/re-index flow
+    /// — it funnels into `process_dirty_file`, the same path the in-daemon
+    /// filesystem watcher uses. Never a parallel mechanism; see notify.rs.
     async fn handle_notify(&self, file: PathBuf) -> DaemonResponse {
+        let ReindexOutcome {
+            dirty_count,
+            threshold,
+            reindex_triggered,
+        } = self.process_dirty_file(file).await;
+
+        DaemonResponse::NotifyResponse {
+            status: "ok".to_string(),
+            dirty_count,
+            threshold,
+            reindex_triggered,
+        }
+    }
+
+    /// Apply one changed file to the dirty set + caches. Shared by the IPC
+    /// `Notify` handler and the in-daemon filesystem watcher worker (TLDR-ac0.2)
+    /// so both paths get IDENTICAL reindex semantics: dirty-set bookkeeping,
+    /// salsa cache invalidation, and (semantic) the in-place index delta.
+    ///
+    /// Path handling is INTENTIONALLY canonicalization-free (verified TLDR-ac0.2,
+    /// 2026-06-03). Two independent reasons, both empirical:
+    /// - The salsa key hashes the RAW path to match the raw-path registration
+    ///   side (the `vec![hash_path(&file)]` handler arms above); canonicalizing
+    ///   here alone would diverge from registration and make invalidation miss.
+    /// - The vector-store delta keying (`root_relative` / `deleted_file_rel`) is
+    ///   already hardened against a non-canonical root, and a deleted file can't
+    ///   be canonicalized — so canonicalizing before `apply_delta` would break
+    ///   the delete path. Pass the path through as-is.
+    pub(crate) async fn process_dirty_file(&self, file: PathBuf) -> ReindexOutcome {
         // Add file to dirty set
         let dirty_count = {
             let mut dirty = self.dirty_files.write().await;
@@ -1085,28 +1574,65 @@ impl TLDRDaemon {
         let file_hash = super::salsa::hash_path(&file);
         self.cache.invalidate_by_input(file_hash);
 
-        // Invalidate semantic index so it rebuilds on next query
+        // TLDR-iqr: evict the single FileIR memo entry for this path (any
+        // lang key). Content-hash verification at build time is the backstop
+        // if this raw-path match misses (e.g. /tmp vs /private/tmp aliasing).
+        self.file_ir_memo.retain(|k, _| k.1 != file);
+
+        // TLDR-iqr freshness: project-level answers (calls/structure/tree/
+        // dead/arch/impact) register against the project-root hash; any save
+        // invalidates them so the next query lazily recomposes from the memo
+        // (a 20-save burst = 20 cheap evictions + ONE recompose). Before this,
+        // they registered vec![] and were PERMANENTLY stale (finding on iqr).
+        self.cache.invalidate_by_input(super::salsa::hash_path(&self.project));
+
+        // Incrementally re-index the changed file in the resident store instead
+        // of dropping it (TLDR-t8f). A warm store applies a per-file delta —
+        // re-embedding only that file's changed chunks — so query results
+        // reflect the edit without a full corpus rebuild. A cold store no-ops
+        // (the next query's cold build already sees the change). Any failure
+        // falls back to invalidate() → full rebuild on the next query.
         #[cfg(feature = "semantic")]
         {
-            let mut idx = self.semantic_index.write().await;
-            *idx = None;
+            let mgr = Arc::clone(&self.semantic_store);
+            let project = self.project.clone();
+            let changed = file.clone();
+            // Busy guard owned by the closure (see Warm handler note): the
+            // delta must defer idle shutdown for exactly as long as it runs,
+            // regardless of what happens to this awaiting task.
+            let busy = self.activity.begin("delta");
+            let _ = tokio::task::spawn_blocking(move || {
+                let _busy = busy;
+                use super::index_manager::DeltaOutcome;
+                match mgr.apply_delta(&project, &changed) {
+                    Ok(DeltaOutcome::NeedsRebuild) => mgr.invalidate(),
+                    Ok(_) => {}
+                    Err(e) => {
+                        eprintln!("[t8f] delta failed for {}: {e}; rebuilding", changed.display());
+                        mgr.invalidate();
+                    }
+                }
+            })
+            .await;
         }
 
         let threshold = self.config.auto_reindex_threshold;
         let reindex_triggered = dirty_count >= threshold;
 
-        // Trigger reindex if threshold reached
+        // TLDR-7dd: freshness is ALREADY applied per-save above — this file's
+        // salsa entries and all project-level answers are invalidated (lines
+        // ~1574/1587) and the semantic store took a per-file delta. The next
+        // query lazily recomposes from the FileIR memo. So there is no separate
+        // rebuild to defer: when the dirty set reaches the threshold we simply
+        // flush the accounting set. `reindex_triggered` reports that the
+        // threshold was reached and the set was flushed — not a pending async
+        // rebuild (which would be redundant given the per-save invalidation).
         if reindex_triggered {
-            // Clear dirty set
             let mut dirty = self.dirty_files.write().await;
             dirty.clear();
-
-            // In full implementation, would spawn background reindex task
-            // For now, just clear the dirty set
         }
 
-        DaemonResponse::NotifyResponse {
-            status: "ok".to_string(),
+        ReindexOutcome {
             dirty_count,
             threshold,
             reindex_triggered,
@@ -1180,11 +1706,29 @@ impl TLDRDaemon {
 /// Start a daemon in the background for the given project.
 ///
 /// Returns the PID of the daemon process.
+///
+/// Routes the spawned daemon's stdout and stderr into `<project>/.tldr/daemon.log`
+/// (append mode) so tracing output, panics, and backtraces remain inspectable
+/// after the parent CLI invocation exits. Previously both streams were dropped
+/// to `/dev/null`, which made any background daemon crash invisible.
 pub async fn start_daemon_background(project: &std::path::Path) -> DaemonResult<u32> {
+    use std::fs::OpenOptions;
     use std::process::Command;
 
     // Get the current executable path
     let exe_path = std::env::current_exe().map_err(DaemonError::Io)?;
+
+    // Open .tldr/daemon.log for append; create parent dir + file if missing.
+    let log_path = project.join(".tldr").join("daemon.log");
+    if let Some(parent) = log_path.parent() {
+        std::fs::create_dir_all(parent).map_err(DaemonError::Io)?;
+    }
+    let log_file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .map_err(DaemonError::Io)?;
+    let log_file_for_stderr = log_file.try_clone().map_err(DaemonError::Io)?;
 
     // Spawn the daemon process
     #[cfg(unix)]
@@ -1197,8 +1741,8 @@ pub async fn start_daemon_background(project: &std::path::Path) -> DaemonResult<
                 .arg(project.as_os_str())
                 .arg("--foreground")
                 .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
+                .stdout(std::process::Stdio::from(log_file))
+                .stderr(std::process::Stdio::from(log_file_for_stderr))
                 .pre_exec(|| {
                     // Create new session (detach from terminal)
                     libc::setsid();
@@ -1222,8 +1766,8 @@ pub async fn start_daemon_background(project: &std::path::Path) -> DaemonResult<
             .arg(project.as_os_str())
             .arg("--foreground")
             .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
+            .stdout(std::process::Stdio::from(log_file))
+            .stderr(std::process::Stdio::from(log_file_for_stderr))
             .creation_flags(DETACHED_PROCESS | CREATE_NO_WINDOW)
             .spawn()
             .map_err(DaemonError::Io)?;
@@ -1269,6 +1813,39 @@ mod tests {
 
         assert_eq!(daemon.project(), temp.path());
         assert!(daemon.uptime() < 1.0);
+    }
+
+    /// Call-site guard: the daemon's query path resolves the embedding model from
+    /// the PROJECT CONFIG, never a hardcoded/Default model (the trap documented at
+    /// resolve_semantic_model: `BuildOptions::default()` silently pinned ArcticM
+    /// even when config asked for ArcticL). Writes a real `.tldr/config.json` and
+    /// asserts `resolve_semantic_model` — the exact method handle_command uses —
+    /// honors it, and that an explicit override still wins.
+    #[cfg(feature = "semantic")]
+    #[test]
+    fn resolve_semantic_model_honors_project_config() {
+        let temp = TempDir::new().unwrap();
+        std::fs::create_dir_all(temp.path().join(".tldr")).unwrap();
+        std::fs::write(
+            temp.path().join(".tldr").join("config.json"),
+            r#"{"embedding": {"model": "arctic-l"}}"#,
+        )
+        .unwrap();
+        let daemon = TLDRDaemon::new(temp.path().to_path_buf(), DaemonConfig::default());
+
+        let resolved = daemon.resolve_semantic_model(None).unwrap();
+        assert_eq!(
+            resolved,
+            EmbeddingModel::ArcticL,
+            "project config model must be honored (not the built-in default)"
+        );
+
+        let overridden = daemon.resolve_semantic_model(Some("arctic-m")).unwrap();
+        assert_eq!(
+            overridden,
+            EmbeddingModel::ArcticM,
+            "explicit override must beat the project config"
+        );
     }
 
     #[tokio::test]
@@ -2000,15 +2577,19 @@ mod tests {
         }
     }
 
+    /// TLDR-7xz.2: a semantic query on a COLD daemon must answer honestly with
+    /// `status: "not_ready"` and the warm-me guidance — it must NEVER build the
+    /// store inline on the query path (the old behavior this test's predecessor,
+    /// `test_semantic_search_builds_index`, asserted). Deterministic: needs no
+    /// ONNX, because the not-ready check fires before any embedding.
     #[cfg(feature = "semantic")]
     #[tokio::test]
-    async fn test_semantic_search_builds_index() {
-        // Create a temp dir with a simple Python file
+    async fn test_semantic_cold_query_returns_not_ready() {
         let temp = tempfile::tempdir().unwrap();
         let py_file = temp.path().join("hello.py");
         std::fs::write(
             &py_file,
-            "def greet(name):\n    return f'Hello, {name}!'\n\ndef farewell(name):\n    return f'Goodbye, {name}!'\n",
+            "def greet(name):\n    return f'Hello, {name}!'\n",
         )
         .unwrap();
 
@@ -2019,31 +2600,33 @@ mod tests {
             .handle_command(DaemonCommand::Semantic {
                 query: "greeting function".to_string(),
                 top_k: 5,
+                model: None,
+                threshold: None,
             })
             .await;
 
-        // Should return a Result with search results, not an error
         match &response {
-            DaemonResponse::Result(value) => {
-                assert!(value.get("query").is_some());
-                assert!(value.get("results").is_some());
-            }
-            DaemonResponse::Error { error, .. } => {
-                // May fail in CI without ONNX model - that's acceptable
-                // but it should NOT say "not yet implemented"
+            DaemonResponse::Error { status, error } => {
+                assert_eq!(
+                    status, "not_ready",
+                    "cold query must be machine-distinguishable from a real error"
+                );
                 assert!(
-                    !error.contains("not yet implemented"),
-                    "Semantic search should be wired, got: {}",
-                    error
+                    error.contains("index not built"),
+                    "cold query must carry the warm-me guidance, got: {error}"
                 );
             }
-            other => panic!("Unexpected response: {:?}", other),
+            other => panic!("cold semantic query must be not_ready, got: {:?}", other),
         }
+        assert!(
+            !daemon.semantic_store.is_warm(),
+            "the query path must NOT have built the store"
+        );
     }
 
     #[cfg(feature = "semantic")]
     #[tokio::test]
-    async fn test_semantic_index_invalidated_on_notify() {
+    async fn test_semantic_store_delta_on_notify_preserves_warmth() {
         let temp = tempfile::tempdir().unwrap();
         let py_file = temp.path().join("example.py");
         std::fs::write(&py_file, "def compute(x):\n    return x * 2\n").unwrap();
@@ -2051,41 +2634,119 @@ mod tests {
         let config = DaemonConfig::default();
         let daemon = TLDRDaemon::new(temp.path().to_path_buf(), config);
 
-        // First semantic search - builds index
+        // Warm explicitly — queries never build the store anymore (TLDR-7xz.2).
+        // Warms iff ONNX is available in this env; the assertion below is
+        // robust either way. Warm is async now (TLDR-utj.7) — join it.
         let _ = daemon
-            .handle_command(DaemonCommand::Semantic {
-                query: "computation".to_string(),
-                top_k: 5,
-            })
+            .handle_command(DaemonCommand::Warm { language: None })
             .await;
+        wait_warm_complete(&daemon).await;
+        let warm_before = daemon.semantic_store.is_warm();
 
-        // Verify index is populated
-        {
-            let idx = daemon.semantic_index.read().await;
-            // Index may be Some (if ONNX model available) or None (if build failed)
-            // We just verify the field exists and is accessible
-            let _ = idx.is_some();
-        }
+        // Edit the file on disk so the delta has a changed body to re-embed.
+        std::fs::write(&py_file, "def compute(x):\n    return x * 3\n").unwrap();
 
-        // Notify a file change - should invalidate the index
+        // Notify a file change — the incremental delta (TLDR-t8f) updates the
+        // store IN PLACE; unlike the old behavior it must NOT invalidate a warm
+        // store. (Pre-t8f this dropped the store to None.)
         let _ = daemon
             .handle_command(DaemonCommand::Notify {
                 file: py_file.clone(),
             })
             .await;
 
-        // Verify index was cleared
-        {
-            let idx = daemon.semantic_index.read().await;
-            assert!(
-                idx.is_none(),
-                "Semantic index should be invalidated after Notify"
-            );
+        assert_eq!(
+            daemon.semantic_store.is_warm(),
+            warm_before,
+            "Notify must preserve the store's warm-state via an incremental \
+             delta, not invalidate it"
+        );
+    }
+
+    /// End-to-end delta through `handle_notify` (TLDR-t8f). Asserts the two
+    /// acceptance criteria a warmth-only check can't see — that an EDIT keeps
+    /// the vector count (delta keys match the build's, so no orphaned/phantom
+    /// vectors) and a DELETE removes all of the file's vectors. No-ops cleanly
+    /// when ONNX is unavailable (the store never warms; `store_len` is `None`).
+    #[cfg(feature = "semantic")]
+    #[tokio::test]
+    async fn test_semantic_delta_edit_keeps_count_and_delete_removes_all() {
+        let temp = tempfile::tempdir().unwrap();
+        let py = temp.path().join("m.py");
+        std::fs::write(
+            &py,
+            "def alpha(x):\n    return x + 1\n\ndef beta(y):\n    return y * 2\n",
+        )
+        .unwrap();
+        let daemon = TLDRDaemon::new(temp.path().to_path_buf(), DaemonConfig::default());
+
+        // Warm the store explicitly (builds iff ONNX is present in this env) —
+        // queries never build it anymore (TLDR-7xz.2). Async warm: join it.
+        let _ = daemon
+            .handle_command(DaemonCommand::Warm { language: None })
+            .await;
+        wait_warm_complete(&daemon).await;
+        let Some(len0) = daemon.semantic_store.store_len() else {
+            return; // No ONNX here — nothing to assert about deltas.
+        };
+        assert!(len0 >= 2, "two functions should be indexed, got {len0}");
+
+        // EDIT alpha's body -> the delta re-embeds alpha, leaves beta as a
+        // metadata-only entry, removes nothing. The COUNT must be unchanged: a
+        // changed count would mean the delta computed different keys than the
+        // build and orphaned/duplicated vectors (the ss3 divergence class).
+        std::fs::write(
+            &py,
+            "def alpha(x):\n    return x + 100\n\ndef beta(y):\n    return y * 2\n",
+        )
+        .unwrap();
+        let _ = daemon
+            .handle_command(DaemonCommand::Notify { file: py.clone() })
+            .await;
+        assert_eq!(
+            daemon.semantic_store.store_len(),
+            Some(len0),
+            "edit delta must keep the vector count (keys match the build — no orphans)"
+        );
+
+        // DELETE the only file -> every one of its vectors removed (acceptance:
+        // "deleted functions' vectors are removed"). This exercises the deleted-
+        // path file_rel derivation end-to-end, which the unit test bypasses.
+        std::fs::remove_file(&py).unwrap();
+        let _ = daemon
+            .handle_command(DaemonCommand::Notify { file: py.clone() })
+            .await;
+        assert_eq!(
+            daemon.semantic_store.store_len(),
+            Some(0),
+            "delete delta must remove all of the file's vectors"
+        );
+        assert!(
+            daemon.semantic_store.is_warm(),
+            "store stays warm across edit + delete deltas"
+        );
+    }
+
+    /// Join a started background warm build (TLDR-utj.7): the Warm ack
+    /// returns before the build, so tests asserting post-warm state must
+    /// wait for the single-flight latch to clear. Generous budget: the
+    /// debug-profile ONNX first load alone can exceed 30s (TLDR-6q2), and
+    /// several warm tests run concurrently.
+    async fn wait_warm_complete(daemon: &TLDRDaemon) {
+        for _ in 0..3000 {
+            if !daemon.warm_in_flight.load(Ordering::SeqCst) {
+                return;
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         }
+        panic!("warm build did not complete within 300s");
     }
 
     #[tokio::test]
-    async fn test_daemon_warm_wires_caches() {
+    async fn test_daemon_warm_acks_immediately_and_wires_caches() {
+        // TLDR-utj.7: the ack must come back instantly with "started" (the
+        // old inline shape blocked the client for the build's duration), and
+        // the BACKGROUND build must actually warm the caches.
         let temp = tempfile::tempdir().unwrap();
         let py_file = temp.path().join("example.py");
         std::fs::write(
@@ -2097,23 +2758,71 @@ mod tests {
         let config = DaemonConfig::default();
         let daemon = TLDRDaemon::new(temp.path().to_path_buf(), config);
 
+        let started = std::time::Instant::now();
         let response = daemon
             .handle_command(DaemonCommand::Warm { language: None })
             .await;
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "Warm ack must not wait for the build"
+        );
 
         match &response {
             DaemonResponse::Status { status, message } => {
-                assert_eq!(status, "ok");
+                assert_eq!(status, "started");
                 let msg = message.as_deref().unwrap_or("");
-                // Should mention what was warmed, not just "Warm completed"
                 assert!(
-                    msg.contains("Warmed"),
-                    "Expected warm details, got: {}",
+                    msg.contains("daemon status"),
+                    "ack must point at the status poll, got: {}",
                     msg
                 );
             }
             other => panic!("Expected Status response, got {:?}", other),
         }
+
+        // The ack precedes the build — a busy token must already be visible
+        // (guard created before the ack, owned by the detached task).
+        assert!(
+            daemon.activity.busy_count() > 0
+                || !daemon.warm_in_flight.load(Ordering::SeqCst),
+            "warm must be visibly busy (or already finished)"
+        );
+
+        wait_warm_complete(&daemon).await;
+        assert!(
+            daemon.indexed_files().await > 0,
+            "background build must have warmed the file tree"
+        );
+        assert_eq!(
+            daemon.activity().busy_count(),
+            0,
+            "busy token must be released at build completion"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_daemon_warm_single_flight() {
+        // TLDR-utj.7: a second Warm during a build answers "already_building"
+        // instead of stacking a duplicate build.
+        let temp = tempfile::tempdir().unwrap();
+        let py_file = temp.path().join("example.py");
+        std::fs::write(&py_file, "def f():\n    pass\n").unwrap();
+
+        let config = DaemonConfig::default();
+        let daemon = TLDRDaemon::new(temp.path().to_path_buf(), config);
+
+        // Hold the latch manually to make the race deterministic.
+        daemon.warm_in_flight.store(true, Ordering::SeqCst);
+        let response = daemon
+            .handle_command(DaemonCommand::Warm { language: None })
+            .await;
+        match &response {
+            DaemonResponse::Status { status, .. } => {
+                assert_eq!(status, "already_building");
+            }
+            other => panic!("Expected Status response, got {:?}", other),
+        }
+        daemon.warm_in_flight.store(false, Ordering::SeqCst);
     }
 
     #[tokio::test]
@@ -2137,32 +2846,130 @@ mod tests {
 
         match &response {
             DaemonResponse::Status { status, .. } => {
-                assert_eq!(status, "ok");
+                assert_eq!(status, "started");
             }
             other => panic!("Expected Status response, got {:?}", other),
         }
+        wait_warm_complete(&daemon).await;
     }
 
     #[tokio::test]
-    async fn test_daemon_last_activity_updated_on_command() {
+    async fn test_status_reports_liveness_busy_and_idle_deadline() {
+        // TLDR-qzc: during internal work, status must show the busy token
+        // (with label) and a DEFERRED idle deadline; after the work drops,
+        // the deadline runs again. This is the "is it building or done?"
+        // observability the 90-min-build blindness demanded.
         let temp = tempfile::tempdir().unwrap();
         let config = DaemonConfig::default();
         let daemon = TLDRDaemon::new(temp.path().to_path_buf(), config);
 
-        // Record initial activity time
-        let before = *daemon.last_activity.read().await;
+        let guard = daemon.activity().begin("warm-build");
+        let resp = daemon
+            .handle_command(DaemonCommand::Status { session: None })
+            .await;
+        match &resp {
+            DaemonResponse::FullStatus {
+                liveness: Some(live),
+                ..
+            } => {
+                assert_eq!(live.busy.len(), 1);
+                assert_eq!(live.busy[0].label, "warm-build");
+                assert!(
+                    live.idle_shutdown_in_secs.is_none(),
+                    "deadline must be deferred while busy"
+                );
+                assert_eq!(
+                    live.presence_age_secs.len(),
+                    4,
+                    "all four sources reported"
+                );
+            }
+            other => panic!("expected FullStatus with liveness, got {:?}", other),
+        }
 
-        // Small delay to ensure time difference
-        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        drop(guard);
+        let resp = daemon
+            .handle_command(DaemonCommand::Status { session: None })
+            .await;
+        match &resp {
+            DaemonResponse::FullStatus {
+                liveness: Some(live),
+                ..
+            } => {
+                assert!(live.busy.is_empty());
+                let deadline = live
+                    .idle_shutdown_in_secs
+                    .expect("deadline must run when not busy");
+                assert!(deadline > 0.0 && deadline <= live.idle_timeout_secs as f64);
+            }
+            other => panic!("expected FullStatus with liveness, got {:?}", other),
+        }
+    }
 
-        // Any command should NOT update last_activity (only connections do),
-        // but handle_command is what we can test. Verify the field exists and is accessible.
+    #[cfg(feature = "semantic")]
+    #[tokio::test]
+    async fn test_status_reports_semantic_index_state() {
+        // Cold daemon → "cold"; the warm/building transitions are covered by
+        // IndexManager tests (state probe) — here we assert the wiring.
+        let temp = tempfile::tempdir().unwrap();
+        let config = DaemonConfig::default();
+        let daemon = TLDRDaemon::new(temp.path().to_path_buf(), config);
+
+        let resp = daemon
+            .handle_command(DaemonCommand::Status { session: None })
+            .await;
+        match &resp {
+            DaemonResponse::FullStatus {
+                semantic_index: Some(idx),
+                ..
+            } => {
+                assert_eq!(idx.state, "cold");
+                assert!(idx.vectors.is_none());
+            }
+            other => panic!("expected FullStatus with semantic_index, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_daemon_command_handling_leaks_no_busy_tokens() {
+        // TLDR-3w5: socket presence is recorded at connection ACCEPT (run
+        // loop), not per-command; command handling itself must leave no busy
+        // tokens behind (a leaked token would make the daemon immortal).
+        let temp = tempfile::tempdir().unwrap();
+        let config = DaemonConfig::default();
+        let daemon = TLDRDaemon::new(temp.path().to_path_buf(), config);
+
         let _ = daemon.handle_command(DaemonCommand::Ping).await;
 
-        // last_activity is set at connection accept, not command handling,
-        // so it should still be the initial value
-        let after = *daemon.last_activity.read().await;
-        assert_eq!(before, after);
+        assert_eq!(daemon.activity().busy_count(), 0);
+    }
+
+    #[cfg(feature = "semantic")]
+    #[tokio::test]
+    async fn test_delta_releases_busy_token_and_touches_internal_presence() {
+        // TLDR-3w5: the per-file delta wraps its spawn_blocking in a busy
+        // guard owned by the closure. After the delta completes the token
+        // must be gone and Internal presence refreshed (idle countdown
+        // restarts at work COMPLETION, not work start).
+        let temp = tempfile::tempdir().unwrap();
+        let config = DaemonConfig::default();
+        let daemon = TLDRDaemon::new(temp.path().to_path_buf(), config);
+
+        let file = temp.path().join("example.py");
+        std::fs::write(&file, "def f():\n    pass\n").unwrap();
+
+        let _ = daemon.process_dirty_file(file).await;
+
+        assert_eq!(
+            daemon.activity().busy_count(),
+            0,
+            "delta busy token must be released on completion"
+        );
+        let ages = daemon.activity().presence_ages();
+        assert!(
+            ages[Source::Internal as usize] < std::time::Duration::from_secs(5),
+            "Internal presence must be touched at delta completion"
+        );
     }
 
     #[tokio::test]

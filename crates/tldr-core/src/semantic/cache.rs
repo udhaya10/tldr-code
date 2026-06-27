@@ -4,6 +4,20 @@
 //! re-computing embeddings for unchanged code. Key features:
 //!
 //! - JSON-based persistence for easy debugging and portability
+//
+// TLDR-AUDIT(TLDR-k4q): REGRESSION + wrong tool for the vectors. llm-tldr
+//   persisted a binary `.faiss` index (semantic.py:1072,1134); this rewrite
+//   stores embeddings as JSON — floats as ASCII text, the whole file parsed into
+//   RAM on every cold run. JSON is the worst format for dense f32 arrays.
+//   DIRECTION (see TLDR-7kf): once `usearch` owns the vectors, its binary
+//   `save`/mmap `view` REPLACES vector persistence entirely — delete the
+//   embedding-blob half of this cache. What remains is a small METADATA SIDECAR
+//   (key -> {path, lines, snippet, content_hash, file_mtime}) that usearch does
+//   NOT store. For that sidecar, JSON is actually fine: it's metadata-only (no
+//   float arrays) and the daemon parses it once into memory (matches the
+//   documented daemon-LRU caching model in ARCHITECTURE.md), so format has zero
+//   query-time cost. The invalidation logic below (content-hash + mtime) is good
+//   and should be preserved in the sidecar. See epic TLDR-blm.
 //! - File locking via `fs2` for concurrent access safety
 //! - TTL-based expiration checked on every read (P0 mitigation)
 //! - Content hash + function identity in cache key (P0 mitigation)
@@ -41,7 +55,7 @@
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use fs2::FileExt;
@@ -55,6 +69,53 @@ use crate::TldrResult;
 /// P0 Mitigation (premortem 1.2): Include function identity in cache key,
 /// not just content hash. This prevents hash collisions when two functions
 /// have identical content but different names (copy-paste code).
+/// Version tag for the embedding-INPUT recipe (the text fed to the embedder),
+/// distinct from the model. Folded into the cache key so vectors produced under
+/// one recipe are never served under another. Reflects the actual recipe used:
+/// raw source vs enriched text (gated by TLDR_ENRICH in index.rs). TLDR-lwg.
+///
+/// TODO(TLDR-blm Phase 2): when enrichment is promoted from an env gate to a
+/// BuildOptions field, derive this from that field instead of re-reading env.
+fn embed_schema_version() -> &'static str {
+    let enrich = std::env::var("TLDR_ENRICH")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    if enrich {
+        "enriched-v1"
+    } else {
+        "raw-v1"
+    }
+}
+
+/// Path used in the cache key: relative to `key_root`. A silent raw-path fallback
+/// on a `strip_prefix` miss re-introduces the absolute-vs-relative key divergence
+/// (TLDR-atc/ss3), so misses are handled deterministically — lexical strip, then
+/// canonical strip, then the canonical absolute path with a warning — never a
+/// silent raw fallback. An empty `key_root` (the default / tests) lexically
+/// matches and returns the full path unchanged, preserving legacy keys.
+fn key_rel_path(file_path: &Path, key_root: &Path) -> String {
+    if let Ok(rel) = file_path.strip_prefix(key_root) {
+        return rel.to_string_lossy().to_string();
+    }
+    if let (Ok(cfile), Ok(croot)) = (file_path.canonicalize(), key_root.canonicalize()) {
+        if let Ok(rel) = cfile.strip_prefix(&croot) {
+            return rel.to_string_lossy().to_string();
+        }
+        eprintln!(
+            "[tldr-warn] cache key: {} is outside root {}; keying by canonical path",
+            cfile.display(),
+            croot.display()
+        );
+        return cfile.to_string_lossy().to_string();
+    }
+    eprintln!(
+        "[tldr-warn] cache key: cannot canonicalize {} under {}; keying by raw path",
+        file_path.display(),
+        key_root.display()
+    );
+    file_path.to_string_lossy().to_string()
+}
+
 #[derive(Debug, Clone, Hash, PartialEq, Eq, Serialize, Deserialize)]
 struct CacheKey {
     /// MD5 hash of the code content
@@ -68,13 +129,27 @@ struct CacheKey {
 }
 
 impl CacheKey {
-    /// Create a cache key from a code chunk and model
-    fn from_chunk(chunk: &CodeChunk, model: EmbeddingModel) -> Self {
+    /// Create a cache key from a code chunk and model.
+    ///
+    /// `key_root` is stripped from `chunk.file_path` so the SAME file yields the
+    /// SAME key regardless of how the index was rooted: the cold CLI passes a
+    /// relative arg (`crates/x/src` -> keys like `semantic/cache.rs`) while the
+    /// daemon canonicalizes to an absolute root (`/Users/.../crates/x/src`).
+    /// Before this, the daemon's absolute keys never matched the cold cache's
+    /// relative keys -> 100% miss -> a full re-embed on every daemon query
+    /// (TLDR-atc). An empty `key_root` (the default for callers that don't set
+    /// one, e.g. tests) leaves the path unchanged.
+    fn from_chunk(chunk: &CodeChunk, model: EmbeddingModel, key_root: &Path) -> Self {
         Self {
             content_hash: chunk.content_hash.clone(),
-            file_path: chunk.file_path.to_string_lossy().to_string(),
+            file_path: key_rel_path(&chunk.file_path, key_root),
             function_name: chunk.function_name.clone(),
-            model: format!("{:?}", model),
+            // TLDR-lwg: the schema tag pins WHICH text was embedded under this
+            // content hash. The hash covers raw source; bumping the recipe (raw
+            // -> enriched) must invalidate old vectors, or stale raw-embedded
+            // entries get served as if enriched. Folded into `model` so no
+            // get/put signatures change.
+            model: format!("{:?}+{}", model, embed_schema_version()),
         }
     }
 
@@ -121,6 +196,12 @@ pub struct EmbeddingCache {
     stats: CacheStats,
     /// Dirty flag for lazy writes
     dirty: bool,
+    /// Path prefix stripped from each chunk's `file_path` when deriving its
+    /// cache key, so the key is build-root-relative and therefore stable across
+    /// relative (cold CLI) vs absolute (daemon) roots and across CWDs (TLDR-atc).
+    /// Empty by default — keys then use the raw path (preserves legacy/test
+    /// behavior). `SemanticIndex::build` sets it to the index root.
+    key_root: PathBuf,
 }
 
 impl EmbeddingCache {
@@ -179,7 +260,18 @@ impl EmbeddingCache {
             },
             entries,
             dirty: false,
+            key_root: PathBuf::new(),
         })
+    }
+
+    /// Set the path prefix stripped from chunk paths when deriving cache keys.
+    ///
+    /// `SemanticIndex::build` calls this with the index root so keys become
+    /// root-relative — the SAME file then maps to the SAME key whether the index
+    /// was rooted at a relative arg (cold CLI) or the canonical absolute path the
+    /// daemon uses. See [`CacheKey::from_chunk`] (TLDR-atc).
+    pub fn set_key_root(&mut self, root: &Path) {
+        self.key_root = root.to_path_buf();
     }
 
     /// Clean up orphaned temp files from previous crashes
@@ -232,7 +324,7 @@ impl EmbeddingCache {
     /// }
     /// ```
     pub fn get(&mut self, chunk: &CodeChunk, model: EmbeddingModel) -> Option<Vec<f32>> {
-        let key = CacheKey::from_chunk(chunk, model);
+        let key = CacheKey::from_chunk(chunk, model, &self.key_root);
         let key_str = key.to_key_string();
 
         if let Some(entry) = self.entries.get(&key_str) {
@@ -301,7 +393,7 @@ impl EmbeddingCache {
     /// cache.put(&chunk, embedding, EmbeddingModel::ArcticM);
     /// ```
     pub fn put(&mut self, chunk: &CodeChunk, embedding: Vec<f32>, model: EmbeddingModel) {
-        let key = CacheKey::from_chunk(chunk, model);
+        let key = CacheKey::from_chunk(chunk, model, &self.key_root);
         let key_str = key.to_key_string();
 
         // Get file mtime for change detection
@@ -354,7 +446,21 @@ impl EmbeddingCache {
         }
 
         let cache_file = self.config.cache_dir.join("cache.json");
-        let temp_file = self.config.cache_dir.join("cache.json.tmp");
+        // Per-process unique temp name. A FIXED `cache.json.tmp` is shared
+        // across processes, so two concurrent flushers (e.g. two agents/CLI
+        // runs against the same cache) race: one renames the temp away and the
+        // other's rename hits `No such file or directory` (os error 2). A
+        // pid+nanos suffix gives each flusher its own temp to rename; it still
+        // ends in `.tmp` so `cleanup_temp_files` reaps orphans. (Lost-update
+        // under concurrent writers — last rename wins — is a deeper follow-up.)
+        let nanos = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let temp_file = self
+            .config
+            .cache_dir
+            .join(format!("cache.json.{}.{}.tmp", std::process::id(), nanos));
 
         // Write to temp file with exclusive lock
         {
@@ -372,8 +478,13 @@ impl EmbeddingCache {
             file.unlock()?;
         }
 
-        // Atomic rename
-        fs::rename(&temp_file, &cache_file)?;
+        // Atomic rename. On failure, best-effort remove our unique temp so a
+        // failed flush does not leave an orphan behind (cleanup_temp_files also
+        // reaps these on next open).
+        if let Err(e) = fs::rename(&temp_file, &cache_file) {
+            let _ = fs::remove_file(&temp_file);
+            return Err(e.into());
+        }
 
         self.dirty = false;
         Ok(())
@@ -514,6 +625,63 @@ mod cache_tests {
         assert_eq!(result.unwrap(), embedding);
     }
 
+    /// TLDR-atc regression: the SAME logical file indexed via a RELATIVE root
+    /// (cold CLI, e.g. `crates/x/src`) and via an ABSOLUTE root (daemon
+    /// canonicalizes `self.project`) must produce the SAME cache key. Before the
+    /// root-relative key fix, the daemon's absolute keys never matched the cold
+    /// cache's relative keys -> 100% miss -> a full re-embed on every daemon
+    /// query. This locks the convergence so that regression cannot silently
+    /// return (it is invisible to the suffix-matching eval; only key identity
+    /// catches it).
+    #[test]
+    fn cache_key_is_root_relative_across_absolute_and_relative_roots() {
+        let content = "fn foo() {}";
+        let mk = |fp: &str| CodeChunk {
+            file_path: PathBuf::from(fp),
+            function_name: Some("foo".to_string()),
+            class_name: None,
+            line_start: 1,
+            line_end: 10,
+            content: content.to_string(),
+            content_hash: format!("{:x}", md5::compute(content)),
+            language: Language::Rust,
+        };
+
+        // Cold CLI: relative root + relative chunk path.
+        let rel_chunk = mk("crates/x/src/a.rs");
+        let rel_key = CacheKey::from_chunk(&rel_chunk, EmbeddingModel::ArcticL, Path::new("crates/x/src"))
+            .to_key_string();
+
+        // Daemon: absolute root + absolute chunk path (same logical file).
+        let abs_chunk = mk("/Users/me/proj/crates/x/src/a.rs");
+        let abs_key = CacheKey::from_chunk(
+            &abs_chunk,
+            EmbeddingModel::ArcticL,
+            Path::new("/Users/me/proj/crates/x/src"),
+        )
+        .to_key_string();
+
+        assert_eq!(
+            rel_key, abs_key,
+            "relative-root and absolute-root invocations must yield identical \
+             cache keys; got {rel_key} vs {abs_key}"
+        );
+        // The key path is the root-relative tail, not the full path.
+        assert!(
+            rel_key.starts_with("a.rs:"),
+            "key should be root-relative ('a.rs:...'), got {rel_key}"
+        );
+
+        // Empty key_root (the default for legacy/test callers) preserves the
+        // full raw path, so existing behavior is unchanged.
+        let raw_key = CacheKey::from_chunk(&rel_chunk, EmbeddingModel::ArcticL, Path::new(""))
+            .to_key_string();
+        assert!(
+            raw_key.starts_with("crates/x/src/a.rs:"),
+            "empty key_root must leave the path untouched, got {raw_key}"
+        );
+    }
+
     #[test]
     fn cache_miss_on_content_hash_change() {
         // GIVEN: A cache with an entry
@@ -603,7 +771,7 @@ mod cache_tests {
         assert_eq!(cache.len(), 1);
 
         // Manually age the entry to be older than TTL (8 days ago)
-        let key = CacheKey::from_chunk(&chunk, EmbeddingModel::ArcticM).to_key_string();
+        let key = CacheKey::from_chunk(&chunk, EmbeddingModel::ArcticM, Path::new("")).to_key_string();
         if let Some(entry) = cache.entries.get_mut(&key) {
             // Set cached_at to 8 days ago
             let now = SystemTime::now()
@@ -730,7 +898,7 @@ mod cache_tests {
         // At minimum, verify the cache entry exists
         assert!(cache
             .entries
-            .contains_key(&CacheKey::from_chunk(&chunk, EmbeddingModel::ArcticM).to_key_string()));
+            .contains_key(&CacheKey::from_chunk(&chunk, EmbeddingModel::ArcticM, Path::new("")).to_key_string()));
     }
 
     #[test]

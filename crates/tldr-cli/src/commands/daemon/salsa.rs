@@ -274,6 +274,16 @@ impl QueryCache {
                 if let Some((_, entry)) = self.entries.remove(&key) {
                     self.current_bytes
                         .fetch_sub(entry.estimated_bytes() as u64, Ordering::Relaxed);
+                    // TLDR-9b8: a multi-input entry is also registered under its
+                    // OTHER input hashes' dependent sets. We already drained the
+                    // current `input_hash` set above; remove this key from the
+                    // remaining sets too, or they accumulate ghost keys to an
+                    // entry that no longer exists.
+                    for &other in entry.input_hashes.iter().filter(|&&h| h != input_hash) {
+                        if let Some(mut deps) = self.dependents.get_mut(&other) {
+                            deps.remove(&key);
+                        }
+                    }
                     invalidated += 1;
                 }
             }
@@ -634,6 +644,16 @@ pub fn hash_args<T: Hash>(args: &T) -> u64 {
 pub fn hash_path(path: &Path) -> u64 {
     let mut hasher = DefaultHasher::new();
     path.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Hash file CONTENT bytes (TLDR-iqr): the single shared convention for the
+/// daemon's FileIR memo freshness check. Same `DefaultHasher` family as
+/// `hash_path`/`hash_str_args` — RAM-only use; if a memo is ever persisted
+/// to disk the hash choice must be versioned explicitly (Codex round-3 Q3).
+pub fn hash_bytes(bytes: &[u8]) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    bytes.hash(&mut hasher);
     hasher.finish()
 }
 

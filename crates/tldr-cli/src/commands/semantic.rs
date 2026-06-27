@@ -1,16 +1,22 @@
 //! Semantic command - Semantic code search
 //!
-//! Performs natural language search over code using dense embeddings.
-//! Builds an in-memory index and returns semantically similar code chunks.
+//! Performs natural language search over code using dense embeddings, served
+//! exclusively by the warm daemon's resident VectorStore (TLDR-7xz.1). The
+//! command has exactly two modes: served warm at full quality, or an honest
+//! one-line explanation of why it can't serve — there is NO silent cold
+//! fallback (the old `search_with_store` fallthrough is gone).
+//!
+//! Parked surfaces (`--hybrid`, `--langs`, `--no-cache`) keep their flags but
+//! fail fast with the standardized "not available in this version" message —
+//! they return at full warm quality with the new engine (TLDR-utj).
 
 use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::Args;
 
-use tldr_core::semantic::{
-    BuildOptions, CacheConfig, ChunkGranularity, EmbeddingModel, IndexSearchOptions, SemanticIndex,
-};
+use tldr_core::config::{find_project_root, TldrConfig};
+use tldr_core::semantic::EmbeddingModel;
 
 use crate::output::{OutputFormat, OutputWriter};
 
@@ -28,29 +34,30 @@ pub struct SemanticArgs {
     #[arg(short = 'n', long, default_value = "10")]
     pub top: usize,
 
-    /// Minimum similarity threshold (0.0 to 1.0)
-    #[arg(short = 't', long, default_value = "0.5")]
+    /// Minimum similarity threshold (0.0 to 1.0). Default 0.0 = return the
+    /// top-N ranked results with no score cutoff. The Arctic query prefix
+    /// (default-on) is asymmetric, which lowers absolute query/passage cosine
+    /// scores, so a non-zero default would hide correct top-ranked matches
+    /// (TLDR-h27). Use `--top` for the result count; set `-t` only to filter.
+    #[arg(short = 't', long, default_value = "0.0")]
     pub threshold: f64,
 
-    /// Embedding model: arctic-xs, arctic-s, arctic-m, arctic-m-long, arctic-l
-    #[arg(short, long, default_value = "arctic-m")]
-    pub model: String,
+    /// [parked] BM25 + dense fusion — not available in this version
+    /// (returning with the new warm engine).
+    #[arg(long)]
+    pub hybrid: bool,
 
-    /// Filter by language via file extensions (comma-separated, e.g., `--langs rs,py`).
-    ///
-    /// Values are parsed by `Language::from_extension`, which accepts file
-    /// extensions such as `rs`, `py`, `ts`, `go`, `java`, `rb`, `kt`, `cpp`.
-    /// Language names (`rust`, `python`) are NOT accepted here; use the
-    /// global `--lang <LANG>` flag above for name-based single-language
-    /// selection. Passing an unknown extension silently drops that entry
-    /// from the filter.
-    ///
-    /// Renamed from `--lang` (pre-VAL-009) to avoid a clap TypeId collision
-    /// with the global `--lang` arg which is `Option<Language>`.
+    /// Embedding model: arctic-xs, arctic-s, arctic-m, arctic-m-long, arctic-l
+    #[arg(short, long)]
+    pub model: Option<String>,
+
+    /// [parked] Language filter — not available in this version
+    /// (returning with the new warm engine).
     #[arg(long = "langs", value_delimiter = ',')]
     pub langs: Option<Vec<String>>,
 
-    /// Disable embedding cache
+    /// [parked] Bypass the embedding cache — not available in this version
+    /// (cold uncached search was removed).
     #[arg(long)]
     pub no_cache: bool,
 }
@@ -60,80 +67,71 @@ impl SemanticArgs {
     pub fn run(&self, format: OutputFormat, quiet: bool) -> Result<()> {
         let writer = OutputWriter::new(format, quiet);
 
-        // Parse model
-        let model = parse_model(&self.model)?;
-
-        writer.progress(&format!(
-            "Building semantic index for {} ({} model)...",
-            self.path.display(),
-            self.model
-        ));
-
-        // Build options
-        let build_opts = BuildOptions {
-            model,
-            granularity: ChunkGranularity::Function,
-            languages: self.langs.clone(),
-            show_progress: !quiet,
-            use_cache: !self.no_cache,
-        };
-
-        // Cache config
-        let cache_config = if self.no_cache {
-            None
-        } else {
-            Some(CacheConfig::default())
-        };
-
-        // Build index
-        let mut index = SemanticIndex::build(&self.path, build_opts, cache_config)?;
-
-        writer.progress(&format!(
-            "Searching {} chunks for '{}'...",
-            index.len(),
-            self.query
-        ));
-
-        // Search options
-        let search_opts = IndexSearchOptions {
-            top_k: self.top,
-            threshold: self.threshold,
-            include_snippet: true,
-            snippet_lines: 5,
-        };
-
-        // Perform search
-        let report = index.search(&self.query, &search_opts)?;
-
-        // Output based on format
-        if writer.is_text() {
-            let text = format_semantic_text(&report);
-            writer.write_text(&text)?;
-        } else {
-            writer.write(&report)?;
+        // Parked surfaces (TLDR-7xz.3): keep the flags, fail fast with the
+        // standardized message — never a silent cold serve, never a silently
+        // removed argument. Checked FIRST so a parked flag never half-runs.
+        if self.hybrid {
+            anyhow::bail!(
+                "not available in this version, hybrid (BM25 + dense) search is moving into the warm daemon engine"
+            );
+        }
+        if self.langs.is_some() {
+            anyhow::bail!(
+                "not available in this version, language filtering needs a daemon-side filter (the resident index covers all languages)"
+            );
+        }
+        if self.no_cache {
+            anyhow::bail!(
+                "not available in this version, uncached cold search was removed — semantic queries are served by the warm daemon"
+            );
         }
 
-        Ok(())
-    }
-}
+        // Validate the model early (CLI flag > config > built-in default) so a
+        // typo'd `--model` fails here instead of after a daemon round-trip.
+        // The daemon re-resolves with the same precedence (daemon.rs
+        // resolve_semantic_model), so warm and cold-config rank the same model.
+        let project_root = find_project_root(&self.path);
+        let config = TldrConfig::resolve(project_root.as_deref());
+        EmbeddingModel::resolve(self.model.as_deref(), &config)
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
 
-/// Parse model string into EmbeddingModel
-fn parse_model(model_str: &str) -> Result<EmbeddingModel> {
-    match model_str {
-        "arctic-xs" | "xs" => Ok(EmbeddingModel::ArcticXS),
-        "arctic-s" | "s" => Ok(EmbeddingModel::ArcticS),
-        "arctic-m" | "m" => Ok(EmbeddingModel::ArcticM),
-        "arctic-m-long" | "m-long" => Ok(EmbeddingModel::ArcticMLong),
-        "arctic-l" | "l" => Ok(EmbeddingModel::ArcticL),
-        _ => Err(anyhow::anyhow!(
-            "Invalid model '{}'. Options: arctic-xs, arctic-s, arctic-m, arctic-m-long, arctic-l",
-            model_str
-        )),
+        // Require-warm routing (TLDR-7xz.1): the warm daemon is the ONLY serve
+        // path. Each non-hit maps to honest guidance — the old behavior
+        // (fall through to a cold store load + ONNX reload) is gone.
+        use crate::commands::daemon_router::{route_semantic, SemanticRoute};
+
+        let mut params = serde_json::json!({
+            "query": self.query,
+            "top_k": self.top,
+            "threshold": self.threshold,
+        });
+        if let Some(m) = &self.model {
+            params["model"] = serde_json::Value::String(m.clone());
+        }
+
+        match route_semantic::<tldr_core::semantic::SemanticSearchReport>(&self.path, params) {
+            SemanticRoute::Hit(report) => {
+                if writer.is_text() {
+                    writer.write_text(&format_semantic_text(&report, self.threshold))?;
+                } else {
+                    writer.write(&report)?;
+                }
+                Ok(())
+            }
+            SemanticRoute::DaemonDown => {
+                anyhow::bail!("daemon not started — run tldr daemon start")
+            }
+            SemanticRoute::NotReady(msg) => anyhow::bail!("{msg}"),
+            SemanticRoute::Error(e) => anyhow::bail!("semantic search failed: {e}"),
+        }
     }
 }
 
 /// Format semantic search report for text output
-fn format_semantic_text(report: &tldr_core::semantic::SemanticSearchReport) -> String {
+fn format_semantic_text(
+    report: &tldr_core::semantic::SemanticSearchReport,
+    threshold: f64,
+) -> String {
     use colored::Colorize;
 
     let mut output = String::new();
@@ -146,7 +144,7 @@ fn format_semantic_text(report: &tldr_core::semantic::SemanticSearchReport) -> S
     output.push_str(&format!(
         "Model: {} | Threshold: {:.2} | Searched: {} chunks\n\n",
         format!("{:?}", report.model).yellow(),
-        0.5, // threshold from options
+        threshold,
         report.total_chunks
     ));
 
@@ -190,4 +188,43 @@ fn format_semantic_text(report: &tldr_core::semantic::SemanticSearchReport) -> S
     output.push_str(&format!("Search completed in {}ms\n", report.latency_ms));
 
     output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(hybrid: bool, langs: Option<Vec<String>>, no_cache: bool) -> SemanticArgs {
+        SemanticArgs {
+            query: "anything".to_string(),
+            path: PathBuf::from("."),
+            top: 10,
+            threshold: 0.0,
+            hybrid,
+            model: None,
+            langs,
+            no_cache,
+        }
+    }
+
+    /// TLDR-7xz.3: every parked flag fails fast with the standardized
+    /// "not available in this version, <reason>" message — checked before any
+    /// model resolution or daemon round-trip, so these tests are hermetic.
+    #[test]
+    fn parked_flags_fail_fast_with_standardized_message() {
+        let cases = [
+            args(true, None, false),
+            args(false, Some(vec!["rs".into()]), false),
+            args(false, None, true),
+        ];
+        for a in cases {
+            let err = a
+                .run(crate::output::OutputFormat::Json, true)
+                .expect_err("parked flag must fail fast");
+            assert!(
+                err.to_string().starts_with("not available in this version,"),
+                "expected standardized parked message, got: {err}"
+            );
+        }
+    }
 }

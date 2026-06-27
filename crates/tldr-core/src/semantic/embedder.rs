@@ -69,8 +69,9 @@ pub struct EmbedOptions {
 ///
 /// # Thread Safety
 ///
-/// `Embedder` is `Send` but not `Sync` - create one per thread for
-/// concurrent embedding.
+/// `Embedder` is `Send + Sync`, but the `embed_*` methods take `&mut self` (the
+/// underlying model is mutated during inference), so concurrent embedding still
+/// needs a per-thread instance or a lock.
 pub struct Embedder {
     /// The underlying fastembed TextEmbedding instance
     model: TextEmbedding,
@@ -250,6 +251,28 @@ impl Embedder {
         Ok(embedding)
     }
 
+    /// Embed a search QUERY.
+    ///
+    /// Applies the model's asymmetric query prefix (`EmbeddingModel::query_prefix`)
+    /// before embedding. Indexed documents/passages must be embedded WITHOUT a
+    /// prefix via [`embed_text`]/[`embed_batch`]. TLDR-dlk.
+    pub fn embed_query(&mut self, query: &str) -> TldrResult<Vec<f32>> {
+        if query.is_empty() {
+            return Ok(vec![0.0; self.config.dimensions()]);
+        }
+        // Prefix ON by default (the Arctic-intended usage). TLDR_QUERY_PREFIX=0
+        // disables it for A/B measurement. TODO(TLDR-blm): promote to a real
+        // option before shipping rather than an env toggle.
+        let use_prefix = std::env::var("TLDR_QUERY_PREFIX")
+            .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
+            .unwrap_or(true);
+        if use_prefix {
+            self.embed_text(&format!("{}{}", self.config.query_prefix(), query))
+        } else {
+            self.embed_text(query)
+        }
+    }
+
     /// Embed multiple texts in a batch
     ///
     /// More efficient than calling `embed_text` multiple times as it batches
@@ -286,7 +309,12 @@ impl Embedder {
             return Ok(Vec::new());
         }
 
-        // Use batch size for progress (affects how fastembed chunks the work)
+        // Batch size for fastembed's internal chunking. Restored to match main
+        // (Some(32) under progress): with fastembed's BatchLongest padding, code
+        // chunks are bimodal (many short funcs + a few ~512-token ones), so a
+        // large batch (256) pads ALL members to ~512 -> 8x memory + wasted compute
+        // and a major slowdown on real corpora. Smaller batches keep short-func
+        // batches short. (My earlier "always None=256" change was the regression.)
         let batch_size = if show_progress { Some(32) } else { None };
 
         let results = self

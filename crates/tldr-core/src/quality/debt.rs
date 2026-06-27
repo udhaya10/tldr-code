@@ -468,6 +468,8 @@ pub fn severity_for_minutes(minutes: u32) -> &'static str {
     }
 }
 
+/// Count lines of code in `source`, excluding blank and comment-only lines for
+/// the given `language`.
 pub fn count_loc(source: &str, language: Language) -> usize {
     let mut count = 0;
     let mut in_multiline_string = false;

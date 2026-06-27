@@ -38,7 +38,7 @@ use crate::output::OutputFormat;
 
 use super::error::{DaemonError, DaemonResult};
 use super::ipc::{check_socket_alive, send_command};
-use super::types::DaemonCommand;
+use super::types::{DaemonCommand, DaemonResponse};
 
 // =============================================================================
 // CLI Arguments
@@ -200,7 +200,16 @@ impl WarmArgs {
                     println!("{}", serde_json::to_string_pretty(&response)?);
                 }
                 OutputFormat::Text | OutputFormat::Sarif | OutputFormat::Dot => {
-                    println!("Warm command sent to daemon");
+                    // TLDR-utj.7: the daemon acks immediately ("started" /
+                    // "already_building") and builds in the background —
+                    // relay its message (which points at `tldr daemon
+                    // status`) instead of implying the warm completed.
+                    match &response {
+                        DaemonResponse::Status {
+                            message: Some(msg), ..
+                        } => println!("{}", msg),
+                        _ => println!("Warm command sent to daemon"),
+                    }
                 }
             }
         }

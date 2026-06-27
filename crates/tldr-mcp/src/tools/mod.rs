@@ -648,7 +648,7 @@ impl ToolRegistry {
         self.register(
             ToolDefinition {
                 name: "tldr_semantic".to_string(),
-                description: "Hybrid search combining BM25 and semantic embeddings using RRF."
+                description: "[PARKED] Not available in this version — semantic search is moving to the warm daemon engine. Use tldr_search (regex) or tldr_bm25 (keyword) instead."
                     .to_string(),
                 input_schema: json!({
                     "type": "object",

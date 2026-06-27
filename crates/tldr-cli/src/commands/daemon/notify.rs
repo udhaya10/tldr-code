@@ -14,7 +14,19 @@
 //!
 //! # Use Case
 //!
-//! Editor hooks call this on file save to keep daemon cache fresh.
+//! Editor/git hooks call this on file save to keep daemon cache fresh.
+//!
+//! # Role (TLDR-7xz.6 — decided KEPT, 2026-06-03)
+//!
+//! This command is the **external poke** (git hooks, editor save hooks) into
+//! the daemon's SINGLE invalidation/re-index flow: it sends `Notify` over IPC,
+//! which lands in `handle_notify -> process_dirty_file` — the exact same
+//! funnel the in-daemon filesystem watcher worker uses. It is NOT a parallel
+//! invalidation mechanism. The watcher is the primary change source; this is
+//! the secondary pipe for events the watcher can't see (e.g. a git checkout
+//! from another machine, hook-driven workflows). If the poke use case ever
+//! dies, delete this whole chain (CLI command -> IPC `Notify` -> handler), not
+//! just parts of it.
 
 use std::path::PathBuf;
 

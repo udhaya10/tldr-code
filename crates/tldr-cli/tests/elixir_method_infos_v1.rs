@@ -44,8 +44,9 @@ fn run_structure(dir: &TempDir) -> Value {
 
 /// elixir-method-infos-v1: a synthetic Elixir module with one `def` and one
 /// `defp` MUST surface both inside `method_infos` with their `line` and
-/// `signature` populated. The `methods: [String]` array MUST also contain
-/// both names (additive contract — legacy consumers keep working).
+/// `signature` populated. (The legacy `methods: [String]` and `functions`
+/// fields are `#[serde(skip_serializing)]` — never in JSON, per
+/// schema-cleanup-v1 BUG-13; `method_infos` is the serialized surface.)
 #[test]
 fn test_structure_elixir_method_infos_populated() {
     let temp = TempDir::new().unwrap();
@@ -59,22 +60,6 @@ fn test_structure_elixir_method_infos_populated() {
         .expect("structure.files present");
     assert_eq!(files.len(), 1, "exactly one elixir file expected");
     let f0 = &files[0];
-
-    let methods = f0
-        .get("methods")
-        .and_then(Value::as_array)
-        .expect("methods array present");
-    let method_names: Vec<&str> = methods.iter().filter_map(Value::as_str).collect();
-    assert!(
-        method_names.contains(&"bar"),
-        "legacy methods[] must contain `bar`, got {:?}",
-        method_names
-    );
-    assert!(
-        method_names.contains(&"baz"),
-        "legacy methods[] must contain `baz`, got {:?}",
-        method_names
-    );
 
     let mi = f0
         .get("method_infos")
@@ -123,11 +108,10 @@ fn test_structure_elixir_method_infos_populated() {
     }
 }
 
-/// elixir-method-infos-v1: count parity invariant. For an Elixir source file
-/// where every `def`/`defp` lives inside a single `defmodule`, the legacy
-/// `methods: [String]` field and the new `method_infos: [MethodInfo]` field
-/// MUST report the same length — they describe the same set of declarations
-/// from two angles (string view vs structured view).
+/// elixir-method-infos-v1: count invariant. For an Elixir source file where
+/// every `def`/`defp` lives inside a single `defmodule`, `method_infos` MUST
+/// contain exactly one entry per declaration. (The legacy `methods: [String]`
+/// field is `#[serde(skip_serializing)]`, so the JSON surface is `method_infos`.)
 #[test]
 fn test_structure_elixir_method_infos_count_matches_methods() {
     let temp = TempDir::new().unwrap();
@@ -137,7 +121,6 @@ fn test_structure_elixir_method_infos_count_matches_methods() {
     let v = run_structure(&temp);
     let f0 = &v.get("files").and_then(Value::as_array).unwrap()[0];
 
-    let methods_len = f0.get("methods").and_then(Value::as_array).unwrap().len();
     let mi_len = f0
         .get("method_infos")
         .and_then(Value::as_array)
@@ -145,8 +128,8 @@ fn test_structure_elixir_method_infos_count_matches_methods() {
         .len();
 
     assert_eq!(
-        methods_len, mi_len,
-        "elixir-method-infos-v1: methods.len() ({}) must equal method_infos.len() ({}); they describe the same defmodule-scoped declarations",
-        methods_len, mi_len
+        mi_len, 2,
+        "elixir-method-infos-v1: method_infos must have exactly 2 entries (bar + baz, the defmodule-scoped def/defp), got {}",
+        mi_len
     );
 }

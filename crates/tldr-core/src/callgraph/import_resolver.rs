@@ -752,8 +752,17 @@ pub struct TracedReExport {
 pub struct ReExportTracer<'a> {
     /// Reference to the module index
     index: &'a ModuleIndex,
-    /// Memoization cache for traced re-exports
-    cache: HashMap<(String, String), Option<TracedReExport>>,
+    /// Memoization cache for traced re-exports.
+    ///
+    /// TLDR-zro hardening (Codex round-1 finding): `max_depth` is part of
+    /// the key. All production call sites pass a constant DEFAULT_MAX_DEPTH
+    /// (resolution.rs), so this changes nothing today — but the back-compat
+    /// wrapper `trace_reexport_with_cycle_detection` derives variable depths,
+    /// and a depth-less key would let a shallow result answer a deeper query.
+    /// With per-worker tracers in the parallel resolution loop, that would be
+    /// an order-dependent (non-deterministic) bug; keying on depth makes the
+    /// memo pure unconditionally.
+    cache: HashMap<(String, String, usize), Option<TracedReExport>>,
     /// Cache hit count
     cache_hits: usize,
     /// Cache miss count
@@ -793,7 +802,7 @@ impl<'a> ReExportTracer<'a> {
         max_depth: usize,
     ) -> Option<TracedReExport> {
         // Check cache
-        let cache_key = (module_path.to_string(), name.to_string());
+        let cache_key = (module_path.to_string(), name.to_string(), max_depth);
         if let Some(cached) = self.cache.get(&cache_key) {
             self.cache_hits += 1;
             return cached.clone();

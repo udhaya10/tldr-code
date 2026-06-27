@@ -57,37 +57,6 @@ pub fn compute_pid_path(project: &Path) -> PathBuf {
     tmp_dir.join(format!("tldr-{}.pid", hash))
 }
 
-/// Compute the socket path for a project (Unix).
-///
-/// Path format: `{temp_dir}/tldr-{hash}.sock`
-/// Uses same hash as PID file for consistency.
-#[cfg(unix)]
-pub fn compute_socket_path(project: &Path) -> PathBuf {
-    let hash = compute_hash(project);
-    let tmp_dir = std::env::temp_dir();
-    tmp_dir.join(format!("tldr-{}.sock", hash))
-}
-
-/// Compute the TCP port for a project (Windows).
-///
-/// Port range: 49152-59151 (dynamic/private port range)
-/// Uses hash to deterministically map project to port.
-#[cfg(windows)]
-pub fn compute_tcp_port(project: &Path) -> u16 {
-    let hash = compute_hash(project);
-    let hash_int = u64::from_str_radix(&hash, 16).unwrap_or(0);
-    49152 + (hash_int % 10000) as u16
-}
-
-// For cross-platform code that needs socket path on all platforms
-#[cfg(not(unix))]
-pub fn compute_socket_path(project: &Path) -> PathBuf {
-    // On Windows, return a path that won't be used (TCP is used instead)
-    let hash = compute_hash(project);
-    let tmp_dir = std::env::temp_dir();
-    tmp_dir.join(format!("tldr-{}.sock", hash))
-}
-
 // =============================================================================
 // PID Guard (RAII lock holder)
 // =============================================================================
@@ -133,31 +102,11 @@ impl Drop for PidGuard {
 // Process Detection
 // =============================================================================
 
-/// Check if a process with the given PID is currently running.
-///
-/// # Platform-specific behavior
-/// - Unix: Uses `kill(pid, 0)` which checks process existence without sending a signal
-/// - Windows: Uses `OpenProcess` with limited query rights
-#[cfg(unix)]
+/// Cross-platform check if a process with the given PID is currently running.
+/// Delegates to `process_alive` which uses `kill(pid, 0)` on Unix and
+/// `OpenProcess` on Windows.
 pub fn is_process_running(pid: u32) -> bool {
-    // Signal 0 checks if process exists without actually sending a signal
-    // Returns 0 on success (process exists), -1 on error
-    unsafe { libc::kill(pid as i32, 0) == 0 }
-}
-
-#[cfg(windows)]
-pub fn is_process_running(pid: u32) -> bool {
-    use windows_sys::Win32::Foundation::CloseHandle;
-    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
-
-    unsafe {
-        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
-        if handle == 0 {
-            return false;
-        }
-        CloseHandle(handle);
-        true
-    }
+    super::daemon_registry::is_pid_alive(pid)
 }
 
 // =============================================================================
@@ -249,53 +198,18 @@ fn read_pid_from_file(file: &File) -> Option<u32> {
 }
 
 // =============================================================================
-// Platform-specific locking
+// File Locking
 // =============================================================================
 
 /// Try to acquire an exclusive non-blocking lock on a file.
-#[cfg(unix)]
+/// Cross-platform: uses flock on Unix, LockFileEx on Windows (via std).
 fn try_lock_file(file: &File) -> Result<(), std::io::Error> {
-    use std::os::unix::io::AsRawFd;
-
-    let fd = file.as_raw_fd();
-    let result = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
-
-    if result == 0 {
-        Ok(())
-    } else {
-        Err(std::io::Error::last_os_error())
-    }
-}
-
-#[cfg(windows)]
-fn try_lock_file(file: &File) -> Result<(), std::io::Error> {
-    use std::os::windows::io::AsRawHandle;
-    use windows_sys::Win32::Foundation::HANDLE;
-    use windows_sys::Win32::Storage::FileSystem::{
-        LockFileEx, LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY,
-    };
-    use windows_sys::Win32::System::IO::OVERLAPPED;
-
-    let handle = file.as_raw_handle() as HANDLE;
-
-    let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
-
-    let result = unsafe {
-        LockFileEx(
-            handle,
-            LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
-            0,
-            1, // Lock 1 byte
-            0,
-            &mut overlapped,
-        )
-    };
-
-    if result != 0 {
-        Ok(())
-    } else {
-        Err(std::io::Error::last_os_error())
-    }
+    file.try_lock().map_err(|e| match e {
+        std::fs::TryLockError::WouldBlock => {
+            std::io::Error::new(std::io::ErrorKind::WouldBlock, "file is locked")
+        }
+        std::fs::TryLockError::Error(io_err) => io_err,
+    })
 }
 
 // =============================================================================
@@ -377,17 +291,8 @@ mod tests {
     }
 
     #[test]
-    fn test_compute_socket_path_format() {
-        let project = PathBuf::from("/test/project");
-        let socket_path = compute_socket_path(&project);
-
-        let filename = socket_path.file_name().unwrap().to_str().unwrap();
-        assert!(filename.starts_with("tldr-"));
-        assert!(filename.ends_with(".sock"));
-    }
-
-    #[test]
     fn test_pid_and_socket_share_hash() {
+        use crate::commands::daemon::ipc::compute_socket_path;
         let project = PathBuf::from("/test/project");
         let pid_path = compute_pid_path(&project);
         let socket_path = compute_socket_path(&project);
@@ -524,21 +429,4 @@ mod tests {
         assert!(pid_path.exists());
     }
 
-    #[cfg(windows)]
-    #[test]
-    fn test_compute_tcp_port_range() {
-        let project = PathBuf::from("/test/project");
-        let port = compute_tcp_port(&project);
-        assert!(port >= 49152);
-        assert!(port < 59152);
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn test_compute_tcp_port_deterministic() {
-        let project = PathBuf::from("/test/project");
-        let port1 = compute_tcp_port(&project);
-        let port2 = compute_tcp_port(&project);
-        assert_eq!(port1, port2);
-    }
 }

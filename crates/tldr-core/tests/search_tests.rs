@@ -8,11 +8,10 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 
 use tldr_core::search::bm25::Bm25Index;
-use tldr_core::search::embedding_client::EmbeddingClient;
 use tldr_core::search::hybrid::hybrid_search;
 use tldr_core::search::text::search;
 use tldr_core::search::tokenizer::Tokenizer;
-use tldr_core::{IgnoreSpec, Language, TldrError};
+use tldr_core::{IgnoreSpec, Language};
 
 fn fixtures_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
@@ -334,7 +333,7 @@ mod hybrid_search_tests {
         let project = fixtures_dir().join("simple-project");
 
         // WHEN: We run hybrid search (without embedding client - BM25 only)
-        let report = hybrid_search("process data", &project, Language::Python, 10, 60.0, None);
+        let report = hybrid_search("process data", &project, Language::Python, 10, 60.0, &[]);
 
         // THEN: Results should be returned (from BM25)
         assert!(report.is_ok());
@@ -376,7 +375,7 @@ mod hybrid_search_tests {
         let project = fixtures_dir().join("simple-project");
 
         // WHEN: We run hybrid search with embedding_service=None
-        let report = hybrid_search("query", &project, Language::Python, 10, 60.0, None);
+        let report = hybrid_search("query", &project, Language::Python, 10, 60.0, &[]);
 
         // THEN: fallback_mode should indicate "bm25_only"
         assert!(report.is_ok());
@@ -390,7 +389,7 @@ mod hybrid_search_tests {
         let project = fixtures_dir().join("simple-project");
 
         // WHEN: We run hybrid search
-        let report = hybrid_search("process", &project, Language::Python, 10, 60.0, None);
+        let report = hybrid_search("process", &project, Language::Python, 10, 60.0, &[]);
 
         // THEN: overlap count should be reported (as 0 in BM25-only mode)
         assert!(report.is_ok());
@@ -405,7 +404,7 @@ mod hybrid_search_tests {
         let project = fixtures_dir().join("simple-project");
 
         // WHEN: We run hybrid search
-        let report = hybrid_search("process", &project, Language::Python, 10, 60.0, None);
+        let report = hybrid_search("process", &project, Language::Python, 10, 60.0, &[]);
 
         // THEN: bm25_only and dense_only counts should be reported
         assert!(report.is_ok());
@@ -421,7 +420,7 @@ mod hybrid_search_tests {
         let project = fixtures_dir().join("simple-project");
 
         // WHEN: We run hybrid search
-        let report = hybrid_search("process", &project, Language::Python, 10, 60.0, None);
+        let report = hybrid_search("process", &project, Language::Python, 10, 60.0, &[]);
 
         // THEN: Results should have bm25_rank (dense_rank is None in BM25-only)
         assert!(report.is_ok());
@@ -438,7 +437,7 @@ mod hybrid_search_tests {
         let project = fixtures_dir().join("simple-project");
 
         // WHEN: We run hybrid search
-        let report = hybrid_search("process", &project, Language::Python, 10, 60.0, None);
+        let report = hybrid_search("process", &project, Language::Python, 10, 60.0, &[]);
 
         // THEN: Results should have bm25_score (dense_score is None in BM25-only)
         assert!(report.is_ok());
@@ -486,38 +485,6 @@ mod tokenizer_tests {
     }
 }
 
-// =============================================================================
-// Embedding client tests
-// =============================================================================
-
-mod embedding_client_tests {
-    use super::*;
-
-    #[test]
-    fn client_unavailable_graceful_degradation() {
-        // GIVEN: An embedding client pointing to unavailable service
-        let client = EmbeddingClient::new("http://localhost:59999");
-
-        // WHEN: We check availability
-        let available = client.is_available();
-
-        // THEN: Should report unavailable (gracefully)
-        assert!(!available);
-    }
-
-    #[test]
-    fn client_search_returns_error_when_unavailable() {
-        // GIVEN: An embedding client pointing to unavailable service
-        let client = EmbeddingClient::new("http://localhost:59999");
-
-        // WHEN: We try to search
-        let result = client.search("query", "project", 10);
-
-        // THEN: Should return ConnectionFailed error
-        assert!(result.is_err());
-        match result {
-            Err(TldrError::ConnectionFailed(_)) => (),
-            _ => panic!("Expected ConnectionFailed error"),
-        }
-    }
-}
+// TLDR-cs5 (done): the EmbeddingClient HTTP stub and its tests were deleted.
+// The dense side of hybrid_search now comes from the in-process SemanticIndex
+// (supplied by the caller as &[SemanticResult]); there is no HTTP client.

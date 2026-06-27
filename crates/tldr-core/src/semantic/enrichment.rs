@@ -17,12 +17,18 @@ use std::collections::HashMap;
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 
+use tree_sitter::Tree;
+
 use crate::ast::imports::get_imports;
+use crate::ast::parser::parse;
 use crate::callgraph::builder_v2::build_project_call_graph_v2;
 use crate::callgraph::cross_file_types::ProjectCallGraphV2;
 use crate::callgraph::BuildConfig;
-use crate::cfg::extractor::get_cfg_context;
-use crate::dfg::extractor::get_dfg_context;
+// TLDR-lwg perf: use the pre-parsed-tree entry points, NOT get_cfg_context /
+// get_dfg_context (which re-parse the whole file on every call). The file is
+// parsed once into FileAnalysisCache.file_trees and reused per function.
+use crate::cfg::extractor::extract_cfg_from_tree;
+use crate::dfg::extractor::extract_dfg_from_tree_with_cfg;
 use crate::semantic::types::CodeChunk;
 use crate::types::{BlockType, RefType};
 use crate::Language;
@@ -67,6 +73,9 @@ struct FileAnalysisCache {
     file_sources: HashMap<PathBuf, String>,
     /// file_path -> formatted import dependencies string
     file_imports: HashMap<PathBuf, String>,
+    /// file_path -> parsed tree-sitter Tree, parsed ONCE per file (TLDR-lwg perf).
+    /// CFG/DFG summaries reuse this instead of re-parsing per function.
+    file_trees: HashMap<PathBuf, Tree>,
 }
 
 impl FileAnalysisCache {
@@ -74,6 +83,7 @@ impl FileAnalysisCache {
     fn build(chunks: &[CodeChunk]) -> Self {
         let mut file_sources: HashMap<PathBuf, String> = HashMap::new();
         let mut file_imports: HashMap<PathBuf, String> = HashMap::new();
+        let mut file_trees: HashMap<PathBuf, Tree> = HashMap::new();
 
         // Collect unique file paths
         let unique_paths: Vec<PathBuf> = {
@@ -86,8 +96,23 @@ impl FileAnalysisCache {
         };
 
         for path in &unique_paths {
+            // Language for this file (from its first chunk)
+            let lang = chunks
+                .iter()
+                .find(|c| &c.file_path == path)
+                .map(|c| c.language);
+
             // Read file content (for CFG/DFG analysis which needs full file)
             if let Ok(source) = std::fs::read_to_string(path) {
+                // TLDR-lwg perf: parse the file ONCE here and cache the tree, so
+                // per-function CFG/DFG reuse it instead of re-parsing each time.
+                if let Some(lang) = lang {
+                    if let Ok(Ok(tree)) =
+                        std::panic::catch_unwind(AssertUnwindSafe(|| parse(&source, lang)))
+                    {
+                        file_trees.insert(path.clone(), tree);
+                    }
+                }
                 file_sources.insert(path.clone(), source);
             }
 
@@ -133,6 +158,7 @@ impl FileAnalysisCache {
         FileAnalysisCache {
             file_sources,
             file_imports,
+            file_trees,
         }
     }
 }
@@ -230,43 +256,40 @@ pub fn build_embedding_text(unit: &EmbeddingUnit) -> String {
 ///
 /// Uses CfgInfo.cyclomatic_complexity directly (PERF-9: avoid separate
 /// calculate_complexity call). Counts branches and loops from block types.
-fn build_cfg_summary_from_source(
+/// Compute the CFG and DFG summary strings for one function from a PRE-PARSED
+/// tree (TLDR-lwg perf). Parses nothing: CFG comes from `extract_cfg_from_tree`,
+/// and the DFG reuses that CFG via `extract_dfg_from_tree_with_cfg` — so the file
+/// is parsed once (at FileAnalysisCache build) and reused, instead of ~3 full-file
+/// re-parses per function (the old get_cfg_context/get_dfg_context path).
+fn compute_flow_summaries(
+    tree: &Tree,
     source: &str,
     function_name: &str,
     language: Language,
-) -> String {
-    // Use full file source, not chunk content (C2 mitigation)
-    match get_cfg_context(source, function_name, language) {
-        Ok(cfg) => {
-            let complexity = cfg.cyclomatic_complexity;
-            let branches = cfg
-                .blocks
-                .iter()
-                .filter(|b| b.block_type == BlockType::Branch)
-                .count();
-            let loops = cfg
-                .blocks
-                .iter()
-                .filter(|b| {
-                    b.block_type == BlockType::LoopHeader || b.block_type == BlockType::LoopBody
-                })
-                .count();
-            format!(
-                "complexity={}, branches={}, loops={}",
-                complexity, branches, loops
-            )
-        }
-        Err(_) => String::new(),
-    }
-}
+) -> (String, String) {
+    let cfg = match extract_cfg_from_tree(tree, source, function_name, language) {
+        Ok(cfg) => cfg,
+        Err(_) => return (String::new(), String::new()),
+    };
 
-/// Build a DFG summary string from DfgInfo data.
-fn build_dfg_summary_from_source(
-    source: &str,
-    function_name: &str,
-    language: Language,
-) -> String {
-    match get_dfg_context(source, function_name, language) {
+    let branches = cfg
+        .blocks
+        .iter()
+        .filter(|b| b.block_type == BlockType::Branch)
+        .count();
+    let loops = cfg
+        .blocks
+        .iter()
+        .filter(|b| b.block_type == BlockType::LoopHeader || b.block_type == BlockType::LoopBody)
+        .count();
+    let cfg_summary = format!(
+        "complexity={}, branches={}, loops={}",
+        cfg.cyclomatic_complexity, branches, loops
+    );
+
+    // Reuse the CFG we just built so the DFG's reaching-defs doesn't re-parse.
+    let dfg_summary = match extract_dfg_from_tree_with_cfg(tree, source, function_name, language, &cfg)
+    {
         Ok(dfg) => {
             let vars = dfg.variables.len();
             let defs = dfg
@@ -282,7 +305,9 @@ fn build_dfg_summary_from_source(
             format!("vars={}, defs={}, uses={}", vars, defs, uses)
         }
         Err(_) => String::new(),
-    }
+    };
+
+    (cfg_summary, dfg_summary)
 }
 
 /// Enrich a batch of CodeChunks into EmbeddingUnits.
@@ -421,42 +446,28 @@ fn enrich_single_chunk(
         (Vec::new(), Vec::new())
     };
 
-    // L3: CFG summary
-    // C2: Always pass full file content, not chunk.content
-    let cfg_summary = if let Some(func_name) = &chunk.function_name {
-        if let Some(source) = file_cache.file_sources.get(&chunk.file_path) {
-            std::panic::catch_unwind(AssertUnwindSafe(|| {
-                build_cfg_summary_from_source(source, func_name, chunk.language)
-            }))
-            .unwrap_or_default()
-        } else {
-            // Fallback: try using chunk content directly
-            std::panic::catch_unwind(AssertUnwindSafe(|| {
-                build_cfg_summary_from_source(&chunk.content, func_name, chunk.language)
-            }))
-            .unwrap_or_default()
-        }
-    } else {
-        String::new()
-    };
+    // L3/L4 (CFG/DFG). Previously the dominant index-build cost: get_cfg_context /
+    // get_dfg_context re-parsed the WHOLE file per function (~3 parses/function).
+    // Now computed together from the file's PRE-PARSED tree (FileAnalysisCache),
+    // so the file is parsed once and reused — TLDR-lwg perf fix. Still gated so we
+    // can measure their recall contribution; default ON. TLDR_ENRICH_FLOW=0 skips.
+    let flow_enrichment = std::env::var("TLDR_ENRICH_FLOW")
+        .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
+        .unwrap_or(true);
 
-    // L4: DFG summary
-    // C2: Always pass full file content, not chunk.content
-    let dfg_summary = if let Some(func_name) = &chunk.function_name {
-        if let Some(source) = file_cache.file_sources.get(&chunk.file_path) {
-            std::panic::catch_unwind(AssertUnwindSafe(|| {
-                build_dfg_summary_from_source(source, func_name, chunk.language)
-            }))
-            .unwrap_or_default()
-        } else {
-            // Fallback: try using chunk content directly
-            std::panic::catch_unwind(AssertUnwindSafe(|| {
-                build_dfg_summary_from_source(&chunk.content, func_name, chunk.language)
-            }))
-            .unwrap_or_default()
-        }
+    let (cfg_summary, dfg_summary) = if !flow_enrichment {
+        (String::new(), String::new())
+    } else if let (Some(func_name), Some(tree), Some(source)) = (
+        chunk.function_name.as_deref(),
+        file_cache.file_trees.get(&chunk.file_path),
+        file_cache.file_sources.get(&chunk.file_path),
+    ) {
+        std::panic::catch_unwind(AssertUnwindSafe(|| {
+            compute_flow_summaries(tree, source, func_name, chunk.language)
+        }))
+        .unwrap_or_else(|_| (String::new(), String::new()))
     } else {
-        String::new()
+        (String::new(), String::new())
     };
 
     // L5: Dependencies (from file-level imports cache)

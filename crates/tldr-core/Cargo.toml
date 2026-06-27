@@ -92,6 +92,9 @@ dirs = "5.0"
 # PINNED per premortem P0 - do not use ^5.8 or 5
 fastembed = { workspace = true, optional = true }
 
+# TLDR-l5d: usearch vector store, gated under `semantic` like fastembed.
+usearch = { workspace = true, optional = true }
+
 # Phase 4: Content hashing for cache keys
 md5 = { workspace = true }
 
@@ -102,8 +105,8 @@ fs2 = { workspace = true }
 which = { workspace = true }
 
 [features]
-default = []
-semantic = ["dep:fastembed"]
+default = ["semantic"]
+semantic = ["dep:fastembed", "dep:usearch"]
 # Experimental V2 call graph builder with parallel processing (Phase 14)
 experimental_callgraph = []
 

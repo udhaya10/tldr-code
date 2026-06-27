@@ -32,6 +32,18 @@
 //! - `top_k_similar`: O(m * n) where m = candidates, n = dimensions
 //!
 //! For 10K functions with 768-dim embeddings: ~7.68M operations
+//
+// TLDR-AUDIT(TLDR-7kf): REGRESSION from the Python original. llm-tldr used
+//   FAISS (`IndexFlatIP`, semantic.py:1068) — SIMD-accelerated, binary-persisted
+//   exact search. The Rust rewrite replaced FAISS with this hand-rolled scalar
+//   cosine loop (no SIMD, full f32, JSON cache). At the 10K target scale the
+//   brute-force O(m*n) is fine and exact, so this is NOT algorithmic debt — but
+//   it leaves a 5-10x SIMD win on the table and the 100K index cap reaches
+//   ~10ms/query. The fix is `usearch` (the in-process Rust FAISS-equivalent that
+//   wasn't reached for during the rewrite): it provides HNSW *and* exact SIMD
+//   search, binary `save`/mmap `view`, and `ScalarKind` quantization in one lib —
+//   subsuming TLDR-7kf + TLDR-8pt + TLDR-k4q. Swap point is `top_k_similar`
+//   below; everything else in this module stays. See epic TLDR-blm.
 
 /// Epsilon tolerance for floating point comparisons
 const EPSILON: f64 = 1e-6;
@@ -234,6 +246,11 @@ pub fn top_k_similar(
         return Vec::new();
     }
 
+    // TLDR-AUDIT(TLDR-7kf): THE SWAP POINT. This linear scan over every candidate
+    // is the one function `usearch` would replace (index.add at build time,
+    // index.search here). Keeping it as an exact fallback is fine; the win is
+    // routing the common path through an indexed/SIMD search instead.
+    //
     // Compute similarity for all candidates
     let mut scored: Vec<(usize, f64)> = candidates
         .iter()

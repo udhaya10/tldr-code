@@ -13,7 +13,6 @@ use crate::TldrResult;
 
 use super::extract::is_upper_case_name;
 use super::imports::extract_imports_from_tree;
-use super::parser::parse_file;
 
 /// Extract code structure from all files in a directory.
 ///
@@ -1872,6 +1871,14 @@ fn collect_definitions(
         emitted_as_constant = true;
     }
 
+    // TLDR-lxc.3: PEP 695 `type X = ...` (Python `type_alias_statement`) and
+    // the TS/JS `type Y = ...` (`type_alias_declaration`) are public API
+    // surface but were previously invisible to extract/structure — neither a
+    // function nor a class, so they fell through `classify_definition_node`.
+    if let Some(alias_def) = try_type_alias_definition(node, source) {
+        definitions.push(alias_def);
+    }
+
     let (is_func, is_class) = classify_definition_node(kind, language);
 
     // VAL-001: In C, `struct_specifier` / `enum_specifier` without a `body`
@@ -2532,6 +2539,52 @@ fn is_inside_elixir_defmodule(node: &Node, source: &str) -> bool {
         current = parent.parent();
     }
     false
+}
+
+/// TLDR-lxc.3: emit type aliases as `kind="type_alias"` definitions.
+///
+/// Handles Python PEP 695 `type_alias_statement` (`type X = list[str]`, with
+/// fields `left: (type (identifier))` / `right: (type ...)`) and the TS/JS
+/// `type_alias_declaration` (`type Y = ...`, with a `name` field). Returns
+/// `None` for any other node kind, so it is safe to call on every node.
+fn try_type_alias_definition(node: Node, source: &str) -> Option<DefinitionInfo> {
+    let name = match node.kind() {
+        // Python: the alias name is the first identifier under `left`.
+        "type_alias_statement" => {
+            let left = node.child_by_field_name("left")?;
+            first_identifier_text(&left, source)?
+        }
+        // TypeScript / JavaScript: the alias name is the `name` field.
+        "type_alias_declaration" => {
+            node.child_by_field_name("name").map(|n| get_node_text(&n, source))?
+        }
+        _ => return None,
+    };
+    if name.is_empty() {
+        return None;
+    }
+    Some(DefinitionInfo {
+        name,
+        kind: "type_alias".to_string(),
+        line_start: node.start_position().row as u32 + 1,
+        line_end: node.end_position().row as u32 + 1,
+        signature: extract_def_signature(node, source),
+    })
+}
+
+/// Depth-first text of the first `identifier` descendant — used to pull the
+/// alias name out of Python's `(type (identifier))` left-hand side.
+fn first_identifier_text(node: &Node, source: &str) -> Option<String> {
+    if node.kind() == "identifier" {
+        return Some(get_node_text(node, source));
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if let Some(t) = first_identifier_text(&child, source) {
+            return Some(t);
+        }
+    }
+    None
 }
 
 /// Classify a tree-sitter node kind as function-like or class-like.
@@ -3688,6 +3741,33 @@ fn top_level() {}
         assert_eq!(consts[1].line_start, 3);
         assert_eq!(consts[1].line_end, 6);
         assert_eq!(consts[1].signature, "EXTERNAL_FUNCTIONS = {");
+    }
+
+    #[test]
+    fn test_python_type_alias_definitions() {
+        // TLDR-lxc.3: PEP 695 `type X = ...` must surface as kind="type_alias".
+        let source = "type SymbolList = list[str]\ntype Pair = tuple[int, int]\n";
+        let tree = parse(source, Language::Python).unwrap();
+        let defs = extract_definitions(&tree, source, Language::Python);
+        let aliases: Vec<_> = defs.iter().filter(|d| d.kind == "type_alias").collect();
+        assert_eq!(aliases.len(), 2, "expected 2 type aliases, got: {defs:?}");
+        assert_eq!(aliases[0].name, "SymbolList");
+        assert_eq!(aliases[0].line_start, 1);
+        assert_eq!(aliases[0].signature, "type SymbolList = list[str]");
+        assert_eq!(aliases[1].name, "Pair");
+        assert_eq!(aliases[1].line_start, 2);
+    }
+
+    #[test]
+    fn test_typescript_type_alias_definitions() {
+        // TLDR-lxc.3: TS `type Y = ...` (type_alias_declaration) surfaces too.
+        let source = "type ID = string;\nexport type Pair = [number, number];\n";
+        let tree = parse(source, Language::TypeScript).unwrap();
+        let defs = extract_definitions(&tree, source, Language::TypeScript);
+        let aliases: Vec<_> = defs.iter().filter(|d| d.kind == "type_alias").collect();
+        assert_eq!(aliases.len(), 2, "expected 2 TS type aliases, got: {defs:?}");
+        assert!(aliases.iter().any(|d| d.name == "ID"));
+        assert!(aliases.iter().any(|d| d.name == "Pair"));
     }
 
     #[test]

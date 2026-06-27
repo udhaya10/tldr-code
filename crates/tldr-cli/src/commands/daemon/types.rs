@@ -30,6 +30,13 @@ pub const HOOK_FLUSH_THRESHOLD: usize = 5;
 // Configuration Types
 // =============================================================================
 
+/// Serde default for [`DaemonConfig::enable_watcher`]: the in-daemon watcher is
+/// ON by default, so a config that predates the field (where serde would
+/// otherwise fill `bool::default()` == `false`) keeps the self-watch behavior.
+fn default_enable_watcher() -> bool {
+    true
+}
+
 /// Daemon configuration loaded from .tldr/config.json or .claude/settings.json
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DaemonConfig {
@@ -42,8 +49,33 @@ pub struct DaemonConfig {
     /// Embedding model for semantic search
     pub semantic_model: String,
 
-    /// Idle timeout in seconds (default: 1800 = 30 min)
+    /// PROJECT-PRESENCE idle timeout in seconds (default: 1800 = 30 min).
+    ///
+    /// SEMANTICS CHANGE (epic TLDR-cxa, 2026-06-04; migration note
+    /// TLDR-d26): this used to be a CLIENT idle timeout — the daemon died
+    /// after this long without a socket connection, even mid-build. It now
+    /// measures PROJECT dormancy: the countdown resets on any client
+    /// connection, any `tldr`/`tldr_mcp` invocation in the project (liveness
+    /// poke), any watcher-observed file write, and is suspended entirely
+    /// while internal work (index build, delta) is in flight. The key is
+    /// deliberately UNCHANGED — the duration concept is the same; only what
+    /// counts as "activity" broadened. Consequence (accepted trade-off): on
+    /// machines with long-running builds the daemon effectively never idles
+    /// out — warm availability is chosen over memory thrift (escape hatch:
+    /// TLDR-yll).
     pub idle_timeout_secs: u64,
+
+    /// Whether the in-daemon filesystem watcher is active (TLDR-ac0.2).
+    /// DEFAULT ON: the daemon self-watches its project root on start (the
+    /// recorded cutover plan — TLDR-4vb). During the window before the C++
+    /// fsnotifier is disabled (cross-repo, TLDR-ejm) both watchers may feed
+    /// `process_dirty_file` for one edit; that overlap is wasteful but
+    /// harmless — `apply_delta`'s content-hash check makes the second delta a
+    /// no-op. Set to `false` (or `TLDR_IN_DAEMON_WATCH=0`, if wired) to opt out.
+    /// `#[serde(default = "default_enable_watcher")]` keeps older persisted
+    /// configs (which lack the field) defaulting to the ON behavior.
+    #[serde(default = "default_enable_watcher")]
+    pub enable_watcher: bool,
 }
 
 impl Default for DaemonConfig {
@@ -53,6 +85,7 @@ impl Default for DaemonConfig {
             auto_reindex_threshold: DEFAULT_REINDEX_THRESHOLD,
             semantic_model: "bge-large-en-v1.5".to_string(),
             idle_timeout_secs: IDLE_TIMEOUT_SECS,
+            enable_watcher: default_enable_watcher(),
         }
     }
 }
@@ -304,7 +337,12 @@ pub enum DaemonCommand {
     /// Graceful shutdown
     Shutdown,
 
-    /// File change notification
+    /// File change notification.
+    ///
+    /// TLDR-7xz.6: the IPC leg of the external poke (`tldr daemon notify`,
+    /// driven by git/editor hooks). Lands in `handle_notify ->
+    /// process_dirty_file` — the same single invalidation/re-index funnel the
+    /// in-daemon watcher uses. See notify.rs for the full role description.
     Notify {
         /// Path to the changed file
         file: PathBuf,
@@ -336,6 +374,17 @@ pub enum DaemonCommand {
         /// Number of results to return
         #[serde(default = "default_top_k")]
         top_k: usize,
+        /// Optional embedding-model override (e.g. `"arctic-l"`). `None` resolves
+        /// from project config — kept identical to the cold CLI path so warm and
+        /// cold rank the same model (TLDR-atc). Backward-compatible: pre-atc
+        /// clients that omit this still deserialize.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+        /// Minimum similarity threshold. `None` => 0.0 (no score cutoff),
+        /// matching the cold CLI default (TLDR-h27) so the warm path does not
+        /// silently hide correct top-ranked matches.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        threshold: Option<f64>,
     },
 
     // Pass-through analysis commands
@@ -469,6 +518,60 @@ fn default_top_k() -> usize {
     10
 }
 
+/// Liveness observability (TLDR-qzc): answers "what is keeping the daemon
+/// alive" and "when will it idle out" — per-source presence ages, live busy
+/// tokens with age (a hung build is VISIBLE as `busy 4h: warm-build`, not
+/// silently immortal), and the computed idle deadline.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LivenessStats {
+    /// Seconds since each source last proved presence, keyed by source name
+    /// (`socket` / `cli_poke` / `watcher` / `internal`). BTreeMap for stable
+    /// key order in output.
+    pub presence_age_secs: std::collections::BTreeMap<String, f64>,
+    /// Live internal work, oldest first. Non-empty means idle shutdown is
+    /// unconditionally deferred ("never abandon your own job").
+    pub busy: Vec<BusyTokenStats>,
+    /// The configured idle timeout.
+    pub idle_timeout_secs: u64,
+    /// Seconds until idle shutdown if no further presence arrives. `None`
+    /// while busy (the deadline does not run during internal work).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_shutdown_in_secs: Option<f64>,
+}
+
+/// One live unit of internal daemon work (TLDR-qzc).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BusyTokenStats {
+    /// What the work is (`warm-build`, `delta`).
+    pub label: String,
+    /// How long it has been running.
+    pub age_secs: f64,
+}
+
+/// Resident semantic index state (TLDR-qzc): kills the "is it building or
+/// done?" blindness during a multi-minute warm build.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SemanticIndexStats {
+    /// `warm` | `building` | `cold`.
+    pub state: String,
+    /// Vector count when warm.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vectors: Option<usize>,
+}
+
+/// Daemon process memory (TLDR-yll): the observability counterweight to
+/// presence-based liveness — a never-idle daemon's footprint must be a
+/// visible number. Best-effort per platform; absent fields mean unreadable.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryStats {
+    /// Current resident set size in bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rss_bytes: Option<u64>,
+    /// Peak (high-water) resident set size in bytes since daemon start.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peak_rss_bytes: Option<u64>,
+}
+
 /// Response from daemon
 ///
 /// IMPORTANT: Variant order matters for serde(untagged)!
@@ -495,6 +598,20 @@ pub enum DaemonResponse {
         all_sessions: Option<AllSessionsSummary>,
         #[serde(skip_serializing_if = "Option::is_none")]
         hook_stats: Option<HashMap<String, HookStats>>,
+        /// Liveness observability (TLDR-qzc). OPTIONAL-WITH-DEFAULT for
+        /// untagged compat both ways: an old server's payload (field absent)
+        /// still decodes as FullStatus here, and an old client simply ignores
+        /// the extra key. Required-field count is unchanged, preserving the
+        /// untagged variant decode order.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        liveness: Option<LivenessStats>,
+        /// Resident semantic index state (TLDR-qzc). Same compat rules as
+        /// `liveness`. `None` on non-semantic builds.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        semantic_index: Option<SemanticIndexStats>,
+        /// Daemon process memory (TLDR-yll). Same compat rules as `liveness`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        memory: Option<MemoryStats>,
     },
 
     /// Notify response (4 required fields)
@@ -530,6 +647,80 @@ pub enum DaemonResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// TLDR-qzc untagged-compat: FullStatus is decoded by required-field
+    /// shape, so the new OPTIONAL fields must not change the variant match
+    /// in either direction — an old server's payload (fields absent) still
+    /// decodes as FullStatus, and a new server's payload (fields present)
+    /// round-trips them intact.
+    #[test]
+    fn full_status_qzc_fields_are_optional_and_round_trip() {
+        let old_shape = DaemonResponse::FullStatus {
+            status: DaemonStatus::Ready,
+            uptime: 1.0,
+            files: 3,
+            project: PathBuf::from("/p"),
+            salsa_stats: SalsaCacheStats::default(),
+            dedup_stats: None,
+            session_stats: None,
+            all_sessions: None,
+            hook_stats: None,
+            liveness: None,
+            semantic_index: None,
+            memory: None,
+        };
+        // liveness/semantic_index/memory are skip_serializing_if=None → this
+        // JSON is byte-identical to an old server's payload.
+        let json = serde_json::to_string(&old_shape).unwrap();
+        assert!(!json.contains("liveness"));
+        let decoded: DaemonResponse = serde_json::from_str(&json).unwrap();
+        assert!(
+            matches!(decoded, DaemonResponse::FullStatus { liveness: None, .. }),
+            "old-shape payload must still decode as FullStatus"
+        );
+
+        let new_shape = DaemonResponse::FullStatus {
+            status: DaemonStatus::Ready,
+            uptime: 1.0,
+            files: 3,
+            project: PathBuf::from("/p"),
+            salsa_stats: SalsaCacheStats::default(),
+            dedup_stats: None,
+            session_stats: None,
+            all_sessions: None,
+            hook_stats: None,
+            liveness: Some(LivenessStats {
+                presence_age_secs: [("socket".to_string(), 2.0)].into_iter().collect(),
+                busy: vec![BusyTokenStats {
+                    label: "warm-build".to_string(),
+                    age_secs: 60.0,
+                }],
+                idle_timeout_secs: 1800,
+                idle_shutdown_in_secs: None,
+            }),
+            semantic_index: Some(SemanticIndexStats {
+                state: "building".to_string(),
+                vectors: None,
+            }),
+            memory: Some(MemoryStats {
+                rss_bytes: Some(1024 * 1024 * 1024),
+                peak_rss_bytes: Some(22 * 1024 * 1024 * 1024),
+            }),
+        };
+        let json = serde_json::to_string(&new_shape).unwrap();
+        let decoded: DaemonResponse = serde_json::from_str(&json).unwrap();
+        match decoded {
+            DaemonResponse::FullStatus {
+                liveness: Some(live),
+                semantic_index: Some(idx),
+                ..
+            } => {
+                assert_eq!(live.busy[0].label, "warm-build");
+                assert_eq!(idx.state, "building");
+            }
+            other => panic!("expected FullStatus with qzc fields, got {:?}", other),
+        }
+    }
 
     #[test]
     fn test_daemon_config_default() {

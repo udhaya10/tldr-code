@@ -102,7 +102,10 @@ class Bar:
     ])
     .assert()
     .success()
-    .stdout(predicate::str::contains("\"functions\""))
+    // The structure JSON groups function-level items under "definitions"
+    // (FileStructure.definitions), alongside "classes" — there is no top-level
+    // "functions" key (TLDR-o48: the old assertion was stale).
+    .stdout(predicate::str::contains("\"definitions\""))
     .stdout(predicate::str::contains("\"classes\""));
 }
 

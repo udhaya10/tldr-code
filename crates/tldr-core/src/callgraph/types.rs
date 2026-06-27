@@ -446,6 +446,14 @@ impl ClassEntry {
 pub struct FuncIndex {
     /// Maps (module_path, func_name) -> FuncEntry
     entries: HashMap<(String, String), FuncEntry>,
+    /// Secondary index: func_name -> keys into `entries` (TLDR-zde Gate-1 fix).
+    ///
+    /// `find_by_name` previously LINEAR-SCANNED `entries` with a string
+    /// compare per entry; called from the fallback-resolution path for every
+    /// call site, that scan was ~98% of the whole call-graph build (measured
+    /// 223s of a 226s build on tldr-code: ~call-sites x ~40k entries).
+    /// Maintained on insert/merge so the by-name lookup is O(matches).
+    by_name: HashMap<String, Vec<(String, String)>>,
 }
 
 impl FuncIndex {
@@ -453,6 +461,7 @@ impl FuncIndex {
     pub fn new() -> Self {
         Self {
             entries: HashMap::new(),
+            by_name: HashMap::new(),
         }
     }
 
@@ -460,6 +469,7 @@ impl FuncIndex {
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
             entries: HashMap::with_capacity(capacity),
+            by_name: HashMap::with_capacity(capacity),
         }
     }
 
@@ -470,8 +480,13 @@ impl FuncIndex {
         func_name: impl Into<String>,
         entry: FuncEntry,
     ) {
-        self.entries
-            .insert((module.into(), func_name.into()), entry);
+        let key = (module.into(), func_name.into());
+        // Only record the key in the secondary index on FIRST insert for this
+        // (module, name): an overwrite reuses the existing key reference, and
+        // pushing again would make find_by_name yield the entry twice.
+        if self.entries.insert(key.clone(), entry).is_none() {
+            self.by_name.entry(key.1.clone()).or_default().push(key);
+        }
     }
 
     /// Looks up a function by module and name.
@@ -494,7 +509,11 @@ impl FuncIndex {
     ///
     /// Used to combine results from parallel processing.
     pub fn merge(&mut self, other: FuncIndex) {
-        self.entries.extend(other.entries);
+        // Route through insert() so the by_name secondary index stays
+        // consistent (a plain extend would bypass it).
+        for ((module, func_name), entry) in other.entries {
+            self.insert(module, func_name, entry);
+        }
     }
 
     /// Returns an iterator over all entries.
@@ -506,14 +525,18 @@ impl FuncIndex {
 
     /// Finds all entries matching a given function name across all modules.
     /// Used for fallback resolution when the module/receiver cannot be determined.
+    ///
+    /// O(matches) via the `by_name` secondary index — formerly a full scan of
+    /// `entries`, which dominated the call-graph build (see `by_name` docs).
     pub fn find_by_name<'a>(
         &'a self,
         func_name: &'a str,
     ) -> impl Iterator<Item = &'a FuncEntry> + 'a {
-        self.entries
-            .iter()
-            .filter(move |((_m, f), _)| f.as_str() == func_name)
-            .map(|(_, e)| e)
+        self.by_name
+            .get(func_name)
+            .into_iter()
+            .flatten()
+            .filter_map(move |key| self.entries.get(key))
     }
 
     /// Convert to path map for TypeAwareCallResolver compatibility.

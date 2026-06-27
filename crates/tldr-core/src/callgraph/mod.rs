@@ -170,8 +170,13 @@ pub use type_resolver::{
 
 // Phase 14: Builder V2 exports (canonical)
 pub use builder_v2::{
+    build_indices_parallel,
     build_project_call_graph_v2,
+    // TLDR-iqr seam: parse/compose split for the daemon FileIR memo
+    compose_call_graph_v2,
     filter_tldrignored,
+    parse_project_file_irs,
+    scan_project_files,
     // Phase 14: Builder V2 types
     BuildConfig,
     BuildDiagnostics,

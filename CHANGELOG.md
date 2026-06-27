@@ -1,5 +1,49 @@
 # Changelog
 
+## Unreleased — semantic search: one warm path (TLDR-7xz)
+
+**Philosophy: the tool has exactly two modes — it works beautifully (warm,
+full quality) or it honestly says why it can't and stops.** No silent cold
+serves, no degraded dual paths, no agents quietly running at reduced quality.
+
+### Changed
+
+- **`tldr semantic` is served exclusively by the warm daemon.** The silent
+  cold fallback (per-call store load + ONNX model reload when the daemon was
+  absent) is gone. Without a daemon: `daemon not started — run tldr daemon
+  start`. With a cold daemon: `index not built — run tldr warm`. During a
+  build: `index build in progress — retry when warm completes`.
+- **The daemon never builds on the query path.** A query against a cold
+  store answers `status: "not_ready"` immediately (no inline corpus build
+  under the query lock, no ONNX load); builds happen only via explicit
+  `tldr warm` / daemon warm.
+- The semantic eval harness (`semantic_eval`) now measures the usearch
+  VectorStore path — the only production serve path. Store-vs-dense
+  results-equivalence was proven before the cutover (TLDR-l5d), so recall
+  baselines remain comparable.
+
+### Parked (not available in this version)
+
+Each fails fast with `not available in this version, <reason>` — surfaces
+kept, never silently removed. All return at full warm quality with the new
+engine (epic TLDR-utj):
+
+- `tldr semantic --hybrid` (BM25 + dense RRF) — moving into the daemon as a
+  resident index; the old per-call cold build (and its silent `bm25_only`
+  degraded mode) is removed.
+- `tldr semantic --langs` / `--no-cache` — need daemon-side support.
+- `tldr similar` — seeded similarity needs a warm daemon API.
+- MCP `tldr_semantic` — cold-built a full index on EVERY agent tool call;
+  parked until the MCP daemon client lands. `tldr_search` and `tldr_bm25`
+  remain fully available.
+
+### Removed
+
+- `SemanticIndex` and `hybrid_search_with_index` (the per-call cold index).
+  Shared `BuildOptions`/`SearchOptions`/corpus limits remain in
+  `semantic/index.rs`; the backend-agnostic RRF fusion machinery remains in
+  `search/hybrid.rs` for the Phase-2 warm hybrid.
+
 ## v0.4.0 — 2026-05-10
 
 First published release after 202 internal milestones since v0.3.0. ~58 bugs

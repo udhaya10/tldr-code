@@ -76,6 +76,11 @@ pub struct EmbeddedChunk {
     pub chunk: CodeChunk,
 
     /// Dense embedding vector (dimensions depend on model)
+    // TLDR-AUDIT(TLDR-8pt): Full f32, no quantization — ~3KB/vector, 357MB at the
+    // 100K index cap. Subsumed by TLDR-7kf: if `usearch` is adopted it owns vector
+    // storage and quantizes natively (ScalarKind::I8/BF16/B1x8), so this field's
+    // role shrinks to "transient input handed to index.add". Don't build a
+    // bespoke quantizer here — let the index do it. See epic TLDR-blm.
     pub embedding: Vec<f32>,
 }
 
@@ -150,6 +155,25 @@ impl EmbeddingModel {
         }
     }
 
+    /// Query-side instruction prefix for retrieval.
+    ///
+    /// Snowflake Arctic Embed models are trained ASYMMETRICALLY: the search
+    /// query is prefixed with this instruction, while indexed documents/passages
+    /// are embedded with NO prefix. Prepending it to the query (only) is the
+    /// model's intended usage and measurably improves recall. fastembed does not
+    /// apply it automatically — it's the caller's responsibility. TLDR-dlk.
+    pub fn query_prefix(&self) -> &'static str {
+        // All current variants are Snowflake Arctic Embed v1, which share this
+        // query prefix (per the model card).
+        match self {
+            Self::ArcticXS
+            | Self::ArcticS
+            | Self::ArcticM
+            | Self::ArcticMLong
+            | Self::ArcticL => "Represent this sentence for searching relevant passages: ",
+        }
+    }
+
     /// Get the model name as used by fastembed
     ///
     /// Returns a string identifier for the model.
@@ -161,6 +185,46 @@ impl EmbeddingModel {
             Self::ArcticMLong => "Snowflake/snowflake-arctic-embed-m-long",
             Self::ArcticL => "Snowflake/snowflake-arctic-embed-l",
         }
+    }
+
+    /// Parse a model string (e.g. "arctic-m", "m") into an EmbeddingModel.
+    pub fn parse(model_str: &str) -> Result<Self, String> {
+        match model_str {
+            "arctic-xs" | "xs" => Ok(Self::ArcticXS),
+            "arctic-s" | "s" => Ok(Self::ArcticS),
+            "arctic-m" | "m" => Ok(Self::ArcticM),
+            "arctic-m-long" | "m-long" => Ok(Self::ArcticMLong),
+            "arctic-l" | "l" => Ok(Self::ArcticL),
+            _ => Err(format!(
+                "Invalid model '{}'. Options: arctic-xs, arctic-s, arctic-m, arctic-m-long, arctic-l",
+                model_str
+            )),
+        }
+    }
+
+    /// Resolve the effective model from CLI flag and config.
+    /// Precedence: cli_flag (if provided) > config > built-in default.
+    pub fn resolve(
+        cli_model: Option<&str>,
+        config: &crate::config::TldrConfig,
+    ) -> Result<Self, String> {
+        if config.embedding.provider != "local" {
+            return Err(format!(
+                "Cloud embedding provider '{}' is not supported in this build. \
+                 Set embedding.provider to \"local\" in your config, or remove it.",
+                config.embedding.provider
+            ));
+        }
+
+        if let Some(flag) = cli_model {
+            return Self::parse(flag);
+        }
+
+        if let Some(ref model_str) = config.embedding.model {
+            return Self::parse(model_str);
+        }
+
+        Ok(Self::default())
     }
 }
 
@@ -390,6 +454,26 @@ impl Default for CacheConfig {
     }
 }
 
+/// Resolve the per-project store directory for usearch vector stores.
+///
+/// Layout: `~/.cache/tldr/stores/<hash>/` where `<hash>` is the first 16 hex
+/// chars of the MD5 of the canonicalized project root. Both the daemon and
+/// cold CLI call this so they resolve a BYTE-IDENTICAL path (TLDR-zxb
+/// requirement). The directory is OUTSIDE the indexed corpus (satisfying
+/// the store-location precondition for the freshness gate).
+pub fn store_dir_for(project_root: &std::path::Path) -> std::path::PathBuf {
+    let canonical = project_root
+        .canonicalize()
+        .unwrap_or_else(|_| project_root.to_path_buf());
+    let digest = md5::compute(canonical.to_string_lossy().as_bytes());
+    let hash = &format!("{:x}", digest)[..16];
+    dirs::cache_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+        .join("tldr")
+        .join("stores")
+        .join(hash)
+}
+
 /// Cache statistics
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CacheStats {
@@ -560,5 +644,53 @@ mod tests {
         assert_eq!(options.model, EmbeddingModel::ArcticM);
         assert!(!options.show_progress);
         assert!(options.batch_size >= 16 && options.batch_size <= 64);
+    }
+
+    #[test]
+    fn parse_valid_models() {
+        assert_eq!(EmbeddingModel::parse("arctic-m").unwrap(), EmbeddingModel::ArcticM);
+        assert_eq!(EmbeddingModel::parse("m").unwrap(), EmbeddingModel::ArcticM);
+        assert_eq!(EmbeddingModel::parse("arctic-l").unwrap(), EmbeddingModel::ArcticL);
+        assert_eq!(EmbeddingModel::parse("arctic-xs").unwrap(), EmbeddingModel::ArcticXS);
+        assert_eq!(EmbeddingModel::parse("arctic-m-long").unwrap(), EmbeddingModel::ArcticMLong);
+    }
+
+    #[test]
+    fn parse_invalid_model() {
+        assert!(EmbeddingModel::parse("invalid").is_err());
+    }
+
+    #[test]
+    fn resolve_config_model_honored() {
+        use crate::config::TldrConfig;
+        let config = TldrConfig::from_str(r#"{"embedding": {"model": "arctic-l"}}"#).unwrap();
+        let model = EmbeddingModel::resolve(None, &config).unwrap();
+        assert_eq!(model, EmbeddingModel::ArcticL);
+    }
+
+    #[test]
+    fn resolve_flag_overrides_config() {
+        use crate::config::TldrConfig;
+        let config = TldrConfig::from_str(r#"{"embedding": {"model": "arctic-l"}}"#).unwrap();
+        let model = EmbeddingModel::resolve(Some("arctic-m"), &config).unwrap();
+        assert_eq!(model, EmbeddingModel::ArcticM);
+    }
+
+    #[test]
+    fn resolve_no_flag_no_config_returns_default() {
+        use crate::config::TldrConfig;
+        let config = TldrConfig::default();
+        let model = EmbeddingModel::resolve(None, &config).unwrap();
+        assert_eq!(model, EmbeddingModel::ArcticM);
+    }
+
+    #[test]
+    fn resolve_non_local_provider_errors() {
+        use crate::config::TldrConfig;
+        let config =
+            TldrConfig::from_str(r#"{"embedding": {"provider": "openai"}}"#).unwrap();
+        let result = EmbeddingModel::resolve(None, &config);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not supported"));
     }
 }

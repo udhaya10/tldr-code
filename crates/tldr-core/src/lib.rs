@@ -35,8 +35,10 @@
 #![warn(missing_docs)]
 #![warn(rustdoc::missing_crate_level_docs)]
 
+pub mod config;
 pub mod error;
 pub mod git;
+pub mod liveness;
 pub mod types;
 pub mod validation;
 pub mod walker;
@@ -94,6 +96,7 @@ pub mod fix;
 pub mod wrappers;
 
 // Re-export main types for convenience
+pub use config::TldrConfig;
 pub use error::TldrError;
 pub use types::*;
 
@@ -126,8 +129,9 @@ pub use search::{
     enriched_search, enriched_search_with_callgraph_cache, enriched_search_with_index,
     enriched_search_with_structure_cache, hybrid_search, read_callgraph_cache,
     read_structure_cache, search, search_with_inner, write_structure_cache, Bm25Index, Bm25Result,
-    CallGraphLookup, EmbeddingClient, EnrichedResult, EnrichedSearchOptions, EnrichedSearchReport,
-    HybridResult, HybridSearchReport, SearchMatch, SearchMode, StructureLookup, Tokenizer,
+    CallGraphLookup, EnrichedResult, EnrichedSearchOptions, EnrichedSearchReport,
+    HybridResult, HybridSearchReport, SearchMatch, SearchMode, SemanticResult, StructureLookup,
+    Tokenizer,
 };
 
 /// Result type alias for all TLDR operations

@@ -34,7 +34,6 @@ use rayon::prelude::*;
 use super::cross_file_types::{CallGraphIR, CallSite, CallType, FileIR};
 use super::import_resolver::{ImportResolver, ReExportTracer};
 use super::module_index::ModuleIndex;
-use super::type_aware_resolver::TypeAwareCallResolver;
 use super::type_resolver::{expand_union_type, MAX_UNION_EXPANSION};
 use crate::types::Language;
 
@@ -626,17 +625,86 @@ pub fn build_project_call_graph_v2(
         return Err(BuildError::UnsupportedLanguage(config.language.clone()));
     }
 
+    // Gate-1 phase timers (TLDR-zde): env-gated, zero cost when unset. Splits
+    // the build into SCAN / PARSE (per-file, memoizable) / COMPOSE (global
+    // resolution) so the chunk-store design's compose budget can be measured
+    // on the real pipeline before any storage work. Enable: TLDR_PHASE_TIMING=1.
+    let phase_timing = std::env::var_os("TLDR_PHASE_TIMING").is_some();
+    let t_start = std::time::Instant::now();
+
     // Step 2: Scan project files (Phase 14b)
     let scanned_files = scan_project_files(root, &config.language, &config)?;
-
-    // Step 3: Create IR with capacity hint
-    let mut ir =
-        CallGraphIR::with_capacity(root.to_path_buf(), &config.language, scanned_files.len());
+    let t_scan = t_start.elapsed();
 
     // Step 4: Build function and class indices in parallel (Phase 14c)
     // Per M1.9: Build indices completely before resolution phase
     let (_func_index, _class_index, file_irs) =
         build_indices_parallel(&scanned_files, root, &config.language, &config);
+    let t_parse = t_start.elapsed() - t_scan;
+
+    // Steps 3 + 5-11 (TLDR-iqr seam): compose the graph from the per-file IRs.
+    let ir = compose_call_graph_v2(root, &config, file_irs)?;
+
+    if phase_timing {
+        let t_compose = t_start.elapsed() - t_scan - t_parse;
+        eprintln!(
+            "[phase-timing] lang={} files={} funcs={} edges={} | scan={}ms parse={}ms compose={}ms total={}ms",
+            config.language,
+            ir.files.len(),
+            ir.function_count(),
+            ir.edges.len(),
+            t_scan.as_millis(),
+            t_parse.as_millis(),
+            t_compose.as_millis(),
+            t_start.elapsed().as_millis(),
+        );
+    }
+
+    return Ok(ir);
+}
+
+/// TLDR-iqr seam: scan + parse phase only — produces the per-file IRs that
+/// [`compose_call_graph_v2`] consumes. Behavior-identical to the front half
+/// of [`build_project_call_graph_v2`]; the daemon's FileIR memo re-parses
+/// single changed files by calling [`build_indices_parallel`] on a one-file
+/// slice and composing with memoized IRs for the rest.
+pub fn parse_project_file_irs(
+    root: &Path,
+    config: &BuildConfig,
+) -> Result<Vec<FileIR>, BuildError> {
+    if !root.exists() || !root.is_dir() {
+        return Err(BuildError::RootNotFound(root.to_path_buf()));
+    }
+    let language = normalize_language_string(&config.language);
+    if !is_supported_language(&language) {
+        return Err(BuildError::UnsupportedLanguage(language));
+    }
+    let scanned_files = scan_project_files(root, &language, config)?;
+    let (_func_index, _class_index, file_irs) =
+        build_indices_parallel(&scanned_files, root, &language, config);
+    Ok(file_irs)
+}
+
+/// TLDR-iqr seam: compose phase — everything after parse (IR assembly,
+/// module/function/class indexes, import resolution, call resolution, edge
+/// dedup + canonical sort). Pure function of (root manifests/disk, config,
+/// file_irs): chaining [`parse_project_file_irs`] into this function is
+/// byte-identical to [`build_project_call_graph_v2`] (7-corpus sha256 gate,
+/// TLDR-iqr). NOTE: when `config.use_type_resolution` is set, the resolution
+/// loop still reads source files for receiver-type enrichment — folding that
+/// into parse-time FileIR artifacts is TLDR-726 (S3) scope, deliberately NOT
+/// done here (it would change observable FileIR serialization; Codex round-3
+/// Q6 finding on TLDR-iqr).
+pub fn compose_call_graph_v2(
+    root: &Path,
+    config: &BuildConfig,
+    file_irs: Vec<FileIR>,
+) -> Result<CallGraphIR, BuildError> {
+    let mut config = config.clone();
+    config.language = normalize_language_string(&config.language);
+
+    // Step 3: Create IR with capacity hint
+    let mut ir = CallGraphIR::with_capacity(root.to_path_buf(), &config.language, file_irs.len());
 
     // Step 5: Add FileIRs to the CallGraphIR
     for file_ir in file_irs {
@@ -675,9 +743,8 @@ pub fn build_project_call_graph_v2(
     )
     .map_err(|e| BuildError::Io(std::io::Error::other(e.to_string())))?;
 
-    // Step 8: Create ImportResolver with LRU cache
-    let mut import_resolver = ImportResolver::with_default_cache(&module_index);
-    let mut reexport_tracer = ReExportTracer::new(&module_index);
+    // Step 8: ImportResolver/ReExportTracer are created PER RAYON WORKER in
+    // the resolution par_iter below (TLDR-zro) — see the map_init note there.
 
     // Step 9: Build FuncIndex and ClassIndex for call resolution
     // We need our own copies because the IR's indices use a different format
@@ -871,101 +938,126 @@ pub fn build_project_call_graph_v2(
         }
     }
 
-    // Step 9b: Create type-aware resolver for chained calls and MRO-based resolution
-    let func_path_map = func_index.to_path_map();
-    let class_path_map = class_index.to_path_map();
-    let mut type_resolver =
-        TypeAwareCallResolver::new(&module_index, &func_path_map, &class_path_map);
+    // Step 9b (REMOVED, TLDR-zro / Codex round-1 Q3 VERIFIED): a
+    // TypeAwareCallResolver was constructed here and fed a full clone of
+    // every FileIR, then never read — pure dead work in the compose hot
+    // path (django: 2,917 FileIR clones per build). add_file_ir only
+    // populates resolver-local maps (type_aware_resolver.rs), so removal
+    // is behavior-preserving; verified by the 7-corpus sha256 gate.
 
-    // Feed all FileIRs and class defs into the resolver.
-    // high-bundle-progress-determinism-coverage-v1 (N2): sorted insertion
-    // so the resolver builds the same internal type tables on every run.
-    for (file_path, file_ir) in &sorted_files {
-        type_resolver.add_file_ir((*file_path).clone(), (*file_ir).clone());
-    }
-
-    // Step 10: For each file, resolve imports and then resolve calls
-    // Note: Cannot parallelize easily due to ImportResolver having mutable cache
-    // Future optimization: Use parallel iteration with thread-local resolvers
-
-    let mut edge_set: HashSet<super::cross_file_types::CrossFileCallEdge> =
-        HashSet::with_capacity(ir.function_count() * 4);
-
-    // Collect file paths to avoid borrow issues.
+    // Step 10: For each file, resolve imports and then resolve calls.
+    //
+    // TLDR-zro: this loop is parallelized with a flat rayon par_iter (M1.8:
+    // no nested parallelism — same global pool the parse phase uses). Every
+    // shared input (ModuleIndex, FuncIndex, ClassIndex, root) is read-only;
+    // the only mutable state, the two memo caches, memoizes PURE lookups:
+    //   - ImportResolver's LRU key includes `current_file`, so there is no
+    //     cross-file entry sharing to lose by going per-worker;
+    //   - ReExportTracer is keyed (module, name, max_depth) over immutable
+    //     ModuleIndex + on-disk content.
+    // `map_init` gives each rayon WORKER its own cache pair (duplicate pure
+    // lookups across workers are accepted; zero contention, no locks).
+    //
+    // Determinism: per-file output is a pure function of (FileIR, immutable
+    // indexes, frozen disk), `par_iter().map().collect()` preserves input
+    // order, and the dedup+insert below consumes the per-file edge vecs in
+    // the SAME sorted file order as the previous sequential loop — so the
+    // edge set, insertion sequence, and final canonical sort are all
+    // byte-identical to the sequential build (verified by the 7-corpus
+    // sha256 gate on TLDR-zro).
     //
     // high-bundle-progress-determinism-coverage-v1 (N2): the underlying
     // `ir.files` is a `HashMap<PathBuf, FileIR>` whose iteration order is
-    // randomized per process. Resolving calls in different orders feeds
-    // the shared `ImportResolver` LRU cache (and the `ReExportTracer`)
-    // different sequences of queries, which in turn alters which calls
-    // resolve and how many edges get added — so `tldr calls` returned a
-    // different `total_edges` count on every run (e.g. flask: 935, 910,
-    // 922 across three invocations). Sorting the paths gives every run
-    // the same resolution sequence and therefore the same edge set.
+    // randomized per process; sort the paths so every run resolves files
+    // in the same sequence.
     let mut file_paths: Vec<PathBuf> = ir.files.keys().cloned().collect();
     file_paths.sort();
 
-    for file_path in file_paths {
-        // Get the FileIR (need to clone to avoid borrow issues)
-        let mut file_ir = match ir.files.get(&file_path) {
-            Some(f) => f.clone(),
-            None => continue,
-        };
+    use super::cross_file_types::CrossFileCallEdge;
+    let per_file_edges: Vec<Vec<CrossFileCallEdge>> = file_paths
+        .par_iter()
+        .map_init(
+            || {
+                (
+                    ImportResolver::with_default_cache(&module_index),
+                    ReExportTracer::new(&module_index),
+                )
+            },
+            |(import_resolver, reexport_tracer), file_path| {
+                // Get the FileIR (need to clone to avoid borrow issues)
+                let mut file_ir = match ir.files.get(file_path) {
+                    Some(f) => f.clone(),
+                    None => return Vec::new(),
+                };
 
-        if config.use_type_resolution {
-            if let Ok(lang) = Language::from_str(&config.language) {
-                if let Ok(source) = fs::read_to_string(root.join(&file_ir.path)) {
-                    apply_type_resolution(&mut file_ir, &source, lang);
+                if config.use_type_resolution {
+                    if let Ok(lang) = Language::from_str(&config.language) {
+                        if let Ok(source) = fs::read_to_string(root.join(&file_ir.path)) {
+                            apply_type_resolution(&mut file_ir, &source, lang);
+                        }
+                    }
                 }
-            }
-        }
 
-        // Step 10a: Resolve imports for this file
-        let resolved_imports = resolve_imports_for_file(&file_ir, &mut import_resolver, root);
+                // Step 10a: Resolve imports for this file
+                let resolved_imports = resolve_imports_for_file(&file_ir, import_resolver, root);
 
-        // Step 10b: Build import map from resolved imports.
-        //
-        // VAL-007: pass the ModuleIndex so aliased imports (e.g. `@/util`)
-        // get rewritten to the canonical func_index key (e.g.
-        // `./apps/web/src/util`). Without this, cross-file edges through
-        // tsconfig path aliases are silently dropped.
-        let (import_map, mut module_imports) =
-            build_import_map_with_index(&resolved_imports, Some(&module_index));
+                // Step 10b: Build import map from resolved imports.
+                //
+                // VAL-007: pass the ModuleIndex so aliased imports (e.g. `@/util`)
+                // get rewritten to the canonical func_index key (e.g.
+                // `./apps/web/src/util`). Without this, cross-file edges through
+                // tsconfig path aliases are silently dropped.
+                let (import_map, mut module_imports) =
+                    build_import_map_with_index(&resolved_imports, Some(&module_index));
 
-        // Step 10b.1: Augment module_imports for Go cross-package function calls.
-        // Go imports use full module paths that don't match func_index keys directly.
-        // This bridges the gap by mapping Go package aliases to func_index module keys.
-        if config.language == "go" {
-            augment_go_module_imports(&file_ir.imports, &mut module_imports, &func_index);
-        }
+                // Step 10b.1: Augment module_imports for Go cross-package function calls.
+                // Go imports use full module paths that don't match func_index keys directly.
+                // This bridges the gap by mapping Go package aliases to func_index module keys.
+                if config.language == "go" {
+                    augment_go_module_imports(&file_ir.imports, &mut module_imports, &func_index);
+                }
 
-        // Step 10c: Resolve calls using the import map and indices
-        let mut resolution_context = ResolutionContext {
-            import_map: &import_map,
-            module_imports: &module_imports,
-            func_index: &func_index,
-            class_index: &class_index,
-            reexport_tracer: &mut reexport_tracer,
-            current_file: &file_ir.path,
-            root,
-            language: &config.language,
-        };
-        let resolved_calls = extract_and_resolve_calls(&file_ir, &mut resolution_context);
+                // Step 10c: Resolve calls using the import map and indices
+                let mut resolution_context = ResolutionContext {
+                    import_map: &import_map,
+                    module_imports: &module_imports,
+                    func_index: &func_index,
+                    class_index: &class_index,
+                    reexport_tracer,
+                    current_file: &file_ir.path,
+                    root,
+                    language: &config.language,
+                };
+                let resolved_calls = extract_and_resolve_calls(&file_ir, &mut resolution_context);
 
-        // Step 10d: Add resolved edges to the IR (both cross-file and intra-file)
-        for (call_site, target) in resolved_calls.resolved {
-            use super::cross_file_types::CrossFileCallEdge;
+                // Step 10d: Map resolved calls to edges (no shared writes here;
+                // dedup + IR insertion happen serially below, in file order).
+                resolved_calls
+                    .resolved
+                    .into_iter()
+                    .map(|(call_site, target)| {
+                        let src_func = resolve_caller_name(&file_ir, &call_site);
+                        let via_import =
+                            compute_via_import(&call_site, &import_map, &module_imports);
+                        CrossFileCallEdge {
+                            src_file: file_path.clone(),
+                            src_func,
+                            dst_file: target.file.clone(),
+                            dst_func: target.qualified_name(),
+                            call_type: call_site.call_type,
+                            via_import,
+                        }
+                    })
+                    .collect()
+            },
+        )
+        .collect();
 
-            let src_func = resolve_caller_name(&file_ir, &call_site);
-            let via_import = compute_via_import(&call_site, &import_map, &module_imports);
-            let edge = CrossFileCallEdge {
-                src_file: file_path.clone(),
-                src_func,
-                dst_file: target.file.clone(),
-                dst_func: target.qualified_name(),
-                call_type: call_site.call_type,
-                via_import,
-            };
+    // Serial dedup + insertion, in the same sorted file order as before.
+    let mut edge_set: HashSet<CrossFileCallEdge> =
+        HashSet::with_capacity(ir.function_count() * 4);
+    for edges in per_file_edges {
+        for edge in edges {
             if edge_set.insert(edge.clone()) {
                 ir.add_edge(edge);
             }

@@ -106,11 +106,13 @@ echo "node_modules/" >> .tldrignore
 find src/ -name "*.py" | head -1000 | xargs tldr structure
 ```
 
-2. Use daemon with smaller cache:
+2. Use the daemon (it self-terminates when the project is dormant):
 ```bash
-# Daemon auto-shuts down after 300s idle
-# Adjust idle timeout (in seconds)
-tldr daemon start --idle-timeout 600
+# The daemon shuts down after 30 min with no project presence — no client,
+# no tldr/MCP invocation, no file writes — and never during an in-flight
+# index build (presence-based liveness, epic TLDR-cxa).
+tldr daemon start
+tldr daemon status   # shows per-source presence ages + the idle deadline
 ```
 
 3. Use shallow analysis:

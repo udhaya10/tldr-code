@@ -31,7 +31,6 @@ use tldr_core::semantic::{
     Embedder,
     EmbeddingCache,
     EmbeddingModel,
-    SemanticIndex,
     SemanticSearchResult,
 };
 
@@ -532,30 +531,40 @@ fn test_embedding_cache_open() {
 }
 
 // ============================================================================
-// SemanticIndex Tests (require model - marked as ignore)
+// VectorStore Tests (require model - marked as ignore)
+//
+// TLDR-7xz.7: these covered SemanticIndex build/search; the type was removed
+// (serving goes through the daemon's resident VectorStore only), so they now
+// exercise the store builder + search — the path production actually runs.
 // ============================================================================
 
 #[test]
 #[ignore = "Requires model download (~110MB)"]
-fn test_semantic_index_build() {
+fn test_vector_store_build() {
     let dir = create_test_dir();
     write_file(&dir, "test.py", "def process_data():\n    return 42");
 
     let build_opts = BuildOptions::default();
-    let result = SemanticIndex::build(dir.path(), build_opts, None);
+    let result = tldr_core::semantic::vector_store::VectorStore::build(dir.path(), &build_opts, None);
     assert!(result.is_ok());
 }
 
 #[test]
 #[ignore = "Requires model download (~110MB)"]
-fn test_semantic_index_search() {
+fn test_vector_store_search() {
     let dir = create_test_dir();
     write_file(&dir, "test.py", "def process_data():\n    return 42");
 
-    let mut index = SemanticIndex::build(dir.path(), BuildOptions::default(), None)
-        .expect("Failed to build index");
+    let store = tldr_core::semantic::vector_store::VectorStore::build(
+        dir.path(),
+        &BuildOptions::default(),
+        None,
+    )
+    .expect("Failed to build store");
 
-    let result = index.search("process data", &IndexSearchOptions::default());
+    let mut embedder = Embedder::new(BuildOptions::default().model).expect("embedder");
+    let qv = embedder.embed_query("process data").expect("embed query");
+    let result = store.search(&qv, IndexSearchOptions::default().top_k);
     assert!(result.is_ok());
 }
 

@@ -131,6 +131,113 @@ pub async fn try_daemon_route_async<T: DeserializeOwned>(
     serde_json::from_value(result_value).ok()
 }
 
+// =============================================================================
+// Semantic Router (require-warm, TLDR-7xz.1)
+// =============================================================================
+
+/// Outcome of routing a semantic query to the daemon.
+///
+/// Unlike [`try_daemon_route`] (whose `None` means "fall back to cold
+/// compute"), semantic has NO cold fallback: the caller must surface each
+/// non-hit honestly. The four states are machine-distinguishable so the CLI
+/// can print the right guidance for each.
+#[derive(Debug)]
+pub enum SemanticRoute<T> {
+    /// Warm daemon served the query at full quality.
+    Hit(T),
+    /// No daemon is listening for this project.
+    DaemonDown,
+    /// Daemon is up but the resident store can't serve yet
+    /// (`status: "not_ready"`): cold store or build in progress. The message
+    /// carries the daemon's guidance (e.g. "index not built — run tldr warm").
+    NotReady(String),
+    /// Daemon returned a real error, or the response was malformed.
+    Error(String),
+}
+
+/// Route a semantic query to the daemon — require-warm, never fall back.
+///
+/// TLDR-7xz.1: `tldr semantic` has exactly two modes — served warm at full
+/// quality, or an honest explanation. This is the routing primitive for the
+/// first mode; every non-`Hit` variant maps to an explanation, never to a
+/// silent cold serve. Kept separate from [`try_daemon_route`] so the ~20
+/// cheap AST commands keep their legitimate compute-cold-on-miss behavior.
+pub fn route_semantic<T: DeserializeOwned>(
+    project: &Path,
+    params: serde_json::Value,
+) -> SemanticRoute<T> {
+    let runtime = match tokio::runtime::Runtime::new() {
+        Ok(rt) => rt,
+        Err(e) => return SemanticRoute::Error(format!("failed to start tokio runtime: {e}")),
+    };
+    runtime.block_on(route_semantic_async(project, params))
+}
+
+async fn route_semantic_async<T: DeserializeOwned>(
+    project: &Path,
+    params: serde_json::Value,
+) -> SemanticRoute<T> {
+    let project = project.canonicalize().unwrap_or_else(|_| {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(project)
+    });
+
+    let mut cmd_obj = serde_json::json!({ "cmd": "semantic" });
+    if let (serde_json::Value::Object(params_obj), serde_json::Value::Object(cmd_map)) =
+        (params, &mut cmd_obj)
+    {
+        for (key, value) in params_obj {
+            cmd_map.insert(key, value);
+        }
+    }
+    let command_json = match serde_json::to_string(&cmd_obj) {
+        Ok(json) => json,
+        Err(e) => return SemanticRoute::Error(format!("failed to encode request: {e}")),
+    };
+
+    let response = match send_raw_command(&project, &command_json).await {
+        Ok(resp) => resp,
+        Err(DaemonError::NotRunning) => return SemanticRoute::DaemonDown,
+        Err(DaemonError::ConnectionRefused) => return SemanticRoute::DaemonDown,
+        Err(e) => return SemanticRoute::Error(format!("daemon request failed: {e}")),
+    };
+
+    let response_value: serde_json::Value = match serde_json::from_str(&response) {
+        Ok(v) => v,
+        Err(e) => return SemanticRoute::Error(format!("malformed daemon response: {e}")),
+    };
+
+    match response_value.get("status").and_then(|s| s.as_str()) {
+        Some("not_ready") => {
+            let msg = response_value
+                .get("error")
+                .and_then(|e| e.as_str())
+                .unwrap_or("index not built — run tldr warm")
+                .to_string();
+            return SemanticRoute::NotReady(msg);
+        }
+        Some("error") => {
+            let msg = response_value
+                .get("error")
+                .and_then(|e| e.as_str())
+                .unwrap_or("daemon error")
+                .to_string();
+            return SemanticRoute::Error(msg);
+        }
+        _ => {}
+    }
+
+    let result_value = response_value
+        .get("result")
+        .cloned()
+        .unwrap_or(response_value);
+    match serde_json::from_value(result_value) {
+        Ok(v) => SemanticRoute::Hit(v),
+        Err(e) => SemanticRoute::Error(format!("malformed daemon result: {e}")),
+    }
+}
+
 /// Check if the daemon is running for a project.
 ///
 /// This is a lightweight check that doesn't send a command.

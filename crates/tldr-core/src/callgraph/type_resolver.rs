@@ -411,6 +411,209 @@ pub fn resolve_annotation(annotation: &str) -> Option<String> {
 }
 
 // =============================================================================
+// Python Per-File Receiver Index (TLDR-olg — mirrors the rust Gate-1 rounds)
+// =============================================================================
+
+/// Per-file Python receiver-type index. The legacy path rebuilt a `lines`
+/// Vec TWICE per call site and ran backwards whole-file scans per call —
+/// 97.6% of the django call-graph build (profiled). This index builds the
+/// line table and the enclosing-class snapshot once, then memoizes the
+/// annotation/constructor scans per DISTINCT receiver, answered per call
+/// site via `partition_point`. Primitive-level drop-ins: `annotation`,
+/// `constructor`, and `enclosing_class` return exactly what
+/// `find_type_annotation`, `find_constructor_assignment`, and
+/// `find_enclosing_class` return (differential-gated below).
+pub struct PythonReceiverIndex<'s> {
+    lines: Vec<&'s str>,
+    /// `find_enclosing_class(source, L)` answer when its at-target-line
+    /// condition FIRES at L (1-based); `None` = fall through to the EOF
+    /// fallback (`final_class`), replicating the legacy walk exactly.
+    enclosing_fired: Vec<Option<String>>,
+    /// Legacy EOF fallback: the last class def seen in the whole file.
+    final_class: Option<String>,
+    /// 0-based indices of lines containing ": " — the only lines a
+    /// `"{var}: "` annotation pattern can match (output-identical filter).
+    colon_lines: Vec<usize>,
+    /// 0-based indices of lines containing '=' — the only lines the
+    /// constructor chain (`=` / `:=` after the var) can succeed on.
+    eq_lines: Vec<usize>,
+    /// Per-var: EVERY line containing `"{var}: "`, with its extraction
+    /// result. Legacy `find_type_annotation` ABORTS at the nearest match
+    /// even when extraction fails (the `?`), so failures are stored too.
+    annotation_cache: std::collections::HashMap<String, Vec<(usize, Option<String>)>>,
+    /// Per-var: lines where the full constructor chain SUCCEEDS. Legacy
+    /// `find_constructor_assignment` CONTINUES past failures, so only
+    /// successes are stored.
+    constructor_cache: std::collections::HashMap<String, Vec<(usize, String)>>,
+}
+
+impl<'s> PythonReceiverIndex<'s> {
+    /// Builds the line table and the enclosing-class snapshot in one pass.
+    pub fn new(source: &'s str) -> Self {
+        let lines: Vec<&str> = source.lines().collect();
+
+        // Single forward pass replicating find_enclosing_class: snapshot
+        // the at-target-line answer for every L; the EOF fallback (last
+        // class def) covers all non-firing lines and L beyond EOF.
+        let mut enclosing_fired: Vec<Option<String>> = Vec::with_capacity(lines.len());
+        let mut current_class: Option<String> = None;
+        let mut indent_level = 0usize;
+        for line_content in &lines {
+            let trimmed = line_content.trim_start();
+            if trimmed.starts_with("class ") {
+                if let Some(class_name) = extract_class_name(trimmed) {
+                    indent_level = line_content.len() - trimmed.len();
+                    current_class = Some(class_name);
+                }
+            }
+            let fired = match &current_class {
+                Some(class_name) => {
+                    let line_indent = line_content.len() - line_content.trim_start().len();
+                    (line_indent > indent_level || line_content.trim().is_empty())
+                        .then(|| class_name.clone())
+                }
+                None => None,
+            };
+            enclosing_fired.push(fired);
+        }
+        let final_class = current_class;
+
+        let colon_lines = lines
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, l)| l.contains(": ").then_some(idx))
+            .collect();
+        let eq_lines = lines
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, l)| l.contains('=').then_some(idx))
+            .collect();
+
+        Self {
+            lines,
+            enclosing_fired,
+            final_class,
+            colon_lines,
+            eq_lines,
+            annotation_cache: std::collections::HashMap::new(),
+            constructor_cache: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Drop-in for [`find_enclosing_class`]: fired-at-line answer, else the
+    /// EOF fallback (covers L == 0, L beyond EOF, and non-firing lines).
+    fn enclosing_class(&self, line: u32) -> Option<String> {
+        if line >= 1 {
+            if let Some(Some(class_name)) = self.enclosing_fired.get(line as usize - 1) {
+                return Some(class_name.clone());
+            }
+        }
+        self.final_class.clone()
+    }
+
+    /// Drop-in for `find_type_annotation`: nearest line at-or-below the
+    /// call line containing `"{var}: "`; its extraction result is returned
+    /// VERBATIM (legacy aborts there whether extraction succeeded or not).
+    fn annotation(&mut self, var_name: &str, call_line: u32) -> Option<String> {
+        // Legacy quirk: first access is lines.get(call_line - 1)? — a call
+        // line beyond EOF (or 0) returns None outright.
+        if call_line == 0 || call_line as usize > self.lines.len() {
+            return None;
+        }
+        if !self.annotation_cache.contains_key(var_name) {
+            let pattern = format!("{}: ", var_name);
+            let mut entries: Vec<(usize, Option<String>)> = Vec::new();
+            for &idx in &self.colon_lines {
+                let line = self.lines[idx];
+                if let Some(i) = line.find(&pattern) {
+                    let after_colon = &line[i + pattern.len()..];
+                    entries.push((idx, extract_type_from_annotation(after_colon)));
+                }
+            }
+            self.annotation_cache
+                .insert(var_name.to_string(), entries);
+        }
+        let entries = &self.annotation_cache[var_name];
+        let pp = entries.partition_point(|(idx, _)| *idx < call_line as usize);
+        (pp > 0).then(|| entries[pp - 1].1.clone()).flatten()
+    }
+
+    /// Drop-in for `find_constructor_assignment`: nearest line at-or-below
+    /// the call line where the full chain (boundary-checked var match,
+    /// `=`/`:=`, `(`, normalize) succeeds — legacy continues past failures.
+    fn constructor(&mut self, var_name: &str, call_line: u32) -> Option<String> {
+        if call_line == 0 || call_line as usize > self.lines.len() {
+            return None;
+        }
+        if !self.constructor_cache.contains_key(var_name) {
+            let mut entries: Vec<(usize, String)> = Vec::new();
+            for &idx in &self.eq_lines {
+                let line = self.lines[idx];
+                let Some(i) = find_var_in_line(line, var_name) else {
+                    continue;
+                };
+                let mut tail = line[i + var_name.len()..].trim_start();
+                if let Some(rest) = tail.strip_prefix(":=") {
+                    tail = rest.trim_start();
+                } else if let Some(rest) = tail.strip_prefix('=') {
+                    tail = rest.trim_start();
+                } else {
+                    continue;
+                }
+                if let Some(paren_idx) = tail.find('(') {
+                    let potential_type = tail[..paren_idx].trim();
+                    if let Some(type_name) = normalize_type_name(potential_type) {
+                        entries.push((idx, type_name));
+                    }
+                }
+            }
+            self.constructor_cache
+                .insert(var_name.to_string(), entries);
+        }
+        let entries = &self.constructor_cache[var_name];
+        let pp = entries.partition_point(|(idx, _)| *idx < call_line as usize);
+        (pp > 0).then(|| entries[pp - 1].1.clone())
+    }
+
+    /// Drop-in equivalent of [`resolve_python_receiver_type`], answered
+    /// from the per-file index. The wrapper logic (self handling, Union /
+    /// confidence rules) is copied verbatim; only the three scan
+    /// primitives are swapped for indexed lookups.
+    pub fn resolve(
+        &mut self,
+        call_line: u32,
+        receiver_name: &str,
+        enclosing_class: Option<&str>,
+    ) -> (Option<String>, Confidence) {
+        if receiver_name == "self" {
+            if let Some(class_name) = enclosing_class {
+                return (Some(class_name.to_string()), Confidence::High);
+            }
+            if let Some(class_name) = self.enclosing_class(call_line) {
+                return (Some(class_name), Confidence::High);
+            }
+            return (None, Confidence::Low);
+        }
+
+        if let Some(type_name) = self.annotation(receiver_name, call_line) {
+            if type_name.starts_with("Union[") || type_name.contains('|') {
+                if expand_union_type(&type_name, None).is_none() {
+                    return (None, Confidence::Low);
+                }
+                return (Some(type_name), Confidence::Medium);
+            }
+            return (Some(type_name), Confidence::High);
+        }
+
+        if let Some(type_name) = self.constructor(receiver_name, call_line) {
+            return (Some(type_name), Confidence::High);
+        }
+
+        (None, Confidence::Low)
+    }
+}
+
+// =============================================================================
 // TypeScript Type Resolution (Phase 9)
 // =============================================================================
 
@@ -610,6 +813,196 @@ fn is_likely_interface(type_name: &str) -> bool {
             .nth(1)
             .map(|c| c.is_uppercase())
             .unwrap_or(false)
+}
+
+// =============================================================================
+// TypeScript/JavaScript Per-File Receiver Index (TLDR-olg)
+// =============================================================================
+
+/// Per-file TypeScript/JavaScript receiver-type index (the dispatcher routes
+/// BOTH languages through the same legacy resolver). Same shape as the
+/// python index: line table + enclosing-class snapshot built once, scan
+/// results memoized per distinct receiver. Unlike python, BOTH legacy scans
+/// here CONTINUE past failed extractions (no abort quirk), so both caches
+/// store successes only; and the enclosing-class walk has NO EOF fallback.
+pub struct TypeScriptReceiverIndex<'s> {
+    lines: Vec<&'s str>,
+    /// `find_typescript_enclosing_class(source, L)` answer at L (1-based);
+    /// `None` everywhere else — the legacy walk returns None at EOF.
+    enclosing_fired: Vec<Option<String>>,
+    /// 0-based indices of lines containing ": " (annotation candidates).
+    colon_lines: Vec<usize>,
+    /// 0-based indices of lines containing " = new " (constructor candidates).
+    new_lines: Vec<usize>,
+    /// Per-var: lines where the 4-prefix annotation attempt SUCCEEDS.
+    annotation_cache: std::collections::HashMap<String, Vec<(usize, String)>>,
+    /// Per-var: lines where the 4-prefix constructor attempt SUCCEEDS.
+    constructor_cache: std::collections::HashMap<String, Vec<(usize, String)>>,
+}
+
+const TS_DECL_PREFIXES: [&str; 4] = ["const ", "let ", "var ", ""];
+
+impl<'s> TypeScriptReceiverIndex<'s> {
+    /// Builds the line table and enclosing-class snapshot in one pass.
+    pub fn new(source: &'s str) -> Self {
+        let lines: Vec<&str> = source.lines().collect();
+
+        // Single forward pass replicating find_typescript_enclosing_class:
+        // brace-depth walk, loop-body order preserved exactly (depth update
+        // -> class-def check -> at-target answer -> class-exit check).
+        let mut enclosing_fired: Vec<Option<String>> = Vec::with_capacity(lines.len());
+        let mut current_class: Option<String> = None;
+        let mut brace_depth: i32 = 0;
+        let mut class_start_brace_depth: i32 = 0;
+        for line_content in &lines {
+            brace_depth += line_content.matches('{').count() as i32;
+            brace_depth -= line_content.matches('}').count() as i32;
+            let trimmed = line_content.trim();
+            if let Some(class_name) = extract_typescript_class_name(trimmed) {
+                class_start_brace_depth = brace_depth;
+                current_class = Some(class_name);
+            }
+            enclosing_fired.push(match &current_class {
+                Some(class_name) if brace_depth >= class_start_brace_depth => {
+                    Some(class_name.clone())
+                }
+                _ => None,
+            });
+            if brace_depth < class_start_brace_depth && current_class.is_some() {
+                current_class = None;
+            }
+        }
+
+        let colon_lines = lines
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, l)| l.contains(": ").then_some(idx))
+            .collect();
+        let new_lines = lines
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, l)| l.contains(" = new ").then_some(idx))
+            .collect();
+
+        Self {
+            lines,
+            enclosing_fired,
+            colon_lines,
+            new_lines,
+            annotation_cache: std::collections::HashMap::new(),
+            constructor_cache: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Drop-in for `find_typescript_enclosing_class` (no EOF fallback).
+    fn enclosing_class(&self, line: u32) -> Option<String> {
+        if line >= 1 {
+            if let Some(fired) = self.enclosing_fired.get(line as usize - 1) {
+                return fired.clone();
+            }
+        }
+        None
+    }
+
+    /// Drop-in for `find_typescript_annotation`: nearest line at-or-below
+    /// the call line where any of the 4 prefix patterns yields a successful
+    /// extraction (prefix order is priority WITHIN a line; failures fall
+    /// through to the next prefix, then the next line — successes only).
+    fn annotation(&mut self, var_name: &str, call_line: u32) -> Option<String> {
+        // Legacy quirk: first access is lines.get(call_line - 1)? — a call
+        // line of 0 or beyond EOF returns None outright.
+        if call_line == 0 || call_line as usize > self.lines.len() {
+            return None;
+        }
+        if !self.annotation_cache.contains_key(var_name) {
+            let mut entries: Vec<(usize, String)> = Vec::new();
+            for &idx in &self.colon_lines {
+                let line = self.lines[idx];
+                for prefix in &TS_DECL_PREFIXES {
+                    let pattern = format!("{}{}: ", prefix, var_name);
+                    if let Some(i) = line.find(&pattern) {
+                        if let Some(type_name) =
+                            extract_typescript_type(&line[i + pattern.len()..])
+                        {
+                            entries.push((idx, type_name));
+                            break; // first successful prefix wins the line
+                        }
+                    }
+                }
+            }
+            self.annotation_cache
+                .insert(var_name.to_string(), entries);
+        }
+        let entries = &self.annotation_cache[var_name];
+        let pp = entries.partition_point(|(idx, _)| *idx < call_line as usize);
+        (pp > 0).then(|| entries[pp - 1].1.clone())
+    }
+
+    /// Drop-in for `find_typescript_constructor`: same 4-prefix per-line
+    /// attempt against `"{prefix}{var} = new "`, successes only.
+    fn constructor(&mut self, var_name: &str, call_line: u32) -> Option<String> {
+        if call_line == 0 || call_line as usize > self.lines.len() {
+            return None;
+        }
+        if !self.constructor_cache.contains_key(var_name) {
+            let mut entries: Vec<(usize, String)> = Vec::new();
+            for &idx in &self.new_lines {
+                let line = self.lines[idx];
+                for prefix in &TS_DECL_PREFIXES {
+                    let pattern = format!("{}{} = new ", prefix, var_name);
+                    if let Some(i) = line.find(&pattern) {
+                        let after_new = &line[i + pattern.len()..];
+                        let type_end = after_new.find(['(', '<']).unwrap_or(after_new.len());
+                        let type_name = after_new[..type_end].trim();
+                        if let Some(normalized) = normalize_type_name(type_name) {
+                            entries.push((idx, normalized));
+                            break; // first successful prefix wins the line
+                        }
+                    }
+                }
+            }
+            self.constructor_cache
+                .insert(var_name.to_string(), entries);
+        }
+        let entries = &self.constructor_cache[var_name];
+        let pp = entries.partition_point(|(idx, _)| *idx < call_line as usize);
+        (pp > 0).then(|| entries[pp - 1].1.clone())
+    }
+
+    /// Drop-in equivalent of [`resolve_typescript_receiver_type`], answered
+    /// from the per-file index. Wrapper logic copied verbatim; only the
+    /// three scan primitives are swapped.
+    pub fn resolve(
+        &mut self,
+        call_line: u32,
+        receiver_name: &str,
+        enclosing_class: Option<&str>,
+    ) -> (Option<String>, Confidence) {
+        if receiver_name == "this" {
+            if let Some(class_name) = enclosing_class {
+                return (Some(class_name.to_string()), Confidence::High);
+            }
+            if let Some(class_name) = self.enclosing_class(call_line) {
+                return (Some(class_name), Confidence::High);
+            }
+            return (None, Confidence::Low);
+        }
+
+        if let Some(type_name) = self.annotation(receiver_name, call_line) {
+            let confidence = if is_likely_interface(&type_name) {
+                Confidence::Medium
+            } else {
+                Confidence::High
+            };
+            return (Some(type_name), confidence);
+        }
+
+        if let Some(type_name) = self.constructor(receiver_name, call_line) {
+            return (Some(type_name), Confidence::High);
+        }
+
+        (None, Confidence::Low)
+    }
 }
 
 // =============================================================================
@@ -1025,6 +1418,300 @@ fn find_rust_struct_literal(source: &str, var_name: &str, call_line: u32) -> Opt
     }
 
     None
+}
+
+// =============================================================================
+// Per-file Rust receiver-type index (TLDR-zde Gate-1 fix #2)
+// =============================================================================
+//
+// `resolve_rust_receiver_type` and its `find_rust_*` helpers re-scan the WHOLE
+// file source for EVERY call site (collecting a fresh `Vec` of lines, building
+// two `format!` pattern strings and running a substring search per line).
+// Profiling the call-graph build on tldr-code showed this text-scanning at
+// ~70% of the entire build (str::find + format! under apply_type_resolution).
+//
+// This index keeps the ORIGINAL per-line decision logic byte-for-byte (same
+// prefix order, same first-occurrence-of-pattern semantics, same
+// failed-extraction-continues behavior, same beyond-EOF early-None) but runs
+// each (variable, scan-kind) scan ONCE per file, memoized, and answers each
+// call site with a binary search for the nearest match at-or-before its line.
+// Cost goes from O(call_sites x file_lines) to O(distinct_receivers x
+// file_lines + call_sites x log matches), with identical outputs.
+
+/// Which legacy backward-scan a cached match list replicates.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum RustScanKind {
+    /// `let name: Type = ...` (find_rust_annotation)
+    Annotation,
+    /// `let name = Type::...` (find_rust_associated_function)
+    AssociatedFn,
+    /// `let name = Type { ...` (find_rust_struct_literal)
+    StructLiteral,
+}
+
+/// Per-file memoized index for Rust receiver-type resolution.
+pub struct RustReceiverIndex<'s> {
+    lines: Vec<&'s str>,
+    /// Enclosing-impl snapshot per 0-based line index, replicating
+    /// `find_rust_enclosing_impl`'s brace-depth walk state at that line.
+    impl_by_line: Vec<Option<String>>,
+    /// All-identifier bindings extracted in ONE inverted pass:
+    /// (ident, kind) -> ascending (line_idx, extracted_type) successes.
+    /// Covers every receiver that is a plain Rust identifier — the 99% case.
+    all_bindings: std::collections::HashMap<(String, RustScanKind), Vec<(usize, String)>>,
+    /// NON-identifier receivers (e.g. "self.config", "x[0]"), inverted the
+    /// same way (TLDR-zde Gate-1 round 5). A legacy pattern
+    /// `let {var}: ` / `let {var} = ` can only match at an occurrence of
+    /// "let " / "let mut ", and `{var}` must then be exactly the text between
+    /// that occurrence and a later ": " / " = " in the line — so per let-line
+    /// the set of weird vars that can EVER match is enumerable: one candidate
+    /// per separator occurrence per prefix occurrence. The previous memoized
+    /// per-(receiver, kind) scan was distinct-receivers x let_lines x 6
+    /// patterns of `str::find` (72% of compose, profiled), almost all
+    /// guaranteed-miss since dotted receivers never bind in valid Rust.
+    weird_bindings: std::collections::HashMap<(String, RustScanKind), Vec<(usize, String)>>,
+}
+
+/// True when the legacy pattern `let {var}: ` / `let {var} = ` can ONLY match
+/// where the inverted identifier parse would also record `var`: plain idents.
+fn is_plain_ident(s: &str) -> bool {
+    !s.is_empty()
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+}
+
+/// Legacy extraction applied after a matched `let {var}{sep}` pattern —
+/// shared verbatim by the ident and weird inverted passes.
+fn extract_for_kind(kind: RustScanKind, after: &str) -> Option<String> {
+    match kind {
+        RustScanKind::Annotation => extract_rust_type_from_annotation(after),
+        RustScanKind::AssociatedFn => after.find("::").map(|c| after[..c].trim()).and_then(|t| {
+            (!t.is_empty() && t.chars().next().is_some_and(char::is_uppercase) && t != "Self")
+                .then(|| t.to_string())
+        }),
+        RustScanKind::StructLiteral => after.find('{').map(|b| after[..b].trim()).and_then(|t| {
+            (!t.is_empty()
+                && t.chars().next().is_some_and(char::is_uppercase)
+                && !t.contains("::"))
+            .then(|| t.to_string())
+        }),
+    }
+}
+
+impl<'s> RustReceiverIndex<'s> {
+    /// Builds the full per-file index (impl snapshots + ident and weird
+    /// binding maps) in a constant number of passes over `source`.
+    pub fn new(source: &'s str) -> Self {
+        let lines: Vec<&str> = source.lines().collect();
+
+        // Single forward pass replicating find_rust_enclosing_impl: snapshot
+        // the answer it would give for every target line. Loop-body order
+        // matches the original exactly: depth update -> impl-start check ->
+        // target-line answer -> impl-exit check.
+        let mut impl_by_line: Vec<Option<String>> = Vec::with_capacity(lines.len());
+        let mut current_impl: Option<(String, i32)> = None;
+        let mut brace_depth: i32 = 0;
+        for line_content in &lines {
+            let trimmed = line_content.trim();
+            brace_depth += line_content.matches('{').count() as i32;
+            brace_depth -= line_content.matches('}').count() as i32;
+            if trimmed.starts_with("impl ") || trimmed.starts_with("impl<") {
+                if let Some(impl_type) = extract_rust_impl_type(trimmed) {
+                    current_impl = Some((impl_type, brace_depth));
+                }
+            }
+            impl_by_line.push(match &current_impl {
+                Some((impl_type, start_depth)) if brace_depth >= *start_depth => {
+                    Some(impl_type.clone())
+                }
+                _ => None,
+            });
+            if let Some((_, start_depth)) = &current_impl {
+                if brace_depth < *start_depth {
+                    current_impl = None;
+                }
+            }
+        }
+
+        // ONE inverted pass extracting every binding — identifier AND weird
+        // (non-identifier) receiver text. Per line, legacy semantics are
+        // reproduced exactly: for each (var, kind), prefix "let " is
+        // consulted before "let mut "; only the FIRST occurrence of a given
+        // full pattern in the line is attempted; a failed extraction at that
+        // occurrence yields nothing for that prefix (it does NOT retry later
+        // occurrences) but the next prefix is still tried.
+        let mut all_bindings: std::collections::HashMap<(String, RustScanKind), Vec<(usize, String)>> =
+            std::collections::HashMap::new();
+        let mut weird_bindings: std::collections::HashMap<
+            (String, RustScanKind),
+            Vec<(usize, String)>,
+        > = std::collections::HashMap::new();
+        let kinds = [
+            RustScanKind::Annotation,
+            RustScanKind::AssociatedFn,
+            RustScanKind::StructLiteral,
+        ];
+        // Per-line state per (var, kind): (prefix_idx of last attempt, outcome).
+        // Legacy rules encoded: a SUCCESS is final (earlier prefix wins); a
+        // failed attempt blocks later occurrences of the SAME prefix (legacy
+        // only ever tries the first occurrence of a pattern) but the next
+        // prefix still gets its own first-occurrence attempt.
+        let mut line_outcome: std::collections::HashMap<
+            (String, RustScanKind),
+            (usize, Option<String>),
+        > = std::collections::HashMap::new();
+        // Single attempt at one pattern occurrence, honoring the legacy
+        // first-occurrence / prefix-priority rules via `line_outcome`.
+        fn attempt(
+            line_outcome: &mut std::collections::HashMap<
+                (String, RustScanKind),
+                (usize, Option<String>),
+            >,
+            var: &str,
+            kind: RustScanKind,
+            prefix_idx: usize,
+            after: &str,
+        ) {
+            let key = (var.to_string(), kind);
+            match line_outcome.get(&key) {
+                Some((_, Some(_))) => return, // success is final
+                Some((p, None)) if *p == prefix_idx => return, // same-prefix retry
+                _ => {}
+            }
+            line_outcome.insert(key, (prefix_idx, extract_for_kind(kind, after)));
+        }
+
+        for (line_idx, raw) in lines.iter().enumerate() {
+            let line = raw.trim();
+            if !line.contains("let ") {
+                continue;
+            }
+            line_outcome.clear();
+            for (prefix_idx, prefix) in ["let ", "let mut "].into_iter().enumerate() {
+                for (pos, _) in line.match_indices(prefix) {
+                    let rest = &line[pos + prefix.len()..];
+
+                    // Identifier candidate: the maximal [A-Za-z0-9_]+ run.
+                    let ident_len = rest
+                        .bytes()
+                        .take_while(|b| b.is_ascii_alphanumeric() || *b == b'_')
+                        .count();
+                    if ident_len > 0 {
+                        let ident = &rest[..ident_len];
+                        let after_ident = &rest[ident_len..];
+                        for kind in kinds {
+                            let after = match kind {
+                                RustScanKind::Annotation => after_ident.strip_prefix(": "),
+                                _ => after_ident.strip_prefix(" = "),
+                            };
+                            let Some(after) = after else { continue };
+                            attempt(&mut line_outcome, ident, kind, prefix_idx, after);
+                        }
+                    }
+
+                    // Weird candidates: a pattern `{prefix}{var}{sep}` matches
+                    // at `pos` iff `var` is exactly the text between `rest`'s
+                    // start and an occurrence of `sep` — enumerate those.
+                    for kind in kinds {
+                        let sep = match kind {
+                            RustScanKind::Annotation => ": ",
+                            _ => " = ",
+                        };
+                        for (i, _) in rest.match_indices(sep) {
+                            let var = &rest[..i];
+                            if is_plain_ident(var) {
+                                continue; // ident pass owns plain idents
+                            }
+                            attempt(
+                                &mut line_outcome,
+                                var,
+                                kind,
+                                prefix_idx,
+                                &rest[i + sep.len()..],
+                            );
+                        }
+                    }
+                }
+            }
+            for ((var, kind), (_, outcome)) in line_outcome.drain() {
+                if let Some(ty) = outcome {
+                    let target = if is_plain_ident(&var) {
+                        &mut all_bindings
+                    } else {
+                        &mut weird_bindings
+                    };
+                    target.entry((var, kind)).or_default().push((line_idx, ty));
+                }
+            }
+        }
+        // drain() order is arbitrary, but pushes happen per line in line
+        // order across iterations, so each Vec is ascending by line_idx.
+
+        Self {
+            lines,
+            impl_by_line,
+            all_bindings,
+            weird_bindings,
+        }
+    }
+
+    /// Nearest successful match at-or-before `call_line`, replicating the
+    /// legacy `(0..call_line).rev()` scan INCLUDING its quirk of returning
+    /// None outright when call_line points beyond EOF (`lines.get(..)?`).
+    fn lookup(&self, var_name: &str, kind: RustScanKind, call_line: u32) -> Option<String> {
+        if call_line as usize > self.lines.len() {
+            return None;
+        }
+        static EMPTY: Vec<(usize, String)> = Vec::new();
+        let bindings = if is_plain_ident(var_name) {
+            &self.all_bindings
+        } else {
+            &self.weird_bindings
+        };
+        let matches = bindings
+            .get(&(var_name.to_string(), kind))
+            .unwrap_or(&EMPTY);
+        let pp = matches.partition_point(|(idx, _)| *idx < call_line as usize);
+        (pp > 0).then(|| matches[pp - 1].1.clone())
+    }
+
+    /// Drop-in equivalent of [`resolve_rust_receiver_type`], answered from
+    /// the per-file index. Step order and confidences mirror the original.
+    pub fn resolve(
+        &self,
+        call_line: u32,
+        receiver_name: &str,
+        enclosing_impl: Option<&str>,
+    ) -> (Option<String>, Confidence) {
+        if receiver_name == "self"
+            || receiver_name == "&self"
+            || receiver_name == "&mut self"
+            || receiver_name == "Self"
+        {
+            if let Some(impl_type) = enclosing_impl {
+                return (Some(impl_type.to_string()), Confidence::High);
+            }
+            let snap = (call_line as usize)
+                .checked_sub(1)
+                .and_then(|i| self.impl_by_line.get(i))
+                .and_then(|o| o.clone());
+            if let Some(impl_type) = snap {
+                return (Some(impl_type), Confidence::High);
+            }
+            return (None, Confidence::Low);
+        }
+
+        if let Some(t) = self.lookup(receiver_name, RustScanKind::Annotation, call_line) {
+            return (Some(t), Confidence::High);
+        }
+        if let Some(t) = self.lookup(receiver_name, RustScanKind::AssociatedFn, call_line) {
+            return (Some(t), Confidence::High);
+        }
+        if let Some(t) = self.lookup(receiver_name, RustScanKind::StructLiteral, call_line) {
+            return (Some(t), Confidence::High);
+        }
+        (None, Confidence::Low)
+    }
 }
 
 // =============================================================================
@@ -1466,6 +2153,432 @@ pub fn create_typed_edge(params: TypedEdgeParams<'_>) -> TypedCallEdge {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// DIFFERENTIAL GATE (TLDR-zde fix #2): the per-file RustReceiverIndex
+    /// must produce byte-identical results to the legacy per-call-site
+    /// scanners for EVERY (receiver, line, enclosing) combination — including
+    /// beyond-EOF lines (legacy quirk: early None) and line 0.
+    #[test]
+    fn rust_receiver_index_matches_legacy_exhaustively() {
+        let source = r#"
+struct Engine { rpm: u32 }
+impl Engine {
+    fn start(&self) {
+        self.ignite();
+        let cfg: Config = Config::default();
+        cfg.load();
+        let mut store = VectorStore::open("p");
+        store.flush();
+        let lit = Payload { size: 1 };
+        lit.send();
+    }
+}
+impl<T> Wrapper<T> {
+    fn run(&mut self) {
+        Self::helper();
+        let outlet pseudo = 1; // contains "let " mid-token shapes
+        let cfg = make(); // shadow without type info
+        cfg.reload();
+    }
+}
+fn free() {
+    let cfg: Other = Other::new();
+    cfg.apply();
+}
+fn nasty() {
+    // let ghost: Phantom = comment-text pattern must match like legacy
+    let s = "let fake: InString = lie"; // string literal content
+    let a: A = x; let a = B::make(); // two bindings, same var, same line
+    let mut a: C = y; // prefix priority vs proximity
+    outlet plug: Socket = z; // "let " inside another word
+    let dotted = 1; // receiver "self.cfg" never binds as ident
+}
+"#;
+        let receivers = [
+            "self",
+            "&self",
+            "&mut self",
+            "Self",
+            "cfg",
+            "store",
+            "lit",
+            "missing",
+            "pseudo",
+            "ghost",
+            "fake",
+            "a",
+            "plug",
+            "s",
+            "self.cfg",
+            "x[0]",
+            "mut",
+            // Round-5 weird-path stressors: receivers that exercise the
+            // inverted separator enumeration (var = text between a
+            // "let "/"let mut " occurrence and a later ": " / " = ").
+            "",
+            "mut a",
+            "mut store",
+            "a: A",
+            "fake: InString",
+            "x: 1, y",
+            "ghost: Phantom",
+            "a: A = x; let a",
+            "s = \"let fake",
+        ];
+        let enclosings = [None, Some("Hint")];
+        let n_lines = source.lines().count() as u32;
+        let idx = RustReceiverIndex::new(source);
+        for line in 0..=(n_lines + 3) {
+            for recv in &receivers {
+                for enc in &enclosings {
+                    let legacy = resolve_rust_receiver_type(source, line, recv, *enc);
+                    let indexed = idx.resolve(line, recv, *enc);
+                    assert_eq!(
+                        legacy, indexed,
+                        "divergence at line={line} recv={recv} enclosing={enc:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// DIFFERENTIAL GATE (TLDR-olg, python): PythonReceiverIndex must match
+    /// the legacy scanners PRIMITIVE-level (annotation / constructor /
+    /// enclosing-class) AND resolve()-level for every (receiver, line,
+    /// enclosing) — including line 0, beyond-EOF lines, substring-match
+    /// false positives ("x" matching "max: int"), walrus :=, Union types,
+    /// failed-extraction-aborts, and multi-class indent quirks.
+    #[test]
+    fn python_receiver_index_matches_legacy_exhaustively() {
+        let source = r#"
+class Engine:
+    def start(self):
+        self.ignite()
+        cfg: Config = Config()
+        cfg.load()
+        store = VectorStore("p")
+        store.flush()
+        u: Union[A, B] = make()
+        u.go()
+        bad: lowercase = thing()
+        opt: Optional[User] = None
+        gen: List[Item] = []
+
+class Wrapper:
+    def run(self):
+        cfg = remake()
+        cfg.reload()
+        w := Walrus()
+        max: int = 5
+        x.method()
+        result = obj.attr(1)
+
+def free():
+    cfg: Other = Other()
+    cfg.apply()
+    # cfg: Phantom = comment text must match like legacy
+    s = "x: InString = lie"
+"#;
+        let receivers = [
+            "self", "cfg", "store", "u", "bad", "opt", "gen", "w", "max",
+            "x", "result", "missing", "self.cfg", "obj.attr", "s", "",
+            "a, b", "t: int",
+        ];
+        let enclosings = [None, Some("Hint")];
+        let n_lines = source.lines().count() as u32;
+        let mut idx = PythonReceiverIndex::new(source);
+        for line in 0..=(n_lines + 3) {
+            for recv in &receivers {
+                // Primitive level (tighter localization than resolve()).
+                assert_eq!(
+                    find_type_annotation(source, recv, line),
+                    idx.annotation(recv, line),
+                    "annotation divergence at line={line} recv={recv}"
+                );
+                assert_eq!(
+                    find_constructor_assignment(source, recv, line),
+                    idx.constructor(recv, line),
+                    "constructor divergence at line={line} recv={recv}"
+                );
+                for enc in &enclosings {
+                    let legacy = resolve_python_receiver_type(source, line, recv, *enc);
+                    let indexed = idx.resolve(line, recv, *enc);
+                    assert_eq!(
+                        legacy, indexed,
+                        "resolve divergence at line={line} recv={recv} enclosing={enc:?}"
+                    );
+                }
+            }
+            assert_eq!(
+                find_enclosing_class(source, line),
+                idx.enclosing_class(line),
+                "enclosing-class divergence at line={line}"
+            );
+        }
+    }
+
+    /// DIFFERENTIAL GATE (TLDR-olg, typescript/javascript): the index must
+    /// match the legacy scanners primitive-level AND resolve()-level —
+    /// including the 4-prefix priority within a line, failed-extraction
+    /// fallthrough (NO abort, unlike python), brace-depth class tracking
+    /// with single-line open/close, no-EOF-fallback, line 0 / beyond-EOF,
+    /// and substring false-matches.
+    #[test]
+    fn typescript_receiver_index_matches_legacy_exhaustively() {
+        let source = r#"
+export class Engine {
+    start(): void {
+        this.ignite();
+        const cfg: Config = load();
+        cfg.run();
+        let store = new VectorStore("p");
+        store.flush();
+        var legacy: ILegacyService = make();
+        legacy.poke();
+        gen: Map<string, Item> = wat();
+        u: A | B = pick();
+        const max: number = 5;
+        x.method();
+        bad: = broken();
+        item = new Widget<Big>(1);
+    }
+}
+class Wrapper { run() { this.cfg.go(); } }
+function free() {
+    const cfg = new Other();
+    cfg.apply();
+    // cfg: Phantom = comment text must match like legacy
+    s = "x: InString = lie";
+    obj = new lowercase();
+}
+"#;
+        let receivers = [
+            "this", "cfg", "store", "legacy", "gen", "u", "max", "x",
+            "item", "missing", "this.cfg", "obj", "s", "", "a, b",
+        ];
+        let enclosings = [None, Some("Hint")];
+        let n_lines = source.lines().count() as u32;
+        let mut idx = TypeScriptReceiverIndex::new(source);
+        for line in 0..=(n_lines + 3) {
+            for recv in &receivers {
+                assert_eq!(
+                    find_typescript_annotation(source, recv, line),
+                    idx.annotation(recv, line),
+                    "ts annotation divergence at line={line} recv={recv}"
+                );
+                assert_eq!(
+                    find_typescript_constructor(source, recv, line),
+                    idx.constructor(recv, line),
+                    "ts constructor divergence at line={line} recv={recv}"
+                );
+                for enc in &enclosings {
+                    assert_eq!(
+                        resolve_typescript_receiver_type(source, line, recv, *enc),
+                        idx.resolve(line, recv, *enc),
+                        "ts resolve divergence at line={line} recv={recv} enclosing={enc:?}"
+                    );
+                }
+            }
+            assert_eq!(
+                find_typescript_enclosing_class(source, line),
+                idx.enclosing_class(line),
+                "ts enclosing-class divergence at line={line}"
+            );
+        }
+    }
+
+    /// CORPUS-LEVEL DIFFERENTIAL GATE (TLDR-olg, ts/js): value-level
+    /// agreement on real call-site receivers from this repo's fixtures.
+    #[test]
+    fn typescript_receiver_index_matches_legacy_on_real_corpus() {
+        use crate::callgraph::cross_file_types::CallType;
+
+        fn collect(dir: &std::path::Path, out: &mut Vec<(std::path::PathBuf, &'static str)>) {
+            if let Ok(rd) = std::fs::read_dir(dir) {
+                for e in rd.flatten() {
+                    let p = e.path();
+                    if p.is_dir() {
+                        collect(&p, out);
+                    } else {
+                        match p.extension().and_then(|x| x.to_str()) {
+                            Some("ts") | Some("tsx") => out.push((p, "typescript")),
+                            Some("js") => out.push((p, "javascript")),
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+        let core_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut files: Vec<(std::path::PathBuf, &str)> = Vec::new();
+        collect(&core_root.join("tests/fixtures"), &mut files);
+        collect(&core_root.join("../tldr-cli/tests/fixtures"), &mut files);
+        files.sort();
+
+        const MAX_SITES_PER_FILE: usize = 80;
+        let mut checked = 0usize;
+        for (path, lang) in &files {
+            let Ok(source) = std::fs::read_to_string(path) else {
+                continue;
+            };
+            let Ok(calls) =
+                crate::callgraph::languages::extract_calls_for_language(lang, path, &source)
+            else {
+                continue;
+            };
+            let mut idx = TypeScriptReceiverIndex::new(&source);
+
+            let mut sites: Vec<(String, u32)> = calls
+                .values()
+                .flatten()
+                .filter(|c| matches!(c.call_type, CallType::Method | CallType::Attr))
+                .filter_map(|c| Some((c.receiver.clone()?, c.line?)))
+                .collect();
+            sites.sort();
+            sites.dedup();
+
+            for (receiver, line) in sites.into_iter().take(MAX_SITES_PER_FILE) {
+                for enclosing in [None, Some("Hint")] {
+                    assert_eq!(
+                        resolve_typescript_receiver_type(&source, line, &receiver, enclosing),
+                        idx.resolve(line, &receiver, enclosing),
+                        "divergence in {} at line={line} recv={receiver} enclosing={enclosing:?}",
+                        path.display()
+                    );
+                }
+                checked += 1;
+            }
+        }
+        assert!(checked >= 20, "ts corpus gate too small: {checked} sites");
+    }
+
+    /// CORPUS-LEVEL DIFFERENTIAL GATE (TLDR-olg, python): value-level
+    /// agreement on real Method/Attr call-site receivers extracted from
+    /// this repo's own python files (continuum/, scripts/).
+    #[test]
+    fn python_receiver_index_matches_legacy_on_real_corpus() {
+        use crate::callgraph::cross_file_types::CallType;
+
+        fn collect_py(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            if let Ok(rd) = std::fs::read_dir(dir) {
+                for e in rd.flatten() {
+                    let p = e.path();
+                    if p.is_dir() {
+                        collect_py(&p, out);
+                    } else if p.extension().and_then(|x| x.to_str()) == Some("py") {
+                        out.push(p);
+                    }
+                }
+            }
+        }
+        let core_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut files: Vec<std::path::PathBuf> = Vec::new();
+        collect_py(&core_root.join("tests/fixtures"), &mut files);
+        collect_py(
+            &core_root.join("../tldr-cli/tests/fixtures"),
+            &mut files,
+        );
+        files.sort();
+
+        const MAX_SITES_PER_FILE: usize = 80;
+        let mut checked = 0usize;
+        for path in &files {
+            let Ok(source) = std::fs::read_to_string(path) else {
+                continue;
+            };
+            let Ok(calls) = crate::callgraph::languages::extract_calls_for_language(
+                "python", path, &source,
+            ) else {
+                continue;
+            };
+            let mut idx = PythonReceiverIndex::new(&source);
+
+            let mut sites: Vec<(String, u32)> = calls
+                .values()
+                .flatten()
+                .filter(|c| matches!(c.call_type, CallType::Method | CallType::Attr))
+                .filter_map(|c| Some((c.receiver.clone()?, c.line?)))
+                .collect();
+            sites.sort();
+            sites.dedup();
+
+            for (receiver, line) in sites.into_iter().take(MAX_SITES_PER_FILE) {
+                for enclosing in [None, Some("Hint")] {
+                    let legacy =
+                        resolve_python_receiver_type(&source, line, &receiver, enclosing);
+                    let indexed = idx.resolve(line, &receiver, enclosing);
+                    assert_eq!(
+                        legacy,
+                        indexed,
+                        "divergence in {} at line={line} recv={receiver} enclosing={enclosing:?}",
+                        path.display()
+                    );
+                }
+                checked += 1;
+            }
+        }
+        // The repo's python surface is test fixtures only (~26 sites today).
+        // The heavyweight external gate is the frozen-corpus byte-hash
+        // (django@8c2d3dc, see TLDR-hqb); this in-repo gate is the cheap
+        // always-on backstop.
+        assert!(checked >= 20, "python corpus gate too small: {checked} sites");
+    }
+
+    /// CORPUS-LEVEL DIFFERENTIAL GATE (TLDR-zde round 5): the synthetic test
+    /// above proves shape coverage; this one proves the index agrees with the
+    /// legacy scanner VALUE-level on REAL call-site receivers — every
+    /// Method/Attr receiver the actual Rust extractor finds in this crate's
+    /// own callgraph sources. Catches same-count-different-type divergence
+    /// that edge-count comparison cannot. Caps bound debug-profile runtime.
+    #[test]
+    fn rust_receiver_index_matches_legacy_on_real_corpus() {
+        use crate::callgraph::cross_file_types::CallType;
+
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/callgraph");
+        let mut files: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| {
+                let p = e.unwrap().path();
+                (p.extension().and_then(|x| x.to_str()) == Some("rs")).then_some(p)
+            })
+            .collect();
+        files.sort();
+
+        const MAX_SITES_PER_FILE: usize = 60;
+        let mut checked = 0usize;
+        for path in &files {
+            let source = std::fs::read_to_string(path).unwrap();
+            let calls = crate::callgraph::languages::extract_calls_for_language(
+                "rust", path, &source,
+            )
+            .unwrap();
+            let idx = RustReceiverIndex::new(&source);
+
+            let mut sites: Vec<(String, u32)> = calls
+                .values()
+                .flatten()
+                .filter(|c| matches!(c.call_type, CallType::Method | CallType::Attr))
+                .filter_map(|c| Some((c.receiver.clone()?, c.line?)))
+                .collect();
+            sites.sort();
+            sites.dedup();
+
+            for (receiver, line) in sites.into_iter().take(MAX_SITES_PER_FILE) {
+                for enclosing in [None, Some("Hint")] {
+                    let legacy = resolve_rust_receiver_type(&source, line, &receiver, enclosing);
+                    let indexed = idx.resolve(line, &receiver, enclosing);
+                    assert_eq!(
+                        legacy,
+                        indexed,
+                        "divergence in {} at line={line} recv={receiver} enclosing={enclosing:?}",
+                        path.display()
+                    );
+                }
+                checked += 1;
+            }
+        }
+        assert!(checked >= 400, "corpus gate too small: {checked} sites checked");
+    }
 
     #[test]
     fn test_find_enclosing_class_simple() {

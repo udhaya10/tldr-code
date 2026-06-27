@@ -21,7 +21,10 @@ use super::daemon_active::read_active;
 use super::daemon_registry::live_entries;
 use super::error::DaemonError;
 use super::ipc::send_command;
-use super::types::{DaemonCommand, DaemonResponse, DaemonStatus, SalsaCacheStats};
+use super::types::{
+    DaemonCommand, DaemonResponse, DaemonStatus, LivenessStats, MemoryStats, SalsaCacheStats,
+    SemanticIndexStats,
+};
 
 // =============================================================================
 // CLI Arguments
@@ -67,6 +70,16 @@ pub struct DaemonStatusOutput {
     /// Cache statistics
     #[serde(skip_serializing_if = "Option::is_none")]
     pub salsa_stats: Option<SalsaCacheStats>,
+    /// Liveness observability: per-source presence ages, busy work with age,
+    /// idle deadline (TLDR-qzc).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub liveness: Option<LivenessStats>,
+    /// Resident semantic index state: warm/building/cold (TLDR-qzc).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub semantic_index: Option<SemanticIndexStats>,
+    /// Daemon process memory: current + peak RSS (TLDR-yll).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory: Option<MemoryStats>,
     /// Optional message
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
@@ -139,6 +152,9 @@ impl DaemonStatusArgs {
                     files: None,
                     project: None,
                     salsa_stats: None,
+                    liveness: None,
+                    semantic_index: None,
+                    memory: None,
                     message: Some("Daemon not running".to_string()),
                 };
 
@@ -173,6 +189,9 @@ impl DaemonStatusArgs {
                 files,
                 project,
                 salsa_stats,
+                liveness,
+                semantic_index,
+                memory,
                 ..
             } => {
                 let status_str = format_status(status);
@@ -185,6 +204,9 @@ impl DaemonStatusArgs {
                     files: Some(files),
                     project: Some(project.clone()),
                     salsa_stats: Some(salsa_stats.clone()),
+                    liveness: liveness.clone(),
+                    semantic_index: semantic_index.clone(),
+                    memory: memory.clone(),
                     message: None,
                 };
 
@@ -200,6 +222,18 @@ impl DaemonStatusArgs {
                             println!("Uptime:  {}", uptime_human);
                             println!("Project: {}", project.display());
                             println!("Files:   {}", files);
+                            if let Some(idx) = &semantic_index {
+                                println!("Index:   {}", format_semantic_index(idx));
+                            }
+                            if let Some(mem) = &memory {
+                                if let Some(line) = format_memory(mem) {
+                                    println!("Memory:  {}", line);
+                                }
+                            }
+                            if let Some(live) = &liveness {
+                                println!();
+                                print_liveness(live);
+                            }
                             println!();
                             println!("Cache Statistics");
                             println!("----------------");
@@ -224,6 +258,9 @@ impl DaemonStatusArgs {
                     files: None,
                     project: None,
                     salsa_stats: None,
+                    liveness: None,
+                    semantic_index: None,
+                    memory: None,
                     message,
                 };
 
@@ -273,6 +310,69 @@ fn format_uptime(secs: f64) -> String {
     format!("{}h {}m {}s", hours, minutes, seconds)
 }
 
+/// Human bytes: `1.2 GB`, `850.0 MB`. Round numbers beat precision here —
+/// the point is spotting a 22.7 GB daemon at a glance (TLDR-yll).
+fn format_bytes(bytes: u64) -> String {
+    const GB: f64 = 1024.0 * 1024.0 * 1024.0;
+    const MB: f64 = 1024.0 * 1024.0;
+    let b = bytes as f64;
+    if b >= GB {
+        format!("{:.1} GB", b / GB)
+    } else {
+        format!("{:.1} MB", b / MB)
+    }
+}
+
+/// One-line memory readout: `1.2 GB (peak 22.7 GB)`. `None` when neither
+/// figure is readable on this platform.
+fn format_memory(mem: &MemoryStats) -> Option<String> {
+    match (mem.rss_bytes, mem.peak_rss_bytes) {
+        (Some(rss), Some(peak)) => {
+            Some(format!("{} (peak {})", format_bytes(rss), format_bytes(peak)))
+        }
+        (Some(rss), None) => Some(format_bytes(rss)),
+        (None, Some(peak)) => Some(format!("peak {}", format_bytes(peak))),
+        (None, None) => None,
+    }
+}
+
+/// One-line semantic index state: `warm (12,345 vectors)` / `building` /
+/// `cold (run 'tldr warm')`.
+fn format_semantic_index(idx: &SemanticIndexStats) -> String {
+    match (idx.state.as_str(), idx.vectors) {
+        ("warm", Some(n)) => format!("warm ({} vectors)", format_number(n as u64)),
+        ("cold", _) => "cold (run 'tldr warm')".to_string(),
+        (state, _) => state.to_string(),
+    }
+}
+
+/// Render the liveness block (TLDR-qzc): what kept the daemon alive, what
+/// internal work is in flight (with age — a hung build shows up here as an
+/// ever-growing `busy`), and when idle shutdown would fire.
+fn print_liveness(live: &LivenessStats) {
+    println!("Liveness");
+    println!("--------");
+    for (source, age) in &live.presence_age_secs {
+        println!("{:<13}{} ago", format!("{}:", source), format_uptime(*age));
+    }
+    for token in &live.busy {
+        println!(
+            "{:<13}{} (running {})",
+            "busy:", token.label,
+            format_uptime(token.age_secs)
+        );
+    }
+    match live.idle_shutdown_in_secs {
+        Some(secs) => println!(
+            "{:<13}in {} (timeout {})",
+            "idle stop:",
+            format_uptime(secs),
+            format_uptime(live.idle_timeout_secs as f64)
+        ),
+        None => println!("{:<13}deferred (internal work in flight)", "idle stop:"),
+    }
+}
+
 /// Format a number with thousands separators.
 fn format_number(n: u64) -> String {
     let s = n.to_string();
@@ -296,6 +396,7 @@ fn format_number(n: u64) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::super::types::BusyTokenStats;
     use super::*;
     use tempfile::TempDir;
 
@@ -359,6 +460,23 @@ mod tests {
                 invalidations: 5,
                 recomputations: 3,
             }),
+            liveness: Some(LivenessStats {
+                presence_age_secs: [("socket".to_string(), 12.5)].into_iter().collect(),
+                busy: vec![BusyTokenStats {
+                    label: "warm-build".to_string(),
+                    age_secs: 900.0,
+                }],
+                idle_timeout_secs: 1800,
+                idle_shutdown_in_secs: None,
+            }),
+            semantic_index: Some(SemanticIndexStats {
+                state: "building".to_string(),
+                vectors: None,
+            }),
+            memory: Some(MemoryStats {
+                rss_bytes: Some(1024 * 1024 * 1024),
+                peak_rss_bytes: Some(22 * 1024 * 1024 * 1024),
+            }),
             message: None,
         };
 
@@ -366,6 +484,11 @@ mod tests {
         assert!(json.contains("running"));
         assert!(json.contains("3600"));
         assert!(json.contains("hits"));
+        assert!(json.contains("warm-build"));
+        assert!(json.contains("building"));
+        assert!(json.contains("idle_timeout_secs"));
+        // None deadline (busy) must be omitted, not "null"
+        assert!(!json.contains("idle_shutdown_in_secs"));
     }
 
     #[test]
@@ -377,6 +500,9 @@ mod tests {
             files: None,
             project: None,
             salsa_stats: None,
+            liveness: None,
+            semantic_index: None,
+            memory: None,
             message: Some("Daemon not running".to_string()),
         };
 
