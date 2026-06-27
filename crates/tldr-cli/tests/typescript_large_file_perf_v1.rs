@@ -110,8 +110,12 @@ fn test_skip_oversize_file_with_warning() {
     );
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let report: serde_json::Value = serde_json::from_str(&stdout)
-        .unwrap_or_else(|e| panic!("structure stdout must be valid JSON; err: {}; stdout: {}", e, stdout));
+    let report: serde_json::Value = serde_json::from_str(&stdout).unwrap_or_else(|e| {
+        panic!(
+            "structure stdout must be valid JSON; err: {}; stdout: {}",
+            e, stdout
+        )
+    });
 
     let files_skipped = report
         .get("files_skipped")
@@ -185,11 +189,7 @@ fn test_dts_files_have_lower_cap() {
     fs::write(dir.path().join("autogen.d.ts"), bytes).unwrap();
 
     // Companion small valid file so the dir isn't empty.
-    fs::write(
-        dir.path().join("ok.ts"),
-        b"export const x: number = 0;\n",
-    )
-    .unwrap();
+    fs::write(dir.path().join("ok.ts"), b"export const x: number = 0;\n").unwrap();
 
     let output = tldr_cmd()
         .arg("structure")
@@ -209,8 +209,12 @@ fn test_dts_files_have_lower_cap() {
     );
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let report: serde_json::Value = serde_json::from_str(&stdout)
-        .unwrap_or_else(|e| panic!("structure stdout must be valid JSON; err: {}; stdout: {}", e, stdout));
+    let report: serde_json::Value = serde_json::from_str(&stdout).unwrap_or_else(|e| {
+        panic!(
+            "structure stdout must be valid JSON; err: {}; stdout: {}",
+            e, stdout
+        )
+    });
 
     let files_skipped = report
         .get("files_skipped")
@@ -228,10 +232,7 @@ fn test_dts_files_have_lower_cap() {
         .and_then(|v| v.as_array())
         .cloned()
         .unwrap_or_default();
-    let warning = warnings
-        .first()
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let warning = warnings.first().and_then(|v| v.as_str()).unwrap_or("");
     assert!(
         warning.contains("autogen.d.ts"),
         "warning must reference the skipped .d.ts; got: {}",
@@ -282,8 +283,12 @@ fn test_normal_ts_file_below_10mb_not_skipped() {
     );
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let report: serde_json::Value = serde_json::from_str(&stdout)
-        .unwrap_or_else(|e| panic!("structure stdout must be valid JSON; err: {}; stdout: {}", e, stdout));
+    let report: serde_json::Value = serde_json::from_str(&stdout).unwrap_or_else(|e| {
+        panic!(
+            "structure stdout must be valid JSON; err: {}; stdout: {}",
+            e, stdout
+        )
+    });
 
     // files_skipped is omitted on clean inputs (skip_serializing_if).
     let files_skipped = report

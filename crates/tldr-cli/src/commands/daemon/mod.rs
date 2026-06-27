@@ -49,9 +49,9 @@ pub(crate) mod activity;
 pub mod cache_clear;
 pub mod cache_stats;
 pub mod daemon_active;
-pub mod daemon_registry;
 #[path = "daemon.rs"]
 pub mod daemon_impl;
+pub mod daemon_registry;
 pub mod error;
 #[cfg(feature = "semantic")]
 pub mod index_manager;
@@ -77,13 +77,13 @@ pub use daemon_impl as daemon;
 pub use error::{DaemonError, DaemonResult};
 pub use ipc::{
     check_socket_alive, cleanup_socket, cleanup_socket_at, compute_socket_path, compute_tcp_port,
-    read_command, send_command, send_raw_command, snapshot_socket_path,
-    send_response, validate_socket_path, IpcListener, IpcStream, CONNECTION_TIMEOUT_SECS,
-    MAX_MESSAGE_SIZE, READ_TIMEOUT_SECS,
+    read_command, send_command, send_raw_command, send_response, snapshot_socket_path,
+    validate_socket_path, IpcListener, IpcStream, CONNECTION_TIMEOUT_SECS, MAX_MESSAGE_SIZE,
+    READ_TIMEOUT_SECS,
 };
 pub use pid::{
-    check_stale_pid, cleanup_stale_pid, compute_hash, compute_pid_path,
-    is_process_running, try_acquire_lock, PidGuard,
+    check_stale_pid, cleanup_stale_pid, compute_hash, compute_pid_path, is_process_running,
+    try_acquire_lock, PidGuard,
 };
 pub use salsa::{hash_args, hash_path, CacheEntry, QueryCache, QueryKey, DEFAULT_MAX_ENTRIES};
 pub use types::{

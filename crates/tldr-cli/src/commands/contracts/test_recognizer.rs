@@ -130,10 +130,12 @@ fn is_candidate_test_file(path: &Path, language: Language) -> bool {
         // `*.test.js` / `*.spec.js` (and tsx/jsx variants), or any file
         // inside a directory literally named `__tests__`.
         Language::JavaScript | Language::TypeScript => {
-            let in_tests_dir = path
-                .components()
-                .any(|c| c.as_os_str() == "__tests__" || c.as_os_str() == "test"
-                    || c.as_os_str() == "tests" || c.as_os_str() == "spec");
+            let in_tests_dir = path.components().any(|c| {
+                c.as_os_str() == "__tests__"
+                    || c.as_os_str() == "test"
+                    || c.as_os_str() == "tests"
+                    || c.as_os_str() == "spec"
+            });
             let has_test_marker = stem.ends_with(".test")
                 || stem.ends_with(".spec")
                 || stem.ends_with("_test")
@@ -168,7 +170,9 @@ fn is_candidate_test_file(path: &Path, language: Language) -> bool {
                     || path.components().any(|c| c.as_os_str() == "test"))
         }
         // PHP: PHPUnit convention — class FooTest in FooTest.php.
-        Language::Php => lower.ends_with(".php") && (stem.ends_with("Test") || stem.ends_with("Tests")),
+        Language::Php => {
+            lower.ends_with(".php") && (stem.ends_with("Test") || stem.ends_with("Tests"))
+        }
         // Swift: XCTest convention — files named `*Tests.swift`.
         Language::Swift => {
             lower.ends_with(".swift")
@@ -220,9 +224,7 @@ fn is_candidate_test_file(path: &Path, language: Language) -> bool {
         // crates/globset/src/lib.rs` into yielding the inline tests they
         // contain. Directory walks accept any `.rs` here and still rely on
         // `matches_test_function` for per-fn filtering.
-        Language::Rust => {
-            lower.ends_with(".rs")
-        }
+        Language::Rust => lower.ends_with(".rs"),
         // C#: NUnit / xUnit / MSTest — files named `*Tests.cs` or under
         // a Tests directory. matches_test_function filters down to methods
         // carrying `[Test]` / `[Fact]` / `[TestMethod]` etc.
@@ -456,10 +458,10 @@ fn jvm_has_test_annotation(node: &Node, source: &[u8]) -> bool {
             if subtree_contains_annotation_named(&child, source, "Test") {
                 return true;
             }
-        } else if child.kind() == "annotation" || child.kind() == "marker_annotation" {
-            if annotation_has_name(&child, source, "Test") {
-                return true;
-            }
+        } else if (child.kind() == "annotation" || child.kind() == "marker_annotation")
+            && annotation_has_name(&child, source, "Test")
+        {
+            return true;
         }
     }
     false
@@ -488,7 +490,10 @@ fn annotation_has_name(annotation_node: &Node, source: &[u8], target: &str) -> b
     // Strip leading `@` and any argument list, then compare the tail
     // identifier (after the last `.`).
     let trimmed = text.trim_start_matches('@');
-    let head = trimmed.split(|c: char| c == '(' || c.is_whitespace()).next().unwrap_or("");
+    let head = trimmed
+        .split(|c: char| c == '(' || c.is_whitespace())
+        .next()
+        .unwrap_or("");
     let last = head.rsplit('.').next().unwrap_or("");
     last == target
 }
@@ -563,7 +568,11 @@ fn go_is_top_level_test_function(node: &Node, source: &[u8]) -> bool {
     // Filter out `Test` exactly (no following uppercase). The Go testing
     // convention is `TestXxx` where `X` is upper.
     let after = name.strip_prefix("Test").unwrap_or("");
-    let starts_upper = after.chars().next().map(|c| c.is_ascii_uppercase()).unwrap_or(false);
+    let starts_upper = after
+        .chars()
+        .next()
+        .map(|c| c.is_ascii_uppercase())
+        .unwrap_or(false);
     starts_upper
 }
 

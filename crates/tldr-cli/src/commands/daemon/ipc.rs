@@ -788,7 +788,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn test_cleanup_socket_removes_dead_daemon_registry_path() {
-        use crate::commands::daemon::daemon_registry::{add_entry, test_support::with_registry_dir};
+        use crate::commands::daemon::daemon_registry::{
+            add_entry, test_support::with_registry_dir,
+        };
         with_registry_dir(|dir| {
             // A real, canonicalizable project dir.
             let project = dir.join("proj");
@@ -797,7 +799,10 @@ mod tests {
             // Socket lives under `dir` (stand-in for the daemon's TMPDIR), not
             // the system temp dir that `compute_socket_path` would yield. The
             // filename still matches this project's deterministic socket name.
-            let sock_name = compute_socket_path(&project).file_name().unwrap().to_owned();
+            let sock_name = compute_socket_path(&project)
+                .file_name()
+                .unwrap()
+                .to_owned();
             let sock = dir.join(&sock_name);
             std::fs::write(&sock, b"").unwrap();
             assert_ne!(
@@ -832,12 +837,17 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn test_snapshot_socket_path_returns_registry_path_for_live_daemon() {
-        use crate::commands::daemon::daemon_registry::{add_entry, test_support::with_registry_dir};
+        use crate::commands::daemon::daemon_registry::{
+            add_entry, test_support::with_registry_dir,
+        };
         with_registry_dir(|dir| {
             let project = dir.join("proj-snap");
             std::fs::create_dir_all(&project).unwrap();
 
-            let sock_name = compute_socket_path(&project).file_name().unwrap().to_owned();
+            let sock_name = compute_socket_path(&project)
+                .file_name()
+                .unwrap()
+                .to_owned();
             let registry_sock = dir.join(&sock_name);
 
             // Live PID (this test process) — simulates snapshotting before shutdown.
@@ -862,12 +872,17 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn test_cleanup_socket_spares_live_daemon_registry_path() {
-        use crate::commands::daemon::daemon_registry::{add_entry, test_support::with_registry_dir};
+        use crate::commands::daemon::daemon_registry::{
+            add_entry, test_support::with_registry_dir,
+        };
         with_registry_dir(|dir| {
             let project = dir.join("proj-live");
             std::fs::create_dir_all(&project).unwrap();
 
-            let sock_name = compute_socket_path(&project).file_name().unwrap().to_owned();
+            let sock_name = compute_socket_path(&project)
+                .file_name()
+                .unwrap()
+                .to_owned();
             let sock = dir.join(&sock_name);
             std::fs::write(&sock, b"").unwrap();
 

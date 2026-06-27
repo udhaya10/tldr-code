@@ -327,9 +327,11 @@ fn format_bytes(bytes: u64) -> String {
 /// figure is readable on this platform.
 fn format_memory(mem: &MemoryStats) -> Option<String> {
     match (mem.rss_bytes, mem.peak_rss_bytes) {
-        (Some(rss), Some(peak)) => {
-            Some(format!("{} (peak {})", format_bytes(rss), format_bytes(peak)))
-        }
+        (Some(rss), Some(peak)) => Some(format!(
+            "{} (peak {})",
+            format_bytes(rss),
+            format_bytes(peak)
+        )),
         (Some(rss), None) => Some(format_bytes(rss)),
         (None, Some(peak)) => Some(format!("peak {}", format_bytes(peak))),
         (None, None) => None,
@@ -358,7 +360,8 @@ fn print_liveness(live: &LivenessStats) {
     for token in &live.busy {
         println!(
             "{:<13}{} (running {})",
-            "busy:", token.label,
+            "busy:",
+            token.label,
             format_uptime(token.age_secs)
         );
     }

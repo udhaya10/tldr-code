@@ -371,7 +371,13 @@ mod tests {
             "non-corpus project write must count as presence"
         );
         assert!(
-            !watch_decision(root.path(), &cache_excl, &store_dir, &artifact, &modify_kind()),
+            !watch_decision(
+                root.path(),
+                &cache_excl,
+                &store_dir,
+                &artifact,
+                &modify_kind()
+            ),
             "…while still being excluded from indexing"
         );
     }
@@ -387,12 +393,32 @@ mod tests {
         let cache_excl = root.path().join(".tldr");
 
         let stats = cache_excl.join("cache").join("salsa_stats.json");
-        assert!(!presence_decision(&cache_excl, &store_dir, &stats, &modify_kind()));
-        assert!(!presence_decision(&cache_excl, &store_dir, &stats, &remove_kind()));
+        assert!(!presence_decision(
+            &cache_excl,
+            &store_dir,
+            &stats,
+            &modify_kind()
+        ));
+        assert!(!presence_decision(
+            &cache_excl,
+            &store_dir,
+            &stats,
+            &remove_kind()
+        ));
 
         let store_file = store_dir.join("index.usearch");
-        assert!(!presence_decision(&cache_excl, &store_dir, &store_file, &modify_kind()));
-        assert!(!presence_decision(&cache_excl, &store_dir, &store_file, &remove_kind()));
+        assert!(!presence_decision(
+            &cache_excl,
+            &store_dir,
+            &store_file,
+            &modify_kind()
+        ));
+        assert!(!presence_decision(
+            &cache_excl,
+            &store_dir,
+            &store_file,
+            &remove_kind()
+        ));
     }
 
     /// PRESENCE READ-EXCLUSION (TLDR-3w5): `Access` events must not count —
@@ -413,9 +439,24 @@ mod tests {
             &EventKind::Access(AccessKind::Read)
         ));
         // …but a real write to the same path does count.
-        assert!(presence_decision(&cache_excl, &store_dir, &py, &modify_kind()));
-        assert!(presence_decision(&cache_excl, &store_dir, &py, &create_kind()));
-        assert!(presence_decision(&cache_excl, &store_dir, &py, &remove_kind()));
+        assert!(presence_decision(
+            &cache_excl,
+            &store_dir,
+            &py,
+            &modify_kind()
+        ));
+        assert!(presence_decision(
+            &cache_excl,
+            &store_dir,
+            &py,
+            &create_kind()
+        ));
+        assert!(presence_decision(
+            &cache_excl,
+            &store_dir,
+            &py,
+            &remove_kind()
+        ));
     }
 
     /// END-TO-END WIRING SMOKE TEST: prove the notify → channel → worker path

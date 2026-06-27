@@ -954,11 +954,8 @@ impl CallGraphLanguageSupport for RustLangHandler {
                                                     match child.kind() {
                                                         "type_identifier" => {
                                                             method_owner = Some(
-                                                                get_node_text(
-                                                                    &child,
-                                                                    source_bytes,
-                                                                )
-                                                                .to_string(),
+                                                                get_node_text(&child, source_bytes)
+                                                                    .to_string(),
                                                             );
                                                         }
                                                         "generic_type" => {
@@ -1952,8 +1949,7 @@ trait Greeter {
             // trait method MUST be emitted as FuncDef::method so the qualified
             // key is generated; otherwise (FuncDef::function) the qualified key
             // never exists and the collision is irrecoverable.
-            let greet_entries: Vec<&FuncDef> =
-                funcs.iter().filter(|f| f.name == "greet").collect();
+            let greet_entries: Vec<&FuncDef> = funcs.iter().filter(|f| f.name == "greet").collect();
             assert_eq!(
                 greet_entries.len(),
                 2,

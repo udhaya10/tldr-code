@@ -57,15 +57,28 @@ fn main() {
 
     // batch 32  (embed_batch maps show_progress=true  -> Some(32))
     let t = Instant::now();
-    emb.embed_batch(texts.clone(), true).expect("batch32 failed");
+    emb.embed_batch(texts.clone(), true)
+        .expect("batch32 failed");
     let d32 = t.elapsed().as_secs_f64();
 
     // batch 256 (embed_batch maps show_progress=false -> None -> 256)
     let t = Instant::now();
-    emb.embed_batch(texts.clone(), false).expect("batch256 failed");
+    emb.embed_batch(texts.clone(), false)
+        .expect("batch256 failed");
     let d256 = t.elapsed().as_secs_f64();
 
-    println!("\nbatch  32: {:.1}s  ({:.1} ms/chunk)", d32, d32 * 1000.0 / n as f64);
-    println!("batch 256: {:.1}s  ({:.1} ms/chunk)", d256, d256 * 1000.0 / n as f64);
-    println!("ratio 256/32: {:.2}x  (>1 means 256 is slower)", d256 / d32.max(0.001));
+    println!(
+        "\nbatch  32: {:.1}s  ({:.1} ms/chunk)",
+        d32,
+        d32 * 1000.0 / n as f64
+    );
+    println!(
+        "batch 256: {:.1}s  ({:.1} ms/chunk)",
+        d256,
+        d256 * 1000.0 / n as f64
+    );
+    println!(
+        "ratio 256/32: {:.2}x  (>1 means 256 is slower)",
+        d256 / d32.max(0.001)
+    );
 }

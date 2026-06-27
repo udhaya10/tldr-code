@@ -101,6 +101,9 @@ impl Default for SemanticConfig {
 
 impl TldrConfig {
     /// Parse a config from a JSON string.
+    // Intentionally named `from_str` for the JSON-parsing API; not the
+    // `std::str::FromStr` trait (the error type is `serde_json::Error`).
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Result<Self, serde_json::Error> {
         serde_json::from_str(s)
     }
@@ -254,7 +257,10 @@ mod tests {
             config.embedding.endpoint.as_deref(),
             Some("https://api.openai.com/v1/embeddings")
         );
-        assert_eq!(config.embedding.api_key_env.as_deref(), Some("OPENAI_API_KEY"));
+        assert_eq!(
+            config.embedding.api_key_env.as_deref(),
+            Some("OPENAI_API_KEY")
+        );
         assert_eq!(config.embedding.dimensions, Some(3072));
         assert!(config.semantic.enabled);
         assert_eq!(
@@ -288,8 +294,7 @@ mod tests {
     #[test]
     fn merge_project_overrides_global() {
         let mut global = TldrConfig::from_str(r#"{"embedding": {"model": "arctic-m"}}"#).unwrap();
-        let project =
-            TldrConfig::from_str(r#"{"embedding": {"model": "arctic-l"}}"#).unwrap();
+        let project = TldrConfig::from_str(r#"{"embedding": {"model": "arctic-l"}}"#).unwrap();
         global.merge(&project);
         assert_eq!(global.embedding.model.as_deref(), Some("arctic-l"));
         assert_eq!(global.embedding.provider, "local");

@@ -95,6 +95,12 @@ pub struct IndexManager {
     embedder_builds: std::sync::atomic::AtomicUsize,
 }
 
+impl Default for IndexManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl IndexManager {
     pub fn new() -> Self {
         Self {
@@ -247,8 +253,13 @@ impl IndexManager {
             ..Default::default()
         };
         let store_dir = store_dir_for(project);
-        let store = load_or_build_store(project, &store_dir, &build_opts, Some(CacheConfig::default()))
-            .map_err(|e| e.to_string())?;
+        let store = load_or_build_store(
+            project,
+            &store_dir,
+            &build_opts,
+            Some(CacheConfig::default()),
+        )
+        .map_err(|e| e.to_string())?;
         *guard = Some((model, store));
         Ok(true)
     }
@@ -404,7 +415,9 @@ impl IndexManager {
             *guard = Some((model, embedder));
         }
         let (_, embedder) = guard.as_mut().expect("embedder present after init");
-        embedder.embed_batch(texts, false).map_err(|e| e.to_string())
+        embedder
+            .embed_batch(texts, false)
+            .map_err(|e| e.to_string())
     }
 
     /// Write-lock invalidate: drops the resident store so the next query
@@ -432,7 +445,9 @@ impl IndexManager {
         match self.store.try_read_for(Duration::from_millis(100)) {
             None => IndexState::Building,
             Some(guard) => match guard.as_ref() {
-                Some((_, store)) => IndexState::Warm { vectors: store.len() },
+                Some((_, store)) => IndexState::Warm {
+                    vectors: store.len(),
+                },
                 None => IndexState::Cold,
             },
         }
@@ -604,8 +619,18 @@ mod tests {
             let manager = seeded_manager();
             let before = manager.store_len();
             let outcome = manager.apply_delta(tmp.path(), path).unwrap();
-            assert_eq!(outcome, DeltaOutcome::Filtered, "expected Filtered for {}", path.display());
-            assert_eq!(manager.store_len(), before, "store_len changed for {}", path.display());
+            assert_eq!(
+                outcome,
+                DeltaOutcome::Filtered,
+                "expected Filtered for {}",
+                path.display()
+            );
+            assert_eq!(
+                manager.store_len(),
+                before,
+                "store_len changed for {}",
+                path.display()
+            );
         }
     }
 
@@ -786,7 +811,11 @@ mod tests {
         manager
             .query(project.path(), "first query about parsing", &opts, model)
             .unwrap();
-        assert_eq!(manager.embedder_builds(), 1, "embedder built on first query");
+        assert_eq!(
+            manager.embedder_builds(),
+            1,
+            "embedder built on first query"
+        );
         manager
             .query(project.path(), "a second, different query", &opts, model)
             .unwrap();
@@ -920,7 +949,11 @@ mod tests {
         };
         for q in ["", "   ", "\t\n"] {
             let v = manager.query(project.path(), q, &opts, model).unwrap();
-            assert_eq!(v["total_results"], serde_json::json!(0), "blank {q:?} -> empty");
+            assert_eq!(
+                v["total_results"],
+                serde_json::json!(0),
+                "blank {q:?} -> empty"
+            );
             assert!(
                 v["results"].as_array().unwrap().is_empty(),
                 "blank {q:?} -> no results"

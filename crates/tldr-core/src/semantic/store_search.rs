@@ -122,7 +122,14 @@ pub fn search_with_store(
 
     let start = Instant::now();
     let store = load_or_build_store(root, store_dir, build_options, cache_config)?;
-    query_store(&store, root, query, search_options, build_options.model, start)
+    query_store(
+        &store,
+        root,
+        query,
+        search_options,
+        build_options.model,
+        start,
+    )
 }
 
 /// Load an existing store (if fresh) or build+save a new one.
@@ -234,7 +241,6 @@ pub fn empty_search_report(query: &str, model: EmbeddingModel) -> SemanticSearch
     }
 }
 
-
 /// Convert raw store [`SearchHit`]s into a [`SemanticSearchReport`] with the SAME
 /// shape `SemanticIndex::search` produces. Pure apart from the lazy snippet read,
 /// so the parity-critical steps are unit-testable without an embedder:
@@ -336,7 +342,11 @@ mod tests {
         }
     }
 
-    fn build_opts(model: EmbeddingModel, gran: ChunkGranularity, langs: Option<&[&str]>) -> BuildOptions {
+    fn build_opts(
+        model: EmbeddingModel,
+        gran: ChunkGranularity,
+        langs: Option<&[&str]>,
+    ) -> BuildOptions {
         BuildOptions {
             model,
             granularity: gran,
@@ -356,7 +366,15 @@ mod tests {
             hit(0.7, "c.rs", 5, 6),
         ];
         let root = Path::new("/proj");
-        let report = hits_to_report("q", EmbeddingModel::ArcticM, hits, root, &opts(0.5, false), 3, 0);
+        let report = hits_to_report(
+            "q",
+            EmbeddingModel::ArcticM,
+            hits,
+            root,
+            &opts(0.5, false),
+            3,
+            0,
+        );
 
         assert_eq!(report.results.len(), 2, "0.3-score hit is below threshold");
         assert_eq!(report.total_results, 2);
@@ -371,24 +389,46 @@ mod tests {
     #[test]
     fn threshold_zero_keeps_all_hits() {
         let hits = vec![hit(0.1, "a.rs", 1, 2), hit(0.9, "b.rs", 3, 4)];
-        let report =
-            hits_to_report("q", EmbeddingModel::ArcticM, hits, Path::new("/p"), &opts(0.0, false), 2, 0);
+        let report = hits_to_report(
+            "q",
+            EmbeddingModel::ArcticM,
+            hits,
+            Path::new("/p"),
+            &opts(0.0, false),
+            2,
+            0,
+        );
         assert_eq!(report.results.len(), 2);
     }
 
     #[test]
     fn include_snippet_false_yields_empty_snippet() {
         let hits = vec![hit(0.1, "a.rs", 1, 2)];
-        let report =
-            hits_to_report("q", EmbeddingModel::ArcticM, hits, Path::new("/p"), &opts(0.0, false), 1, 0);
+        let report = hits_to_report(
+            "q",
+            EmbeddingModel::ArcticM,
+            hits,
+            Path::new("/p"),
+            &opts(0.0, false),
+            1,
+            0,
+        );
         assert!(report.results[0].snippet.is_empty());
     }
 
     #[test]
     fn chunk_params_tag_is_order_independent_and_ignores_runtime_flags() {
         // Languages in different order -> identical tag (sorted).
-        let a = build_opts(EmbeddingModel::ArcticM, ChunkGranularity::Function, Some(&["rust", "go"]));
-        let b = build_opts(EmbeddingModel::ArcticM, ChunkGranularity::Function, Some(&["go", "rust"]));
+        let a = build_opts(
+            EmbeddingModel::ArcticM,
+            ChunkGranularity::Function,
+            Some(&["rust", "go"]),
+        );
+        let b = build_opts(
+            EmbeddingModel::ArcticM,
+            ChunkGranularity::Function,
+            Some(&["go", "rust"]),
+        );
         assert_eq!(chunk_params_tag(&a), chunk_params_tag(&b));
 
         // show_progress / use_cache do NOT affect the tag (runtime concerns).
@@ -398,26 +438,46 @@ mod tests {
         assert_eq!(chunk_params_tag(&a), chunk_params_tag(&c));
 
         // Granularity DOES affect the tag.
-        let d = build_opts(EmbeddingModel::ArcticM, ChunkGranularity::File, Some(&["rust", "go"]));
+        let d = build_opts(
+            EmbeddingModel::ArcticM,
+            ChunkGranularity::File,
+            Some(&["rust", "go"]),
+        );
         assert_ne!(chunk_params_tag(&a), chunk_params_tag(&d));
     }
 
     #[test]
     fn manifest_id_reflects_model_and_chunk_inputs() {
         let root = Path::new("/proj");
-        let base = build_opts(EmbeddingModel::ArcticM, ChunkGranularity::Function, Some(&["rust"]));
+        let base = build_opts(
+            EmbeddingModel::ArcticM,
+            ChunkGranularity::Function,
+            Some(&["rust"]),
+        );
         let id = manifest_id_for(root, &base);
 
         // A model change MUST change identity (else load() serves stale vectors).
-        let other_model = build_opts(EmbeddingModel::ArcticL, ChunkGranularity::Function, Some(&["rust"]));
+        let other_model = build_opts(
+            EmbeddingModel::ArcticL,
+            ChunkGranularity::Function,
+            Some(&["rust"]),
+        );
         assert_ne!(id, manifest_id_for(root, &other_model));
 
         // A granularity change MUST change identity.
-        let other_gran = build_opts(EmbeddingModel::ArcticM, ChunkGranularity::File, Some(&["rust"]));
+        let other_gran = build_opts(
+            EmbeddingModel::ArcticM,
+            ChunkGranularity::File,
+            Some(&["rust"]),
+        );
         assert_ne!(id, manifest_id_for(root, &other_gran));
 
         // A language-set change MUST change identity.
-        let other_langs = build_opts(EmbeddingModel::ArcticM, ChunkGranularity::Function, Some(&["rust", "go"]));
+        let other_langs = build_opts(
+            EmbeddingModel::ArcticM,
+            ChunkGranularity::Function,
+            Some(&["rust", "go"]),
+        );
         assert_ne!(id, manifest_id_for(root, &other_langs));
 
         // walker_version is wired through.
@@ -566,7 +626,10 @@ mod tests {
         // Second call: store_dir now exists -> load hit (no rebuild) -> same ranking.
         let r2 = search_with_store(dir.path(), &store_dir, query, &sopts, &bopts, cache()).unwrap();
         let order = |r: &SemanticSearchReport| {
-            r.results.iter().map(|x| x.file_path.clone()).collect::<Vec<_>>()
+            r.results
+                .iter()
+                .map(|x| x.file_path.clone())
+                .collect::<Vec<_>>()
         };
         assert_eq!(order(&r1), order(&r2), "load-hit path matches rebuild path");
     }
@@ -622,7 +685,11 @@ mod tests {
 
         // Call 2: tree UNCHANGED (incl the 0-chunk file) -> load-hit, NO rebuild.
         search_with_store(corpus.path(), &store_dir, q, &sopts, &bopts, cache()).unwrap();
-        assert_eq!(gens(), 1, "fresh store must NOT rebuild (0-chunk file is no phantom add)");
+        assert_eq!(
+            gens(),
+            1,
+            "fresh store must NOT rebuild (0-chunk file is no phantom add)"
+        );
 
         // Edit a source file (size change) -> drift -> rebuild -> generation 2.
         std::fs::write(

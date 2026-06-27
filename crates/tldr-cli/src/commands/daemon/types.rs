@@ -582,6 +582,10 @@ pub struct MemoryStats {
 /// This makes them structurally distinguishable for serde untagged.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
+// `FullStatus` is intentionally the large, field-rich variant; this enum is
+// constructed infrequently (one response per daemon request) so boxing its
+// fields would add indirection and serde churn for no real benefit.
+#[allow(clippy::large_enum_variant)]
 pub enum DaemonResponse {
     /// Full status response (5 required fields including typed enum status)
     FullStatus {

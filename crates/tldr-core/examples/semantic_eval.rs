@@ -450,9 +450,23 @@ fn main() {
     let n = gold.len().max(1) as f64;
     println!("{}", "-".repeat(100));
     println!("\nScope:       {}", root.display());
-    println!("Gold cases:  {} (of {} total; rest out of scope)", gold.len(), GOLD.len());
-    println!("Recall@5:    {:.3}  ({}/{})", hits_at_5 as f64 / n, hits_at_5, gold.len());
-    println!("Recall@10:   {:.3}  ({}/{})", hits_at_10 as f64 / n, hits_at_10, gold.len());
+    println!(
+        "Gold cases:  {} (of {} total; rest out of scope)",
+        gold.len(),
+        GOLD.len()
+    );
+    println!(
+        "Recall@5:    {:.3}  ({}/{})",
+        hits_at_5 as f64 / n,
+        hits_at_5,
+        gold.len()
+    );
+    println!(
+        "Recall@10:   {:.3}  ({}/{})",
+        hits_at_10 as f64 / n,
+        hits_at_10,
+        gold.len()
+    );
     println!("MRR:         {:.3}", mrr_sum / n);
 
     // Re-list the queries that fell outside top-10 so the worst cases are visible

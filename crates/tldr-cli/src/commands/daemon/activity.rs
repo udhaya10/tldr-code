@@ -54,8 +54,7 @@ pub(crate) enum Source {
 const SOURCE_COUNT: usize = 4;
 
 /// Display names in `Source` order, for `daemon status` (TLDR-qzc).
-pub(crate) const SOURCE_NAMES: [&str; SOURCE_COUNT] =
-    ["socket", "cli_poke", "watcher", "internal"];
+pub(crate) const SOURCE_NAMES: [&str; SOURCE_COUNT] = ["socket", "cli_poke", "watcher", "internal"];
 
 /// A live unit of internal work, for the busy snapshot (TLDR-qzc).
 #[derive(Debug, Clone)]
@@ -111,12 +110,18 @@ impl ActivityTracker {
     /// exact lifetime (inside the `spawn_blocking` closure — see module docs).
     pub(crate) fn begin(self: &Arc<Self>, label: &'static str) -> BusyGuard {
         let token = self.next_token.fetch_add(1, Ordering::Relaxed);
-        self.busy
-            .lock()
-            .expect("busy lock poisoned")
-            .insert(token, BusyEntry { label, started: Instant::now() });
+        self.busy.lock().expect("busy lock poisoned").insert(
+            token,
+            BusyEntry {
+                label,
+                started: Instant::now(),
+            },
+        );
         self.busy_count.fetch_add(1, Ordering::Relaxed);
-        BusyGuard { tracker: Arc::clone(self), token }
+        BusyGuard {
+            tracker: Arc::clone(self),
+            token,
+        }
     }
 
     /// Number of live busy tokens.
@@ -131,7 +136,10 @@ impl ActivityTracker {
             .lock()
             .expect("busy lock poisoned")
             .values()
-            .map(|e| BusyInfo { label: e.label, age: e.started.elapsed() })
+            .map(|e| BusyInfo {
+                label: e.label,
+                age: e.started.elapsed(),
+            })
             .collect();
         infos.sort_by(|a, b| b.age.cmp(&a.age));
         infos
@@ -202,7 +210,12 @@ mod tests {
 
     #[test]
     fn touch_defeats_idle_per_source() {
-        for source in [Source::Socket, Source::CliPoke, Source::Watcher, Source::Internal] {
+        for source in [
+            Source::Socket,
+            Source::CliPoke,
+            Source::Watcher,
+            Source::Internal,
+        ] {
             let t = stale_tracker();
             t.touch(source);
             assert!(!t.is_idle(TIMEOUT), "touch({source:?}) must defeat idle");

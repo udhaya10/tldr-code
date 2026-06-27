@@ -129,9 +129,8 @@ pub use search::{
     enriched_search, enriched_search_with_callgraph_cache, enriched_search_with_index,
     enriched_search_with_structure_cache, hybrid_search, read_callgraph_cache,
     read_structure_cache, search, search_with_inner, write_structure_cache, Bm25Index, Bm25Result,
-    CallGraphLookup, EnrichedResult, EnrichedSearchOptions, EnrichedSearchReport,
-    HybridResult, HybridSearchReport, SearchMatch, SearchMode, SemanticResult, StructureLookup,
-    Tokenizer,
+    CallGraphLookup, EnrichedResult, EnrichedSearchOptions, EnrichedSearchReport, HybridResult,
+    HybridSearchReport, SearchMatch, SearchMode, SemanticResult, StructureLookup, Tokenizer,
 };
 
 /// Result type alias for all TLDR operations

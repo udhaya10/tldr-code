@@ -504,9 +504,7 @@ impl TypeScriptHandler {
                     // `app.init()` route to `resolve_method_or_attr_call`
                     // and silently fail to resolve in-project.
                     if Self::is_top_level_assignment(&node) {
-                        if let Some(name) =
-                            Self::extract_assignment_function_name(&node, source)
-                        {
+                        if let Some(name) = Self::extract_assignment_function_name(&node, source) {
                             functions.insert(name);
                         }
                     }

@@ -222,7 +222,8 @@ mod tests {
                 .run(crate::output::OutputFormat::Json, true)
                 .expect_err("parked flag must fail fast");
             assert!(
-                err.to_string().starts_with("not available in this version,"),
+                err.to_string()
+                    .starts_with("not available in this version,"),
                 "expected standardized parked message, got: {err}"
             );
         }

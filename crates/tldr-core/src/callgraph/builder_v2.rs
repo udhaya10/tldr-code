@@ -660,7 +660,7 @@ pub fn build_project_call_graph_v2(
         );
     }
 
-    return Ok(ir);
+    Ok(ir)
 }
 
 /// TLDR-iqr seam: scan + parse phase only — produces the per-file IRs that
@@ -765,8 +765,8 @@ pub fn compose_call_graph_v2(
 
     // Populate indices from IR
     for (file_path, file_ir) in &sorted_files {
-        let file_path: &PathBuf = *file_path;
-        let file_ir: &super::cross_file_types::FileIR = *file_ir;
+        let file_path: &PathBuf = file_path;
+        let file_ir: &super::cross_file_types::FileIR = file_ir;
         let module = path_to_module(file_path, &config.language);
 
         for func in &file_ir.funcs {
@@ -860,8 +860,8 @@ pub fn compose_call_graph_v2(
     // as the populate-indices loop above, for the same reason — first
     // writer wins on the class_index, and HashMap iteration is random.
     for (file_path, file_ir) in &sorted_files {
-        let file_path: &PathBuf = *file_path;
-        let file_ir: &super::cross_file_types::FileIR = *file_ir;
+        let file_path: &PathBuf = file_path;
+        let file_ir: &super::cross_file_types::FileIR = file_ir;
         for func in &file_ir.funcs {
             if !func.is_method {
                 continue;
@@ -1054,8 +1054,7 @@ pub fn compose_call_graph_v2(
         .collect();
 
     // Serial dedup + insertion, in the same sorted file order as before.
-    let mut edge_set: HashSet<CrossFileCallEdge> =
-        HashSet::with_capacity(ir.function_count() * 4);
+    let mut edge_set: HashSet<CrossFileCallEdge> = HashSet::with_capacity(ir.function_count() * 4);
     for edges in per_file_edges {
         for edge in edges {
             if edge_set.insert(edge.clone()) {

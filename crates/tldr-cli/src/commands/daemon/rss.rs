@@ -13,22 +13,27 @@
 
 /// Current resident set size of THIS process, in bytes.
 #[cfg(target_os = "macos")]
+// `mach_task_self_` is deprecated in `libc` in favor of the `mach2` crate, but
+// pulling in `mach2` just for the task port is not worth a new dependency here.
+#[allow(deprecated)]
 pub(crate) fn current_rss_bytes() -> Option<u64> {
     // mach task_info(MACH_TASK_BASIC_INFO) — there is no procfs on macOS.
     // libc exposes the task port as the `mach_task_self_` static.
-    use libc::{mach_task_basic_info, mach_task_self_, natural_t, task_info, KERN_SUCCESS,
-        MACH_TASK_BASIC_INFO};
+    use libc::{
+        mach_task_basic_info, mach_task_self_, natural_t, task_info, KERN_SUCCESS,
+        MACH_TASK_BASIC_INFO,
+    };
     unsafe {
         let mut info: mach_task_basic_info = std::mem::zeroed();
-        let mut count = (std::mem::size_of::<mach_task_basic_info>()
-            / std::mem::size_of::<natural_t>()) as u32;
+        let mut count =
+            (std::mem::size_of::<mach_task_basic_info>() / std::mem::size_of::<natural_t>()) as u32;
         let kr = task_info(
             mach_task_self_,
-            MACH_TASK_BASIC_INFO as u32,
+            MACH_TASK_BASIC_INFO,
             &mut info as *mut _ as *mut _,
             &mut count,
         );
-        (kr == KERN_SUCCESS).then(|| info.resident_size)
+        (kr == KERN_SUCCESS).then_some(info.resident_size)
     }
 }
 
@@ -57,7 +62,11 @@ pub(crate) fn peak_rss_bytes() -> Option<u64> {
         }
         let raw = ru.ru_maxrss as u64;
         // ru_maxrss unit differs: bytes on macOS, kilobytes on Linux/BSD.
-        Some(if cfg!(target_os = "macos") { raw } else { raw * 1024 })
+        Some(if cfg!(target_os = "macos") {
+            raw
+        } else {
+            raw * 1024
+        })
     }
 }
 

@@ -244,7 +244,9 @@ fn tag_directive_functions(info: &mut ModuleInfo, source: &str, path: &Path) {
 /// "possibly_dead" findings for every declared symbol. Mirrors the
 /// oversize-skip pattern used elsewhere in the codebase.
 fn is_typescript_declaration_file(path: &Path) -> bool {
-    path.to_string_lossy().to_ascii_lowercase().ends_with(".d.ts")
+    path.to_string_lossy()
+        .to_ascii_lowercase()
+        .ends_with(".d.ts")
 }
 
 /// Collect ModuleInfo from all files in a directory using detailed AST extraction.

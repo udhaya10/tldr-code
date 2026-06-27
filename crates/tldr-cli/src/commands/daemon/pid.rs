@@ -428,5 +428,4 @@ mod tests {
         assert!(!cleaned);
         assert!(pid_path.exists());
     }
-
 }

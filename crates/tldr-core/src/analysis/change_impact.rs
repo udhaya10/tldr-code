@@ -693,10 +693,7 @@ fn detect_git_changes_base(project: &Path, base: &str) -> TldrResult<Vec<PathBuf
             // remediation hint pointing the user at the qualified ref.
             let mut message = format!("Branch '{}' not found. {}", base, stderr.trim());
             if origin_branch_exists(project, base) {
-                message.push_str(&format!(
-                    " (hint: try --base origin/{base})",
-                    base = base
-                ));
+                message.push_str(&format!(" (hint: try --base origin/{base})", base = base));
             }
             return Err(crate::error::TldrError::InvalidArgs {
                 arg: "base".to_string(),

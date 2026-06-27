@@ -1747,11 +1747,7 @@ static PYTHON_AST_SINKS: &[AstSinkPattern] = &[
     // are member-access shapes.
     AstSinkPattern {
         call_names: &["open", "Path"],
-        member_patterns: &[
-            ("os.path", "join"),
-            ("shutil", "copy"),
-            ("shutil", "move"),
-        ],
+        member_patterns: &[("os.path", "join"), ("shutil", "copy"), ("shutil", "move")],
         sink_type: TaintSinkType::FileOpen,
     },
     // VULN-MIGRATION-V1 M2: HttpRequest (Ssrf) sinks per vuln.rs L616-L630.
@@ -1993,10 +1989,7 @@ static TYPESCRIPT_AST_SINKS: &[AstSinkPattern] = &[
     // ontology for an HTTP redirect with attacker-controllable target.
     AstSinkPattern {
         call_names: &[],
-        member_patterns: &[
-            ("NextResponse", "redirect"),
-            ("Response", "redirect"),
-        ],
+        member_patterns: &[("NextResponse", "redirect"), ("Response", "redirect")],
         sink_type: TaintSinkType::OpenRedirect,
     },
     // Bare `redirect(...)` server-action helper from `next/navigation` —
@@ -2028,16 +2021,12 @@ static TYPESCRIPT_AST_SINKS: &[AstSinkPattern] = &[
     // dedicated "header injection" sink yet).
     AstSinkPattern {
         call_names: &[],
-        member_patterns: &[
-            ("reply", "redirect"),
-        ],
+        member_patterns: &[("reply", "redirect")],
         sink_type: TaintSinkType::OpenRedirect,
     },
     AstSinkPattern {
         call_names: &[],
-        member_patterns: &[
-            ("reply", "header"),
-        ],
+        member_patterns: &[("reply", "header")],
         sink_type: TaintSinkType::FileWrite,
     },
     // W1-M3: NestJS framework sinks (parity-add for Wave 2 regex deletion).
@@ -2091,10 +2080,7 @@ static TYPESCRIPT_AST_SINKS: &[AstSinkPattern] = &[
     // CWE-22, which is incorrect for a redirect operation.
     AstSinkPattern {
         call_names: &[],
-        member_patterns: &[
-            ("res", "redirect"),
-            ("response", "redirect"),
-        ],
+        member_patterns: &[("res", "redirect"), ("response", "redirect")],
         sink_type: TaintSinkType::OpenRedirect,
     },
     // VULN-MIGRATION-V1 M3 — `*.send(tainted)` reclassification.
@@ -2159,10 +2145,7 @@ static TYPESCRIPT_AST_SINKS: &[AstSinkPattern] = &[
     // does not produce duplicate findings within a single sink_type bucket.
     AstSinkPattern {
         call_names: &[],
-        member_patterns: &[
-            ("NextResponse", "json"),
-            ("NextResponse", "redirect"),
-        ],
+        member_patterns: &[("NextResponse", "json"), ("NextResponse", "redirect")],
         sink_type: TaintSinkType::HtmlOutput,
     },
     // VULN-MIGRATION-V1 M2: HtmlOutput (Xss) sinks per vuln.rs L387-L394.
@@ -2182,11 +2165,7 @@ static TYPESCRIPT_AST_SINKS: &[AstSinkPattern] = &[
     // pending a future reclassification.)
     AstSinkPattern {
         call_names: &[],
-        member_patterns: &[
-            ("*", "outerHTML"),
-            ("document", "writeln"),
-            ("*", "html"),
-        ],
+        member_patterns: &[("*", "outerHTML"), ("document", "writeln"), ("*", "html")],
         sink_type: TaintSinkType::HtmlOutput,
     },
     // VULN-MIGRATION-V1 M2: FileOpen (PathTraversal) sinks per vuln.rs L521-L527.
@@ -2235,10 +2214,7 @@ static TYPESCRIPT_AST_SINKS: &[AstSinkPattern] = &[
     // does not introduce new FPs (verified via dispatch contract M4 stop_threshold).
     AstSinkPattern {
         call_names: &["unserialize"],
-        member_patterns: &[
-            ("serialize", "unserialize"),
-            ("", "node-serialize"),
-        ],
+        member_patterns: &[("serialize", "unserialize"), ("", "node-serialize")],
         sink_type: TaintSinkType::Deserialize,
     },
 ];
@@ -2411,10 +2387,7 @@ static JAVA_AST_SINKS: &[AstSinkPattern] = &[
         call_names: &[],
         // Runtime.getRuntime().exec is a chained call; raw fallback. ProcessBuilder
         // is an object_creation; raw fallback.
-        member_patterns: &[
-            ("", "Runtime.getRuntime().exec"),
-            ("", "ProcessBuilder"),
-        ],
+        member_patterns: &[("", "Runtime.getRuntime().exec"), ("", "ProcessBuilder")],
         sink_type: TaintSinkType::ShellExec,
     },
     AstSinkPattern {
@@ -2506,10 +2479,7 @@ static JAVA_AST_SANITIZERS: &[AstSanitizerPattern] = &[
     },
     AstSanitizerPattern {
         call_names: &[],
-        member_patterns: &[
-            ("ESAPI", "encoder"),
-            ("StringEscapeUtils", "escapeHtml"),
-        ],
+        member_patterns: &[("ESAPI", "encoder"), ("StringEscapeUtils", "escapeHtml")],
         sanitizer_type: SanitizerType::Html,
     },
 ];
@@ -2874,11 +2844,7 @@ static RUBY_AST_SOURCES: &[AstSourcePattern] = &[
     // most-specific structured AST entry should fire per descendant.)
     AstSourcePattern {
         call_names: &[],
-        member_patterns: &[
-            ("STDIN", "read"),
-            ("STDIN", "gets"),
-            ("STDIN", "readline"),
-        ],
+        member_patterns: &[("STDIN", "read"), ("STDIN", "gets"), ("STDIN", "readline")],
         source_type: TaintSourceType::Stdin,
     },
     AstSourcePattern {
@@ -2965,11 +2931,7 @@ static RUBY_AST_SINKS: &[AstSinkPattern] = &[
     // VULN-MIGRATION-V1 M2: Deserialize sinks per vuln.rs L739-L743.
     AstSinkPattern {
         call_names: &[],
-        member_patterns: &[
-            ("Marshal", "load"),
-            ("YAML", "load"),
-            ("Psych", "load"),
-        ],
+        member_patterns: &[("Marshal", "load"), ("YAML", "load"), ("Psych", "load")],
         sink_type: TaintSinkType::Deserialize,
     },
     // VULN-SOURCE-PARITY-V1 M2: SqlQuery sinks for Ruby — NEW BANK. Pre-M3
@@ -2998,10 +2960,7 @@ static RUBY_AST_SANITIZERS: &[AstSanitizerPattern] = &[
     },
     AstSanitizerPattern {
         call_names: &[],
-        member_patterns: &[
-            ("", "CGI.escapeHTML"),
-            ("", "Rack::Utils.escape_html"),
-        ],
+        member_patterns: &[("", "CGI.escapeHTML"), ("", "Rack::Utils.escape_html")],
         sanitizer_type: SanitizerType::Html,
     },
 ];
@@ -3045,10 +3004,7 @@ static KOTLIN_AST_SOURCES: &[AstSourcePattern] = &[
 static KOTLIN_AST_SINKS: &[AstSinkPattern] = &[
     AstSinkPattern {
         call_names: &[],
-        member_patterns: &[
-            ("", "Runtime.getRuntime().exec"),
-            ("", "ProcessBuilder"),
-        ],
+        member_patterns: &[("", "Runtime.getRuntime().exec"), ("", "ProcessBuilder")],
         sink_type: TaintSinkType::ShellExec,
     },
     AstSinkPattern {
@@ -3077,10 +3033,7 @@ static KOTLIN_AST_SINKS: &[AstSinkPattern] = &[
     // `readObject(` is a method call (wildcard receiver).
     AstSinkPattern {
         call_names: &[],
-        member_patterns: &[
-            ("*", "readObject"),
-            ("", "ObjectInputStream("),
-        ],
+        member_patterns: &[("*", "readObject"), ("", "ObjectInputStream(")],
         sink_type: TaintSinkType::Deserialize,
     },
 ];
@@ -3111,10 +3064,7 @@ static SWIFT_AST_SOURCES: &[AstSourcePattern] = &[
     AstSourcePattern {
         call_names: &[],
         // FileManager.default is structural; URLSession is a bare identifier (raw).
-        member_patterns: &[
-            ("FileManager", "default"),
-            ("", "URLSession"),
-        ],
+        member_patterns: &[("FileManager", "default"), ("", "URLSession")],
         source_type: TaintSourceType::FileRead,
     },
     // VULN-MIGRATION-V1 M3: command-line argument access — Swift's
@@ -3269,11 +3219,7 @@ static CSHARP_AST_SINKS: &[AstSinkPattern] = &[
     // was lost in M2 audit.
     AstSinkPattern {
         call_names: &["AppendHtml"],
-        member_patterns: &[
-            ("Html", "Raw"),
-            ("", "@Html.Raw("),
-            ("Response", "Write"),
-        ],
+        member_patterns: &[("Html", "Raw"), ("", "@Html.Raw("), ("Response", "Write")],
         sink_type: TaintSinkType::HtmlOutput,
     },
     // VULN-MIGRATION-V1 M2: FileOpen (PathTraversal) sinks per vuln.rs L574-L579.
@@ -3335,10 +3281,7 @@ static SCALA_AST_SOURCES: &[AstSourcePattern] = &[
         call_names: &[],
         // `StdIn.readLine` is structural; `scala.io.StdIn` is a multi-segment qualified
         // path — raw fallback.
-        member_patterns: &[
-            ("StdIn", "readLine"),
-            ("", "scala.io.StdIn"),
-        ],
+        member_patterns: &[("StdIn", "readLine"), ("", "scala.io.StdIn")],
         source_type: TaintSourceType::UserInput,
     },
     AstSourcePattern {
@@ -3496,11 +3439,7 @@ static PHP_AST_SINKS: &[AstSinkPattern] = &[
     // `<?= ` is the short-tag template raw output — all raw substring fallbacks.
     AstSinkPattern {
         call_names: &[],
-        member_patterns: &[
-            ("", "echo "),
-            ("", "print "),
-            ("", "<?= "),
-        ],
+        member_patterns: &[("", "echo "), ("", "print "), ("", "<?= ")],
         sink_type: TaintSinkType::HtmlOutput,
     },
     // VULN-MIGRATION-V1 M2: FileOpen (PathTraversal) sinks per vuln.rs L586-L592.
@@ -3509,10 +3448,7 @@ static PHP_AST_SINKS: &[AstSinkPattern] = &[
     // function calls (call_names path).
     AstSinkPattern {
         call_names: &["fopen", "file_get_contents", "file_put_contents"],
-        member_patterns: &[
-            ("", "include("),
-            ("", "require("),
-        ],
+        member_patterns: &[("", "include("), ("", "require(")],
         sink_type: TaintSinkType::FileOpen,
     },
     // VULN-MIGRATION-V1 M2: HttpRequest (Ssrf) sinks per vuln.rs L688-L697.
@@ -3534,10 +3470,7 @@ static PHP_AST_SINKS: &[AstSinkPattern] = &[
             "get_headers",
             "readfile",
         ],
-        member_patterns: &[
-            ("", "Guzzle\\Client"),
-            ("", "->request("),
-        ],
+        member_patterns: &[("", "Guzzle\\Client"), ("", "->request(")],
         sink_type: TaintSinkType::HttpRequest,
     },
     // VULN-MIGRATION-V1 M2: Deserialize sinks per vuln.rs L762-L765.
@@ -3805,10 +3738,7 @@ static OCAML_AST_SOURCES: &[AstSourcePattern] = &[
     },
     AstSourcePattern {
         call_names: &[],
-        member_patterns: &[
-            ("In_channel", "read_all"),
-            ("In_channel", "input_all"),
-        ],
+        member_patterns: &[("In_channel", "read_all"), ("In_channel", "input_all")],
         source_type: TaintSourceType::FileRead,
     },
 ];
@@ -3854,10 +3784,7 @@ static OCAML_AST_SINKS: &[AstSinkPattern] = &[
     // VULN-MIGRATION-V1 M2: Deserialize sinks per vuln.rs L767-L770.
     AstSinkPattern {
         call_names: &[],
-        member_patterns: &[
-            ("Marshal", "from_channel"),
-            ("Marshal", "from_string"),
-        ],
+        member_patterns: &[("Marshal", "from_channel"), ("Marshal", "from_string")],
         sink_type: TaintSinkType::Deserialize,
     },
 ];
@@ -4248,10 +4175,7 @@ fn extract_first_identifier_arg_ast(
     // variable_name / name identifier descendant. Skips string-literal subtrees
     // already filtered by is_in_string upstream of detect_sinks_ast.
     if language == Language::Php
-        && matches!(
-            descendant.kind(),
-            "echo_statement" | "print_intrinsic"
-        )
+        && matches!(descendant.kind(), "echo_statement" | "print_intrinsic")
     {
         // BFS over named descendants seeking the first variable_name / name node.
         let mut stack: Vec<tree_sitter::Node> = vec![*descendant];
@@ -4391,10 +4315,7 @@ fn extract_first_identifier_arg_ast(
                 continue;
             }
             // OCaml-specific: strip parens around `(expr)` parenthesised args.
-            let stripped = text
-                .trim_start_matches('(')
-                .trim_end_matches(')')
-                .trim();
+            let stripped = text.trim_start_matches('(').trim_end_matches(')').trim();
             let head = stripped.split('.').next().unwrap_or(stripped);
             let head = head.trim_start_matches('&');
             if is_valid_identifier(head) {
@@ -4408,21 +4329,19 @@ fn extract_first_identifier_arg_ast(
     //   * tree-sitter-{python,go,c,cpp,rust,java,javascript,typescript}: "arguments"
     //   * tree-sitter-{kotlin,swift,csharp}: positional — the call_expression's
     //     last child is typically the value_arguments / arguments node.
-    let args = descendant
-        .child_by_field_name("arguments")
-        .or_else(|| {
-            // Positional fallback: scan children for a node whose kind looks like
-            // an arg list.
-            for i in 0..descendant.child_count() {
-                if let Some(child) = descendant.child(i) {
-                    let kind = child.kind();
-                    if kind.contains("argument") || kind == "call_suffix" {
-                        return Some(child);
-                    }
+    let args = descendant.child_by_field_name("arguments").or_else(|| {
+        // Positional fallback: scan children for a node whose kind looks like
+        // an arg list.
+        for i in 0..descendant.child_count() {
+            if let Some(child) = descendant.child(i) {
+                let kind = child.kind();
+                if kind.contains("argument") || kind == "call_suffix" {
+                    return Some(child);
                 }
             }
-            None
-        })?;
+        }
+        None
+    })?;
 
     // VAR-EXTRACT-NESTED-CONSTRUCTOR-V1: when the first NAMED non-string-literal
     // arg-list child is itself a constructor / call / instance-shaped node and
@@ -4458,11 +4377,7 @@ fn extract_first_identifier_arg_ast(
             "method_invocation",
             "parenthesized_expression",
         ],
-        Language::Scala => &[
-            "call_expression",
-            "instance_expression",
-            "infix_expression",
-        ],
+        Language::Scala => &["call_expression", "instance_expression", "infix_expression"],
         Language::Cpp => &[
             "binary_expression",
             "call_expression",
@@ -4607,8 +4522,7 @@ fn extract_assignment_rhs_ident(
             } else {
                 b' '
             };
-            if before != b'=' && before != b'!' && before != b'<' && before != b'>'
-                && after != b'='
+            if before != b'=' && before != b'!' && before != b'<' && before != b'>' && after != b'='
             {
                 let rhs = &line_text[pos + 1..];
                 // Skip JSX expression-container braces `{{` / `{`.
@@ -4696,7 +4610,13 @@ pub fn detect_sources_ast(
                     }
                 }
                 false
-            }) || member_patterns_match(descendant, source, language, pattern.member_patterns, text);
+            }) || member_patterns_match(
+                descendant,
+                source,
+                language,
+                pattern.member_patterns,
+                text,
+            );
 
             if matched {
                 let line_text = std::str::from_utf8(source)
@@ -4734,9 +4654,7 @@ pub fn detect_sources_ast(
                         let call_kinds = call_node_kinds(language);
                         if call_kinds.contains(&descendant.kind()) {
                             extract_call_name(descendant, source, language)
-                                .and_then(|name| {
-                                    name.split('.').next().map(|s| s.to_string())
-                                })
+                                .and_then(|name| name.split('.').next().map(|s| s.to_string()))
                                 .filter(|s| is_valid_identifier(s))
                         } else {
                             None
@@ -4943,7 +4861,13 @@ pub fn detect_sinks_ast(
                     }
                 }
                 false
-            }) || member_patterns_match(descendant, source, language, pattern.member_patterns, text);
+            }) || member_patterns_match(
+                descendant,
+                source,
+                language,
+                pattern.member_patterns,
+                text,
+            );
 
             if matched {
                 let stmt_text = std::str::from_utf8(source)
@@ -4990,9 +4914,7 @@ pub fn detect_sinks_ast(
                         let call_kinds = call_node_kinds(language);
                         if call_kinds.contains(&descendant.kind()) {
                             extract_call_name(descendant, source, language)
-                                .and_then(|name| {
-                                    name.split('.').next().map(|s| s.to_string())
-                                })
+                                .and_then(|name| name.split('.').next().map(|s| s.to_string()))
                                 .filter(|s| is_valid_identifier(s))
                         } else {
                             None
@@ -5238,7 +5160,13 @@ pub fn detect_sanitizer_ast(
                     }
                 }
                 false
-            }) || member_patterns_match(descendant, source, language, pattern.member_patterns, text);
+            }) || member_patterns_match(
+                descendant,
+                source,
+                language,
+                pattern.member_patterns,
+                text,
+            );
 
             if matched {
                 return Some(pattern.sanitizer_type);
@@ -5672,17 +5600,11 @@ pub fn compute_taint_with_tree(
                 // (like `x` in `let x = ...; x = sanitize(x); eval(x)`), the
                 // SSA path's verdict is authoritative.
                 if !sink.tainted {
-                    let sink_var_is_ssa_tracked = ssa_ref
-                        .ssa_names
-                        .iter()
-                        .any(|n| n.variable == sink.var);
-                    if !sink_var_is_ssa_tracked
-                        && !result.sanitized_vars.contains(&sink.var)
-                    {
+                    let sink_var_is_ssa_tracked =
+                        ssa_ref.ssa_names.iter().any(|n| n.variable == sink.var);
+                    if !sink_var_is_ssa_tracked && !result.sanitized_vars.contains(&sink.var) {
                         if let Some(tainted_at_block) = tainted.get(&sink_block) {
-                            if let Some(block) =
-                                cfg.blocks.iter().find(|b| b.id == sink_block)
-                            {
+                            if let Some(block) = cfg.blocks.iter().find(|b| b.id == sink_block) {
                                 let block_text: String = (block.lines.0..=block.lines.1)
                                     .filter_map(|l| statements.get(&l))
                                     .map(|s| s.as_str())
@@ -6090,15 +6012,9 @@ fn process_block(
 /// substring of an unrelated token (method names, class names, comments).
 /// Uses the DFG's per-line use-reference granularity instead — the DFG already
 /// emits Use refs at correct token boundaries.
-fn rhs_uses_tainted(
-    line: u32,
-    current_taint: &HashSet<String>,
-    block_refs: &[&VarRef],
-) -> bool {
+fn rhs_uses_tainted(line: u32, current_taint: &HashSet<String>, block_refs: &[&VarRef]) -> bool {
     block_refs.iter().any(|r| {
-        r.line == line
-            && matches!(r.ref_type, RefType::Use)
-            && current_taint.contains(&r.name)
+        r.line == line && matches!(r.ref_type, RefType::Use) && current_taint.contains(&r.name)
     })
 }
 
@@ -6162,7 +6078,8 @@ fn ssa_propagate(
     // deterministic processing order within a block (Q-M1-C).
     let mut block_insts: HashMap<usize, Vec<&crate::ssa::types::SsaInstruction>> = HashMap::new();
     for sblock in &ssa.blocks {
-        let mut insts: Vec<&crate::ssa::types::SsaInstruction> = sblock.instructions.iter().collect();
+        let mut insts: Vec<&crate::ssa::types::SsaInstruction> =
+            sblock.instructions.iter().collect();
         insts.sort_by_key(|i| i.line);
         block_insts.insert(sblock.id, insts);
     }

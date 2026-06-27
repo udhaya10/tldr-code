@@ -545,7 +545,8 @@ fn test_vector_store_build() {
     write_file(&dir, "test.py", "def process_data():\n    return 42");
 
     let build_opts = BuildOptions::default();
-    let result = tldr_core::semantic::vector_store::VectorStore::build(dir.path(), &build_opts, None);
+    let result =
+        tldr_core::semantic::vector_store::VectorStore::build(dir.path(), &build_opts, None);
     assert!(result.is_ok());
 }
 

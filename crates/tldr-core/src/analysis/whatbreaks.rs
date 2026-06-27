@@ -436,10 +436,7 @@ fn count_transitive_callers(tree: &crate::types::CallerTree) -> usize {
 /// `affected_test_count` JSON field that
 /// [`whatbreaks_analysis`]'s Function-target branch reads back into
 /// [`WhatbreaksSummary::affected_test_count`].
-fn collect_test_files_from_tree(
-    tree: &crate::types::CallerTree,
-    acc: &mut HashSet<PathBuf>,
-) {
+fn collect_test_files_from_tree(tree: &crate::types::CallerTree, acc: &mut HashSet<PathBuf>) {
     if is_test_file(&tree.file) {
         acc.insert(tree.file.clone());
     }

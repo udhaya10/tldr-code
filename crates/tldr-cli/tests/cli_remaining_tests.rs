@@ -396,12 +396,6 @@ fn test_available_nonexistent_file() {
 // Dominators Tests
 // =============================================================================
 
-
-
-
-
-
-
 // =============================================================================
 // Reaching Definitions Tests
 // =============================================================================
@@ -538,11 +532,6 @@ fn test_reaching_defs_help() {
 // Live Variables Tests
 // =============================================================================
 
-
-
-
-
-
 // =============================================================================
 // Taint Analysis Tests
 // =============================================================================
@@ -635,12 +624,6 @@ fn test_taint_help() {
 // =============================================================================
 // Alias Analysis Tests
 // =============================================================================
-
-
-
-
-
-
 
 // =============================================================================
 // Slice Tests
@@ -1344,7 +1327,8 @@ fn test_no_other_subcommand_panics_on_lang() {
         assert!(
             !stderr.contains("Mismatch between definition and access of"),
             "tldr {:?} must not produce clap downcast panic. stderr: {}",
-            full_args, stderr
+            full_args,
+            stderr
         );
     }
 }
@@ -2125,7 +2109,6 @@ fn test_cache_clear_help() {
 // Cross-Command Integration Tests
 // =============================================================================
 
-
 #[test]
 fn test_analysis_commands_on_same_project() {
     let temp_dir = create_deps_test_project();
@@ -2150,7 +2133,6 @@ fn test_analysis_commands_on_same_project() {
 // =============================================================================
 // Error Handling Tests
 // =============================================================================
-
 
 #[test]
 fn test_invalid_format_option() {

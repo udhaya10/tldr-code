@@ -77,7 +77,10 @@ fn daemon_start_creates_nonempty_daemon_log() {
     let log_path = log_path(project);
     let metadata = std::fs::metadata(&log_path).unwrap_or_else(|e| {
         stop_daemon(project);
-        panic!("expected {:?} to exist after `daemon start`, got: {}", log_path, e);
+        panic!(
+            "expected {:?} to exist after `daemon start`, got: {}",
+            log_path, e
+        );
     });
     let len = metadata.len();
 

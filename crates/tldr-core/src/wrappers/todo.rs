@@ -500,9 +500,7 @@ fn build_todo_items(report: &TodoReport) -> Vec<TodoItem> {
     {
         use std::collections::HashSet;
         let mut seen: HashSet<(String, String, usize)> = HashSet::new();
-        items.retain(|item| {
-            seen.insert((item.category.clone(), item.file.clone(), item.line))
-        });
+        items.retain(|item| seen.insert((item.category.clone(), item.file.clone(), item.line)));
     }
 
     // Sort by priority

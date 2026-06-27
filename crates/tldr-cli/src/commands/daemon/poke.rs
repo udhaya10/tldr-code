@@ -180,5 +180,4 @@ mod tests {
         drop(guard);
         assert!(!poke.exists(), "guard drop must remove the poke file");
     }
-
 }

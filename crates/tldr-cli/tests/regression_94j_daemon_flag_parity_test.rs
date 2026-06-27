@@ -92,7 +92,8 @@ fn start_daemon(home: &Path, project: &Path) {
     }
 }
 
-const SAMPLE: &str = "def compute(a, b):\n    x = a + 1\n    y = b + 2\n    z = x + y\n    print(z)\n    return y\n";
+const SAMPLE: &str =
+    "def compute(a, b):\n    x = a + 1\n    y = b + 2\n    z = x + y\n    print(z)\n    return y\n";
 
 fn write_sample(project: &Path) -> std::path::PathBuf {
     let file = project.join("sample.py");

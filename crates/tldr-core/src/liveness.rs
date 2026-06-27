@@ -53,7 +53,9 @@ fn warn_registry_override_once() {
     use std::sync::Once;
     static WARN: Once = Once::new();
     WARN.call_once(|| {
-        eprintln!("[tldr] WARNING: TLDR_DAEMON_REGISTRY_DIR override active — daemon registry redirected");
+        eprintln!(
+            "[tldr] WARNING: TLDR_DAEMON_REGISTRY_DIR override active — daemon registry redirected"
+        );
     });
 }
 
@@ -160,10 +162,7 @@ mod tests {
 
         let _env = ENV_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
-        let cwd = std::env::current_dir()
-            .unwrap()
-            .canonicalize()
-            .unwrap();
+        let cwd = std::env::current_dir().unwrap().canonicalize().unwrap();
 
         // Receiver for the MATCHING daemon (project = cwd's root ancestor).
         let match_sock = dir.path().join("tldr-match.sock");

@@ -242,7 +242,11 @@ fn parse_block_doc_comment(text: &str) -> Option<String> {
 /// can enumerate functions with line ranges for the per-function
 /// `compute_taint_with_tree` dispatch loop. NOT part of the external library
 /// API; internal-only consumers within tldr-core.
-pub(crate) fn extract_functions_detailed(tree: &Tree, source: &str, language: Language) -> Vec<FunctionInfo> {
+pub(crate) fn extract_functions_detailed(
+    tree: &Tree,
+    source: &str,
+    language: Language,
+) -> Vec<FunctionInfo> {
     let mut functions = Vec::new();
     let root = tree.root_node();
 
@@ -278,7 +282,11 @@ pub(crate) fn extract_functions_detailed(tree: &Tree, source: &str, language: La
 /// enumerate per-method ranges for languages whose method definitions live
 /// only inside class/object/trait bodies (Scala `object M { def f ... }`,
 /// Java `class C { void f(){} }`, etc.). NOT part of the external library API.
-pub(crate) fn extract_classes_detailed(tree: &Tree, source: &str, language: Language) -> Vec<ClassInfo> {
+pub(crate) fn extract_classes_detailed(
+    tree: &Tree,
+    source: &str,
+    language: Language,
+) -> Vec<ClassInfo> {
     let mut classes = Vec::new();
     let root = tree.root_node();
 
@@ -1039,8 +1047,7 @@ fn extract_ts_module_constants(root: &Node, source: &str) -> Vec<FieldInfo> {
                                             .map(|n| get_node_text(&n, source));
                                         let line_number =
                                             decl_child.start_position().row as u32 + 1;
-                                        let line_end =
-                                            decl_child.end_position().row as u32 + 1;
+                                        let line_end = decl_child.end_position().row as u32 + 1;
                                         constants.push(FieldInfo {
                                             name,
                                             field_type: None,

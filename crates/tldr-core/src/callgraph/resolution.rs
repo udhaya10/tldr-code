@@ -293,8 +293,7 @@ pub fn apply_type_resolution(file_ir: &mut FileIR, source: &str, language: Langu
     // identical — each index replicates the legacy per-line decision logic
     // exactly (differential-gated in type_resolver.rs).
     let rust_index = (language == Language::Rust).then(|| RustReceiverIndex::new(source));
-    let mut python_index =
-        (language == Language::Python).then(|| PythonReceiverIndex::new(source));
+    let mut python_index = (language == Language::Python).then(|| PythonReceiverIndex::new(source));
     // The legacy dispatcher routes TypeScript AND JavaScript through the
     // same resolver — the index must serve both.
     let mut ts_index = matches!(language, Language::TypeScript | Language::JavaScript)

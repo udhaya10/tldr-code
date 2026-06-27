@@ -8,7 +8,9 @@ use std::path::Path;
 use tree_sitter::{Node, Tree};
 
 use crate::fs::tree::{collect_files, get_file_tree};
-use crate::types::{CodeStructure, DefinitionInfo, FileStructure, IgnoreSpec, Language, MethodInfo};
+use crate::types::{
+    CodeStructure, DefinitionInfo, FileStructure, IgnoreSpec, Language, MethodInfo,
+};
 use crate::TldrResult;
 
 use super::extract::is_upper_case_name;
@@ -66,18 +68,17 @@ pub fn get_code_structure(
                 // `size_mb` / `max_mb` fields on `FileTooLarge` are
                 // pre-rounded to MB and would render the 512 KB
                 // cap as "1MB" — confusing for users.
-                let (size_bytes, max_bytes) =
-                    match crate::fs::oversize::check_size(&path) {
-                        crate::fs::oversize::SizeCheck::Oversize {
-                            size_bytes,
-                            max_bytes,
-                            ..
-                        } => (size_bytes, max_bytes),
-                        // Fallback: file vanished between the
-                        // failed parse and the warning emission.
-                        // Use the rounded fields from the error.
-                        _ => (0, 0),
-                    };
+                let (size_bytes, max_bytes) = match crate::fs::oversize::check_size(&path) {
+                    crate::fs::oversize::SizeCheck::Oversize {
+                        size_bytes,
+                        max_bytes,
+                        ..
+                    } => (size_bytes, max_bytes),
+                    // Fallback: file vanished between the
+                    // failed parse and the warning emission.
+                    // Use the rounded fields from the error.
+                    _ => (0, 0),
+                };
                 warnings.push(crate::fs::oversize::format_oversize_warning(
                     &path,
                     size_bytes,
@@ -2555,9 +2556,9 @@ fn try_type_alias_definition(node: Node, source: &str) -> Option<DefinitionInfo>
             first_identifier_text(&left, source)?
         }
         // TypeScript / JavaScript: the alias name is the `name` field.
-        "type_alias_declaration" => {
-            node.child_by_field_name("name").map(|n| get_node_text(&n, source))?
-        }
+        "type_alias_declaration" => node
+            .child_by_field_name("name")
+            .map(|n| get_node_text(&n, source))?,
         _ => return None,
     };
     if name.is_empty() {
@@ -3765,7 +3766,11 @@ fn top_level() {}
         let tree = parse(source, Language::TypeScript).unwrap();
         let defs = extract_definitions(&tree, source, Language::TypeScript);
         let aliases: Vec<_> = defs.iter().filter(|d| d.kind == "type_alias").collect();
-        assert_eq!(aliases.len(), 2, "expected 2 TS type aliases, got: {defs:?}");
+        assert_eq!(
+            aliases.len(),
+            2,
+            "expected 2 TS type aliases, got: {defs:?}"
+        );
         assert!(aliases.iter().any(|d| d.name == "ID"));
         assert!(aliases.iter().any(|d| d.name == "Pair"));
     }

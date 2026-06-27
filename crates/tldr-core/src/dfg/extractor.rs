@@ -824,16 +824,16 @@ impl<'a> DfgBuilder<'a> {
                     // definite-uninitialized in reaching-defs is a false
                     // positive (e.g. `IO`, `FlatMap`, `Tracing` in
                     // `IO(FlatMap(this, f, Tracing.calculateTracingEvent(f)))`).
-                    if matches!(self.language, Language::Scala) {
-                        if name.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
-                            // Recurse into children so any nested identifiers
-                            // (rare for an identifier node) are not lost.
-                            let mut cursor = node.walk();
-                            for child in node.children(&mut cursor) {
-                                self.extract_refs_from_node(child, depth + 1)?;
-                            }
-                            return Ok(());
+                    if matches!(self.language, Language::Scala)
+                        && name.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+                    {
+                        // Recurse into children so any nested identifiers
+                        // (rare for an identifier node) are not lost.
+                        let mut cursor = node.walk();
+                        for child in node.children(&mut cursor) {
+                            self.extract_refs_from_node(child, depth + 1)?;
                         }
+                        return Ok(());
                     }
                     self.add_ref_from_node(node, RefType::Use);
                 }

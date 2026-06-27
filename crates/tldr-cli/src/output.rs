@@ -126,14 +126,7 @@ pub fn validate_format_for_command(cmd: &str, format: OutputFormat) -> Result<()
     // surface-gaps-v1 (BUG-19): added calls/impact/hubs/inheritance — the
     // canonical DOT use cases (call graphs and class hierarchies). Each
     // command's `Dot` arm must call a real format_*_dot emitter.
-    const DOT_SUPPORTED: &[&str] = &[
-        "clones",
-        "deps",
-        "calls",
-        "impact",
-        "hubs",
-        "inheritance",
-    ];
+    const DOT_SUPPORTED: &[&str] = &["clones", "deps", "calls", "impact", "hubs", "inheritance"];
 
     match format {
         OutputFormat::Sarif => {
@@ -296,6 +289,7 @@ fn format_tree_node(tree: &tldr_core::FileTree, output: &mut String, indent: usi
 ///   * each file's functions WITH `(line)` and full signature when known
 ///     (via `definitions[]` if present, falling back to bare names),
 ///   * each class WITH its inline method list pulled from `method_infos`,
+///
 /// while still skipping fields the JSON consumers rely on (imports,
 /// definitions array). Result: roughly 2-3× richer than before, still
 /// text-stream friendly.
@@ -363,10 +357,7 @@ pub fn format_structure_text(structure: &tldr_core::CodeStructure) -> String {
                 if file.classes.len() == 1 && i == 0 && !file.method_infos.is_empty() {
                     for m in &file.method_infos {
                         if !m.signature.is_empty() {
-                            output.push_str(&format!(
-                                "        . {} (L{})\n",
-                                m.signature, m.line
-                            ));
+                            output.push_str(&format!("        . {} (L{})\n", m.signature, m.line));
                         } else {
                             output.push_str(&format!("        . {} (L{})\n", m.name, m.line));
                         }
@@ -1231,10 +1222,7 @@ pub fn format_secrets_text(report: &tldr_core::SecretsReport) -> String {
 
         // Truncate file path to 40 chars (char-boundary safe; #16)
         let file_display = if rel_file.len() > 40 {
-            format!(
-                "...{}",
-                truncate_at_char_boundary_from_end(&rel_file, 37)
-            )
+            format!("...{}", truncate_at_char_boundary_from_end(&rel_file, 37))
         } else {
             rel_file
         };
@@ -1828,18 +1816,12 @@ pub fn format_clones_text(report: &tldr_core::analysis::ClonesReport) -> String 
         // Truncate file names if too long (show tail for readability;
         // char-boundary safe; #16).
         let file_a_display = if file_a.len() > 30 {
-            format!(
-                "...{}",
-                truncate_at_char_boundary_from_end(&file_a, 27)
-            )
+            format!("...{}", truncate_at_char_boundary_from_end(&file_a, 27))
         } else {
             file_a
         };
         let file_b_display = if file_b.len() > 30 {
-            format!(
-                "...{}",
-                truncate_at_char_boundary_from_end(&file_b, 27)
-            )
+            format!("...{}", truncate_at_char_boundary_from_end(&file_b, 27))
         } else {
             file_b
         };
@@ -2024,10 +2006,7 @@ pub fn format_hubs_dot(report: &tldr_core::analysis::hubs::HubReport) -> String 
         // without needing to consult the JSON.
         let label = format!("{} (score={:.3})", hub.name, hub.composite_score);
         let label_escaped = label.replace('"', "\\\"");
-        output.push_str(&format!(
-            "    {} [label=\"{}\"];\n",
-            escaped, label_escaped
-        ));
+        output.push_str(&format!("    {} [label=\"{}\"];\n", escaped, label_escaped));
     }
     // Emit a synthetic invisible chain so consumers that grep for `->`
     // (a common quick-validation idiom) see at least one edge for non-empty

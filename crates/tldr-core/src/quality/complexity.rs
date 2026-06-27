@@ -279,9 +279,8 @@ pub fn analyze_complexity(
     // per-function complexity rows (`functions`/`hotspots`) intentionally
     // remain the metrics-derived subset (functions for which cyclomatic
     // metrics could be computed); only the headline count is canonicalized.
-    let canonical_lang = language.unwrap_or_else(|| {
-        Language::from_directory(path).unwrap_or(Language::Python)
-    });
+    let canonical_lang =
+        language.unwrap_or_else(|| Language::from_directory(path).unwrap_or(Language::Python));
     let canonical_count = count_functions_canonical(path, canonical_lang) as usize;
     let report_functions_analyzed = if canonical_count > 0 {
         canonical_count

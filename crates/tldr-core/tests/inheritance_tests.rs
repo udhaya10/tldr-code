@@ -1781,11 +1781,7 @@ fn test_inheritance_edges_deduplicated() {
     // file as well, which we simulate by listing the same parent twice
     // via a graph-level injection (tested below).
     let f1 = dir.path().join("a.ts");
-    std::fs::write(
-        &f1,
-        "class Base {}\nclass Child extends Base {}\n",
-    )
-    .unwrap();
+    std::fs::write(&f1, "class Base {}\nclass Child extends Base {}\n").unwrap();
 
     let report = extract_inheritance(
         dir.path(),
@@ -1803,14 +1799,17 @@ fn test_inheritance_edges_deduplicated() {
     assert_eq!(
         child_to_base, 1,
         "Child->Base edge should not be duplicated, got {} edges total: {:?}",
-        child_to_base,
-        report.edges,
+        child_to_base, report.edges,
     );
 
     // Stronger invariant: every (child, parent, parent_file) tuple is unique.
     let mut seen = std::collections::HashSet::new();
     for edge in &report.edges {
-        let key = (edge.child.clone(), edge.parent.clone(), edge.parent_file.clone());
+        let key = (
+            edge.child.clone(),
+            edge.parent.clone(),
+            edge.parent_file.clone(),
+        );
         assert!(
             seen.insert(key.clone()),
             "Duplicate edge tuple detected: {:?}",
@@ -1824,8 +1823,8 @@ fn test_inheritance_edges_deduplicated() {
 /// emitted edge.
 #[test]
 fn test_inheritance_edges_deduplicated_graph_level() {
-    use tldr_core::inheritance::extract_inheritance;
     use tempfile::TempDir;
+    use tldr_core::inheritance::extract_inheritance;
 
     // Construct a fixture where a single class extends a single parent.
     // We can't easily inject duplicate add_edge calls through the public
@@ -1853,10 +1852,16 @@ class D extends C {}
     let mut counts: std::collections::HashMap<(String, String), usize> =
         std::collections::HashMap::new();
     for edge in &report.edges {
-        *counts.entry((edge.child.clone(), edge.parent.clone())).or_default() += 1;
+        *counts
+            .entry((edge.child.clone(), edge.parent.clone()))
+            .or_default() += 1;
     }
     for ((c, p), n) in &counts {
-        assert_eq!(*n, 1, "edge {} -> {} appears {} times (expected 1)", c, p, n);
+        assert_eq!(
+            *n, 1,
+            "edge {} -> {} appears {} times (expected 1)",
+            c, p, n
+        );
     }
 }
 
@@ -1924,13 +1929,21 @@ fn test_inheritance_no_false_diamond_from_duplicate_parents() {
     let mut graph = InheritanceGraph::new();
 
     // Linear chain: CSSTransition -> Animation -> EventTarget
-    let event_target =
-        InheritanceNode::new("EventTarget", PathBuf::from("d.ts"), 1, Language::TypeScript);
+    let event_target = InheritanceNode::new(
+        "EventTarget",
+        PathBuf::from("d.ts"),
+        1,
+        Language::TypeScript,
+    );
     let mut animation =
         InheritanceNode::new("Animation", PathBuf::from("d.ts"), 2, Language::TypeScript);
     animation.bases = vec!["EventTarget".to_string()];
-    let mut transition =
-        InheritanceNode::new("CSSTransition", PathBuf::from("d.ts"), 3, Language::TypeScript);
+    let mut transition = InheritanceNode::new(
+        "CSSTransition",
+        PathBuf::from("d.ts"),
+        3,
+        Language::TypeScript,
+    );
     transition.bases = vec!["Animation".to_string()];
 
     graph.add_node(event_target);

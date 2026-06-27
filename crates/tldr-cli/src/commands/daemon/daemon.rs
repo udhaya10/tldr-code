@@ -26,30 +26,29 @@ use super::activity::{ActivityTracker, Source};
 use super::error::{DaemonError, DaemonResult};
 use super::ipc::{read_command, send_response, IpcListener, IpcStream};
 use super::salsa::{hash_bytes, hash_path, QueryCache, QueryKey};
+use super::types::{
+    AllSessionsSummary, DaemonCommand, DaemonConfig, DaemonResponse, DaemonStatus, HookStats,
+    SalsaCacheStats, SessionStats, HOOK_FLUSH_THRESHOLD,
+};
 use tldr_core::callgraph::cross_file_types::FileIR;
 use tldr_core::callgraph::{
     build_indices_parallel, compose_call_graph_v2, scan_project_files, BuildConfig,
 };
 use tldr_core::types::{CallEdge, ProjectCallGraph, WorkspaceConfig};
-use super::types::{
-    AllSessionsSummary, DaemonCommand, DaemonConfig, DaemonResponse, DaemonStatus, HookStats,
-    SalsaCacheStats, SessionStats, HOOK_FLUSH_THRESHOLD,
-};
 
+#[cfg(feature = "semantic")]
+use super::index_manager::IndexManager;
 #[cfg(test)]
 use super::types::DEFAULT_REINDEX_THRESHOLD;
 #[cfg(feature = "semantic")]
 use tldr_core::config::TldrConfig;
 #[cfg(feature = "semantic")]
 use tldr_core::semantic::{EmbeddingModel, IndexSearchOptions};
-#[cfg(feature = "semantic")]
-use super::index_manager::IndexManager;
 use tldr_core::{
-    architecture_analysis, change_impact, collect_all_functions,
-    dead_code_analysis, detect_or_parse_language, extract_file, find_importers, get_cfg_context,
-    get_code_structure, get_dfg_context, get_file_tree, get_imports, get_relevant_context,
-    get_slice, impact_analysis, search as tldr_search, FileTree, Language, NodeType,
-    SliceDirection,
+    architecture_analysis, change_impact, collect_all_functions, dead_code_analysis,
+    detect_or_parse_language, extract_file, find_importers, get_cfg_context, get_code_structure,
+    get_dfg_context, get_file_tree, get_imports, get_relevant_context, get_slice, impact_analysis,
+    search as tldr_search, FileTree, Language, NodeType, SliceDirection,
 };
 
 // =============================================================================
@@ -143,8 +142,7 @@ fn build_project_call_graph_memoized(
         }
     }
 
-    let scanned =
-        scan_project_files(root, &config.language, &config).map_err(|e| e.to_string())?;
+    let scanned = scan_project_files(root, &config.language, &config).map_err(|e| e.to_string())?;
 
     let mut file_irs = Vec::with_capacity(scanned.len());
     for s in &scanned {
@@ -671,7 +669,10 @@ impl TLDRDaemon {
     /// the daemon's old `BuildOptions::default()` silently pinned ArcticM even
     /// when the project config asked for ArcticL.
     #[cfg(feature = "semantic")]
-    fn resolve_semantic_model(&self, override_model: Option<&str>) -> Result<EmbeddingModel, String> {
+    fn resolve_semantic_model(
+        &self,
+        override_model: Option<&str>,
+    ) -> Result<EmbeddingModel, String> {
         let config = TldrConfig::resolve(Some(&self.project));
         EmbeddingModel::resolve(override_model, &config)
     }
@@ -805,13 +806,9 @@ impl TLDRDaemon {
                 // Extract auto-detects language from the file path. Tag the
                 // cache key with the detected language so two files with the
                 // same name in different language sub-projects do not collide.
-                let detected_lang = detect_or_parse_language(None, &file)
-                    .unwrap_or(Language::Python);
-                let key = QueryKey::new(
-                    "extract",
-                    hash_str_args(&[&file_str]),
-                    detected_lang,
-                );
+                let detected_lang =
+                    detect_or_parse_language(None, &file).unwrap_or(Language::Python);
+                let key = QueryKey::new("extract", hash_str_args(&[&file_str]), detected_lang);
                 if let Some(cached) = self.cache.get::<serde_json::Value>(&key) {
                     return DaemonResponse::Result(cached);
                 }
@@ -833,11 +830,8 @@ impl TLDRDaemon {
                 let root = path.unwrap_or_else(|| self.project.clone());
                 let root_str = root.to_string_lossy().to_string();
                 // File tree is language-agnostic; tag with default language.
-                let key = QueryKey::new(
-                    "tree",
-                    hash_str_args(&[&root_str]),
-                    resolve_language(None),
-                );
+                let key =
+                    QueryKey::new("tree", hash_str_args(&[&root_str]), resolve_language(None));
                 if let Some(cached) = self.cache.get::<serde_json::Value>(&key) {
                     return DaemonResponse::Result(cached);
                 }
@@ -874,11 +868,8 @@ impl TLDRDaemon {
                         }
                     }
                 };
-                let key = QueryKey::new(
-                    "structure",
-                    hash_str_args(&[&path_str, lang_str]),
-                    language,
-                );
+                let key =
+                    QueryKey::new("structure", hash_str_args(&[&path_str, lang_str]), language);
                 if let Some(cached) = self.cache.get::<serde_json::Value>(&key) {
                     return DaemonResponse::Result(cached);
                 }
@@ -910,11 +901,7 @@ impl TLDRDaemon {
             } => {
                 let d = depth.unwrap_or(2);
                 let lang = resolve_language(language);
-                let key = QueryKey::new(
-                    "context",
-                    hash_str_args(&[&entry, &d.to_string()]),
-                    lang,
-                );
+                let key = QueryKey::new("context", hash_str_args(&[&entry, &d.to_string()]), lang);
                 if let Some(cached) = self.cache.get::<serde_json::Value>(&key) {
                     return DaemonResponse::Result(cached);
                 }
@@ -944,11 +931,7 @@ impl TLDRDaemon {
                         }
                     }
                 };
-                let key = QueryKey::new(
-                    "cfg",
-                    hash_str_args(&[&file_str, &function]),
-                    language,
-                );
+                let key = QueryKey::new("cfg", hash_str_args(&[&file_str, &function]), language);
                 if let Some(cached) = self.cache.get::<serde_json::Value>(&key) {
                     return DaemonResponse::Result(cached);
                 }
@@ -977,11 +960,7 @@ impl TLDRDaemon {
                         }
                     }
                 };
-                let key = QueryKey::new(
-                    "dfg",
-                    hash_str_args(&[&file_str, &function]),
-                    language,
-                );
+                let key = QueryKey::new("dfg", hash_str_args(&[&file_str, &function]), language);
                 if let Some(cached) = self.cache.get::<serde_json::Value>(&key) {
                     return DaemonResponse::Result(cached);
                 }
@@ -1085,11 +1064,7 @@ impl TLDRDaemon {
             } => {
                 let d = depth.unwrap_or(3);
                 let lang = resolve_language(language);
-                let key = QueryKey::new(
-                    "impact",
-                    hash_str_args(&[&func, &d.to_string()]),
-                    lang,
-                );
+                let key = QueryKey::new("impact", hash_str_args(&[&func, &d.to_string()]), lang);
                 if let Some(cached) = self.cache.get::<serde_json::Value>(&key) {
                     return DaemonResponse::Result(cached);
                 }
@@ -1109,8 +1084,7 @@ impl TLDRDaemon {
                     Ok(result) => {
                         let val = serde_json::to_value(&result).unwrap_or_default();
                         // TLDR-iqr freshness: root-hash registration (see Calls).
-                        self.cache
-                            .insert(key, &val, vec![hash_path(&self.project)]);
+                        self.cache.insert(key, &val, vec![hash_path(&self.project)]);
                         DaemonResponse::Result(val)
                     }
                     Err(e) => DaemonResponse::Error {
@@ -1129,11 +1103,7 @@ impl TLDRDaemon {
                 let lang = resolve_language(language);
                 let root_str = root.to_string_lossy().to_string();
                 let entry_str = entry.as_ref().map(|v| v.join(",")).unwrap_or_default();
-                let key = QueryKey::new(
-                    "dead",
-                    hash_str_args(&[&root_str, &entry_str]),
-                    lang,
-                );
+                let key = QueryKey::new("dead", hash_str_args(&[&root_str, &entry_str]), lang);
                 if let Some(cached) = self.cache.get::<serde_json::Value>(&key) {
                     return DaemonResponse::Result(cached);
                 }
@@ -1147,11 +1117,8 @@ impl TLDRDaemon {
                     }
                 };
                 // Collect all functions from the project by extracting each file
-                let extensions: HashSet<String> = lang
-                    .extensions()
-                    .iter()
-                    .map(|s| s.to_string())
-                    .collect();
+                let extensions: HashSet<String> =
+                    lang.extensions().iter().map(|s| s.to_string()).collect();
                 let file_tree = match get_file_tree(&root, Some(&extensions), true, None) {
                     Ok(t) => t,
                     Err(e) => {
@@ -1241,11 +1208,7 @@ impl TLDRDaemon {
                         }
                     }
                 };
-                let key = QueryKey::new(
-                    "imports",
-                    hash_str_args(&[&file_str]),
-                    language,
-                );
+                let key = QueryKey::new("imports", hash_str_args(&[&file_str]), language);
                 if let Some(cached) = self.cache.get::<serde_json::Value>(&key) {
                     return DaemonResponse::Result(cached);
                 }
@@ -1271,11 +1234,7 @@ impl TLDRDaemon {
                 let root = path.unwrap_or_else(|| self.project.clone());
                 let lang = resolve_language(language);
                 let root_str = root.to_string_lossy().to_string();
-                let key = QueryKey::new(
-                    "importers",
-                    hash_str_args(&[&module, &root_str]),
-                    lang,
-                );
+                let key = QueryKey::new("importers", hash_str_args(&[&module, &root_str]), lang);
                 if let Some(cached) = self.cache.get::<serde_json::Value>(&key) {
                     return DaemonResponse::Result(cached);
                 }
@@ -1325,11 +1284,7 @@ impl TLDRDaemon {
                             .join(",")
                     })
                     .unwrap_or_default();
-                let key = QueryKey::new(
-                    "change_impact",
-                    hash_str_args(&[&files_str]),
-                    lang,
-                );
+                let key = QueryKey::new("change_impact", hash_str_args(&[&files_str]), lang);
                 if let Some(cached) = self.cache.get::<serde_json::Value>(&key) {
                     return DaemonResponse::Result(cached);
                 }
@@ -1585,7 +1540,8 @@ impl TLDRDaemon {
         // invalidates them so the next query lazily recomposes from the memo
         // (a 20-save burst = 20 cheap evictions + ONE recompose). Before this,
         // they registered vec![] and were PERMANENTLY stale (finding on iqr).
-        self.cache.invalidate_by_input(super::salsa::hash_path(&self.project));
+        self.cache
+            .invalidate_by_input(super::salsa::hash_path(&self.project));
 
         // Incrementally re-index the changed file in the resident store instead
         // of dropping it (TLDR-t8f). A warm store applies a per-file delta —
@@ -1609,7 +1565,10 @@ impl TLDRDaemon {
                     Ok(DeltaOutcome::NeedsRebuild) => mgr.invalidate(),
                     Ok(_) => {}
                     Err(e) => {
-                        eprintln!("[t8f] delta failed for {}: {e}; rebuilding", changed.display());
+                        eprintln!(
+                            "[t8f] delta failed for {}: {e}; rebuilding",
+                            changed.display()
+                        );
                         mgr.invalidate();
                     }
                 }
@@ -2588,11 +2547,7 @@ mod tests {
     async fn test_semantic_cold_query_returns_not_ready() {
         let temp = tempfile::tempdir().unwrap();
         let py_file = temp.path().join("hello.py");
-        std::fs::write(
-            &py_file,
-            "def greet(name):\n    return f'Hello, {name}!'\n",
-        )
-        .unwrap();
+        std::fs::write(&py_file, "def greet(name):\n    return f'Hello, {name}!'\n").unwrap();
 
         let config = DaemonConfig::default();
         let daemon = TLDRDaemon::new(temp.path().to_path_buf(), config);
@@ -2784,8 +2739,7 @@ mod tests {
         // The ack precedes the build — a busy token must already be visible
         // (guard created before the ack, owned by the detached task).
         assert!(
-            daemon.activity.busy_count() > 0
-                || !daemon.warm_in_flight.load(Ordering::SeqCst),
+            daemon.activity.busy_count() > 0 || !daemon.warm_in_flight.load(Ordering::SeqCst),
             "warm must be visibly busy (or already finished)"
         );
 
@@ -2879,11 +2833,7 @@ mod tests {
                     live.idle_shutdown_in_secs.is_none(),
                     "deadline must be deferred while busy"
                 );
-                assert_eq!(
-                    live.presence_age_secs.len(),
-                    4,
-                    "all four sources reported"
-                );
+                assert_eq!(live.presence_age_secs.len(), 4, "all four sources reported");
             }
             other => panic!("expected FullStatus with liveness, got {:?}", other),
         }

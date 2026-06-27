@@ -197,10 +197,7 @@ impl DaemonStartArgs {
         // state. A missing file degrades to the legacy behaviour where
         // `daemon status` from a different cwd reports `not_running`.
         if let Err(e) = add_entry(project, our_pid, &socket_path) {
-            eprintln!(
-                "warning: could not register daemon in registry: {}",
-                e
-            );
+            eprintln!("warning: could not register daemon in registry: {}", e);
         }
 
         // Print startup message
@@ -359,8 +356,7 @@ mod tests {
 
             // Live PID (ourselves) + a socket path nothing is bound to.
             let bogus_socket = dir.join("busy-project.sock");
-            add_entry(&project, std::process::id(), &bogus_socket)
-                .expect("inject live owner");
+            add_entry(&project, std::process::id(), &bogus_socket).expect("inject live owner");
 
             let args = DaemonStartArgs {
                 project: project.clone(),

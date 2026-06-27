@@ -293,8 +293,8 @@ impl VectorStore {
         // 2. Add / update each current chunk.
         for (key, meta) in keyed {
             let needs_embed = match self.content_hash(*key) {
-                None => true,                                  // new key
-                Some(h) => h != meta.content_hash.as_str(),    // changed body
+                None => true,                               // new key
+                Some(h) => h != meta.content_hash.as_str(), // changed body
             };
             if needs_embed {
                 match embedded.get(key) {
@@ -491,7 +491,10 @@ impl VectorStore {
         if id.dimensions as usize != self.dimensions {
             return Err(vs_err(
                 "save",
-                format!("id.dimensions {} != store {}", id.dimensions, self.dimensions),
+                format!(
+                    "id.dimensions {} != store {}",
+                    id.dimensions, self.dimensions
+                ),
             ));
         }
         std::fs::create_dir_all(dir)?;
@@ -648,12 +651,15 @@ impl VectorStore {
     /// changed → rebuild) while still scanning older generations past any other
     /// failure. See `load()` for the full fallback policy.
     fn load_generation(dir: &Path, gen: u64, expect: &ManifestId) -> Result<Self, LoadFail> {
-        let manifest_bytes =
-            std::fs::read(dir.join(format!("manifest.{gen}"))).map_err(|e| LoadFail::Corrupt(e.into()))?;
-        let manifest: Manifest =
-            serde_json::from_slice(&manifest_bytes).map_err(|e| LoadFail::Corrupt(vs_err("load", e)))?;
+        let manifest_bytes = std::fs::read(dir.join(format!("manifest.{gen}")))
+            .map_err(|e| LoadFail::Corrupt(e.into()))?;
+        let manifest: Manifest = serde_json::from_slice(&manifest_bytes)
+            .map_err(|e| LoadFail::Corrupt(vs_err("load", e)))?;
         if manifest.format_version != STORE_FORMAT_VERSION {
-            return Err(LoadFail::Incompatible(vs_err("load", "format_version mismatch")));
+            return Err(LoadFail::Incompatible(vs_err(
+                "load",
+                "format_version mismatch",
+            )));
         }
         if &manifest.id != expect {
             return Err(LoadFail::Incompatible(vs_err(
@@ -662,13 +668,19 @@ impl VectorStore {
             )));
         }
         if manifest.generation != gen {
-            return Err(LoadFail::Corrupt(vs_err("load", "manifest generation != filename")));
+            return Err(LoadFail::Corrupt(vs_err(
+                "load",
+                "manifest generation != filename",
+            )));
         }
 
-        let meta_bytes =
-            std::fs::read(dir.join(format!("meta.{gen}"))).map_err(|e| LoadFail::Corrupt(e.into()))?;
+        let meta_bytes = std::fs::read(dir.join(format!("meta.{gen}")))
+            .map_err(|e| LoadFail::Corrupt(e.into()))?;
         if digest_bytes(&meta_bytes) != manifest.sidecar_checksum {
-            return Err(LoadFail::Corrupt(vs_err("load", "sidecar checksum mismatch")));
+            return Err(LoadFail::Corrupt(vs_err(
+                "load",
+                "sidecar checksum mismatch",
+            )));
         }
         let index_path = dir.join(format!("index.{gen}.usearch"));
         let index_bytes = std::fs::read(&index_path).map_err(|e| LoadFail::Corrupt(e.into()))?;
@@ -676,8 +688,8 @@ impl VectorStore {
             return Err(LoadFail::Corrupt(vs_err("load", "index checksum mismatch")));
         }
 
-        let sidecar: SidecarOwned =
-            serde_json::from_slice(&meta_bytes).map_err(|e| LoadFail::Corrupt(vs_err("load", e)))?;
+        let sidecar: SidecarOwned = serde_json::from_slice(&meta_bytes)
+            .map_err(|e| LoadFail::Corrupt(vs_err("load", e)))?;
         let mut keys: Vec<u64> = sidecar.meta.keys().copied().collect();
         keys.sort_unstable();
         if keys_digest(&keys) != manifest.keys_checksum {
@@ -690,15 +702,23 @@ impl VectorStore {
         let index_str = index_path
             .to_str()
             .ok_or_else(|| LoadFail::Corrupt(vs_err("load", "non-utf8 index path")))?;
-        index.load(index_str).map_err(|e| LoadFail::Corrupt(vs_err("load", e)))?;
+        index
+            .load(index_str)
+            .map_err(|e| LoadFail::Corrupt(vs_err("load", e)))?;
         if index.size() != sidecar.meta.len() {
-            return Err(LoadFail::Corrupt(vs_err("load", "index size != sidecar count (drift)")));
+            return Err(LoadFail::Corrupt(vs_err(
+                "load",
+                "index size != sidecar count (drift)",
+            )));
         }
         // `keys_checksum` only proves the sidecar matches the manifest; verify the
         // usearch index actually CONTAINS every sidecar key (Codex — not circular).
         for &key in sidecar.meta.keys() {
             if !index.contains(key) {
-                return Err(LoadFail::Corrupt(vs_err("load", "index is missing a sidecar key (drift)")));
+                return Err(LoadFail::Corrupt(vs_err(
+                    "load",
+                    "index is missing a sidecar key (drift)",
+                )));
             }
         }
 
@@ -1193,14 +1213,20 @@ impl VectorStore {
                 .unwrap_or(false);
             let enriched_texts: Vec<String> = if enrich {
                 let units = enrich_chunks(&chunks, root);
-                uncached.iter().map(|&i| build_embedding_text(&units[i])).collect()
+                uncached
+                    .iter()
+                    .map(|&i| build_embedding_text(&units[i]))
+                    .collect()
             } else {
                 Vec::new()
             };
             let texts: Vec<&str> = if enrich {
                 enriched_texts.iter().map(|s| s.as_str()).collect()
             } else {
-                uncached.iter().map(|&i| chunks[i].content.as_str()).collect()
+                uncached
+                    .iter()
+                    .map(|&i| chunks[i].content.as_str())
+                    .collect()
             };
             let embeddings = embedder.embed_batch(texts, options.show_progress)?;
             for (&i, embedding) in uncached.iter().zip(embeddings) {
@@ -1298,7 +1324,9 @@ mod tests {
 
         // Nearest neighbour of an indexed vector is itself (cosine distance ~0).
         let (want_key, query) = &vecs[3];
-        let m = index.exact_search(query.as_slice(), 5).expect("exact_search");
+        let m = index
+            .exact_search(query.as_slice(), 5)
+            .expect("exact_search");
         assert_eq!(m.keys.len(), 5);
         assert_eq!(m.keys[0], *want_key, "nearest to a vector must be itself");
 
@@ -1378,7 +1406,10 @@ mod tests {
         assert_eq!(store.len(), 1);
         let hits = store.search(&unit(D, 1), 5).unwrap();
         assert!(hits.iter().all(|h| h.key != 7), "removed key not returned");
-        assert!(!store.remove(123).unwrap(), "removing an absent key is false");
+        assert!(
+            !store.remove(123).unwrap(),
+            "removing an absent key is false"
+        );
     }
 
     #[test]
@@ -1393,7 +1424,11 @@ mod tests {
         m2.content_hash = "h2".into();
         store.add(42, &unit(D, 1), m1).unwrap();
         store.add(42, &unit(D, 1), m2).unwrap();
-        assert_eq!(store.len(), 1, "re-add of the same key does not grow the store");
+        assert_eq!(
+            store.len(),
+            1,
+            "re-add of the same key does not grow the store"
+        );
         let hits = store.search(&unit(D, 1), 1).unwrap();
         assert_eq!(hits[0].meta.content_hash, "h2");
     }
@@ -1461,7 +1496,10 @@ mod tests {
         // META-ONLY line shift landed (search joins the refreshed meta).
         let hit = store.search(&unit(D, 1), 1).unwrap();
         assert_eq!(hit[0].key, 1);
-        assert_eq!(hit[0].meta.line_start, 3, "line numbers refreshed without re-embed");
+        assert_eq!(
+            hit[0].meta.line_start, 3,
+            "line numbers refreshed without re-embed"
+        );
         // File record reflects the new key set + reconcile signal.
         let rec = store.file_record("f.rs").unwrap();
         assert_eq!(rec.keys, [1u64, 2, 4].into_iter().collect());
@@ -1580,7 +1618,9 @@ mod tests {
         let hits = loaded.search(&unit(D, 2), 1).unwrap();
         assert_eq!(hits[0].key, 21);
         assert_eq!(hits[0].meta.identity, "f2");
-        let rec = loaded.file_record("src/f2.rs").expect("file record persisted");
+        let rec = loaded
+            .file_record("src/f2.rs")
+            .expect("file record persisted");
         assert!(rec.keys.contains(&21));
         assert_eq!(rec.file_type, FileKind::Regular);
     }
@@ -1766,7 +1806,11 @@ mod tests {
     fn identity_and_key_are_stable_and_ordinal_disambiguates() {
         let a = chunk_identity("src/a.rs", None, Some("foo"), 0);
         assert_eq!(a, "src/a.rs::::foo::0");
-        assert_eq!(identity_key(&a), identity_key("src/a.rs::::foo::0"), "stable");
+        assert_eq!(
+            identity_key(&a),
+            identity_key("src/a.rs::::foo::0"),
+            "stable"
+        );
         // Duplicate (file, class, fn) name → different ordinal → distinct keys.
         let k0 = identity_key(&chunk_identity("src/a.rs", Some("S"), Some("new"), 0));
         let k1 = identity_key(&chunk_identity("src/a.rs", Some("S"), Some("new"), 1));
@@ -1788,7 +1832,11 @@ mod tests {
         let vectors: Vec<Vec<f32>> = (0..chunks.len()).map(|i| unit(D, i)).collect();
 
         let store = VectorStore::from_embedded(&chunks, &vectors, root).unwrap();
-        assert_eq!(store.len(), 4, "same-named fns get distinct keys via ordinal");
+        assert_eq!(
+            store.len(),
+            4,
+            "same-named fns get distinct keys via ordinal"
+        );
 
         // Root-relative path + correct metadata joined on search.
         let hits = store.search(&unit(D, 0), 1).unwrap();
@@ -1802,7 +1850,13 @@ mod tests {
         // Deterministic: a rebuild yields identical keys.
         let store2 = VectorStore::from_embedded(&chunks, &vectors, root).unwrap();
         let keys = |s: &VectorStore| -> Vec<u64> {
-            let mut k: Vec<u64> = s.file_record("src/a.rs").unwrap().keys.iter().copied().collect();
+            let mut k: Vec<u64> = s
+                .file_record("src/a.rs")
+                .unwrap()
+                .keys
+                .iter()
+                .copied()
+                .collect();
             k.sort_unstable();
             k
         };
@@ -1820,13 +1874,19 @@ mod tests {
     fn root_relative_strips_lexically_and_is_deterministic_on_miss() {
         // Common case: lexical strip.
         assert_eq!(
-            root_relative(std::path::Path::new("/proj"), std::path::Path::new("/proj/src/a.rs")),
+            root_relative(
+                std::path::Path::new("/proj"),
+                std::path::Path::new("/proj/src/a.rs")
+            ),
             "src/a.rs"
         );
         // Not under root and not canonicalizable → raw path, but DETERMINISTIC and
         // warned (TLDR-ss3) — never a silent abs-vs-rel divergence.
         assert_eq!(
-            root_relative(std::path::Path::new("/proj"), std::path::Path::new("/elsewhere/x.rs")),
+            root_relative(
+                std::path::Path::new("/proj"),
+                std::path::Path::new("/elsewhere/x.rs")
+            ),
             "/elsewhere/x.rs"
         );
     }
@@ -1856,8 +1916,11 @@ mod tests {
         let mut query = vec![0.0f32; D];
         query[0] = 1.0;
 
-        let candidates: Vec<(usize, &[f32])> =
-            vecs.iter().enumerate().map(|(i, v)| (i, v.as_slice())).collect();
+        let candidates: Vec<(usize, &[f32])> = vecs
+            .iter()
+            .enumerate()
+            .map(|(i, v)| (i, v.as_slice()))
+            .collect();
         let brute: Vec<u64> = top_k_similar(&query, &candidates, 5, 0.0)
             .iter()
             .map(|(i, _)| *i as u64)
@@ -1870,7 +1933,11 @@ mod tests {
             .collect();
 
         assert_eq!(usearch, brute, "exact_search ranking == brute-force cosine");
-        assert_eq!(usearch, vec![0, 1, 2, 3, 4], "deterministic decreasing-cos order");
+        assert_eq!(
+            usearch,
+            vec![0, 1, 2, 3, 4],
+            "deterministic decreasing-cos order"
+        );
     }
 
     // ---- search() edge cases (characterization guards) ------------------------
@@ -1891,7 +1958,9 @@ mod tests {
         const D: usize = 8;
         let mut store = VectorStore::new(D, 4).unwrap();
         for i in 0..3u64 {
-            store.add(i, &unit(D, i as usize), meta(&format!("c{i}"))).unwrap();
+            store
+                .add(i, &unit(D, i as usize), meta(&format!("c{i}")))
+                .unwrap();
         }
         // Asking for far more than exist clamps to the population, never errors.
         let hits = store.search(&unit(D, 0), 100).unwrap();
@@ -1924,7 +1993,10 @@ mod tests {
         let first = run(&store);
         assert_eq!(first.len(), 5, "all equal-cosine items returned");
         assert_eq!(
-            first.iter().copied().collect::<std::collections::BTreeSet<_>>(),
+            first
+                .iter()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>(),
             (0..5u64).collect::<std::collections::BTreeSet<_>>(),
             "the returned key SET is exactly the populated keys"
         );
@@ -1941,7 +2013,11 @@ mod tests {
         std::fs::write(p("b.rs"), "fn b() {}\n").unwrap();
 
         let d0 = compute_corpus_digest(dir.path());
-        assert_eq!(d0, compute_corpus_digest(dir.path()), "same tree -> same digest");
+        assert_eq!(
+            d0,
+            compute_corpus_digest(dir.path()),
+            "same tree -> same digest"
+        );
 
         // ADD a file -> digest changes.
         std::fs::write(p("c.rs"), "fn c() {}\n").unwrap();
@@ -1951,12 +2027,19 @@ mod tests {
         // EDIT (size change) -> digest changes.
         std::fs::write(p("c.rs"), "fn c() { let _x = 1; }\n").unwrap();
         let d_edit = compute_corpus_digest(dir.path());
-        assert_ne!(d_add, d_edit, "editing a file (size delta) must change the digest");
+        assert_ne!(
+            d_add, d_edit,
+            "editing a file (size delta) must change the digest"
+        );
 
         // DELETE -> digest changes, and removing the only added file returns to d0
         // (a.rs/b.rs are untouched, so their mtime/size rows are identical).
         std::fs::remove_file(p("c.rs")).unwrap();
-        assert_eq!(compute_corpus_digest(dir.path()), d0, "delete restores the prior digest");
+        assert_eq!(
+            compute_corpus_digest(dir.path()),
+            d0,
+            "delete restores the prior digest"
+        );
     }
 
     #[test]
@@ -1972,8 +2055,15 @@ mod tests {
 
         std::fs::write(dir.path().join("mod.rs"), "pub mod a;\n").unwrap();
         let after = compute_corpus_digest(dir.path());
-        assert_ne!(before, after, "a zero-chunk file must be counted in the corpus digest");
-        assert_eq!(after, compute_corpus_digest(dir.path()), "digest stable with the 0-chunk file");
+        assert_ne!(
+            before, after,
+            "a zero-chunk file must be counted in the corpus digest"
+        );
+        assert_eq!(
+            after,
+            compute_corpus_digest(dir.path()),
+            "digest stable with the 0-chunk file"
+        );
     }
 
     #[test]
@@ -1986,7 +2076,10 @@ mod tests {
         assert_eq!(id.search_mode, "exact");
         assert_eq!(id.root, "/proj");
         assert!(id.model_revision.contains("arctic"));
-        assert_eq!(id, ManifestId::for_build(EmbeddingModel::ArcticL, p, "fn", "v1"));
+        assert_eq!(
+            id,
+            ManifestId::for_build(EmbeddingModel::ArcticL, p, "fn", "v1")
+        );
     }
 
     /// End-to-end through the real ONNX embedder: build → search → manifest →
@@ -2032,7 +2125,10 @@ mod tests {
             .embed_query("compute cosine similarity between vectors")
             .unwrap();
         let hits = store.search(&q, 1).unwrap();
-        assert_eq!(hits[0].meta.file_rel_path, "a.rs", "right function ranks top");
+        assert_eq!(
+            hits[0].meta.file_rel_path, "a.rs",
+            "right function ranks top"
+        );
 
         let id = ManifestId::for_build(model, dir.path(), "fn", "v1");
         let store_dir = dir.path().join("store");

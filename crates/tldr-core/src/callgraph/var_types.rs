@@ -273,8 +273,7 @@ fn collect_python_value_refs(
         // Skip the identifier-form of a call's `function` field — that
         // is the regular "Direct" / "Method" call path handled by
         // parse_python_call.
-        if parent.kind() == "call"
-            && parent.child_by_field_name("function").as_ref() == Some(&node)
+        if parent.kind() == "call" && parent.child_by_field_name("function").as_ref() == Some(&node)
         {
             continue;
         }

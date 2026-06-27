@@ -68,6 +68,7 @@ pub mod types;
 
 // Re-export all public types for convenience
 pub use types::{
+    store_dir_for,
     CacheConfig,
     CacheStats,
     ChunkGranularity,
@@ -84,7 +85,6 @@ pub use types::{
     // Result types
     SemanticSearchResult,
     SimilarityReport,
-    store_dir_for,
 };
 
 // Phase 2: Similarity

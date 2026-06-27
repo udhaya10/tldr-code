@@ -530,8 +530,7 @@ impl<'s> PythonReceiverIndex<'s> {
                     entries.push((idx, extract_type_from_annotation(after_colon)));
                 }
             }
-            self.annotation_cache
-                .insert(var_name.to_string(), entries);
+            self.annotation_cache.insert(var_name.to_string(), entries);
         }
         let entries = &self.annotation_cache[var_name];
         let pp = entries.partition_point(|(idx, _)| *idx < call_line as usize);
@@ -567,8 +566,7 @@ impl<'s> PythonReceiverIndex<'s> {
                     }
                 }
             }
-            self.constructor_cache
-                .insert(var_name.to_string(), entries);
+            self.constructor_cache.insert(var_name.to_string(), entries);
         }
         let entries = &self.constructor_cache[var_name];
         let pp = entries.partition_point(|(idx, _)| *idx < call_line as usize);
@@ -921,8 +919,7 @@ impl<'s> TypeScriptReceiverIndex<'s> {
                 for prefix in &TS_DECL_PREFIXES {
                     let pattern = format!("{}{}: ", prefix, var_name);
                     if let Some(i) = line.find(&pattern) {
-                        if let Some(type_name) =
-                            extract_typescript_type(&line[i + pattern.len()..])
+                        if let Some(type_name) = extract_typescript_type(&line[i + pattern.len()..])
                         {
                             entries.push((idx, type_name));
                             break; // first successful prefix wins the line
@@ -930,8 +927,7 @@ impl<'s> TypeScriptReceiverIndex<'s> {
                     }
                 }
             }
-            self.annotation_cache
-                .insert(var_name.to_string(), entries);
+            self.annotation_cache.insert(var_name.to_string(), entries);
         }
         let entries = &self.annotation_cache[var_name];
         let pp = entries.partition_point(|(idx, _)| *idx < call_line as usize);
@@ -961,8 +957,7 @@ impl<'s> TypeScriptReceiverIndex<'s> {
                     }
                 }
             }
-            self.constructor_cache
-                .insert(var_name.to_string(), entries);
+            self.constructor_cache.insert(var_name.to_string(), entries);
         }
         let entries = &self.constructor_cache[var_name];
         let pp = entries.partition_point(|(idx, _)| *idx < call_line as usize);
@@ -1475,9 +1470,7 @@ pub struct RustReceiverIndex<'s> {
 /// True when the legacy pattern `let {var}: ` / `let {var} = ` can ONLY match
 /// where the inverted identifier parse would also record `var`: plain idents.
 fn is_plain_ident(s: &str) -> bool {
-    !s.is_empty()
-        && s.bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+    !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
 }
 
 /// Legacy extraction applied after a matched `let {var}{sep}` pattern —
@@ -1490,10 +1483,8 @@ fn extract_for_kind(kind: RustScanKind, after: &str) -> Option<String> {
                 .then(|| t.to_string())
         }),
         RustScanKind::StructLiteral => after.find('{').map(|b| after[..b].trim()).and_then(|t| {
-            (!t.is_empty()
-                && t.chars().next().is_some_and(char::is_uppercase)
-                && !t.contains("::"))
-            .then(|| t.to_string())
+            (!t.is_empty() && t.chars().next().is_some_and(char::is_uppercase) && !t.contains("::"))
+                .then(|| t.to_string())
         }),
     }
 }
@@ -1540,8 +1531,10 @@ impl<'s> RustReceiverIndex<'s> {
         // full pattern in the line is attempted; a failed extraction at that
         // occurrence yields nothing for that prefix (it does NOT retry later
         // occurrences) but the next prefix is still tried.
-        let mut all_bindings: std::collections::HashMap<(String, RustScanKind), Vec<(usize, String)>> =
-            std::collections::HashMap::new();
+        let mut all_bindings: std::collections::HashMap<
+            (String, RustScanKind),
+            Vec<(usize, String)>,
+        > = std::collections::HashMap::new();
         let mut weird_bindings: std::collections::HashMap<
             (String, RustScanKind),
             Vec<(usize, String)>,
@@ -1574,7 +1567,7 @@ impl<'s> RustReceiverIndex<'s> {
         ) {
             let key = (var.to_string(), kind);
             match line_outcome.get(&key) {
-                Some((_, Some(_))) => return, // success is final
+                Some((_, Some(_))) => return,                  // success is final
                 Some((p, None)) if *p == prefix_idx => return, // same-prefix retry
                 _ => {}
             }
@@ -2280,9 +2273,8 @@ def free():
     s = "x: InString = lie"
 "#;
         let receivers = [
-            "self", "cfg", "store", "u", "bad", "opt", "gen", "w", "max",
-            "x", "result", "missing", "self.cfg", "obj.attr", "s", "",
-            "a, b", "t: int",
+            "self", "cfg", "store", "u", "bad", "opt", "gen", "w", "max", "x", "result", "missing",
+            "self.cfg", "obj.attr", "s", "", "a, b", "t: int",
         ];
         let enclosings = [None, Some("Hint")];
         let n_lines = source.lines().count() as u32;
@@ -2353,8 +2345,8 @@ function free() {
 }
 "#;
         let receivers = [
-            "this", "cfg", "store", "legacy", "gen", "u", "max", "x",
-            "item", "missing", "this.cfg", "obj", "s", "", "a, b",
+            "this", "cfg", "store", "legacy", "gen", "u", "max", "x", "item", "missing",
+            "this.cfg", "obj", "s", "", "a, b",
         ];
         let enclosings = [None, Some("Hint")];
         let n_lines = source.lines().count() as u32;
@@ -2474,10 +2466,7 @@ function free() {
         let core_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         let mut files: Vec<std::path::PathBuf> = Vec::new();
         collect_py(&core_root.join("tests/fixtures"), &mut files);
-        collect_py(
-            &core_root.join("../tldr-cli/tests/fixtures"),
-            &mut files,
-        );
+        collect_py(&core_root.join("../tldr-cli/tests/fixtures"), &mut files);
         files.sort();
 
         const MAX_SITES_PER_FILE: usize = 80;
@@ -2486,9 +2475,9 @@ function free() {
             let Ok(source) = std::fs::read_to_string(path) else {
                 continue;
             };
-            let Ok(calls) = crate::callgraph::languages::extract_calls_for_language(
-                "python", path, &source,
-            ) else {
+            let Ok(calls) =
+                crate::callgraph::languages::extract_calls_for_language("python", path, &source)
+            else {
                 continue;
             };
             let mut idx = PythonReceiverIndex::new(&source);
@@ -2504,8 +2493,7 @@ function free() {
 
             for (receiver, line) in sites.into_iter().take(MAX_SITES_PER_FILE) {
                 for enclosing in [None, Some("Hint")] {
-                    let legacy =
-                        resolve_python_receiver_type(&source, line, &receiver, enclosing);
+                    let legacy = resolve_python_receiver_type(&source, line, &receiver, enclosing);
                     let indexed = idx.resolve(line, &receiver, enclosing);
                     assert_eq!(
                         legacy,
@@ -2521,7 +2509,10 @@ function free() {
         // The heavyweight external gate is the frozen-corpus byte-hash
         // (django@8c2d3dc, see TLDR-hqb); this in-repo gate is the cheap
         // always-on backstop.
-        assert!(checked >= 20, "python corpus gate too small: {checked} sites");
+        assert!(
+            checked >= 20,
+            "python corpus gate too small: {checked} sites"
+        );
     }
 
     /// CORPUS-LEVEL DIFFERENTIAL GATE (TLDR-zde round 5): the synthetic test
@@ -2548,10 +2539,9 @@ function free() {
         let mut checked = 0usize;
         for path in &files {
             let source = std::fs::read_to_string(path).unwrap();
-            let calls = crate::callgraph::languages::extract_calls_for_language(
-                "rust", path, &source,
-            )
-            .unwrap();
+            let calls =
+                crate::callgraph::languages::extract_calls_for_language("rust", path, &source)
+                    .unwrap();
             let idx = RustReceiverIndex::new(&source);
 
             let mut sites: Vec<(String, u32)> = calls
@@ -2577,7 +2567,10 @@ function free() {
                 checked += 1;
             }
         }
-        assert!(checked >= 400, "corpus gate too small: {checked} sites checked");
+        assert!(
+            checked >= 400,
+            "corpus gate too small: {checked} sites checked"
+        );
     }
 
     #[test]

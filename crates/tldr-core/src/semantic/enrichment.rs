@@ -127,10 +127,8 @@ impl FileAnalysisCache {
                 if let Some(lang) = lang {
                     match get_imports(path, lang) {
                         Ok(imports) => {
-                            let modules: Vec<String> = imports
-                                .iter()
-                                .map(|imp| imp.module.clone())
-                                .collect();
+                            let modules: Vec<String> =
+                                imports.iter().map(|imp| imp.module.clone()).collect();
                             if modules.is_empty() {
                                 String::new()
                             } else {
@@ -187,17 +185,13 @@ pub fn build_embedding_text(unit: &EmbeddingUnit) -> String {
     let mut parts = Vec::new();
 
     // Function name (from chunk or file path for file-level chunks)
-    let name = unit
-        .chunk
-        .function_name
-        .as_deref()
-        .unwrap_or_else(|| {
-            unit.chunk
-                .file_path
-                .file_name()
-                .and_then(|f| f.to_str())
-                .unwrap_or("unknown")
-        });
+    let name = unit.chunk.function_name.as_deref().unwrap_or_else(|| {
+        unit.chunk
+            .file_path
+            .file_name()
+            .and_then(|f| f.to_str())
+            .unwrap_or("unknown")
+    });
     parts.push(format!("Function: {}", name));
 
     // L1: Signature (truncate to 200 chars if needed)
@@ -288,24 +282,24 @@ fn compute_flow_summaries(
     );
 
     // Reuse the CFG we just built so the DFG's reaching-defs doesn't re-parse.
-    let dfg_summary = match extract_dfg_from_tree_with_cfg(tree, source, function_name, language, &cfg)
-    {
-        Ok(dfg) => {
-            let vars = dfg.variables.len();
-            let defs = dfg
-                .refs
-                .iter()
-                .filter(|r| matches!(r.ref_type, RefType::Definition))
-                .count();
-            let uses = dfg
-                .refs
-                .iter()
-                .filter(|r| matches!(r.ref_type, RefType::Use))
-                .count();
-            format!("vars={}, defs={}, uses={}", vars, defs, uses)
-        }
-        Err(_) => String::new(),
-    };
+    let dfg_summary =
+        match extract_dfg_from_tree_with_cfg(tree, source, function_name, language, &cfg) {
+            Ok(dfg) => {
+                let vars = dfg.variables.len();
+                let defs = dfg
+                    .refs
+                    .iter()
+                    .filter(|r| matches!(r.ref_type, RefType::Definition))
+                    .count();
+                let uses = dfg
+                    .refs
+                    .iter()
+                    .filter(|r| matches!(r.ref_type, RefType::Use))
+                    .count();
+                format!("vars={}, defs={}, uses={}", vars, defs, uses)
+            }
+            Err(_) => String::new(),
+        };
 
     (cfg_summary, dfg_summary)
 }
@@ -405,12 +399,7 @@ fn enrich_single_chunk(
     call_graphs: &HashMap<Language, ProjectCallGraphV2>,
 ) -> EmbeddingUnit {
     // L1: Extract signature (first line of chunk content)
-    let signature = chunk
-        .content
-        .lines()
-        .next()
-        .unwrap_or("")
-        .to_string();
+    let signature = chunk.content.lines().next().unwrap_or("").to_string();
 
     // L1: Docstring -- for now use empty string (would need tree-sitter
     // comment node extraction; graceful degradation per spec)

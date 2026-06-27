@@ -166,11 +166,9 @@ impl EmbeddingModel {
         // All current variants are Snowflake Arctic Embed v1, which share this
         // query prefix (per the model card).
         match self {
-            Self::ArcticXS
-            | Self::ArcticS
-            | Self::ArcticM
-            | Self::ArcticMLong
-            | Self::ArcticL => "Represent this sentence for searching relevant passages: ",
+            Self::ArcticXS | Self::ArcticS | Self::ArcticM | Self::ArcticMLong | Self::ArcticL => {
+                "Represent this sentence for searching relevant passages: "
+            }
         }
     }
 
@@ -648,11 +646,23 @@ mod tests {
 
     #[test]
     fn parse_valid_models() {
-        assert_eq!(EmbeddingModel::parse("arctic-m").unwrap(), EmbeddingModel::ArcticM);
+        assert_eq!(
+            EmbeddingModel::parse("arctic-m").unwrap(),
+            EmbeddingModel::ArcticM
+        );
         assert_eq!(EmbeddingModel::parse("m").unwrap(), EmbeddingModel::ArcticM);
-        assert_eq!(EmbeddingModel::parse("arctic-l").unwrap(), EmbeddingModel::ArcticL);
-        assert_eq!(EmbeddingModel::parse("arctic-xs").unwrap(), EmbeddingModel::ArcticXS);
-        assert_eq!(EmbeddingModel::parse("arctic-m-long").unwrap(), EmbeddingModel::ArcticMLong);
+        assert_eq!(
+            EmbeddingModel::parse("arctic-l").unwrap(),
+            EmbeddingModel::ArcticL
+        );
+        assert_eq!(
+            EmbeddingModel::parse("arctic-xs").unwrap(),
+            EmbeddingModel::ArcticXS
+        );
+        assert_eq!(
+            EmbeddingModel::parse("arctic-m-long").unwrap(),
+            EmbeddingModel::ArcticMLong
+        );
     }
 
     #[test]
@@ -687,8 +697,7 @@ mod tests {
     #[test]
     fn resolve_non_local_provider_errors() {
         use crate::config::TldrConfig;
-        let config =
-            TldrConfig::from_str(r#"{"embedding": {"provider": "openai"}}"#).unwrap();
+        let config = TldrConfig::from_str(r#"{"embedding": {"provider": "openai"}}"#).unwrap();
         let result = EmbeddingModel::resolve(None, &config);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("not supported"));

@@ -41,12 +41,12 @@ use tldr_cli::commands::{
     ChangeImpactArgs, ChopArgs, ChurnArgs, ClonesArgs, CognitiveArgs, ComplexityArgs, ContextArgs,
     ContractsArgs, CoverageArgs, DaemonListArgs, DaemonNotifyArgs, DaemonQueryArgs,
     DaemonStartArgs, DaemonStatusArgs, DaemonStopArgs, DeadArgs, DeadStoresArgs, DebtArgs,
-    DefinitionArgs, DepsArgs,
-    DiagnosticsArgs, DiceArgs, DiffArgs, DoctorArgs, ExplainArgs, ExtractArgs, FixArgs,
-    HalsteadArgs, HealthArgs, HotspotsArgs, HubsArgs, ImpactArgs, ImportersArgs, ImportsArgs,
-    InheritanceArgs, InvariantsArgs, LocArgs, PatternsArgs, ReachingDefsArgs, ReferencesArgs,
-    SecureArgs, SliceArgs, SmartSearchArgs, SmellsArgs, SpecsArgs, StatsArgs, StructureArgs,
-    TaintArgs, TodoArgs, TreeArgs, VerifyArgs, WarmArgs, WhatbreaksArgs,
+    DefinitionArgs, DepsArgs, DiagnosticsArgs, DiceArgs, DiffArgs, DoctorArgs, ExplainArgs,
+    ExtractArgs, FixArgs, HalsteadArgs, HealthArgs, HotspotsArgs, HubsArgs, ImpactArgs,
+    ImportersArgs, ImportsArgs, InheritanceArgs, InvariantsArgs, LocArgs, PatternsArgs,
+    ReachingDefsArgs, ReferencesArgs, SecureArgs, SliceArgs, SmartSearchArgs, SmellsArgs,
+    SpecsArgs, StatsArgs, StructureArgs, TaintArgs, TodoArgs, TreeArgs, VerifyArgs, WarmArgs,
+    WhatbreaksArgs,
 };
 // Pattern analysis commands
 use tldr_cli::commands::patterns::{

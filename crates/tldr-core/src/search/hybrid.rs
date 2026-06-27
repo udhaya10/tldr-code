@@ -362,8 +362,7 @@ mod tests {
         std::fs::write(&test_file, "def process_data():\n    pass").unwrap();
 
         // No dense results - should fall back to BM25 only
-        let report =
-            hybrid_search("process", tmp.path(), Language::Python, 10, 60.0, &[]).unwrap();
+        let report = hybrid_search("process", tmp.path(), Language::Python, 10, 60.0, &[]).unwrap();
 
         assert_eq!(report.fallback_mode, Some("bm25_only".to_string()));
         // Should still have BM25 results

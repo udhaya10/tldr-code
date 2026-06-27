@@ -33,8 +33,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::metrics::file_utils::{
     check_file_size, has_binary_extension, is_binary_file, should_exclude,
-    should_skip_path_with_lang,
-    DEFAULT_MAX_FILE_SIZE_MB,
+    should_skip_path_with_lang, DEFAULT_MAX_FILE_SIZE_MB,
 };
 use crate::metrics::types::LocInfo;
 use crate::types::Language;
@@ -623,10 +622,7 @@ pub fn analyze_directory(path: &Path, options: &LocOptions) -> Result<LocReport,
                 *counts.entry(lang).or_insert(0) += 1;
             }
         }
-        counts
-            .into_iter()
-            .max_by_key(|(_, n)| *n)
-            .map(|(l, _)| l)
+        counts.into_iter().max_by_key(|(_, n)| *n).map(|(l, _)| l)
     });
 
     // Build walker with options

@@ -348,8 +348,7 @@ pub fn is_corpus_file(root: &Path, file: &Path) -> bool {
         set
     };
 
-    let preserve_js_ts_dirs =
-        crate::walker::root_is_js_ts_dominated(&canonical_root);
+    let preserve_js_ts_dirs = crate::walker::root_is_js_ts_dominated(&canonical_root);
     let js_ts_preserved: &[&str] = if preserve_js_ts_dirs {
         crate::walker::JS_TS_PRESERVED_DIRS
     } else {
@@ -370,7 +369,10 @@ pub fn is_corpus_file(root: &Path, file: &Path) -> bool {
         let is_dir = entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
         if is_dir {
             // Only descend into ancestors of the target file.
-            let entry_canon = entry.path().canonicalize().unwrap_or_else(|_| entry.path().to_path_buf());
+            let entry_canon = entry
+                .path()
+                .canonicalize()
+                .unwrap_or_else(|_| entry.path().to_path_buf());
             if !ancestors.contains(&entry_canon) {
                 return false;
             }
@@ -390,7 +392,9 @@ pub fn is_corpus_file(root: &Path, file: &Path) -> bool {
 
     for res in builder.build() {
         let Ok(entry) = res else { continue };
-        let Some(ft) = entry.file_type() else { continue };
+        let Some(ft) = entry.file_type() else {
+            continue;
+        };
         if !ft.is_file() {
             continue;
         }

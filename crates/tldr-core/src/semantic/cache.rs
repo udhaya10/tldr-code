@@ -457,10 +457,10 @@ impl EmbeddingCache {
             .duration_since(SystemTime::UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or(0);
-        let temp_file = self
-            .config
-            .cache_dir
-            .join(format!("cache.json.{}.{}.tmp", std::process::id(), nanos));
+        let temp_file =
+            self.config
+                .cache_dir
+                .join(format!("cache.json.{}.{}.tmp", std::process::id(), nanos));
 
         // Write to temp file with exclusive lock
         {
@@ -649,8 +649,12 @@ mod cache_tests {
 
         // Cold CLI: relative root + relative chunk path.
         let rel_chunk = mk("crates/x/src/a.rs");
-        let rel_key = CacheKey::from_chunk(&rel_chunk, EmbeddingModel::ArcticL, Path::new("crates/x/src"))
-            .to_key_string();
+        let rel_key = CacheKey::from_chunk(
+            &rel_chunk,
+            EmbeddingModel::ArcticL,
+            Path::new("crates/x/src"),
+        )
+        .to_key_string();
 
         // Daemon: absolute root + absolute chunk path (same logical file).
         let abs_chunk = mk("/Users/me/proj/crates/x/src/a.rs");
@@ -771,7 +775,8 @@ mod cache_tests {
         assert_eq!(cache.len(), 1);
 
         // Manually age the entry to be older than TTL (8 days ago)
-        let key = CacheKey::from_chunk(&chunk, EmbeddingModel::ArcticM, Path::new("")).to_key_string();
+        let key =
+            CacheKey::from_chunk(&chunk, EmbeddingModel::ArcticM, Path::new("")).to_key_string();
         if let Some(entry) = cache.entries.get_mut(&key) {
             // Set cached_at to 8 days ago
             let now = SystemTime::now()
@@ -896,9 +901,9 @@ mod cache_tests {
         // that the TTL check exists in the code path.
         // For a more robust test, we'd need time mocking.
         // At minimum, verify the cache entry exists
-        assert!(cache
-            .entries
-            .contains_key(&CacheKey::from_chunk(&chunk, EmbeddingModel::ArcticM, Path::new("")).to_key_string()));
+        assert!(cache.entries.contains_key(
+            &CacheKey::from_chunk(&chunk, EmbeddingModel::ArcticM, Path::new("")).to_key_string()
+        ));
     }
 
     #[test]

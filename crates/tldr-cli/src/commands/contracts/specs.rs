@@ -169,8 +169,7 @@ pub fn run_specs(test_path: &Path, function_filter: Option<&str>) -> ContractsRe
                     // assertion patterns. Previously these languages
                     // reported `total_specs = 0` even with hundreds of
                     // recognised test functions.
-                    let extracted =
-                        extract_generic_specs(test_path, &source, language);
+                    let extracted = extract_generic_specs(test_path, &source, language);
                     merge_specs(&mut all_specs, extracted);
                 }
             }
@@ -184,9 +183,7 @@ pub fn run_specs(test_path: &Path, function_filter: Option<&str>) -> ContractsRe
         // verification-pipeline-completeness-v1 (P11.BUG-AGG-3): closes
         // the previous Python-only walk that always reported
         // `test_files_scanned = 0` on JS/Java/PHP/Swift/Go/etc test trees.
-        for entry in
-            walk_project(test_path).filter(|e| e.path().is_file())
-        {
+        for entry in walk_project(test_path).filter(|e| e.path().is_file()) {
             let file_path = entry.path();
             let language = match super::test_recognizer::detect_language(file_path) {
                 Some(l) => l,
@@ -1202,7 +1199,7 @@ fn strip_string_quotes(s: &str) -> String {
 // Utility Functions
 // =============================================================================
 
-/// Merge specs from a file into the aggregate.
+// Merge specs from a file into the aggregate.
 // =============================================================================
 // Generic Multi-Language Spec Extraction (P12.AGG12-2)
 // =============================================================================
@@ -1240,11 +1237,7 @@ fn strip_string_quotes(s: &str) -> String {
 /// the appropriate tree-sitter grammar for `language`, walks every test
 /// function (using the same recogniser as test counting), and extracts
 /// specs from each function body.
-fn extract_generic_specs(
-    path: &Path,
-    source: &str,
-    language: Language,
-) -> Vec<FunctionSpecs> {
+fn extract_generic_specs(path: &Path, source: &str, language: Language) -> Vec<FunctionSpecs> {
     if source.trim().is_empty() {
         return Vec::new();
     }
@@ -1332,10 +1325,9 @@ fn walk_for_assertion_calls(
     // dedicated `assertEquals`-shaped helper. Detect that shape and
     // promote the FUT call inside the condition to a property spec.
     if matches!(language, Language::Go) && node.kind() == "if_statement" {
-        if try_extract_go_if_t_assertion(&node, source, test_func_name, specs) {
-            // Still recurse: nested if/loop bodies may contain more
-            // assertions or further FUT calls we need to harvest.
-        }
+        // Still recurse: nested if/loop bodies may contain more
+        // assertions or further FUT calls we need to harvest.
+        try_extract_go_if_t_assertion(&node, source, test_func_name, specs);
     }
 
     // language-specific-bugs-v1 (P14.AGG14-2): Java MockMvc fluent
@@ -1379,14 +1371,7 @@ fn walk_for_assertion_calls(
             let callee_tail = callee_text.rsplit('.').next().unwrap_or(&callee_text);
             // Strip generic params: `Throws<E>` -> `Throws`
             let callee_tail = callee_tail.split('<').next().unwrap_or(callee_tail);
-            classify_assertion_call(
-                &node,
-                source,
-                language,
-                callee_tail,
-                test_func_name,
-                specs,
-            );
+            classify_assertion_call(&node, source, language, callee_tail, test_func_name, specs);
         }
     }
 
@@ -1456,16 +1441,14 @@ fn try_extract_go_if_t_assertion(
     }
 
     let line = if_node.start_position().row as u32 + 1;
-    let entry = specs
-        .entry(fname.clone())
-        .or_insert_with(|| FunctionSpecs {
-            function_name: fname.clone(),
-            summary: String::new(),
-            test_count: 0,
-            input_output_specs: vec![],
-            exception_specs: vec![],
-            property_specs: vec![],
-        });
+    let entry = specs.entry(fname.clone()).or_insert_with(|| FunctionSpecs {
+        function_name: fname.clone(),
+        summary: String::new(),
+        test_count: 0,
+        input_output_specs: vec![],
+        exception_specs: vec![],
+        property_specs: vec![],
+    });
     entry.property_specs.push(PropertySpec {
         function: fname,
         property_type: "go_if_assertion".to_string(),
@@ -1605,14 +1588,16 @@ fn try_extract_java_mockmvc_assertion(
 
     let line = call.start_position().row as u32 + 1;
 
-    let entry = specs.entry(fut_name.clone()).or_insert_with(|| FunctionSpecs {
-        function_name: fut_name.clone(),
-        summary: String::new(),
-        test_count: 0,
-        input_output_specs: vec![],
-        exception_specs: vec![],
-        property_specs: vec![],
-    });
+    let entry = specs
+        .entry(fut_name.clone())
+        .or_insert_with(|| FunctionSpecs {
+            function_name: fut_name.clone(),
+            summary: String::new(),
+            test_count: 0,
+            input_output_specs: vec![],
+            exception_specs: vec![],
+            property_specs: vec![],
+        });
 
     // Avoid duplicates when the same test method is harvested twice (the
     // caller recurses through receivers, so we can hit the same call node
@@ -1668,14 +1653,8 @@ fn find_mockmvc_perform_call<'a>(call: Node<'a>, source: &[u8]) -> Option<Node<'
         let object = current
             .child_by_field_name("object")
             .or_else(|| current.child_by_field_name("expression"));
-        let object = match object {
-            Some(o) => o,
-            None => return None,
-        };
-        if matches!(
-            object.kind(),
-            "method_invocation" | "invocation_expression"
-        ) {
+        let object = object?;
+        if matches!(object.kind(), "method_invocation" | "invocation_expression") {
             if let Some(name) = generic_callee_name(&object, source) {
                 let tail = name.rsplit('.').next().unwrap_or(&name);
                 if tail == "perform" {
@@ -1884,9 +1863,8 @@ fn collect_rust_macro_args<'a>(call: Node<'a>) -> Vec<Node<'a>> {
                     return Some(*n);
                 }
             }
-            grp.into_iter().find(|n| {
-                !matches!(n.kind(), "(" | ")" | "[" | "]" | "{" | "}" | ",")
-            })
+            grp.into_iter()
+                .find(|n| !matches!(n.kind(), "(" | ")" | "[" | "]" | "{" | "}" | ","))
         })
         .collect()
 }
@@ -1970,14 +1948,16 @@ fn classify_assertion_call(
         specs: &'a mut HashMap<String, FunctionSpecs>,
         name: &str,
     ) -> &'a mut FunctionSpecs {
-        specs.entry(name.to_string()).or_insert_with(|| FunctionSpecs {
-            function_name: name.to_string(),
-            summary: String::new(),
-            test_count: 0,
-            input_output_specs: vec![],
-            exception_specs: vec![],
-            property_specs: vec![],
-        })
+        specs
+            .entry(name.to_string())
+            .or_insert_with(|| FunctionSpecs {
+                function_name: name.to_string(),
+                summary: String::new(),
+                test_count: 0,
+                input_output_specs: vec![],
+                exception_specs: vec![],
+                property_specs: vec![],
+            })
     }
 
     // Equality assertions: assertEquals(expected, actual) / AreEqual etc.
@@ -2075,8 +2055,7 @@ fn classify_assertion_call(
         // in the source is `(`, treat that identifier as the head of a
         // (text-level) function call. Use the identifier's name as the
         // FUT name and the OTHER side as the value/output.
-        let rust_macro = matches!(language, Language::Rust)
-            && call.kind() == "macro_invocation";
+        let rust_macro = matches!(language, Language::Rust) && call.kind() == "macro_invocation";
         let (call_arg, value_arg) = if rust_macro {
             let lhs_callish = is_rust_macro_call_token(args[0], source);
             let rhs_callish = is_rust_macro_call_token(args[1], source);
@@ -2092,9 +2071,7 @@ fn classify_assertion_call(
                 _ => return,
             }
         };
-        if let Some((fname, inputs)) =
-            extract_call_info_for_lang(call_arg, source, language)
-        {
+        if let Some((fname, inputs)) = extract_call_info_for_lang(call_arg, source, language) {
             let output = try_eval_literal(value_arg, source);
             let fs = ensure(specs, &fname);
             fs.input_output_specs.push(InputOutputSpec {
@@ -2110,8 +2087,7 @@ fn classify_assertion_call(
     }
 
     if is_inequality && args.len() >= 2 {
-        let rust_macro = matches!(language, Language::Rust)
-            && call.kind() == "macro_invocation";
+        let rust_macro = matches!(language, Language::Rust) && call.kind() == "macro_invocation";
         let call_arg = if rust_macro {
             if is_rust_macro_call_token(args[1], source) {
                 args[1]
@@ -2133,10 +2109,8 @@ fn classify_assertion_call(
             args[1]
         };
         if let Some((fname, _inputs)) = extract_call_info_for_lang(call_arg, source, language) {
-            let val = std::str::from_utf8(
-                &source[other.start_byte()..other.end_byte()],
-            )
-            .unwrap_or("");
+            let val =
+                std::str::from_utf8(&source[other.start_byte()..other.end_byte()]).unwrap_or("");
             let constraint = format!("result != {}", val);
             let fs = ensure(specs, &fname);
             fs.property_specs.push(PropertySpec {
@@ -2495,8 +2469,7 @@ fn is_followed_by_open_paren(node: Node, source: &[u8]) -> bool {
 fn guess_exception_type(call: &Node, source: &[u8]) -> String {
     // Walk the call's text up to the first '(' and collect any
     // capitalised-identifier sub-token.
-    let text = std::str::from_utf8(&source[call.start_byte()..call.end_byte()])
-        .unwrap_or("");
+    let text = std::str::from_utf8(&source[call.start_byte()..call.end_byte()]).unwrap_or("");
     let mut acc = String::new();
     for ch in text.chars() {
         if acc.contains('(') || acc.contains('{') {

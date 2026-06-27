@@ -216,10 +216,7 @@ pub fn analyze_churn(
         summary.avg_commits_per_file = 0.0;
         // Repick most_churned_file by lines_changed (descending),
         // since commit_count is degenerate (all == 1).
-        if let Some(top) = file_stats
-            .values()
-            .max_by_key(|f| f.lines_changed)
-        {
+        if let Some(top) = file_stats.values().max_by_key(|f| f.lines_changed) {
             summary.most_churned_file = top.file.clone();
         }
     }

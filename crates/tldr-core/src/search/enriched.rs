@@ -949,7 +949,7 @@ pub fn search_with_inner(
                 return Ok(EnrichedSearchReport {
                     query: pattern.clone(),
                     results: Vec::new(),
-                            total_results: 0,
+                    total_results: 0,
                     total_files_searched: total,
                     search_mode: if structure_cache.is_some() {
                         "regex+cached-structure".to_string()
@@ -1004,7 +1004,7 @@ pub fn search_with_inner(
                 return Ok(EnrichedSearchReport {
                     query: hybrid_query.clone(),
                     results: Vec::new(),
-                            total_results: 0,
+                    total_results: 0,
                     total_files_searched: total_files,
                     search_mode: "hybrid(bm25+regex)".to_string(),
                 });
@@ -1149,9 +1149,7 @@ pub fn search_with_inner(
                 if raw.score > *entry {
                     *entry = raw.score;
                 }
-                let terms = file_matched_terms
-                    .entry(raw.file_path.clone())
-                    .or_default();
+                let terms = file_matched_terms.entry(raw.file_path.clone()).or_default();
                 for t in &raw.matched_terms {
                     if !terms.contains(t) {
                         terms.push(t.clone());
@@ -2557,7 +2555,10 @@ def thing():
         }
 
         let report = enriched_search("Bar", &project, Language::Python, opts(20)).unwrap();
-        assert!(!report.results.is_empty(), "Should return results for 'Bar'");
+        assert!(
+            !report.results.is_empty(),
+            "Should return results for 'Bar'"
+        );
 
         // The top two results must be the substring-name matches, in
         // either order. Docstring-only matches must rank below.

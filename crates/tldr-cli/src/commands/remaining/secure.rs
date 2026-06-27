@@ -439,24 +439,19 @@ fn partition_utf8_clean(candidates: &[PathBuf]) -> (Vec<PathBuf>, Vec<String>, u
         // O(1) and returns SizeCheck::Unknown for missing files
         // (which then falls through to the existing read path and is
         // handled there).
-        match check_size(file) {
-            SizeCheck::Oversize {
-                size_bytes,
-                max_bytes,
-                is_autogen,
-            } => {
-                skipped += 1;
-                warnings.push(format_oversize_warning(
-                    file,
-                    size_bytes,
-                    max_bytes,
-                    is_autogen,
-                ));
-                continue;
-            }
-            // WithinLimit | Unknown: proceed to the UTF-8 read below.
-            _ => {}
+        if let SizeCheck::Oversize {
+            size_bytes,
+            max_bytes,
+            is_autogen,
+        } = check_size(file)
+        {
+            skipped += 1;
+            warnings.push(format_oversize_warning(
+                file, size_bytes, max_bytes, is_autogen,
+            ));
+            continue;
         }
+        // WithinLimit | Unknown: proceed to the UTF-8 read below.
 
         match read_to_string_tolerant(file) {
             Ok(ReadOutcome::Ok(_)) => clean.push(file.clone()),
@@ -474,11 +469,7 @@ fn partition_utf8_clean(candidates: &[PathBuf]) -> (Vec<PathBuf>, Vec<String>, u
                 // whole scan. This is NOT counted under `files_skipped`,
                 // which is reserved for the UTF-8-tolerance policy and
                 // the oversize policy.
-                warnings.push(format!(
-                    "Skipped {}: I/O error: {}",
-                    file.display(),
-                    e
-                ));
+                warnings.push(format!("Skipped {}: I/O error: {}", file.display(), e));
             }
         }
     }
@@ -566,8 +557,7 @@ fn apply_test_file_suppression(findings: &mut Vec<SecureFinding>) {
         // post-analysis filter and the fixture suite is JS/TS-only).
         // Without this gate, finding-level Rust suppression would drop
         // legitimate fixture findings on hypothetical Rust fixtures.
-        let in_fixtures =
-            f.file.contains("/fixtures/") || f.file.contains("\\fixtures\\");
+        let in_fixtures = f.file.contains("/fixtures/") || f.file.contains("\\fixtures\\");
         if in_fixtures {
             return true;
         }
@@ -710,9 +700,7 @@ fn rust_line_scanner_taint_findings(
             // if canonical already covers `(line, vuln_type)`.
             let core_ty = match f.vuln_type {
                 VulnType::SqlInjection => tldr_core::security::vuln::VulnType::SqlInjection,
-                VulnType::CommandInjection => {
-                    tldr_core::security::vuln::VulnType::CommandInjection
-                }
+                VulnType::CommandInjection => tldr_core::security::vuln::VulnType::CommandInjection,
                 _ => return true,
             };
             !canonical_index
@@ -1474,8 +1462,7 @@ fn risky(user: &str) {
             "export function f(x: string): string { return x; }\n",
         );
 
-        let (kept, warnings, files_skipped) =
-            partition_utf8_clean(&[big.clone(), small.clone()]);
+        let (kept, warnings, files_skipped) = partition_utf8_clean(&[big.clone(), small.clone()]);
 
         // 1. Oversize file is dropped from the kept set.
         assert!(
@@ -1520,11 +1507,7 @@ fn risky(user: &str) {
     /// Build a SecureReport JSON file by running `secure::run` against a
     /// temp directory containing the supplied files. Returns the parsed
     /// JSON value for assertion.
-    fn run_secure_to_json(
-        path: &Path,
-        lang: Language,
-        include_tests: bool,
-    ) -> serde_json::Value {
+    fn run_secure_to_json(path: &Path, lang: Language, include_tests: bool) -> serde_json::Value {
         let temp_out = TempDir::new().unwrap();
         let out_path = temp_out.path().join("report.json");
         let args = SecureArgs {
@@ -1601,10 +1584,8 @@ fn risky(user: &str) {
             !findings.is_empty(),
             "fixture must produce at least one taint finding (got 0 — fixture is wrong)"
         );
-        let unique_files: std::collections::HashSet<&str> = findings
-            .iter()
-            .filter_map(|f| f["file"].as_str())
-            .collect();
+        let unique_files: std::collections::HashSet<&str> =
+            findings.iter().filter_map(|f| f["file"].as_str()).collect();
         assert_eq!(
             unique_files.len(),
             1,
@@ -1628,7 +1609,10 @@ fn risky(user: &str) {
                 .iter()
                 .any(|f| f["file"].as_str().unwrap_or("").contains("/test/")),
             "no finding may originate from a test/ path; got: {:?}",
-            findings.iter().map(|f| f["file"].clone()).collect::<Vec<_>>()
+            findings
+                .iter()
+                .map(|f| f["file"].clone())
+                .collect::<Vec<_>>()
         );
     }
 
@@ -1669,10 +1653,8 @@ fn risky(user: &str) {
         // With --include-tests BOTH source and test findings surface.
         // Use unique-file-set semantics for tolerance to canonical-
         // engine multi-emission per flow.
-        let unique_files: std::collections::HashSet<&str> = findings
-            .iter()
-            .filter_map(|f| f["file"].as_str())
-            .collect();
+        let unique_files: std::collections::HashSet<&str> =
+            findings.iter().filter_map(|f| f["file"].as_str()).collect();
         assert_eq!(
             unique_files.len(),
             2,
@@ -1686,7 +1668,9 @@ fn risky(user: &str) {
             unique_files
         );
         assert!(
-            unique_files.iter().any(|f| f.contains("/test/") && f.ends_with(".test.js")),
+            unique_files
+                .iter()
+                .any(|f| f.contains("/test/") && f.ends_with(".test.js")),
             "must include test-file finding when --include-tests: {:?}",
             unique_files
         );
@@ -1700,13 +1684,13 @@ fn risky(user: &str) {
         let mk = |file: &str| SecureFinding::new("taint", "high", "x").with_location(file, 1);
 
         let mut findings = vec![
-            mk("/abs/src/index.js"),                   // keep
-            mk("/abs/test/app.test.js"),               // drop (js test path)
-            mk("/abs/lib/foo.spec.ts"),                // drop (js spec suffix)
-            mk("/abs/__tests__/x.tsx"),                // drop (js __tests__)
-            mk("/abs/crates/foo/tests/it.rs"),         // drop (rust /tests/)
-            mk("/abs/crates/foo/src/lib.rs"),          // keep
-            mk("/abs/crates/foo/src/foo_test.rs"),     // drop (rust _test.rs)
+            mk("/abs/src/index.js"),               // keep
+            mk("/abs/test/app.test.js"),           // drop (js test path)
+            mk("/abs/lib/foo.spec.ts"),            // drop (js spec suffix)
+            mk("/abs/__tests__/x.tsx"),            // drop (js __tests__)
+            mk("/abs/crates/foo/tests/it.rs"),     // drop (rust /tests/)
+            mk("/abs/crates/foo/src/lib.rs"),      // keep
+            mk("/abs/crates/foo/src/foo_test.rs"), // drop (rust _test.rs)
             // Fixture exemption — must NOT be dropped (vuln_migration_v1
             // suite depends on this exemption being preserved).
             mk("/abs/crates/tldr-cli/tests/fixtures/vuln_migration_v1/javascript/x.js"),

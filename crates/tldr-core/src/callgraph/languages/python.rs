@@ -1273,8 +1273,9 @@ class App:
                 .get("App")
                 .expect("App class body should have calls (ConfigAttribute, _make_timedelta)");
             assert!(
-                app_calls.iter().any(|c| c.target == "_make_timedelta"
-                    && c.call_type == CallType::Ref),
+                app_calls
+                    .iter()
+                    .any(|c| c.target == "_make_timedelta" && c.call_type == CallType::Ref),
                 "Expected Ref to _make_timedelta from App class body. Got: {:?}",
                 app_calls
             );
@@ -1291,9 +1292,7 @@ def caller():
     return list(map(transform, [1, 2, 3]))
 "#;
             let calls = extract_calls(source);
-            let caller_calls = calls
-                .get("caller")
-                .expect("caller should have calls");
+            let caller_calls = calls.get("caller").expect("caller should have calls");
             assert!(
                 caller_calls
                     .iter()

@@ -91,7 +91,8 @@ mod tests {
             .run(OutputFormat::Json, true)
             .expect_err("parked command must fail fast");
         assert!(
-            err.to_string().starts_with("not available in this version,"),
+            err.to_string()
+                .starts_with("not available in this version,"),
             "expected standardized parked message, got: {err}"
         );
     }

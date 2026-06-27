@@ -437,19 +437,6 @@ impl Default for DebtOptions {
 // Public Functions - STUBS (to be implemented)
 // =============================================================================
 
-/// Count non-empty, non-comment lines of code
-///
-/// # Arguments
-/// * `source` - Source code content
-/// * `language` - Programming language for comment detection
-///
-/// # Returns
-/// Count of logical lines of code
-///
-/// # Algorithm
-/// - Skip empty lines and comment-only lines
-/// - For Python: handle triple-quoted docstrings (both """ and ''')
-/// - Lines with code + inline comments still count as code
 /// Map a debt-minute value to a severity bucket name.
 ///
 /// Buckets are aligned to the [`DebtRule::minutes`] table so that every rule

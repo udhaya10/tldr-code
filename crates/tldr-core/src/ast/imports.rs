@@ -1718,7 +1718,7 @@ fn parse_cjs_require(node: &Node, source: &str) -> Option<ImportInfo> {
     let module = args
         .children(&mut arg_cursor)
         .find(|c| matches!(c.kind(), "string" | "template_string"))
-        .map(|c| {
+        .and_then(|c| {
             // Reject template strings with substitutions — those resolve
             // dynamically and we can't emit a stable module name for them.
             if c.kind() == "template_string" {
@@ -1731,8 +1731,7 @@ fn parse_cjs_require(node: &Node, source: &str) -> Option<ImportInfo> {
                 }
             }
             Some(get_string_content(&c, source))
-        })
-        .flatten()?;
+        })?;
 
     if module.is_empty() {
         return None;
@@ -1793,14 +1792,24 @@ fn parse_swift_import_text(raw: &str) -> Option<ImportInfo> {
     // Submodule kind keywords that may follow the `import` keyword. The next
     // token after one of these is the module path.
     const KIND_KEYWORDS: &[&str] = &[
-        "struct", "class", "enum", "protocol", "typealias", "func", "var", "let",
+        "struct",
+        "class",
+        "enum",
+        "protocol",
+        "typealias",
+        "func",
+        "var",
+        "let",
     ];
 
     // Strip a leading attribute like `@testable`, `@_implementationOnly`, etc.
     let trimmed = raw.trim();
     let after_attr = if let Some(rest) = trimmed.strip_prefix('@') {
         // Skip until whitespace.
-        rest.split_whitespace().skip(1).collect::<Vec<_>>().join(" ")
+        rest.split_whitespace()
+            .skip(1)
+            .collect::<Vec<_>>()
+            .join(" ")
     } else {
         trimmed.to_string()
     };

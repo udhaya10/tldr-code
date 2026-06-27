@@ -280,7 +280,9 @@ fn test_temporal_basic_json() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("constraints") || stdout.contains("trigrams") || stdout.contains("metadata"),
+        stdout.contains("constraints")
+            || stdout.contains("trigrams")
+            || stdout.contains("metadata"),
         "Output should contain temporal report fields; got: {}",
         stdout
     );
@@ -440,8 +442,6 @@ fn test_interface_basic() {
 // Behavioral Command Tests
 // =============================================================================
 
-
-
 // =============================================================================
 // Contracts Command Tests
 // =============================================================================
@@ -492,8 +492,6 @@ fn test_contracts_text_format() {
 // =============================================================================
 // Bounds Command Tests
 // =============================================================================
-
-
 
 // =============================================================================
 // Invariants Command Tests
@@ -770,7 +768,6 @@ fn test_diagnostics_no_typecheck() {
 // Error Handling Tests
 // =============================================================================
 
-
 #[test]
 fn test_contracts_nonexistent_function() {
     let temp_dir = create_minimal_project();
@@ -811,8 +808,6 @@ fn test_chop_invalid_line_numbers() {
 // Help Tests
 // =============================================================================
 
-
-
 #[test]
 fn test_diagnostics_help() {
     let output = Command::new(assert_cmd::cargo::cargo_bin!("tldr"))
@@ -839,5 +834,3 @@ fn test_diagnostics_help() {
 // =============================================================================
 // Multi-Language Tests
 // =============================================================================
-
-

@@ -55,7 +55,7 @@ impl ContextArgs {
     /// (med-cleanup-bundle-v1 / M1)
     fn effective_project(&self) -> PathBuf {
         match &self.project {
-            Some(p) if self.path == PathBuf::from(".") => p.clone(),
+            Some(p) if self.path == Path::new(".") => p.clone(),
             _ => self.path.clone(),
         }
     }
@@ -93,18 +93,14 @@ impl ContextArgs {
 
         // The user-supplied --file (if any) wins over the derived form so
         // explicit flags always take precedence over inferred shorthands.
-        let effective_file: Option<PathBuf> =
-            self.file.clone().or_else(|| derived_file.clone());
+        let effective_file: Option<PathBuf> = self.file.clone().or_else(|| derived_file.clone());
 
         // Auto-derive project root from file when shorthand was used and
         // the user didn't supply an explicit one. Honour `.git` /
         // `package.json` / `Cargo.toml` markers; otherwise fall back to
         // the file's immediate parent directory. This keeps the
         // shorthand useful from any cwd.
-        if derived_file.is_some()
-            && self.path == PathBuf::from(".")
-            && self.project.is_none()
-        {
+        if derived_file.is_some() && self.path == Path::new(".") && self.project.is_none() {
             if let Some(file) = effective_file.as_ref() {
                 if let Some(root) = infer_project_root_from_file(file) {
                     project_path = root;
