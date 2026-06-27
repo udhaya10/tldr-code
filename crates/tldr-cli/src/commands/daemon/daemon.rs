@@ -49,10 +49,10 @@ use tldr_core::{
     detect_smells_with_walker_opts, SmellsWalkerOpts,
 };
 use tldr_core::{
-    architecture_analysis, change_impact, collect_all_functions, dead_code_analysis,
-    detect_or_parse_language, extract_file, find_importers, get_cfg_context, get_code_structure,
-    get_dfg_context, get_file_tree, get_imports, get_relevant_context, get_slice, impact_analysis,
-    search as tldr_search, FileTree, Language, NodeType, SliceDirection,
+    architecture_analysis, change_impact, detect_or_parse_language, extract_file_with_lang,
+    find_importers, get_cfg_context, get_code_structure, get_dfg_context, get_file_tree,
+    get_imports, get_relevant_context, get_slice, impact_analysis, search as tldr_search, FileTree,
+    Language, NodeType, SliceDirection,
 };
 
 // =============================================================================
@@ -812,19 +812,32 @@ impl TLDRDaemon {
                 }
             }
 
-            DaemonCommand::Extract { file, session: _ } => {
+            DaemonCommand::Extract {
+                file,
+                session: _,
+                language,
+            } => {
                 let file_str = file.to_string_lossy().to_string();
-                // Extract auto-detects language from the file path. Tag the
-                // cache key with the detected language so two files with the
-                // same name in different language sub-projects do not collide.
-                let detected_lang =
-                    detect_or_parse_language(None, &file).unwrap_or(Language::Python);
-                let key = QueryKey::new("extract", hash_str_args(&[&file_str]), detected_lang);
+                // Mirror extract.rs compute_local: the resolved language hint
+                // wins; cache key is tagged with the language actually used so
+                // two files with the same name in different language
+                // sub-projects (or the same file with/without --lang) do not
+                // collide.
+                let key_lang = language.unwrap_or_else(|| {
+                    detect_or_parse_language(None, &file).unwrap_or(Language::Python)
+                });
+                let key = QueryKey::new(
+                    "extract",
+                    hash_str_args(&[&file_str, &format!("{language:?}")]),
+                    key_lang,
+                );
                 if let Some(cached) = self.cache.get::<serde_json::Value>(&key) {
                     return DaemonResponse::Result(cached);
                 }
                 let file_hash = super::salsa::hash_path(&file);
-                match extract_file(&file, Some(&self.project)) {
+                // base_path = None to match extract.rs compute_local EXACTLY
+                // (previously the daemon passed Some(self.project), diverging).
+                match extract_file_with_lang(&file, None, language) {
                     Ok(result) => {
                         let val = serde_json::to_value(&result).unwrap_or_default();
                         self.cache.insert(key, &val, vec![file_hash]);
@@ -892,7 +905,11 @@ impl TLDRDaemon {
                 }
             }
 
-            DaemonCommand::Structure { path, lang } => {
+            DaemonCommand::Structure {
+                path,
+                lang,
+                max_results,
+            } => {
                 let path_str = path.to_string_lossy().to_string();
                 let lang_str = lang.as_deref().unwrap_or("");
                 let language = match detect_or_parse_language(lang.as_deref(), &path) {
@@ -904,12 +921,25 @@ impl TLDRDaemon {
                         }
                     }
                 };
-                let key =
-                    QueryKey::new("structure", hash_str_args(&[&path_str, lang_str]), language);
+                // TLDR-7pp.1.5: max_results is part of the key so flag-varied
+                // requests don't collide.
+                let key = QueryKey::new(
+                    "structure",
+                    hash_str_args(&[&path_str, lang_str, &max_results.to_string()]),
+                    language,
+                );
                 if let Some(cached) = self.cache.get::<serde_json::Value>(&key) {
                     return DaemonResponse::Result(cached);
                 }
-                match get_code_structure(&path, language, 0, None) {
+                // Mirror structure.rs compute_local EXACTLY: the user's
+                // --max-results and the default IgnoreSpec (previously the
+                // daemon passed 0 + None, diverging from local compute).
+                match get_code_structure(
+                    &path,
+                    language,
+                    max_results,
+                    Some(&tldr_core::IgnoreSpec::default()),
+                ) {
                     Ok(result) => {
                         let val = serde_json::to_value(&result).unwrap_or_default();
                         // TLDR-fct freshness: register the target path + project
@@ -934,19 +964,70 @@ impl TLDRDaemon {
                 entry,
                 depth,
                 language,
+                path,
+                include_docstrings,
+                file,
             } => {
                 let d = depth.unwrap_or(2);
                 let lang = resolve_language(language);
-                let key = QueryKey::new("context", hash_str_args(&[&entry, &d.to_string()]), lang);
+                let project = path.unwrap_or_else(|| self.project.clone());
+                let project_str = project.to_string_lossy().to_string();
+                let file_str = file
+                    .as_ref()
+                    .map(|f| f.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                // TLDR-7pp.1.5: project path + include_docstrings + file are
+                // part of the key so flag-varied requests don't collide.
+                let key = QueryKey::new(
+                    "context",
+                    hash_str_args(&[
+                        &entry,
+                        &d.to_string(),
+                        &project_str,
+                        &include_docstrings.to_string(),
+                        &file_str,
+                    ]),
+                    lang,
+                );
                 if let Some(cached) = self.cache.get::<serde_json::Value>(&key) {
                     return DaemonResponse::Result(cached);
                 }
-                match get_relevant_context(&self.project, &entry, d, lang, true, None) {
+                // Mirror context.rs compute_local EXACTLY: caller-supplied
+                // project root, include_docstrings, and --file disambiguator.
+                // Run off the async runtime — the call-graph build is
+                // CPU-heavy (consistent with the Calls/Dead handlers).
+                let project_for_build = project.clone();
+                let entry_owned = entry.clone();
+                let file_owned = file.clone();
+                let built = tokio::task::spawn_blocking(move || {
+                    get_relevant_context(
+                        &project_for_build,
+                        &entry_owned,
+                        d,
+                        lang,
+                        include_docstrings,
+                        file_owned.as_deref(),
+                    )
+                })
+                .await
+                .unwrap_or_else(|e| {
+                    Err(tldr_core::TldrError::DaemonError(format!(
+                        "context task failed: {e}"
+                    )))
+                });
+                match built {
                     Ok(result) => {
                         let val = serde_json::to_value(&result).unwrap_or_default();
-                        // TLDR-fct freshness: context spans self.project — register
-                        // the project hash so process_dirty_file evicts on any edit.
-                        self.cache.insert(key, &val, vec![hash_path(&self.project)]);
+                        // TLDR-fct freshness: context spans the project —
+                        // register both the supplied project root and the
+                        // daemon project so process_dirty_file evicts on edits.
+                        if project == self.project || project.starts_with(&self.project) {
+                            self.cache.insert(
+                                key,
+                                &val,
+                                vec![hash_path(&project), hash_path(&self.project)],
+                            );
+                        }
                         DaemonResponse::Result(val)
                     }
                     Err(e) => DaemonResponse::Error {
@@ -1058,25 +1139,57 @@ impl TLDRDaemon {
                 }
             }
 
-            DaemonCommand::Calls { path, language } => {
+            DaemonCommand::Calls {
+                path,
+                language,
+                respect_ignore,
+                max_items,
+            } => {
                 let root = path.unwrap_or_else(|| self.project.clone());
-                let lang = resolve_language(language);
+                // detected_language is the JSON `language` field; building
+                // language falls back to Python (mirrors calls.rs exactly).
+                let detected_language = language;
+                let building_language = resolve_language(detected_language);
                 let root_str = root.to_string_lossy().to_string();
-                let key = QueryKey::new("calls", hash_str_args(&[&root_str]), lang);
+                // TLDR-7pp.1.5: detected language + respect_ignore + max_items
+                // are part of the key so flag-varied requests don't collide.
+                let key = QueryKey::new(
+                    "calls",
+                    hash_str_args(&[
+                        &root_str,
+                        &format!("{detected_language:?}"),
+                        &respect_ignore.to_string(),
+                        &max_items.to_string(),
+                    ]),
+                    building_language,
+                );
                 if let Some(cached) = self.cache.get::<serde_json::Value>(&key) {
                     return DaemonResponse::Result(cached);
                 }
-                match self.build_graph_memoized_blocking(root.clone(), lang).await {
+                // Compute the SAME CallGraphOutput the CLI --oneshot path
+                // builds (TLDR-7pp.1.5): the previous handler returned a raw
+                // ProjectCallGraph that never deserialized as CallGraphOutput,
+                // so the daemon route silently always missed. Run off the async
+                // runtime — the build is CPU-heavy.
+                let root_for_build = root.clone();
+                let built = tokio::task::spawn_blocking(move || {
+                    crate::commands::calls::build_call_graph_output(
+                        &root_for_build,
+                        building_language,
+                        detected_language,
+                        respect_ignore,
+                        max_items,
+                    )
+                })
+                .await
+                .unwrap_or_else(|e| Err(anyhow::anyhow!("graph build task failed: {e}")));
+                match built {
                     Ok(result) => {
                         let val = serde_json::to_value(&result).unwrap_or_default();
                         // TLDR-iqr freshness: register BOTH the query-supplied
-                        // root and the daemon project root — raw-path hashing
-                        // means /tmp vs /private/tmp aliases hash differently,
-                        // and process_dirty_file invalidates the PROJECT hash.
-                        //
-                        // Codex r4 Q3: a root OUTSIDE this daemon's project is
-                        // beyond the watcher's freshness contract — never cache
-                        // it (always rebuild fresh) instead of serving stale.
+                        // root and the daemon project root. A root OUTSIDE this
+                        // daemon's project is beyond the watcher's freshness
+                        // contract — never cache it (always rebuild fresh).
                         if root == self.project || root.starts_with(&self.project) {
                             self.cache.insert(
                                 key,
@@ -1088,7 +1201,7 @@ impl TLDRDaemon {
                     }
                     Err(e) => DaemonResponse::Error {
                         status: "error".to_string(),
-                        error: e,
+                        error: e.to_string(),
                     },
                 }
             }
@@ -1134,47 +1247,45 @@ impl TLDRDaemon {
                 path,
                 entry,
                 language,
+                call_graph,
+                no_default_ignore,
             } => {
                 let root = path.unwrap_or_else(|| self.project.clone());
                 let lang = resolve_language(language);
                 let root_str = root.to_string_lossy().to_string();
                 let entry_str = entry.as_ref().map(|v| v.join(",")).unwrap_or_default();
-                let key = QueryKey::new("dead", hash_str_args(&[&root_str, &entry_str]), lang);
+                // TLDR-7pp.1.5: call_graph + no_default_ignore are part of the
+                // key so flag-varied requests don't collide.
+                let key = QueryKey::new(
+                    "dead",
+                    hash_str_args(&[
+                        &root_str,
+                        &entry_str,
+                        &call_graph.to_string(),
+                        &no_default_ignore.to_string(),
+                    ]),
+                    lang,
+                );
                 if let Some(cached) = self.cache.get::<serde_json::Value>(&key) {
                     return DaemonResponse::Result(cached);
                 }
-                let graph = match self.build_graph_memoized_blocking(root.clone(), lang).await {
-                    Ok(g) => g,
-                    Err(e) => {
-                        return DaemonResponse::Error {
-                            status: "error".to_string(),
-                            error: e,
-                        }
-                    }
-                };
-                // Collect all functions from the project by extracting each file
-                let extensions: HashSet<String> =
-                    lang.extensions().iter().map(|s| s.to_string()).collect();
-                let file_tree = match get_file_tree(&root, Some(&extensions), true, None) {
-                    Ok(t) => t,
-                    Err(e) => {
-                        return DaemonResponse::Error {
-                            status: "error".to_string(),
-                            error: e.to_string(),
-                        }
-                    }
-                };
-                let files = tldr_core::fs::tree::collect_files(&file_tree, &root);
-                let mut module_infos = Vec::new();
-                for file_path in files {
-                    if let Ok(info) = extract_file(&file_path, Some(&root)) {
-                        module_infos.push((file_path, info));
-                    }
-                }
-                let all_functions = collect_all_functions(&module_infos);
-                let entry_strings: Option<Vec<String>> = entry;
-                let entry_refs: Option<&[String]> = entry_strings.as_deref();
-                match dead_code_analysis(&graph, &all_functions, entry_refs) {
+                // Compute the SAME DeadCodeReport the CLI --oneshot path builds
+                // (TLDR-7pp.1.5): mirrors --call-graph and --no-default-ignore.
+                // Run off the async runtime — the analysis is CPU-heavy.
+                let root_for_build = root.clone();
+                let entry_owned = entry.clone();
+                let built = tokio::task::spawn_blocking(move || {
+                    crate::commands::dead::compute_dead_report(
+                        &root_for_build,
+                        lang,
+                        entry_owned.as_deref(),
+                        call_graph,
+                        no_default_ignore,
+                    )
+                })
+                .await
+                .unwrap_or_else(|e| Err(anyhow::anyhow!("dead-code task failed: {e}")));
+                match built {
                     Ok(result) => {
                         let val = serde_json::to_value(&result).unwrap_or_default();
                         // TLDR-iqr freshness: both hashes; external roots
@@ -1233,17 +1344,19 @@ impl TLDRDaemon {
                 }
             }
 
-            DaemonCommand::Imports { file } => {
+            DaemonCommand::Imports { file, language } => {
                 let file_str = file.to_string_lossy().to_string();
-                let language = match detect_or_parse_language(None, &file) {
-                    Ok(l) => l,
-                    Err(e) => {
-                        return DaemonResponse::Error {
-                            status: "error".to_string(),
-                            error: e.to_string(),
+                // Mirror imports.rs: explicit --lang wins; otherwise detect.
+                let language =
+                    match detect_or_parse_language(language.as_ref().map(|l| l.as_str()), &file) {
+                        Ok(l) => l,
+                        Err(e) => {
+                            return DaemonResponse::Error {
+                                status: "error".to_string(),
+                                error: e.to_string(),
+                            }
                         }
-                    }
-                };
+                    };
                 let key = QueryKey::new("imports", hash_str_args(&[&file_str]), language);
                 if let Some(cached) = self.cache.get::<serde_json::Value>(&key) {
                     return DaemonResponse::Result(cached);
@@ -2228,6 +2341,7 @@ mod tests {
             .handle_command(DaemonCommand::Extract {
                 file: temp.path().join("main.py"),
                 session: None,
+                language: None,
             })
             .await;
 
@@ -2260,6 +2374,7 @@ mod tests {
             .handle_command(DaemonCommand::Extract {
                 file: temp.path().join("nonexistent.py"),
                 session: None,
+                language: None,
             })
             .await;
 
@@ -2309,6 +2424,7 @@ mod tests {
             .handle_command(DaemonCommand::Structure {
                 path: temp.path().to_path_buf(),
                 lang: Some("python".to_string()),
+                max_results: 0,
             })
             .await;
 
@@ -2335,6 +2451,7 @@ mod tests {
         let response = daemon
             .handle_command(DaemonCommand::Imports {
                 file: temp.path().join("main.py"),
+                language: None,
             })
             .await;
 
@@ -2417,6 +2534,8 @@ mod tests {
             .handle_command(DaemonCommand::Calls {
                 path: None,
                 language: None,
+                respect_ignore: true,
+                max_items: 200,
             })
             .await;
 
@@ -2530,6 +2649,8 @@ mod tests {
                 path: None,
                 entry: None,
                 language: None,
+                call_graph: false,
+                no_default_ignore: false,
             })
             .await;
 
@@ -2589,6 +2710,7 @@ mod tests {
             .handle_command(DaemonCommand::Extract {
                 file: file.clone(),
                 session: None,
+                language: None,
             })
             .await;
         assert!(matches!(r1, DaemonResponse::Result(_)));
@@ -2603,6 +2725,7 @@ mod tests {
             .handle_command(DaemonCommand::Extract {
                 file,
                 session: None,
+                language: None,
             })
             .await;
 
@@ -2654,6 +2777,9 @@ mod tests {
                 entry: "main".to_string(),
                 depth: Some(1),
                 language: None,
+                path: None,
+                include_docstrings: false,
+                file: None,
             })
             .await;
 

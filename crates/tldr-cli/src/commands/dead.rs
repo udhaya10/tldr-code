@@ -26,7 +26,7 @@ use tldr_core::{
     build_project_call_graph, collect_all_functions, dead_code_analysis, FunctionRef, Language,
 };
 
-use crate::commands::daemon_router::{params_for_dead, try_daemon_route};
+use crate::commands::daemon_router::{is_oneshot, route_for_path};
 use crate::output::{OutputFormat, OutputWriter};
 
 /// Find dead (unreachable) code
@@ -68,96 +68,44 @@ impl DeadArgs {
             anyhow::bail!("Path not found: {}", self.path.display());
         }
 
-        // Determine language (auto-detect from directory, default to Python)
+        // Determine language (auto-detect from directory, default to Python).
+        // Resolved once and sent on the wire so the daemon uses the same
+        // language as compute_local.
         let language = self
             .lang
             .unwrap_or_else(|| Language::from_directory(&self.path).unwrap_or(Language::Python));
 
-        // Try daemon first for cached result
         let entry_points: Option<Vec<String>> = if self.entry_points.is_empty() {
             None
         } else {
             Some(self.entry_points.clone())
         };
 
-        if let Some(report) = try_daemon_route::<DeadCodeReport>(
-            &self.path,
-            "dead",
-            params_for_dead(Some(&self.path), entry_points.as_deref()),
-        ) {
-            // Apply truncation if needed
-            let (truncated_report, truncated, total_count, shown_count) =
-                apply_truncation(report, self.max_items);
-
-            // Output based on format
-            if writer.is_text() {
-                let text = format_dead_code_text_truncated(
-                    &truncated_report,
-                    truncated,
-                    total_count,
-                    shown_count,
-                );
-                writer.write_text(&text)?;
-                return Ok(());
-            } else {
-                let _ = (total_count, shown_count); // text path only
-                let output = DeadCodeOutput {
-                    report: truncated_report,
-                    truncated,
-                };
-                writer.write(&output)?;
-                return Ok(());
-            }
-        }
-
-        // Fallback to direct compute
-        let entry_points_for_analysis: Option<Vec<String>> = if self.entry_points.is_empty() {
-            None
+        // ADR-10 (TLDR-7pp.1.5): daemon is the only serve path; `--oneshot` is
+        // the sole explicit local-compute escape. No silent fallback. The
+        // full flag envelope (call_graph + no_default_ignore + entry points +
+        // resolved language) travels so the daemon runs EXACTLY the analysis
+        // compute_local runs (previously the daemon path always used the
+        // call-graph analyzer and ignored --call-graph/--no-default-ignore,
+        // diverging from the CLI's default reference-counting analysis).
+        let report = if is_oneshot() {
+            self.compute_local(language, entry_points.as_deref(), &writer)?
         } else {
-            Some(self.entry_points.clone())
+            let params = serde_json::json!({
+                "path": self.path,
+                "entry": entry_points,
+                "language": language,
+                "call_graph": self.call_graph,
+                "no_default_ignore": self.no_default_ignore,
+            });
+            route_for_path::<DeadCodeReport>(&self.path, "dead", params).into_hit_or_bail("dead")?
         };
 
-        let report = if self.call_graph {
-            // Old path: build call graph, then analyze
-            writer.progress(&format!(
-                "Building call graph for {} ({:?})...",
-                self.path.display(),
-                language
-            ));
-
-            let graph = build_project_call_graph(&self.path, language, None, true)?;
-
-            writer.progress("Extracting all functions...");
-            let module_infos = collect_module_infos(&self.path, language, self.no_default_ignore);
-            let all_functions: Vec<FunctionRef> = collect_all_functions(&module_infos);
-
-            writer.progress("Analyzing dead code (call graph)...");
-            dead_code_analysis(&graph, &all_functions, entry_points_for_analysis.as_deref())?
-        } else {
-            // New default path: reference counting (single-pass)
-            writer.progress(&format!(
-                "Scanning {} ({:?}) with reference counting...",
-                self.path.display(),
-                language
-            ));
-
-            let (module_infos, merged_ref_counts) =
-                collect_module_infos_with_refcounts(&self.path, language, self.no_default_ignore);
-            let all_functions: Vec<FunctionRef> = collect_all_functions(&module_infos);
-
-            writer.progress("Analyzing dead code (refcount)...");
-            dead_code_analysis_refcount(
-                &all_functions,
-                &merged_ref_counts,
-                entry_points_for_analysis.as_deref(),
-            )?
-        };
-
-        // Apply truncation if needed
+        // Apply truncation if needed (presentation concern, CLI-side).
         let (truncated_report, truncated, total_count, shown_count) =
             apply_truncation(report, self.max_items);
 
-        // Output based on format
+        // Single renderer for both paths.
         if writer.is_text() {
             let text = format_dead_code_text_truncated(
                 &truncated_report,
@@ -176,6 +124,65 @@ impl DeadArgs {
         }
 
         Ok(())
+    }
+
+    /// Local in-process dead-code analysis — reached only via `--oneshot`.
+    fn compute_local(
+        &self,
+        language: Language,
+        entry_points: Option<&[String]>,
+        writer: &OutputWriter,
+    ) -> Result<DeadCodeReport> {
+        if self.call_graph {
+            writer.progress(&format!(
+                "Building call graph for {} ({:?})...",
+                self.path.display(),
+                language
+            ));
+        } else {
+            writer.progress(&format!(
+                "Scanning {} ({:?}) with reference counting...",
+                self.path.display(),
+                language
+            ));
+        }
+        compute_dead_report(
+            &self.path,
+            language,
+            entry_points,
+            self.call_graph,
+            self.no_default_ignore,
+        )
+    }
+}
+
+/// Run the dead-code analysis for `path`, shared by the CLI `--oneshot` path
+/// and the daemon `Dead` handler so the two produce byte-identical reports
+/// (TLDR-7pp.1.5). `call_graph` selects the call-graph analyzer; the default
+/// (`false`) is the single-pass reference-counting analyzer.
+pub(crate) fn compute_dead_report(
+    path: &Path,
+    language: Language,
+    entry_points: Option<&[String]>,
+    call_graph: bool,
+    no_default_ignore: bool,
+) -> Result<DeadCodeReport> {
+    if call_graph {
+        // Call-graph path: build graph, then analyze.
+        let graph = build_project_call_graph(path, language, None, true)?;
+        let module_infos = collect_module_infos(path, language, no_default_ignore);
+        let all_functions: Vec<FunctionRef> = collect_all_functions(&module_infos);
+        Ok(dead_code_analysis(&graph, &all_functions, entry_points)?)
+    } else {
+        // Default path: reference counting (single-pass).
+        let (module_infos, merged_ref_counts) =
+            collect_module_infos_with_refcounts(path, language, no_default_ignore);
+        let all_functions: Vec<FunctionRef> = collect_all_functions(&module_infos);
+        Ok(dead_code_analysis_refcount(
+            &all_functions,
+            &merged_ref_counts,
+            entry_points,
+        )?)
     }
 }
 

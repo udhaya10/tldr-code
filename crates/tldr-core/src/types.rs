@@ -1639,10 +1639,19 @@ impl Serialize for FieldInfo {
 /// Intra-file call graph
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct IntraFileCallGraph {
-    /// Map from function name to the list of functions it calls
-    pub calls: HashMap<String, Vec<String>>,
-    /// Reverse map from function name to the list of functions that call it
-    pub called_by: HashMap<String, Vec<String>>,
+    /// Map from function name to the list of functions it calls.
+    ///
+    /// TLDR-7pp.1.5: `BTreeMap` (not `HashMap`) so serialization is
+    /// deterministic across processes. The daemon and a cold `--oneshot` run
+    /// are separate processes with different `HashMap` hash seeds; a `HashMap`
+    /// here serialized its keys in per-process-random order, making `tldr
+    /// extract` output non-byte-identical between the two paths (a parity
+    /// break the daemon-vs-oneshot differential exposed once `extract` began
+    /// honestly routing through the daemon).
+    pub calls: std::collections::BTreeMap<String, Vec<String>>,
+    /// Reverse map from function name to the list of functions that call it.
+    /// `BTreeMap` for the same determinism reason as `calls`.
+    pub called_by: std::collections::BTreeMap<String, Vec<String>>,
 }
 
 // =============================================================================
@@ -2452,28 +2461,66 @@ pub struct CallerTree {
 /// `functions_analyzed` (canonical, matches `health.summary.functions_analyzed`
 /// from the M-B2 canonical-function-enumerator-v1 vocabulary) and the legacy
 /// `total_functions` key (deprecated alias) for back-compat.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct DeadCodeReport {
     /// Functions that are definitely dead (private and uncalled)
     pub dead_functions: Vec<FunctionRef>,
     /// Public/exported functions that are uncalled (may be intentional API surface)
-    #[serde(default)]
     pub possibly_dead: Vec<FunctionRef>,
     /// Map from file path to names of dead functions in that file
     pub by_file: HashMap<PathBuf, Vec<String>>,
     /// Count of definitely-dead functions
     pub total_dead: usize,
     /// Number of possibly-dead (public but uncalled) functions
-    #[serde(default)]
     pub total_possibly_dead: usize,
     /// Total number of functions in the analyzed codebase.
-    ///
-    /// Accepts both `functions_analyzed` (canonical, N13) and
-    /// `total_functions` (legacy) on deserialization.
-    #[serde(alias = "functions_analyzed")]
     pub total_functions: usize,
     /// Percentage of definitely-dead functions (excludes possibly_dead)
     pub dead_percentage: f64,
+}
+
+// TLDR-7pp.1.5: hand-rolled `Deserialize` so DeadCodeReport ROUND-TRIPS
+// through its own `Serialize`. The serializer below emits BOTH the canonical
+// `functions_analyzed` key and the legacy `total_functions` key (N13
+// back-compat). A `#[serde(alias = "functions_analyzed")]` on a single
+// `total_functions` field made the derive reject that payload with "duplicate
+// field `total_functions`" — harmless until `tldr dead` began honestly routing
+// through the daemon, whose JSON transport round-trips the report (the daemon
+// serializes, the CLI deserializes). The helper struct keeps the two keys as
+// SEPARATE optional fields (no duplicate-field error) and coalesces them,
+// preferring the canonical `functions_analyzed`.
+impl<'de> serde::Deserialize<'de> for DeadCodeReport {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct DeadCodeReportDe {
+            dead_functions: Vec<FunctionRef>,
+            #[serde(default)]
+            possibly_dead: Vec<FunctionRef>,
+            by_file: HashMap<PathBuf, Vec<String>>,
+            total_dead: usize,
+            #[serde(default)]
+            total_possibly_dead: usize,
+            #[serde(default)]
+            functions_analyzed: Option<usize>,
+            #[serde(default)]
+            total_functions: Option<usize>,
+            dead_percentage: f64,
+        }
+        let de = DeadCodeReportDe::deserialize(deserializer)?;
+        Ok(DeadCodeReport {
+            dead_functions: de.dead_functions,
+            possibly_dead: de.possibly_dead,
+            by_file: de.by_file,
+            total_dead: de.total_dead,
+            total_possibly_dead: de.total_possibly_dead,
+            // Prefer the canonical key; fall back to the legacy one.
+            total_functions: de.functions_analyzed.or(de.total_functions).unwrap_or(0),
+            dead_percentage: de.dead_percentage,
+        })
+    }
 }
 
 // med-low-schema-cleanup-v1 (N13): hand-rolled `Serialize` so we can emit

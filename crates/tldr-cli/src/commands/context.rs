@@ -8,10 +8,9 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use clap::Args;
 
-use tldr_core::types::RelevantContext;
-use tldr_core::{get_relevant_context, Language};
+use tldr_core::{get_relevant_context, Language, RelevantContext};
 
-use crate::commands::daemon_router::{params_with_entry_depth, try_daemon_route};
+use crate::commands::daemon_router::{is_oneshot, route_for_path};
 use crate::output::{OutputFormat, OutputWriter};
 
 /// Build LLM-ready context from entry point
@@ -113,46 +112,39 @@ impl ContextArgs {
             .lang
             .unwrap_or_else(|| Language::from_directory(&project_path).unwrap_or(Language::Python));
 
-        // Try daemon first for cached result. Only route through the
-        // daemon when there is no derived-file disambiguation, since the
-        // daemon protocol does not currently propagate the `--file`
-        // filter (would silently ignore the disambiguator).
-        if effective_file.is_none() {
-            if let Some(context) = try_daemon_route::<RelevantContext>(
+        // Canonicalize the project root so the daemon — whose working
+        // directory may differ from the CLI's — builds the call graph over the
+        // SAME directory, keeping daemon and `--oneshot` output byte-identical.
+        let project_path = project_path.canonicalize().unwrap_or(project_path);
+
+        // ADR-10 (TLDR-7pp.1.5): daemon is the only serve path; `--oneshot` is
+        // the sole explicit local-compute escape. No silent fallback. The full
+        // flag envelope (project path, depth, language, include_docstrings, and
+        // the `--file` disambiguator) travels so the daemon computes EXACTLY
+        // what compute_local computes — previously the daemon path dropped
+        // `--file` and hardcoded `include_docstrings = true`.
+        let context: RelevantContext = if is_oneshot() {
+            self.compute_local(
                 &project_path,
-                "context",
-                params_with_entry_depth(&entry, Some(self.depth)),
-            ) {
-                // Output based on format
-                if writer.is_text() {
-                    // Use the built-in LLM string format
-                    let text = context.to_llm_string();
-                    writer.write_text(&text)?;
-                    return Ok(());
-                } else {
-                    writer.write(&context)?;
-                    return Ok(());
-                }
-            }
-        }
+                &entry,
+                language,
+                effective_file.as_deref(),
+                &writer,
+            )?
+        } else {
+            let params = serde_json::json!({
+                "entry": entry,
+                "path": project_path,
+                "depth": self.depth,
+                "language": language,
+                "include_docstrings": self.include_docstrings,
+                "file": effective_file,
+            });
+            route_for_path::<RelevantContext>(&project_path, "context", params)
+                .into_hit_or_bail("context")?
+        };
 
-        // Fallback to direct compute
-        writer.progress(&format!(
-            "Building context for {} (depth={})...",
-            entry, self.depth
-        ));
-
-        // Get relevant context
-        let context = get_relevant_context(
-            &project_path,
-            &entry,
-            self.depth,
-            language,
-            self.include_docstrings,
-            effective_file.as_deref(),
-        )?;
-
-        // Output based on format
+        // Single renderer for both paths.
         if writer.is_text() {
             // Use the built-in LLM string format
             let text = context.to_llm_string();
@@ -162,6 +154,30 @@ impl ContextArgs {
         }
 
         Ok(())
+    }
+
+    /// Local in-process context build — reached only via `--oneshot`.
+    fn compute_local(
+        &self,
+        project_path: &Path,
+        entry: &str,
+        language: Language,
+        effective_file: Option<&Path>,
+        writer: &OutputWriter,
+    ) -> Result<RelevantContext> {
+        writer.progress(&format!(
+            "Building context for {} (depth={})...",
+            entry, self.depth
+        ));
+
+        Ok(get_relevant_context(
+            project_path,
+            entry,
+            self.depth,
+            language,
+            self.include_docstrings,
+            effective_file,
+        )?)
     }
 }
 

@@ -631,7 +631,16 @@ fn bfs_collect_functions(
         // Find all callees of this function
         let key = (file.clone(), func.clone());
         if let Some(callees) = forward_graph.get(&key) {
-            for callee in callees {
+            // TLDR-7pp.1.5: sort callees so the BFS visitation order — and
+            // hence the `functions` Vec in the output — is DETERMINISTIC. The
+            // forward graph's callee order derives from `ProjectCallGraph`
+            // edge-iteration order, which is per-process random (HashSet-backed
+            // storage); without this sort `tldr context` output differed
+            // between two runs, breaking daemon-vs-oneshot byte parity once the
+            // command began routing through the daemon.
+            let mut callees_sorted: Vec<&(PathBuf, String)> = callees.iter().collect();
+            callees_sorted.sort();
+            for callee in callees_sorted {
                 if !visited.contains(callee) {
                     visited.insert(callee.clone());
                     queue.push_back((callee.clone(), current_depth + 1));

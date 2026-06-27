@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use tldr_core::types::ImportInfo;
 use tldr_core::{detect_or_parse_language, get_imports, Language};
 
-use crate::commands::daemon_router::{params_with_file_lang, try_daemon_route};
+use crate::commands::daemon_router::{is_oneshot, route_for_path};
 use crate::output::{format_imports_text, OutputFormat, OutputWriter};
 
 /// Envelope shape for `tldr imports` JSON output (schema-unification-v1).
@@ -57,64 +57,28 @@ impl ImportsArgs {
     pub fn run(&self, format: OutputFormat, quiet: bool) -> Result<()> {
         let writer = OutputWriter::new(format, quiet);
 
-        // Try daemon first for cached result (use file's parent as project root)
-        let project = self.file.parent().unwrap_or(&self.file);
-        if let Some(result) = try_daemon_route::<Vec<ImportInfo>>(
-            project,
-            "imports",
-            params_with_file_lang(&self.file, self.lang.as_ref().map(|l| l.as_str())),
-        ) {
-            if writer.is_text() {
-                writer.write_text(&format!(
-                    "{} ({} imports)\n\n{}",
-                    self.file.display().to_string().bold(),
-                    result.len(),
-                    format_imports_text(&result),
-                ))?;
-            } else if self.legacy_array {
-                writer.write(&result)?;
-            } else {
-                // schema-unification-v1 BUG-18: wrap in envelope so the
-                // top-level JSON is an object (consistent with structure,
-                // vuln, dead, etc.) instead of a bare array.
-                let envelope = ImportsEnvelope {
-                    file: self.file.display().to_string(),
-                    language: self
-                        .lang
-                        .as_ref()
-                        .map(|l| l.as_str().to_string())
-                        .unwrap_or_else(|| {
-                            // Daemon path: language not directly known; best-effort
-                            // detect from extension. If detection fails, fall back
-                            // to "unknown" rather than failing — the imports still
-                            // got parsed.
-                            detect_or_parse_language(None, &self.file)
-                                .map(|l| l.as_str().to_string())
-                                .unwrap_or_else(|_| "unknown".to_string())
-                        }),
-                    imports: result,
-                };
-                writer.write(&envelope)?;
-            }
-            return Ok(());
-        }
-
-        // Fallback to direct compute
-
-        // Detect or parse language (uses shared validator M28)
+        // Resolve language CLI-side (shared validator M28) so both paths agree
+        // on the envelope `language` field and the parse language — the daemon
+        // receives the resolved hint and parses identically.
         let language =
             detect_or_parse_language(self.lang.as_ref().map(|l| l.as_str()), &self.file)?;
 
-        writer.progress(&format!(
-            "Parsing imports from {} ({:?})...",
-            self.file.display(),
-            language
-        ));
+        // ADR-10 (TLDR-7pp.1.5): daemon is the only serve path; `--oneshot` is
+        // the sole explicit local-compute escape. No silent fallback.
+        let result: Vec<ImportInfo> = if is_oneshot() {
+            self.compute_local(language, &writer)?
+        } else {
+            // The resolved language travels on the wire (previously the daemon
+            // path dropped --lang entirely and re-detected from the extension).
+            let params = serde_json::json!({
+                "file": self.file,
+                "language": language.as_str(),
+            });
+            route_for_path::<Vec<ImportInfo>>(&self.file, "imports", params)
+                .into_hit_or_bail("imports")?
+        };
 
-        // Get imports
-        let result = get_imports(&self.file, language)?;
-
-        // Output based on format
+        // Single renderer for both paths.
         if writer.is_text() {
             writer.write_text(&format!(
                 "{} ({} imports)\n\n{}",
@@ -125,7 +89,9 @@ impl ImportsArgs {
         } else if self.legacy_array {
             writer.write(&result)?;
         } else {
-            // schema-unification-v1 BUG-18: envelope shape, see daemon branch.
+            // schema-unification-v1 BUG-18: wrap in envelope so the top-level
+            // JSON is an object (consistent with structure, vuln, dead, etc.)
+            // instead of a bare array.
             let envelope = ImportsEnvelope {
                 file: self.file.display().to_string(),
                 language: language.as_str().to_string(),
@@ -135,5 +101,15 @@ impl ImportsArgs {
         }
 
         Ok(())
+    }
+
+    /// Local in-process import parsing — reached only via `--oneshot`.
+    fn compute_local(&self, language: Language, writer: &OutputWriter) -> Result<Vec<ImportInfo>> {
+        writer.progress(&format!(
+            "Parsing imports from {} ({:?})...",
+            self.file.display(),
+            language
+        ));
+        Ok(get_imports(&self.file, language)?)
     }
 }

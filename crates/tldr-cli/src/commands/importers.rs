@@ -12,7 +12,7 @@ use colored::Colorize;
 use tldr_core::types::ImportersReport;
 use tldr_core::{find_importers, Language};
 
-use crate::commands::daemon_router::{params_with_module, try_daemon_route};
+use crate::commands::daemon_router::{is_oneshot, route_for_path};
 use crate::output::{format_importers_text, OutputFormat, OutputWriter};
 
 /// Find all files that import a given module
@@ -39,42 +39,51 @@ impl ImportersArgs {
     pub fn run(&self, format: OutputFormat, quiet: bool) -> Result<()> {
         let writer = OutputWriter::new(format, quiet);
 
-        // Validate path exists BEFORE daemon route / language detection / progress banner
+        // Validate path exists BEFORE language detection / progress banner
         // (lang-detect-default-v1)
         if !self.path.exists() {
             anyhow::bail!("Path not found: {}", self.path.display());
         }
 
-        // Try daemon first for cached result
-        if let Some(mut result) = try_daemon_route::<ImportersReport>(
-            &self.path,
-            "importers",
-            params_with_module(&self.module, Some(&self.path)),
-        ) {
-            self.apply_limit(&mut result);
-            self.output_result(&writer, &result)?;
-            return Ok(());
-        }
-
-        // Determine language (auto-detect from directory, default to Python)
+        // Determine language (auto-detect from directory, default to Python).
+        // Resolved once and sent on the wire so the daemon uses the same
+        // language as compute_local (previously the daemon path dropped --lang
+        // and defaulted to Python regardless of the directory contents).
         let language = self
             .lang
             .unwrap_or_else(|| Language::from_directory(&self.path).unwrap_or(Language::Python));
 
-        // Fallback to direct compute
+        // ADR-10 (TLDR-7pp.1.5): daemon is the only serve path; `--oneshot` is
+        // the sole explicit local-compute escape. No silent fallback. The
+        // `--limit` truncation is applied CLI-side (presentation concern) so
+        // both paths stay byte-identical.
+        let mut result = if is_oneshot() {
+            self.compute_local(language, &writer)?
+        } else {
+            let params = serde_json::json!({
+                "module": self.module,
+                "path": self.path,
+                "language": language,
+            });
+            route_for_path::<ImportersReport>(&self.path, "importers", params)
+                .into_hit_or_bail("importers")?
+        };
+
+        self.apply_limit(&mut result);
+        self.output_result(&writer, &result)?;
+
+        Ok(())
+    }
+
+    /// Local in-process importer search — reached only via `--oneshot`.
+    fn compute_local(&self, language: Language, writer: &OutputWriter) -> Result<ImportersReport> {
         writer.progress(&format!(
             "Finding files that import '{}' in {} ({:?})...",
             self.module,
             self.path.display(),
             language
         ));
-
-        // Find importers
-        let mut result = find_importers(&self.path, &self.module, language)?;
-        self.apply_limit(&mut result);
-        self.output_result(&writer, &result)?;
-
-        Ok(())
+        Ok(find_importers(&self.path, &self.module, language)?)
     }
 
     fn apply_limit(&self, report: &mut ImportersReport) {

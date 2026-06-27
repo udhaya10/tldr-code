@@ -11,7 +11,7 @@ use clap::Args;
 use tldr_core::types::CodeStructure;
 use tldr_core::{get_code_structure, IgnoreSpec, Language};
 
-use crate::commands::daemon_router::{params_with_path_lang, try_daemon_route};
+use crate::commands::daemon_router::{is_oneshot, route_for_path};
 use crate::output::{format_structure_text, OutputFormat, OutputWriter};
 
 /// Extract code structure (functions, classes, imports)
@@ -42,44 +42,33 @@ impl StructureArgs {
             anyhow::bail!("Path not found: {}", self.path.display());
         }
 
-        // Determine language (auto-detect from directory, default to Python)
+        // Determine language (auto-detect from directory, default to Python).
+        // Resolved once and shared by both paths so the daemon and `--oneshot`
+        // results are byte-identical (the daemon receives the resolved string).
         let language = self
             .lang
             .unwrap_or_else(|| Language::from_directory(&self.path).unwrap_or(Language::Python));
 
-        // Try daemon first for cached result
-        if let Some(structure) = try_daemon_route::<CodeStructure>(
-            &self.path,
-            "structure",
-            params_with_path_lang(&self.path, Some(language.as_str())),
-        ) {
-            // Output based on format
-            if writer.is_text() {
-                let text = format_structure_text(&structure);
-                writer.write_text(&text)?;
-                return Ok(());
-            } else {
-                writer.write(&structure)?;
-                return Ok(());
-            }
-        }
+        // ADR-10 (TLDR-7pp.1.5): daemon is the only serve path; `--oneshot` is
+        // the sole explicit local-compute escape. No silent fallback.
+        let structure: CodeStructure = if is_oneshot() {
+            self.compute_local(language, &writer)?
+        } else {
+            // Full flag envelope on the wire: language (resolved) + max_results
+            // so the daemon computes EXACTLY what compute_local computes,
+            // including the default IgnoreSpec (previously the daemon path
+            // dropped both the ignore spec and --max-results — a latent parity
+            // break this conversion fixes).
+            let params = serde_json::json!({
+                "path": self.path,
+                "language": language.as_str(),
+                "max_results": self.max_results,
+            });
+            route_for_path::<CodeStructure>(&self.path, "structure", params)
+                .into_hit_or_bail("structure")?
+        };
 
-        // Fallback to direct compute
-        writer.progress(&format!(
-            "Extracting structure from {} ({:?})...",
-            self.path.display(),
-            language
-        ));
-
-        // Get code structure
-        let structure = get_code_structure(
-            &self.path,
-            language,
-            self.max_results,
-            Some(&IgnoreSpec::default()),
-        )?;
-
-        // Output based on format
+        // Single renderer for both paths.
         if writer.is_text() {
             let text = format_structure_text(&structure);
             writer.write_text(&text)?;
@@ -88,5 +77,21 @@ impl StructureArgs {
         }
 
         Ok(())
+    }
+
+    /// Local in-process structure extraction — reached only via `--oneshot`.
+    fn compute_local(&self, language: Language, writer: &OutputWriter) -> Result<CodeStructure> {
+        writer.progress(&format!(
+            "Extracting structure from {} ({:?})...",
+            self.path.display(),
+            language
+        ));
+
+        Ok(get_code_structure(
+            &self.path,
+            language,
+            self.max_results,
+            Some(&IgnoreSpec::default()),
+        )?)
     }
 }

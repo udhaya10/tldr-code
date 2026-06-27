@@ -436,7 +436,7 @@ fn extract_all_functions(path: &Path, language: Language) -> TldrResult<Vec<Func
 fn function_info_to_data(
     func: &FunctionInfo,
     file: &Path,
-    call_graph: &HashMap<String, Vec<String>>,
+    call_graph: &std::collections::BTreeMap<String, Vec<String>>,
 ) -> Option<FunctionData> {
     // Get callees for this function
     let callees: HashSet<String> = call_graph

@@ -1726,7 +1726,7 @@ fn make_module_info() -> ModuleInfo {
         }],
         call_graph: IntraFileCallGraph {
             calls: {
-                let mut m = HashMap::new();
+                let mut m = std::collections::BTreeMap::new();
                 m.insert("process_data".to_string(), vec!["helper".to_string()]);
                 m.insert(
                     "DataHandler.run".to_string(),
@@ -1735,7 +1735,7 @@ fn make_module_info() -> ModuleInfo {
                 m
             },
             called_by: {
-                let mut m = HashMap::new();
+                let mut m = std::collections::BTreeMap::new();
                 m.insert("helper".to_string(), vec!["process_data".to_string()]);
                 m.insert(
                     "process_data".to_string(),

@@ -4388,8 +4388,10 @@ fn build_intra_file_call_graph(
     functions: &[FunctionInfo],
     classes: &[ClassInfo],
 ) -> IntraFileCallGraph {
-    let mut calls: HashMap<String, Vec<String>> = HashMap::new();
-    let mut called_by: HashMap<String, Vec<String>> = HashMap::new();
+    let mut calls: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
+    let mut called_by: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
 
     // Build set of known function and class names
     let known_functions: std::collections::HashSet<String> = functions

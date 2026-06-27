@@ -398,6 +398,12 @@ pub enum DaemonCommand {
     Extract {
         file: PathBuf,
         session: Option<String>,
+        /// Optional language hint (CLI `--lang` / sibling-aware widening).
+        /// TLDR-7pp.1.5 flag parity: previously the daemon path dropped the
+        /// hint and used plain extension detection. Accepts the legacy `lang`
+        /// key for v0.2.x clients.
+        #[serde(default, alias = "lang", skip_serializing_if = "Option::is_none")]
+        language: Option<Language>,
     },
 
     /// Get file tree
@@ -427,6 +433,11 @@ pub enum DaemonCommand {
             skip_serializing_if = "Option::is_none"
         )]
         lang: Option<String>,
+        /// Maximum number of files to process (0 = unlimited). TLDR-7pp.1.5
+        /// flag parity: the CLI's `--max-results` was previously dropped on the
+        /// daemon path (the handler hardcoded 0).
+        #[serde(default)]
+        max_results: usize,
     },
 
     /// Get context for entry point
@@ -437,6 +448,22 @@ pub enum DaemonCommand {
         /// `None`. Accepts the legacy `lang` key for v0.2.x clients.
         #[serde(default, alias = "lang", skip_serializing_if = "Option::is_none")]
         language: Option<Language>,
+        /// Project root to build context over. TLDR-7pp.1.5 flag parity: the
+        /// CLI resolves a project path (positional / `--project` / inferred
+        /// from a `<file>:<func>` shorthand) that the daemon previously ignored
+        /// in favor of its own project root. Falls back to the daemon project
+        /// when absent.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<PathBuf>,
+        /// Include function docstrings (CLI `--include-docstrings`). TLDR-7pp.1.5
+        /// flag parity: the daemon path previously hardcoded `true`, diverging
+        /// from the CLI default (`false`).
+        #[serde(default)]
+        include_docstrings: bool,
+        /// Restrict to functions in this file (CLI `--file` / `<file>:<func>`
+        /// shorthand). TLDR-7pp.1.5 flag parity: previously dropped on the wire.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        file: Option<PathBuf>,
     },
 
     /// Get control flow graph
@@ -459,6 +486,17 @@ pub enum DaemonCommand {
         /// `None`. Accepts the legacy `lang` key for v0.2.x clients.
         #[serde(default, alias = "lang", skip_serializing_if = "Option::is_none")]
         language: Option<Language>,
+        /// Respect .gitignore/.tldrignore patterns (CLI `--respect-ignore`,
+        /// default true). TLDR-7pp.1.5 flag parity: previously dropped on the
+        /// daemon path. `#[serde(default = ...)]` keeps the CLI default for
+        /// clients that omit it.
+        #[serde(default = "default_true")]
+        respect_ignore: bool,
+        /// Maximum edges in output (CLI `--max-items`, default 200).
+        /// TLDR-7pp.1.5 flag parity: previously the daemon path neither
+        /// truncated nor reported truncation.
+        #[serde(default = "default_max_items")]
+        max_items: usize,
     },
 
     /// Get impact analysis
@@ -479,6 +517,15 @@ pub enum DaemonCommand {
         /// `None`. Accepts the legacy `lang` key for v0.2.x clients.
         #[serde(default, alias = "lang", skip_serializing_if = "Option::is_none")]
         language: Option<Language>,
+        /// Use the call-graph analyzer instead of the default reference
+        /// counting (CLI `--call-graph`). TLDR-7pp.1.5 flag parity: previously
+        /// the daemon path ALWAYS used the call-graph analyzer, diverging from
+        /// the CLI's default refcount analysis.
+        #[serde(default)]
+        call_graph: bool,
+        /// Walk vendored/build dirs normally skipped (CLI `--no-default-ignore`).
+        #[serde(default)]
+        no_default_ignore: bool,
     },
 
     /// Get architecture analysis
@@ -491,7 +538,14 @@ pub enum DaemonCommand {
     },
 
     /// Get imports for a file
-    Imports { file: PathBuf },
+    Imports {
+        file: PathBuf,
+        /// Optional language hint (CLI `--lang`). TLDR-7pp.1.5 flag parity:
+        /// previously the daemon path dropped the hint and re-detected from the
+        /// extension. Accepts the legacy `lang` key for v0.2.x clients.
+        #[serde(default, alias = "lang", skip_serializing_if = "Option::is_none")]
+        language: Option<Language>,
+    },
 
     /// Find files that import a module
     Importers {
@@ -575,6 +629,12 @@ fn default_true() -> bool {
 
 fn default_top_k() -> usize {
     10
+}
+
+/// Serde default for [`DaemonCommand::Calls::max_items`] — mirrors the CLI
+/// `--max-items` default so clients that omit it get identical truncation.
+fn default_max_items() -> usize {
+    200
 }
 
 /// Liveness observability (TLDR-qzc): answers "what is keeping the daemon
