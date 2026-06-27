@@ -55,6 +55,31 @@ pub struct EmbedArgs {
 impl EmbedArgs {
     /// Run the embed command
     pub fn run(&self, format: OutputFormat, quiet: bool) -> Result<()> {
+        // ADR-10 / DaemonRoute discipline (TLDR-ami): `embed` builds the project's
+        // usearch store at `store_dir_for(path)` — the SAME store the daemon's
+        // IndexManager builds, saves, and serves. If a live daemon covers this
+        // path, running a standalone build here makes TWO concurrent writers of
+        // one store: rebuild livelock + cache flush race (observed 2026-06-28 as
+        // a hung `embed` looping on "source changed; rebuilding" while the daemon
+        // ballooned to 20GB). Refuse loudly and point at the daemon-owned build.
+        //
+        // No `--oneshot` override on purpose (unlike read-only query commands):
+        // a local build WRITES the shared `store_dir`, so it cannot be made safe
+        // while the daemon is live — the explicit escape is to stop the daemon.
+        if let Some(project) = crate::commands::daemon_router::daemon_project_for(&self.path) {
+            anyhow::bail!(
+                "a tldr daemon owns this project's index ({}) and builds it for you — \
+                 standalone `tldr embed` here would be a second writer of the same store \
+                 (rebuild livelock / cache race).\n\
+                 \n\
+                 Instead:\n  \
+                 • run `tldr warm {}` to (re)build the index via the daemon, or\n  \
+                 • `tldr daemon stop` first if you really want a one-off local build.",
+                project.display(),
+                self.path.display(),
+            );
+        }
+
         let writer = OutputWriter::new(format, quiet);
         let start = Instant::now();
 
@@ -128,5 +153,60 @@ impl EmbedArgs {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::daemon::daemon_registry::{add_entry, test_support::with_registry_dir};
+
+    /// TLDR-ami: `embed` must refuse — BEFORE any build work — when a live
+    /// daemon covers the path, since both would write the same usearch store.
+    #[test]
+    fn embed_refuses_when_a_live_daemon_covers_the_path() {
+        with_registry_dir(|dir| {
+            let project = dir.join("proj");
+            std::fs::create_dir_all(&project).unwrap();
+            // Register a LIVE daemon (this process's pid is alive) at the root.
+            add_entry(&project, std::process::id(), &dir.join("p.sock")).unwrap();
+
+            let args = EmbedArgs {
+                path: project.clone(),
+                output: None,
+                granularity: "function".to_string(),
+                model: None,
+                langs: None,
+                no_cache: true,
+            };
+            let err = args
+                .run(OutputFormat::Json, true)
+                .expect_err("embed must refuse when a covering daemon is live")
+                .to_string();
+            assert!(err.contains("daemon"), "message should name the daemon: {err}");
+            assert!(
+                err.contains("tldr warm"),
+                "message should point to `tldr warm`: {err}"
+            );
+            assert!(
+                err.contains("tldr daemon stop"),
+                "message should offer the stop-daemon escape: {err}"
+            );
+        });
+    }
+
+    /// The gate must NOT trip when no live daemon covers the path (the no-daemon
+    /// / CI prebuild case still works). We assert the routing primitive directly
+    /// rather than running a full build (which needs the embedding model).
+    #[test]
+    fn embed_gate_does_not_trip_without_a_daemon() {
+        with_registry_dir(|dir| {
+            let project = dir.join("proj");
+            std::fs::create_dir_all(&project).unwrap();
+            assert!(
+                crate::commands::daemon_router::daemon_project_for(&project).is_none(),
+                "no registered daemon → embed gate must not trip"
+            );
+        });
     }
 }
