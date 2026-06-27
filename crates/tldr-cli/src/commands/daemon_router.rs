@@ -19,7 +19,9 @@ use std::path::{Path, PathBuf};
 use serde::de::DeserializeOwned;
 
 use crate::commands::daemon::error::DaemonError;
-use crate::commands::daemon::ipc::send_raw_command;
+use crate::commands::daemon::ipc::{
+    send_raw_command, send_raw_command_with_read_timeout, COMPUTE_READ_TIMEOUT_SECS,
+};
 
 // =============================================================================
 // Core Router Function
@@ -383,7 +385,18 @@ pub async fn route_async<T: DeserializeOwned>(
         Err(e) => return DaemonRoute::Error(format!("failed to encode request: {e}")),
     };
 
-    let response = match send_raw_command(&project, &command_json).await {
+    // Compute-on-miss path (TLDR-7pp.1.5): the daemon may synchronously run a
+    // heavy analysis (e.g. `context -d 3`) before replying on this connection,
+    // which can exceed the interactive read timeout. Use the larger
+    // COMPUTE_READ_TIMEOUT_SECS so a healthy-but-busy daemon is not mistaken for
+    // a wedged one and the only non-`--oneshot` path stays byte-identical.
+    let response = match send_raw_command_with_read_timeout(
+        &project,
+        &command_json,
+        COMPUTE_READ_TIMEOUT_SECS,
+    )
+    .await
+    {
         Ok(resp) => resp,
         Err(DaemonError::NotRunning) => return DaemonRoute::DaemonDown,
         Err(DaemonError::ConnectionRefused) => return DaemonRoute::DaemonDown,

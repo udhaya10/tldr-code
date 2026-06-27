@@ -38,8 +38,27 @@ pub const MAX_MESSAGE_SIZE: usize = 10 * 1024 * 1024;
 /// Connection timeout in seconds
 pub const CONNECTION_TIMEOUT_SECS: u64 = 5;
 
-/// Read timeout in seconds
+/// Read timeout in seconds (interactive default).
+///
+/// Bounds a single `recv` on the client. Sized for the common case where the
+/// daemon answers from cache or runs a cheap analysis. Heavy compute-on-miss
+/// requests use [`COMPUTE_READ_TIMEOUT_SECS`] instead.
 pub const READ_TIMEOUT_SECS: u64 = 30;
+
+/// Read timeout in seconds for compute-on-miss routing (TLDR-7pp.1.5).
+///
+/// The daemon serves `DaemonRoute` commands by computing synchronously on a
+/// cache miss, then replying on the same connection. Heavy analyses (e.g.
+/// `tldr context -d 3` on a large tree, ~36s here; `calls`/`dead` on big trees)
+/// legitimately exceed the interactive [`READ_TIMEOUT_SECS`]. Bounding the
+/// compute-on-miss read at 30s makes the *only* non-`--oneshot` path hard-fail
+/// with a spurious "connection timeout" even though the daemon is healthy and
+/// still working — breaking strict daemon==--oneshot output parity.
+///
+/// This larger bound only guards against a genuinely wedged daemon, so it is
+/// set well above any realistic single-analysis compute time. The daemon
+/// computes once and caches, so subsequent reads are fast regardless.
+pub const COMPUTE_READ_TIMEOUT_SECS: u64 = 600;
 
 // =============================================================================
 // Path/Port Computation
@@ -502,7 +521,18 @@ impl IpcStream {
     /// (TIGER-P3-03; closes #17 + #25). Both Unix and Windows arms
     /// delegate to the shared `recv_raw_from` helper.
     pub async fn recv_raw(&mut self) -> DaemonResult<String> {
-        let timeout = tokio::time::Duration::from_secs(READ_TIMEOUT_SECS);
+        self.recv_raw_with_timeout(READ_TIMEOUT_SECS).await
+    }
+
+    /// Receive a raw JSON string from the daemon, bounding the read at
+    /// `read_timeout_secs` instead of the interactive [`READ_TIMEOUT_SECS`].
+    ///
+    /// Used by the compute-on-miss routing path
+    /// ([`send_raw_command_with_read_timeout`]) so a daemon that is legitimately
+    /// computing a heavy analysis is not mistaken for a wedged one. Size
+    /// enforcement is identical to [`recv_raw`].
+    pub async fn recv_raw_with_timeout(&mut self, read_timeout_secs: u64) -> DaemonResult<String> {
+        let timeout = tokio::time::Duration::from_secs(read_timeout_secs);
         // limit = MAX + 1 so reading exactly MAX_MESSAGE_SIZE payload bytes
         // followed by the `\n` delimiter still fits within the bounded reader.
         let limit = (MAX_MESSAGE_SIZE + 1) as u64;
@@ -556,7 +586,7 @@ where
         Ok(Ok(_)) => Ok(line.trim_end().to_string()),
         Ok(Err(e)) => Err(DaemonError::Io(e)),
         Err(_) => Err(DaemonError::ConnectionTimeout {
-            timeout_secs: READ_TIMEOUT_SECS,
+            timeout_secs: timeout.as_secs(),
         }),
     }
 }
@@ -675,9 +705,25 @@ pub async fn send_command(project: &Path, cmd: &DaemonCommand) -> DaemonResult<D
 ///
 /// Useful for low-level debugging or custom commands.
 pub async fn send_raw_command(project: &Path, json: &str) -> DaemonResult<String> {
+    send_raw_command_with_read_timeout(project, json, READ_TIMEOUT_SECS).await
+}
+
+/// Send a raw JSON command to the daemon and receive a raw response, bounding
+/// the *read* at `read_timeout_secs` (connect still uses
+/// [`CONNECTION_TIMEOUT_SECS`]).
+///
+/// The compute-on-miss routing path passes [`COMPUTE_READ_TIMEOUT_SECS`] so a
+/// daemon legitimately running a heavy analysis (which it then caches) is given
+/// time to reply instead of hard-failing the only non-`--oneshot` path with a
+/// spurious connection-timeout (TLDR-7pp.1.5).
+pub async fn send_raw_command_with_read_timeout(
+    project: &Path,
+    json: &str,
+    read_timeout_secs: u64,
+) -> DaemonResult<String> {
     let mut stream = IpcStream::connect(project).await?;
     stream.send_raw(json).await?;
-    stream.recv_raw().await
+    stream.recv_raw_with_timeout(read_timeout_secs).await
 }
 
 // =============================================================================

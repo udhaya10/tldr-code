@@ -77,9 +77,9 @@ pub use daemon_impl as daemon;
 pub use error::{DaemonError, DaemonResult};
 pub use ipc::{
     check_socket_alive, cleanup_socket, cleanup_socket_at, compute_socket_path, compute_tcp_port,
-    read_command, send_command, send_raw_command, send_response, snapshot_socket_path,
-    validate_socket_path, IpcListener, IpcStream, CONNECTION_TIMEOUT_SECS, MAX_MESSAGE_SIZE,
-    READ_TIMEOUT_SECS,
+    read_command, send_command, send_raw_command, send_raw_command_with_read_timeout,
+    send_response, snapshot_socket_path, validate_socket_path, IpcListener, IpcStream,
+    COMPUTE_READ_TIMEOUT_SECS, CONNECTION_TIMEOUT_SECS, MAX_MESSAGE_SIZE, READ_TIMEOUT_SECS,
 };
 pub use pid::{
     check_stale_pid, cleanup_stale_pid, compute_hash, compute_pid_path, is_process_running,
