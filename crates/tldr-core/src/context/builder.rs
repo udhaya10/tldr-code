@@ -449,9 +449,20 @@ fn find_function_in_graph(
 
     // Verify each candidate by extracting the module and checking the function
     // actually has a definition there. Prefer non-test candidates first.
-    let mut sorted = candidates.clone();
-    sorted.sort_by_key(|(f, _)| is_test_path(f));
-    for (file, func) in &sorted {
+    //
+    // context-deterministic-candidate-order-v1 (TLDR-7pp.1.5): the candidate
+    // list is gathered by iterating `call_graph.edges()`, whose hash-backed
+    // iteration order reseeds on every process start. A long-lived daemon
+    // therefore yields a stable order while each fresh `--oneshot` process
+    // sees a different one. The previous tie-break (`sort_by_key(is_test_path)`)
+    // is stable but leaves same-named non-test candidates in their (random)
+    // arrival order, so daemon-vs-oneshot resolved ambiguous bare entry names
+    // differently — and --oneshot was not even self-consistent across runs.
+    // Impose a TOTAL order — (is_test_path, file_path, func_name) — so the pick
+    // is fully deterministic regardless of edge iteration order.
+    candidates
+        .sort_by(|(fa, na), (fb, nb)| (is_test_path(fa), fa, na).cmp(&(is_test_path(fb), fb, nb)));
+    for (file, func) in &candidates {
         let full_path = if file.is_relative() {
             project.join(file)
         } else {
@@ -464,8 +475,8 @@ fn find_function_in_graph(
         }
     }
 
-    // No candidate verified — fall back to the first edge match (preserves
-    // previous behaviour for cases where extraction fails for some reason).
+    // No candidate verified — fall back to the first edge match. After the
+    // total-order sort above this pick is deterministic across processes.
     if let Some(first) = candidates.into_iter().next() {
         return Ok(first);
     }
