@@ -122,15 +122,15 @@ impl DaemonNotifyArgs {
                 ),
             };
 
-            if !quiet {
-                match format {
-                    OutputFormat::Json | OutputFormat::Compact => {
-                        println!("{}", serde_json::to_string_pretty(&output)?);
-                    }
-                    OutputFormat::Text | OutputFormat::Sarif | OutputFormat::Dot => {
-                        eprintln!("Error: File '{}' is outside project root", file.display());
-                    }
+            match format {
+                OutputFormat::Json | OutputFormat::Compact => {
+                    // Always emit the structured payload (TLDR-3bk).
+                    println!("{}", serde_json::to_string_pretty(&output)?);
                 }
+                OutputFormat::Text | OutputFormat::Sarif | OutputFormat::Dot if !quiet => {
+                    eprintln!("Error: File '{}' is outside project root", file.display());
+                }
+                _ => {}
             }
 
             return Err(anyhow::anyhow!("File is outside project root"));
@@ -145,46 +145,46 @@ impl DaemonNotifyArgs {
             Err(DaemonError::NotRunning) | Err(DaemonError::ConnectionRefused) => {
                 // Daemon not running - silently succeed
                 // File edits should never fail due to daemon status
-                if !quiet {
-                    match format {
-                        OutputFormat::Json | OutputFormat::Compact => {
-                            let output = DaemonNotifyOutput {
-                                status: "ok".to_string(),
-                                dirty_count: 0,
-                                threshold: 20,
-                                reindex_triggered: false,
-                                message: Some(
-                                    "Daemon not running (notification ignored)".to_string(),
-                                ),
-                            };
-                            println!("{}", serde_json::to_string_pretty(&output)?);
-                        }
-                        OutputFormat::Text | OutputFormat::Sarif | OutputFormat::Dot => {
-                            // Silent - don't interrupt editor workflow
-                        }
+                match format {
+                    OutputFormat::Json | OutputFormat::Compact => {
+                        // Always emit the structured payload (TLDR-3bk).
+                        let output = DaemonNotifyOutput {
+                            status: "ok".to_string(),
+                            dirty_count: 0,
+                            threshold: 20,
+                            reindex_triggered: false,
+                            message: Some(
+                                "Daemon not running (notification ignored)".to_string(),
+                            ),
+                        };
+                        println!("{}", serde_json::to_string_pretty(&output)?);
                     }
+                    OutputFormat::Text | OutputFormat::Sarif | OutputFormat::Dot if !quiet => {
+                        // Silent - don't interrupt editor workflow
+                    }
+                    _ => {}
                 }
                 Ok(())
             }
             Err(e) => {
                 // Other errors - also silently succeed
                 // File edits should never fail due to daemon issues
-                if !quiet {
-                    match format {
-                        OutputFormat::Json | OutputFormat::Compact => {
-                            let output = DaemonNotifyOutput {
-                                status: "ok".to_string(),
-                                dirty_count: 0,
-                                threshold: 20,
-                                reindex_triggered: false,
-                                message: Some(format!("Notification failed: {} (ignored)", e)),
-                            };
-                            println!("{}", serde_json::to_string_pretty(&output)?);
-                        }
-                        OutputFormat::Text | OutputFormat::Sarif | OutputFormat::Dot => {
-                            // Silent - don't interrupt editor workflow
-                        }
+                match format {
+                    OutputFormat::Json | OutputFormat::Compact => {
+                        // Always emit the structured payload (TLDR-3bk).
+                        let output = DaemonNotifyOutput {
+                            status: "ok".to_string(),
+                            dirty_count: 0,
+                            threshold: 20,
+                            reindex_triggered: false,
+                            message: Some(format!("Notification failed: {} (ignored)", e)),
+                        };
+                        println!("{}", serde_json::to_string_pretty(&output)?);
                     }
+                    OutputFormat::Text | OutputFormat::Sarif | OutputFormat::Dot if !quiet => {
+                        // Silent - don't interrupt editor workflow
+                    }
+                    _ => {}
                 }
                 Ok(())
             }
@@ -213,19 +213,19 @@ impl DaemonNotifyArgs {
                     message: None,
                 };
 
-                if !quiet {
-                    match format {
-                        OutputFormat::Json | OutputFormat::Compact => {
-                            println!("{}", serde_json::to_string_pretty(&output)?);
-                        }
-                        OutputFormat::Text | OutputFormat::Sarif | OutputFormat::Dot => {
-                            if reindex_triggered {
-                                println!("Reindex triggered ({}/{} files)", dirty_count, threshold);
-                            } else {
-                                println!("Tracked: {}/{} files", dirty_count, threshold);
-                            }
+                match format {
+                    OutputFormat::Json | OutputFormat::Compact => {
+                        // Always emit the structured payload (TLDR-3bk).
+                        println!("{}", serde_json::to_string_pretty(&output)?);
+                    }
+                    OutputFormat::Text | OutputFormat::Sarif | OutputFormat::Dot if !quiet => {
+                        if reindex_triggered {
+                            println!("Reindex triggered ({}/{} files)", dirty_count, threshold);
+                        } else {
+                            println!("Tracked: {}/{} files", dirty_count, threshold);
                         }
                     }
+                    _ => {}
                 }
 
                 Ok(())
@@ -240,15 +240,15 @@ impl DaemonNotifyArgs {
                     message,
                 };
 
-                if !quiet {
-                    match format {
-                        OutputFormat::Json | OutputFormat::Compact => {
-                            println!("{}", serde_json::to_string_pretty(&output)?);
-                        }
-                        OutputFormat::Text | OutputFormat::Sarif | OutputFormat::Dot => {
-                            println!("Status: {}", status);
-                        }
+                match format {
+                    OutputFormat::Json | OutputFormat::Compact => {
+                        // Always emit the structured payload (TLDR-3bk).
+                        println!("{}", serde_json::to_string_pretty(&output)?);
                     }
+                    OutputFormat::Text | OutputFormat::Sarif | OutputFormat::Dot if !quiet => {
+                        println!("Status: {}", status);
+                    }
+                    _ => {}
                 }
 
                 Ok(())
@@ -259,15 +259,15 @@ impl DaemonNotifyArgs {
                     error: error.clone(),
                 };
 
-                if !quiet {
-                    match format {
-                        OutputFormat::Json | OutputFormat::Compact => {
-                            println!("{}", serde_json::to_string_pretty(&output)?);
-                        }
-                        OutputFormat::Text | OutputFormat::Sarif | OutputFormat::Dot => {
-                            eprintln!("Error: {}", error);
-                        }
+                match format {
+                    OutputFormat::Json | OutputFormat::Compact => {
+                        // Always emit the structured payload (TLDR-3bk).
+                        println!("{}", serde_json::to_string_pretty(&output)?);
                     }
+                    OutputFormat::Text | OutputFormat::Sarif | OutputFormat::Dot if !quiet => {
+                        eprintln!("Error: {}", error);
+                    }
+                    _ => {}
                 }
 
                 // Don't fail - file edits should work even with daemon errors

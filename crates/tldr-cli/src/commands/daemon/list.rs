@@ -32,16 +32,13 @@ impl DaemonListArgs {
     pub fn run(&self, format: OutputFormat, quiet: bool) -> anyhow::Result<()> {
         let entries = live_entries();
 
-        if quiet {
-            return Ok(());
-        }
-
         match format {
             OutputFormat::Json | OutputFormat::Compact => {
+                // Always emit the structured payload (TLDR-3bk).
                 let out = DaemonListOutput { daemons: &entries };
                 println!("{}", serde_json::to_string_pretty(&out)?);
             }
-            OutputFormat::Text | OutputFormat::Sarif | OutputFormat::Dot => {
+            OutputFormat::Text | OutputFormat::Sarif | OutputFormat::Dot if !quiet => {
                 if entries.is_empty() {
                     println!("No daemons running");
                 } else {
@@ -57,6 +54,7 @@ impl DaemonListArgs {
                     }
                 }
             }
+            _ => {}
         }
         Ok(())
     }

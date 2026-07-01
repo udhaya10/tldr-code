@@ -162,15 +162,16 @@ impl CacheStatsArgs {
         format: OutputFormat,
         quiet: bool,
     ) -> anyhow::Result<()> {
-        if quiet {
-            return Ok(());
-        }
-
         match format {
             OutputFormat::Json | OutputFormat::Compact => {
+                // Always emit the structured payload — `quiet` suppresses
+                // progress chatter, never the result (TLDR-3bk).
                 println!("{}", serde_json::to_string_pretty(output)?);
             }
             OutputFormat::Text | OutputFormat::Sarif | OutputFormat::Dot => {
+                if quiet {
+                    return Ok(());
+                }
                 if let Some(ref msg) = output.message {
                     println!("{}", msg);
                     return Ok(());

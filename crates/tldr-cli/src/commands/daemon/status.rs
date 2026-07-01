@@ -158,15 +158,15 @@ impl DaemonStatusArgs {
                     message: Some("Daemon not running".to_string()),
                 };
 
-                if !quiet {
-                    match format {
-                        OutputFormat::Json | OutputFormat::Compact => {
-                            println!("{}", serde_json::to_string_pretty(&output)?);
-                        }
-                        OutputFormat::Text | OutputFormat::Sarif | OutputFormat::Dot => {
-                            println!("Daemon not running");
-                        }
+                match format {
+                    OutputFormat::Json | OutputFormat::Compact => {
+                        // Always emit the structured payload (TLDR-3bk).
+                        println!("{}", serde_json::to_string_pretty(&output)?);
                     }
+                    OutputFormat::Text | OutputFormat::Sarif | OutputFormat::Dot if !quiet => {
+                        println!("Daemon not running");
+                    }
+                    _ => {}
                 }
 
                 Ok(())
@@ -210,42 +210,42 @@ impl DaemonStatusArgs {
                     message: None,
                 };
 
-                if !quiet {
-                    match format {
-                        OutputFormat::Json | OutputFormat::Compact => {
-                            println!("{}", serde_json::to_string_pretty(&output)?);
-                        }
-                        OutputFormat::Text | OutputFormat::Sarif | OutputFormat::Dot => {
-                            println!("TLDR Daemon Status");
-                            println!("==================");
-                            println!("Status:  {}", status_str);
-                            println!("Uptime:  {}", uptime_human);
-                            println!("Project: {}", project.display());
-                            println!("Files:   {}", files);
-                            if let Some(idx) = &semantic_index {
-                                println!("Index:   {}", format_semantic_index(idx));
-                            }
-                            if let Some(mem) = &memory {
-                                if let Some(line) = format_memory(mem) {
-                                    println!("Memory:  {}", line);
-                                }
-                            }
-                            if let Some(live) = &liveness {
-                                println!();
-                                print_liveness(live);
-                            }
-                            println!();
-                            println!("Cache Statistics");
-                            println!("----------------");
-                            println!("Hits:          {}", format_number(salsa_stats.hits));
-                            println!("Misses:        {}", format_number(salsa_stats.misses));
-                            println!("Hit Rate:      {:.2}%", salsa_stats.hit_rate());
-                            println!(
-                                "Invalidations: {}",
-                                format_number(salsa_stats.invalidations)
-                            );
-                        }
+                match format {
+                    OutputFormat::Json | OutputFormat::Compact => {
+                        // Always emit the structured payload (TLDR-3bk).
+                        println!("{}", serde_json::to_string_pretty(&output)?);
                     }
+                    OutputFormat::Text | OutputFormat::Sarif | OutputFormat::Dot if !quiet => {
+                        println!("TLDR Daemon Status");
+                        println!("==================");
+                        println!("Status:  {}", status_str);
+                        println!("Uptime:  {}", uptime_human);
+                        println!("Project: {}", project.display());
+                        println!("Files:   {}", files);
+                        if let Some(idx) = &semantic_index {
+                            println!("Index:   {}", format_semantic_index(idx));
+                        }
+                        if let Some(mem) = &memory {
+                            if let Some(line) = format_memory(mem) {
+                                println!("Memory:  {}", line);
+                            }
+                        }
+                        if let Some(live) = &liveness {
+                            println!();
+                            print_liveness(live);
+                        }
+                        println!();
+                        println!("Cache Statistics");
+                        println!("----------------");
+                        println!("Hits:          {}", format_number(salsa_stats.hits));
+                        println!("Misses:        {}", format_number(salsa_stats.misses));
+                        println!("Hit Rate:      {:.2}%", salsa_stats.hit_rate());
+                        println!(
+                            "Invalidations: {}",
+                            format_number(salsa_stats.invalidations)
+                        );
+                    }
+                    _ => {}
                 }
 
                 Ok(())
@@ -264,18 +264,18 @@ impl DaemonStatusArgs {
                     message,
                 };
 
-                if !quiet {
-                    match format {
-                        OutputFormat::Json | OutputFormat::Compact => {
-                            println!("{}", serde_json::to_string_pretty(&output)?);
-                        }
-                        OutputFormat::Text | OutputFormat::Sarif | OutputFormat::Dot => {
-                            println!("Status: {}", status);
-                            if let Some(msg) = &output.message {
-                                println!("{}", msg);
-                            }
+                match format {
+                    OutputFormat::Json | OutputFormat::Compact => {
+                        // Always emit the structured payload (TLDR-3bk).
+                        println!("{}", serde_json::to_string_pretty(&output)?);
+                    }
+                    OutputFormat::Text | OutputFormat::Sarif | OutputFormat::Dot if !quiet => {
+                        println!("Status: {}", status);
+                        if let Some(msg) = &output.message {
+                            println!("{}", msg);
                         }
                     }
+                    _ => {}
                 }
 
                 Ok(())

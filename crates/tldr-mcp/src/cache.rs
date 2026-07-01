@@ -384,12 +384,13 @@ mod tests {
             per_hit, iterations, elapsed
         );
 
-        // Assert: must be under 1us for raw HashMap lookup.
-        // Release mode: ~128ns. Debug mode: ~400ns. Both well under 1us.
-        // The 15us target includes JSON serialization overhead in the full call_tool path.
+        // Smoke check only: a raw HashMap lookup is ~128ns (release) / ~400ns (debug).
+        // We assert a deliberately loose ceiling so machine load on CI / busy dev boxes
+        // cannot trip a timing artifact (see TLDR-167). The eprintln above is the real
+        // signal; use `cargo bench` for precise measurement.
         assert!(
-            per_hit < Duration::from_micros(1),
-            "Cache hit too slow: {:?} (target: <1us for raw lookup)",
+            per_hit < Duration::from_micros(50),
+            "Cache hit unexpectedly slow: {:?} (loose smoke ceiling: <50us for raw lookup)",
             per_hit
         );
     }
