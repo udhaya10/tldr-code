@@ -27,17 +27,35 @@ cargo install tldr-cli --features semantic
 Adds:
 
 - `tldr semantic '<query>' <path>` — natural-language code search, served by
-  the warm daemon (`tldr daemon start`, then `tldr warm`). With no daemon or a
-  cold index it says so honestly instead of serving slowly.
-- `tldr embed <path>` — build the embedding index
+  the daemon after indexes warm. Prefer **`tldr init`** (daemon + warm-if-cold).
+  With no daemon or a cold index it says so honestly instead of serving slowly.
+- `tldr embed <path>` — offline/standalone vector build (**refused** while a
+  daemon owns the project; use `tldr warm` or stop the daemon first)
 - `tldr similar <file>` — not available in this version (returning with the
   new warm engine)
 
 This pulls in `fastembed` + ONNX Runtime. On first run it downloads the arctic-embed-m model (~110MB, cached). Builds reliably on Mac. Other platforms are unverified — if it doesn't compile for you, a PR with the fix is very welcome.
 
+## Project lifecycle (recommended)
+
+```bash
+cd /path/to/your/project
+tldr init                 # .tldr/ config, LaunchAgent (macOS), daemon, warm-if-cold
+tldr daemon status -p .   # poll until ready; semantic_index may show "building"
+# ... run analysis commands ...
+tldr init --remove        # stop daemon + remove LaunchAgent; keeps config/cache/logs
+```
+
+- **`tldr init -p /abs/path`** — same for an explicit root  
+- **CI / no service:** `tldr structure src/ --oneshot` (ADR-10 local escape)  
+- **Force rebuild indexes:** `tldr warm .` (expert; not required after init)  
+- Logs (macOS LaunchAgent): printed by init under `logs.stdout` / `logs.stderr`
+
 ## Quick start
 
 ```bash
+tldr init                 # once per project (daemon + indexes)
+
 # What's in this codebase?
 tldr structure src/
 
@@ -161,14 +179,18 @@ tldr health src/
 
 ## Daemon mode
 
-For repeated queries, the daemon caches results in memory:
+Prefer **`tldr init`** (see [Project lifecycle](#project-lifecycle-recommended)).  
+Power-user equivalent:
 
 ```bash
-tldr daemon start
-tldr warm src/          # Pre-warm cache
-tldr calls src/         # Fast — cache hit
-tldr daemon stop
+tldr daemon start -p .
+# warm-if-cold runs on start; force rebuild with: tldr warm .
+tldr calls src/         # Fast when cache is warm
+tldr daemon stop -p .
+# or full teardown (LaunchAgent + binding): tldr init --remove
 ```
+
+Analysis commands need a running daemon (ADR-10) or `--oneshot` for a one-off local run.
 
 ## Documentation
 

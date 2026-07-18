@@ -43,7 +43,7 @@ use tldr_cli::commands::{
     DaemonStartArgs, DaemonStatusArgs, DaemonStopArgs, DeadArgs, DeadStoresArgs, DebtArgs,
     DefinitionArgs, DepsArgs, DiagnosticsArgs, DiceArgs, DiffArgs, DoctorArgs, ExplainArgs,
     ExtractArgs, FixArgs, HalsteadArgs, HealthArgs, HotspotsArgs, HubsArgs, ImpactArgs,
-    ImportersArgs, ImportsArgs, InheritanceArgs, InvariantsArgs, LocArgs, PatternsArgs,
+    ImportersArgs, ImportsArgs, InheritanceArgs, InitArgs, InvariantsArgs, LocArgs, PatternsArgs,
     ReachingDefsArgs, ReferencesArgs, SecureArgs, SliceArgs, SmartSearchArgs, SmellsArgs,
     SpecsArgs, StatsArgs, StructureArgs, TaintArgs, TodoArgs, TreeArgs, VerifyArgs, WarmArgs,
     WhatbreaksArgs,
@@ -285,6 +285,9 @@ pub enum Command {
     /// Daemon management commands (start, stop, status)
     #[command(subcommand)]
     Daemon(DaemonCommand),
+
+    /// Initialize project lifecycle (daemon + LaunchAgent) or tear it down with --remove
+    Init(InitArgs),
 
     /// Cache management commands (stats, clear)
     #[command(subcommand)]
@@ -557,6 +560,7 @@ fn command_name(cmd: &Command) -> &'static str {
             DaemonCommand::Notify(_) => "daemon notify",
             DaemonCommand::List(_) => "daemon list",
         },
+        Command::Init(_) => "init",
         Command::Cache(sub) => match sub {
             CacheCommand::Stats(_) => "cache stats",
             CacheCommand::Clear(_) => "cache clear",
@@ -695,6 +699,7 @@ fn run_command(cli: &Cli) -> Result<()> {
             DaemonCommand::Notify(args) => args.run(cli.format, q),
             DaemonCommand::List(args) => args.run(cli.format, q),
         },
+        Command::Init(args) => args.run(cli.format, q),
         // Cache management commands
         Command::Cache(cache_cmd) => match cache_cmd {
             CacheCommand::Stats(args) => args.run(cli.format, q),

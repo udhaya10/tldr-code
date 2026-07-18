@@ -59,6 +59,9 @@ pub mod similar;
 // Daemon subsystem (Phase 1: types and error)
 pub mod daemon;
 
+// Project lifecycle: tldr init / tldr init --remove
+pub mod init;
+
 // Daemon router for auto-routing commands through daemon cache
 pub mod daemon_router;
 
@@ -253,3 +256,6 @@ pub use fix::FixArgs;
 
 // Bugbot types
 pub use bugbot::BugbotCheckArgs;
+
+// Lifecycle
+pub use init::InitArgs;

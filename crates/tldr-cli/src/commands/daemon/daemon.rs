@@ -528,6 +528,16 @@ impl TLDRDaemon {
         }
         eprintln!("daemon_ready project={}", self.project.display());
 
+        // Lifecycle / tldr init: warm-if-cold on start so users (and LaunchAgent
+        // restarts) do not need a separate `tldr warm` for first readiness.
+        // Full rebuild is skipped when a warm is already in flight; WarmJob
+        // itself short-circuits cached graph/structure/tree/semantic steps.
+        {
+            let lang = resolve_language(None);
+            let _ = self.start_warm_build(lang);
+            eprintln!("[lifecycle] ensure-warm queued (warm-if-cold on start)");
+        }
+
         // One-line effective liveness policy (TLDR-d26): idle_timeout_secs
         // changed meaning from client-idle to project-presence-idle (epic
         // TLDR-cxa) — state it where an operator reading the daemon log will
