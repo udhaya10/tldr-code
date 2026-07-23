@@ -133,6 +133,10 @@ impl EmbedArgs {
             granularity,
             chunks_embedded: total_chunks,
             chunks_cached: 0,
+            files_indexed: store.build_stats().files_indexed,
+            files_skipped: store.build_stats().files_skipped,
+            files_unsupported: store.build_stats().files_unsupported,
+            files_oversized: store.build_stats().files_oversized,
             chunks: None,
             latency_ms,
         };

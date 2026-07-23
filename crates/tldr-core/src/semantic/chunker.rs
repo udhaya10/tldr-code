@@ -79,6 +79,49 @@ pub struct ChunkResult {
 
     /// Files that were skipped during chunking
     pub skipped: Vec<SkippedFile>,
+
+    /// Counts describing the chunking pass.
+    pub stats: ChunkStats,
+}
+
+/// Counts describing source eligibility and chunk creation.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ChunkStats {
+    pub files_indexed: usize,
+    pub files_skipped: usize,
+    pub files_unsupported: usize,
+    pub files_oversized: usize,
+    pub chunks_created: usize,
+}
+
+impl ChunkStats {
+    fn from_parts(chunks: &[CodeChunk], skipped: &[SkippedFile]) -> Self {
+        let files_indexed = chunks
+            .iter()
+            .map(|chunk| chunk.file_path.to_string_lossy().into_owned())
+            .collect::<std::collections::HashSet<_>>()
+            .len();
+        let files_unsupported = skipped
+            .iter()
+            .filter(|file| {
+                file.reason.contains("Unknown language")
+                    || file.reason.contains("Filtered out by language")
+            })
+            .count();
+        let files_oversized = skipped
+            .iter()
+            .filter(|file| {
+                file.reason.contains("too large") || file.reason.contains("exceeds")
+            })
+            .count();
+        Self {
+            files_indexed,
+            files_skipped: skipped.len(),
+            files_unsupported,
+            files_oversized,
+            chunks_created: chunks.len(),
+        }
+    }
 }
 
 /// A file that was skipped during chunking
@@ -175,7 +218,7 @@ pub fn chunk_file<P: AsRef<Path>>(path: P, options: &ChunkOptions) -> TldrResult
             path: path.display().to_string(),
             reason: "Binary or hidden file".into(),
         });
-        return Ok(ChunkResult { chunks, skipped });
+        return Ok(ChunkResult::from_parts(chunks, skipped));
     }
 
     // Detect language from extension
@@ -191,7 +234,7 @@ pub fn chunk_file<P: AsRef<Path>>(path: P, options: &ChunkOptions) -> TldrResult
                         .unwrap_or_else(|| "none".into())
                 ),
             });
-            return Ok(ChunkResult { chunks, skipped });
+            return Ok(ChunkResult::from_parts(chunks, skipped));
         }
     };
 
@@ -202,7 +245,7 @@ pub fn chunk_file<P: AsRef<Path>>(path: P, options: &ChunkOptions) -> TldrResult
                 path: path.display().to_string(),
                 reason: format!("Filtered out by language ({})", language),
             });
-            return Ok(ChunkResult { chunks, skipped });
+            return Ok(ChunkResult::from_parts(chunks, skipped));
         }
     }
 
@@ -221,7 +264,7 @@ pub fn chunk_file<P: AsRef<Path>>(path: P, options: &ChunkOptions) -> TldrResult
                 is_autogen,
             ),
         });
-        return Ok(ChunkResult { chunks, skipped });
+        return Ok(ChunkResult::from_parts(chunks, skipped));
     }
 
     // Read file content
@@ -232,7 +275,7 @@ pub fn chunk_file<P: AsRef<Path>>(path: P, options: &ChunkOptions) -> TldrResult
                 path: path.display().to_string(),
                 reason: format!("Read error: {}", e),
             });
-            return Ok(ChunkResult { chunks, skipped });
+            return Ok(ChunkResult::from_parts(chunks, skipped));
         }
     };
 
@@ -270,7 +313,7 @@ pub fn chunk_file<P: AsRef<Path>>(path: P, options: &ChunkOptions) -> TldrResult
         }
     }
 
-    Ok(ChunkResult { chunks, skipped })
+    Ok(ChunkResult::from_parts(chunks, skipped))
 }
 
 // =============================================================================
@@ -310,6 +353,7 @@ fn chunk_directory<P: AsRef<Path>>(path: P, options: &ChunkOptions) -> TldrResul
     }
 
     Ok(ChunkResult {
+        stats: ChunkStats::from_parts(&all_chunks, &all_skipped),
         chunks: all_chunks,
         skipped: all_skipped,
     })
@@ -1344,6 +1388,9 @@ fn bar() {}
         assert!(result.chunks.is_empty());
         assert_eq!(result.skipped.len(), 1);
         assert!(result.skipped[0].reason.contains("Unknown language"));
+        assert_eq!(result.stats.files_skipped, 1);
+        assert_eq!(result.stats.files_unsupported, 1);
+        assert_eq!(result.stats.chunks_created, 0);
     }
 
     #[test]
@@ -1496,6 +1543,8 @@ fn bar() {}
         let result = chunk_file(&path, &ChunkOptions::default()).unwrap();
         assert!(result.chunks.is_empty());
         assert_eq!(result.skipped.len(), 1);
+        assert_eq!(result.stats.files_oversized, 1);
+        assert_eq!(result.stats.files_skipped, 1);
         assert!(
             result.skipped[0].reason.contains("exceeds 512KB cap"),
             "unexpected oversize reason: {}",

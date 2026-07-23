@@ -109,6 +109,7 @@ pub struct VectorStore {
     /// 0 for stores built without a root (e.g. unit tests via `new`/`from_embedded`),
     /// which simply never trip the freshness gate.
     corpus_digest: u64,
+    build_stats: crate::semantic::chunker::ChunkStats,
 }
 
 impl VectorStore {
@@ -127,6 +128,7 @@ impl VectorStore {
             meta: HashMap::new(),
             files: HashMap::new(),
             corpus_digest: 0,
+            build_stats: Default::default(),
         })
     }
 
@@ -149,6 +151,11 @@ impl VectorStore {
     /// Whether the store holds no vectors.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    /// Counts captured during the most recent build.
+    pub fn build_stats(&self) -> crate::semantic::chunker::ChunkStats {
+        self.build_stats
     }
 
     /// The build-time corpus digest persisted with this store (TLDR-kkt). Compare
@@ -731,6 +738,7 @@ impl VectorStore {
             // Restore the build-time corpus digest so the freshness gate can
             // compare it against the current on-disk corpus (TLDR-kkt).
             corpus_digest: manifest.corpus_digest,
+            build_stats: Default::default(),
         })
     }
 }
@@ -1166,7 +1174,9 @@ impl VectorStore {
         // skews the other way: a mid-build edit makes stored != the post-edit
         // digest, so the next load rebuilds (correct).
         let corpus_digest = compute_corpus_digest(root);
-        let chunks = chunk_code(root, &chunk_opts)?.chunks;
+        let chunk_result = chunk_code(root, &chunk_opts)?;
+        let build_stats = chunk_result.stats;
+        let chunks = chunk_result.chunks;
 
         // P0 guards — shared with SemanticIndex::build (same limits, not copies).
         if chunks.len() > MAX_INDEX_SIZE {
@@ -1244,6 +1254,7 @@ impl VectorStore {
         // Stamp the digest captured BEFORE chunking (see TOCTOU note above), so the
         // freshness gate compares against the snapshot the vectors describe.
         store.corpus_digest = corpus_digest;
+        store.build_stats = build_stats;
         Ok(store)
     }
 }

@@ -331,6 +331,18 @@ pub struct EmbedReport {
     /// Number of chunks loaded from cache
     pub chunks_cached: usize,
 
+    /// Number of source files represented by created chunks.
+    pub files_indexed: usize,
+
+    /// Number of files skipped during chunking.
+    pub files_skipped: usize,
+
+    /// Skipped files with unsupported or filtered languages.
+    pub files_unsupported: usize,
+
+    /// Skipped files rejected by the centralized size policy.
+    pub files_oversized: usize,
+
     /// Embedded chunks (if output requested)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chunks: Option<Vec<EmbeddedChunk>>,
