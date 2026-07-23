@@ -137,6 +137,43 @@ pub struct SkippedFile {
     pub reason: String,
 }
 
+/// Shared file-level eligibility gate for the semantic corpus.
+///
+/// Directory traversal still owns ignore-file and generated-directory pruning,
+/// while this policy owns the checks that must agree for builds, freshness
+/// checks, and watcher updates.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CorpusPolicy;
+
+impl CorpusPolicy {
+    /// Return whether an existing path is a source-corpus candidate.
+    pub fn accepts_file(path: &Path) -> bool {
+        !is_binary_or_hidden(path) && Language::from_path(path).is_some()
+    }
+
+    /// Return whether an existing source file passes the size policy.
+    pub fn within_size_limit(path: &Path) -> bool {
+        matches!(
+            Self::size_check(path),
+            crate::fs::oversize::SizeCheck::WithinLimit { .. }
+        )
+    }
+
+    /// Return the centralized size-policy result for a source file.
+    pub fn size_check(path: &Path) -> crate::fs::oversize::SizeCheck {
+        crate::fs::oversize::check_size(path)
+    }
+
+    /// Return the supported extension set used by project traversal.
+    pub fn supported_extensions() -> Vec<&'static str> {
+        crate::Language::all()
+            .iter()
+            .flat_map(|language| language.scan_extensions().iter().copied())
+            .filter_map(|extension| extension.strip_prefix('.'))
+            .collect()
+    }
+}
+
 // =============================================================================
 // Public API
 // =============================================================================
@@ -253,7 +290,7 @@ pub fn chunk_file<P: AsRef<Path>>(path: P, options: &ChunkOptions) -> TldrResult
         size_bytes,
         max_bytes,
         is_autogen,
-    } = crate::fs::oversize::check_size(path)
+    } = CorpusPolicy::size_check(path)
     {
         skipped.push(SkippedFile {
             path: path.display().to_string(),
@@ -390,10 +427,7 @@ pub fn is_corpus_file(root: &Path, file: &Path) -> bool {
     };
 
     // Quick pre-checks before building the walker.
-    if is_binary_or_hidden(&canonical_file) {
-        return false;
-    }
-    if Language::from_path(&canonical_file).is_none() {
+    if !CorpusPolicy::accepts_file(&canonical_file) {
         return false;
     }
 
@@ -488,11 +522,7 @@ pub fn is_corpus_file(root: &Path, file: &Path) -> bool {
 /// declarations) still counts here — which is exactly what keeps the freshness
 /// digest from spuriously flagging such files as additions.
 pub(crate) fn enumerate_corpus_files(root: &Path) -> Vec<PathBuf> {
-    let extensions: Vec<&'static str> = crate::Language::all()
-        .iter()
-        .flat_map(|language| language.scan_extensions().iter().copied())
-        .filter_map(|extension| extension.strip_prefix('.'))
-        .collect();
+    let extensions = CorpusPolicy::supported_extensions();
     let mut files = Vec::new();
     for entry in crate::walker::ProjectWalker::new(root)
         .extensions(&extensions)
@@ -505,7 +535,7 @@ pub(crate) fn enumerate_corpus_files(root: &Path) -> Vec<PathBuf> {
             continue;
         }
         let entry_path = entry.path();
-        if is_binary_or_hidden(entry_path) {
+        if !CorpusPolicy::accepts_file(entry_path) {
             continue;
         }
         files.push(entry_path.to_path_buf());
@@ -1391,6 +1421,19 @@ fn bar() {}
         assert_eq!(result.stats.files_skipped, 1);
         assert_eq!(result.stats.files_unsupported, 1);
         assert_eq!(result.stats.chunks_created, 0);
+    }
+
+    #[test]
+    fn corpus_policy_matches_supported_source_candidates() {
+        let tmp = TempDir::new().unwrap();
+        let source = tmp.path().join("main.cpp");
+        let data = tmp.path().join("events.csv");
+        fs::write(&source, "int main() { return 0; }\n").unwrap();
+        fs::write(&data, "id,value\n1,large\n").unwrap();
+
+        assert!(CorpusPolicy::accepts_file(&source));
+        assert!(!CorpusPolicy::accepts_file(&data));
+        assert!(CorpusPolicy::supported_extensions().contains(&"cpp"));
     }
 
     #[test]
