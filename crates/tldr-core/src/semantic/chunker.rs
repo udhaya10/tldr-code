@@ -172,6 +172,12 @@ impl CorpusPolicy {
             .filter_map(|extension| extension.strip_prefix('.'))
             .collect()
     }
+
+    /// Return whether an existing path survives the full corpus gate,
+    /// including ignore files and generated-directory pruning.
+    pub fn accepts_path(root: &Path, file: &Path) -> bool {
+        is_corpus_file_impl(root, file)
+    }
 }
 
 // =============================================================================
@@ -409,6 +415,10 @@ fn chunk_directory<P: AsRef<Path>>(path: P, options: &ChunkOptions) -> TldrResul
 /// plus the target file's siblings at the leaf level. The file is in the
 /// corpus iff the walker yields it AND it passes `is_binary_or_hidden`.
 pub fn is_corpus_file(root: &Path, file: &Path) -> bool {
+    CorpusPolicy::accepts_path(root, file)
+}
+
+fn is_corpus_file_impl(root: &Path, file: &Path) -> bool {
     use crate::walker::{dir_has_generated_sentinel, DEFAULT_EXCLUDE_DIRS};
     use ignore::WalkBuilder;
 
