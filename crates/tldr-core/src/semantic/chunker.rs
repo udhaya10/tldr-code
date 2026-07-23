@@ -84,6 +84,17 @@ pub struct ChunkResult {
     pub stats: ChunkStats,
 }
 
+impl ChunkResult {
+    fn from_parts(chunks: Vec<CodeChunk>, skipped: Vec<SkippedFile>) -> Self {
+        let stats = ChunkStats::from_parts(&chunks, &skipped);
+        Self {
+            chunks,
+            skipped,
+            stats,
+        }
+    }
+}
+
 /// Counts describing source eligibility and chunk creation.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ChunkStats {
