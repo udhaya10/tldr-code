@@ -379,17 +379,23 @@ fn test_ignore_spec_default() {
 }
 
 #[test]
-fn test_ignore_spec_from_file_stub() {
-    // TODO: This is currently a stub, returns default
-    let result = IgnoreSpec::from_file(std::path::Path::new("/nonexistent/.gitignore"));
-    assert!(result.is_ok());
+fn test_ignore_spec_from_file_loads_patterns() {
+    let dir = tempfile::tempdir().unwrap();
+    let ignore_path = dir.path().join(".tldrignore");
+    std::fs::write(&ignore_path, "generated/\n*.pyc\n# comment\n").unwrap();
+
+    let spec = IgnoreSpec::from_file(&ignore_path).unwrap();
+    assert_eq!(spec.patterns, vec!["generated/".to_string(), "*.pyc".to_string()]);
+    assert!(spec.is_ignored(&dir.path().join("generated/auto.py")));
+    assert!(spec.is_ignored(&dir.path().join("cache.pyc")));
+    assert!(!spec.is_ignored(&dir.path().join("src/main.py")));
 }
 
 #[test]
-fn test_ignore_spec_is_ignored_stub() {
-    // TODO: This is currently a stub, always returns false
+fn test_ignore_spec_matches_relative_patterns() {
     let spec = IgnoreSpec::new(vec!["*.pyc".to_string()]);
-    assert!(!spec.is_ignored(std::path::Path::new("test.pyc")));
+    assert!(spec.is_ignored(std::path::Path::new("test.pyc")));
+    assert!(!spec.is_ignored(std::path::Path::new("test.py")));
 }
 
 // =============================================================================
