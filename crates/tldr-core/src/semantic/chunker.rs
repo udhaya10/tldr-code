@@ -206,6 +206,24 @@ pub fn chunk_file<P: AsRef<Path>>(path: P, options: &ChunkOptions) -> TldrResult
         }
     }
 
+    if let crate::fs::oversize::SizeCheck::Oversize {
+        size_bytes,
+        max_bytes,
+        is_autogen,
+    } = crate::fs::oversize::check_size(path)
+    {
+        skipped.push(SkippedFile {
+            path: path.display().to_string(),
+            reason: crate::fs::oversize::format_oversize_warning(
+                path,
+                size_bytes,
+                max_bytes,
+                is_autogen,
+            ),
+        });
+        return Ok(ChunkResult { chunks, skipped });
+    }
+
     // Read file content
     let content = match std::fs::read_to_string(path) {
         Ok(c) => c,
@@ -1462,6 +1480,26 @@ fn bar() {}
             files,
             vec![tmp.path().join("main.cpp")],
             "only supported source files belong to the semantic corpus: {files:?}"
+        );
+    }
+
+    #[test]
+    fn chunk_file_skips_oversized_generated_source_before_reading() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("generated.d.ts");
+        fs::write(
+            &path,
+            vec![b'a'; crate::fs::oversize::MAX_AUTOGEN_FILE_SIZE_BYTES as usize + 1],
+        )
+        .unwrap();
+
+        let result = chunk_file(&path, &ChunkOptions::default()).unwrap();
+        assert!(result.chunks.is_empty());
+        assert_eq!(result.skipped.len(), 1);
+        assert!(
+            result.skipped[0].reason.contains("exceeds 512KB cap"),
+            "unexpected oversize reason: {}",
+            result.skipped[0].reason
         );
     }
 }
