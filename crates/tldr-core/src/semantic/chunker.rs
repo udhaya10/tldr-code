@@ -1532,6 +1532,19 @@ fn bar() {}
     }
 
     #[test]
+    fn corpus_policy_accepts_cpp_extractor_fixture() {
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/extractor/test_cpp.cpp");
+
+        assert!(fixture.is_file(), "missing C++ extractor fixture");
+        assert!(CorpusPolicy::accepts_file(&fixture));
+
+        let result = chunk_file(&fixture, &ChunkOptions::default()).unwrap();
+        assert!(!result.chunks.is_empty());
+        assert!(result.skipped.is_empty());
+    }
+
+    #[test]
     fn chunk_directory_skips_node_modules() {
         let tmp = TempDir::new().unwrap();
 
