@@ -96,12 +96,43 @@ impl ChunkResult {
 }
 
 /// Counts describing source eligibility and chunk creation.
+///
+/// Every counter is derived from the same chunking pass via
+/// [`ChunkStats::from_parts`], so consumers reading policy-aware counts do
+/// not need to recompute them from [`ChunkResult::chunks`] and
+/// [`ChunkResult::skipped`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ChunkStats {
+    /// Source files that produced at least one chunk.
+    ///
+    /// Deduped by [`CodeChunk::file_path`]; a file that yields N chunks
+    /// contributes 1 here.
     pub files_indexed: usize,
+
+    /// Total skipped files across every skip reason (autogen, oversized,
+    /// unsupported language, ignore matchers, etc.).
+    ///
+    /// [`Self::files_unsupported`] and [`Self::files_oversized`] are
+    /// subsets of this count.
     pub files_skipped: usize,
+
+    /// Skipped files rejected by [`CorpusPolicy`] for language reasons.
+    ///
+    /// Matches skip reasons containing `Unknown language` or
+    /// `Filtered out by language` — the corpus deemed the language
+    /// ineligible for embedding.
     pub files_unsupported: usize,
+
+    /// Skipped files rejected for exceeding the corpus size budget.
+    ///
+    /// Matches skip reasons containing `too large` or `exceeds` —
+    /// the file is unreadable or too large to chunk within budget.
     pub files_oversized: usize,
+
+    /// Total chunks emitted by the pass.
+    ///
+    /// May exceed [`Self::files_indexed`] when a single file yields
+    /// multiple chunks (multi-function files, oversized splits).
     pub chunks_created: usize,
 }
 
