@@ -595,6 +595,49 @@ pub(crate) fn enumerate_corpus_files(root: &Path) -> Vec<PathBuf> {
     files
 }
 
+/// Walk the corpus under `root` for a single [`Language`] and return
+/// policy-aware [`ChunkStats`] without producing chunks or reading file
+/// contents.
+///
+/// This is the count-only counterpart to [`chunk_code`]: it uses the same
+/// `ProjectWalker` honoring `.gitignore`/`.tldrignore` and filters by
+/// `language.extensions()`, but stops before parsing. Search-side code paths
+/// (e.g. enriched/regex) that previously re-ran `ProjectWalker` to derive
+/// `total_files_searched` should call this so the report's count agrees with
+/// the same corpus policy that `chunk_code` honors. The returned stats have
+/// `files_indexed` populated; everything else is zero because no file was
+/// opened or skipped in this pass.
+pub fn corpus_stats_for_language(root: &Path, language: Language) -> ChunkStats {
+    let walker_extensions: Vec<&'static str> = language
+        .extensions()
+        .iter()
+        .filter_map(|extension| extension.strip_prefix('.'))
+        .collect();
+    let mut files_indexed = 0usize;
+    for entry in crate::walker::ProjectWalker::new(root)
+        .extensions(&walker_extensions)
+        .iter()
+    {
+        let Some(file_type) = entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_file() {
+            continue;
+        }
+        files_indexed += 1;
+    }
+    ChunkStats {
+        files_indexed,
+        // No file was read or classified in this pass, so the per-file skip
+        // buckets stay at 0; `files_skipped` likewise. `chunks_created` is the
+        // honest nothing-emitted representation.
+        files_skipped: 0,
+        files_unsupported: 0,
+        files_oversized: 0,
+        chunks_created: 0,
+    }
+}
+
 /// Check if a file is binary or hidden
 fn is_binary_or_hidden(path: &Path) -> bool {
     // Check if hidden
@@ -1644,6 +1687,46 @@ fn bar() {}
             result.skipped[0].reason.contains("exceeds 512KB cap"),
             "unexpected oversize reason: {}",
             result.skipped[0].reason
+        );
+    }
+
+    #[test]
+    fn corpus_stats_for_language_counts_only_matching_extensions() {
+        let tmp = TempDir::new().unwrap();
+        fs::write(tmp.path().join("a.rs"), "fn a() {}\n").unwrap();
+        fs::write(tmp.path().join("b.rs"), "fn b() {}\n").unwrap();
+        fs::write(tmp.path().join("c.py"), "def c(): pass\n").unwrap();
+
+        let rust_stats = corpus_stats_for_language(tmp.path(), Language::Rust);
+        assert_eq!(rust_stats.files_indexed, 2, "two .rs files in corpus");
+        assert_eq!(rust_stats.chunks_created, 0);
+        assert_eq!(rust_stats.files_skipped, 0);
+
+        let py_stats = corpus_stats_for_language(tmp.path(), Language::Python);
+        assert_eq!(py_stats.files_indexed, 1, "exactly one .py file");
+    }
+
+    #[test]
+    fn corpus_stats_for_language_zero_when_no_matches() {
+        let tmp = TempDir::new().unwrap();
+        fs::write(tmp.path().join("only.py"), "def x(): pass\n").unwrap();
+
+        let stats = corpus_stats_for_language(tmp.path(), Language::Rust);
+        assert_eq!(stats.files_indexed, 0);
+        assert_eq!(stats.chunks_created, 0);
+    }
+
+    #[test]
+    fn corpus_stats_for_language_honors_gitignore() {
+        let tmp = TempDir::new().unwrap();
+        fs::write(tmp.path().join(".gitignore"), "ignored.rs\n").unwrap();
+        fs::write(tmp.path().join("kept.rs"), "fn k() {}\n").unwrap();
+        fs::write(tmp.path().join("ignored.rs"), "fn i() {}\n").unwrap();
+
+        let stats = corpus_stats_for_language(tmp.path(), Language::Rust);
+        assert_eq!(
+            stats.files_indexed, 1,
+            "gitignored file must not be counted for the language"
         );
     }
 }

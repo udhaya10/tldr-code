@@ -424,19 +424,14 @@ fn do_regex_search(
     // This undercounts (files with 0 matches are not counted), but avoids
     // a second directory walk. For the report, this is acceptable.
     let unique_files: HashSet<&PathBuf> = matches.iter().map(|m| &m.file).collect();
-    // Count the same ignore-aware source files used by project searches.
-    let walker_extensions: Vec<&'static str> = language
-        .extensions()
-        .iter()
-        .filter_map(|extension| extension.strip_prefix('.'))
-        .collect();
-    let total_files = crate::walker::ProjectWalker::new(root)
-        .extensions(&walker_extensions)
-        .iter()
-        .filter(|entry| entry.file_type().map(|kind| kind.is_file()).unwrap_or(false))
-        .count();
+    // Use the chunker's policy-aware corpus count for this language so the
+    // search-side counter agrees with what `chunk_code` would scan, instead
+    // of re-running `ProjectWalker` here. `corpus_stats_for_language` honors
+    // `.gitignore`/`.tldrignore` and the project's supported-extension set.
+    let corpus_files =
+        crate::semantic::chunker::corpus_stats_for_language(root, language).files_indexed;
     // Use at least the number of unique matched files (in case walk missed some)
-    let total = total_files.max(unique_files.len());
+    let total = corpus_files.max(unique_files.len());
     Ok((matches, total))
 }
 

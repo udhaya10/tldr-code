@@ -101,7 +101,8 @@ pub use embedder::Embedder;
 // Phase 4: Chunker
 pub mod chunker;
 pub use chunker::{
-    chunk_code, chunk_file, is_corpus_file, ChunkResult, CorpusPolicy, SkippedFile,
+    chunk_code, chunk_file, corpus_stats_for_language, is_corpus_file, ChunkResult, CorpusPolicy,
+    SkippedFile,
 };
 
 // Phase 5: Cache
