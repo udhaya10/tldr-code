@@ -153,9 +153,7 @@ impl DaemonNotifyArgs {
                             dirty_count: 0,
                             threshold: 20,
                             reindex_triggered: false,
-                            message: Some(
-                                "Daemon not running (notification ignored)".to_string(),
-                            ),
+                            message: Some("Daemon not running (notification ignored)".to_string()),
                         };
                         println!("{}", serde_json::to_string_pretty(&output)?);
                     }

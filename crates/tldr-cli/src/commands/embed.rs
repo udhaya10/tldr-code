@@ -183,7 +183,10 @@ mod tests {
                 .run(OutputFormat::Json, true)
                 .expect_err("embed must refuse when a covering daemon is live")
                 .to_string();
-            assert!(err.contains("daemon"), "message should name the daemon: {err}");
+            assert!(
+                err.contains("daemon"),
+                "message should name the daemon: {err}"
+            );
             assert!(
                 err.contains("tldr warm"),
                 "message should point to `tldr warm`: {err}"

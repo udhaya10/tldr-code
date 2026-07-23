@@ -54,7 +54,10 @@ pub const TLDRIGNORE_FILE: &str = ".tldrignore";
 /// (e.g. the `tldr-cli` daemon watcher) get the matching semantics without
 /// taking a direct dependency on the `ignore` crate.
 #[derive(Debug, Clone)]
-pub struct PathIgnoreMatcher(ignore::gitignore::Gitignore);
+pub struct PathIgnoreMatcher {
+    gitignore: Option<ignore::gitignore::Gitignore>,
+    tldrignore: Option<ignore::gitignore::Gitignore>,
+}
 
 impl PathIgnoreMatcher {
     /// Returns `true` when `path` is excluded by the loaded `.tldrignore` /
@@ -64,9 +67,15 @@ impl PathIgnoreMatcher {
     /// only the parent dir pattern can be consulted. `is_dir` should be
     /// `false` for a path that no longer exists.
     pub fn is_ignored(&self, path: &Path, is_dir: bool) -> bool {
-        self.0
-            .matched_path_or_any_parents(path, is_dir)
-            .is_ignore()
+        self.gitignore.as_ref().is_some_and(|matcher| {
+            matcher
+                .matched_path_or_any_parents(path, is_dir)
+                .is_ignore()
+        }) || self.tldrignore.as_ref().is_some_and(|matcher| {
+            matcher
+                .matched_path_or_any_parents(path, is_dir)
+                .is_ignore()
+        })
     }
 }
 
@@ -91,26 +100,50 @@ pub fn build_path_ignore_matcher(
 ) -> Option<PathIgnoreMatcher> {
     use ignore::gitignore::GitignoreBuilder;
 
-    let mut builder = GitignoreBuilder::new(root);
-    let mut added = false;
+    let mut gitignore = None;
+    let mut tldrignore = None;
 
-    let tldrignore = root.join(TLDRIGNORE_FILE);
-    // `GitignoreBuilder::add` returns `Some(err)` on failure, `None` on success.
-    if tldrignore.is_file() && builder.add(&tldrignore).is_none() {
-        added = true;
-    }
-
-    if include_gitignore {
-        let gitignore = root.join(".gitignore");
-        if gitignore.is_file() && builder.add(&gitignore).is_none() {
-            added = true;
+    let tldrignore_path = root.join(TLDRIGNORE_FILE);
+    if tldrignore_path.is_file() {
+        let mut builder = GitignoreBuilder::new(root);
+        let mut valid = true;
+        if let Ok(contents) = std::fs::read_to_string(&tldrignore_path) {
+            for line in contents.lines() {
+                let line = line.trim();
+                if line.is_empty() || line.starts_with('#') {
+                    continue;
+                }
+                let deny_pattern = line.strip_prefix('!').unwrap_or(line);
+                if builder.add_line(None, deny_pattern).is_err() {
+                    valid = false;
+                    break;
+                }
+            }
+        } else {
+            valid = false;
+        }
+        if valid {
+            tldrignore = builder.build().ok();
         }
     }
 
-    if !added {
+    if include_gitignore {
+        let gitignore_path = root.join(".gitignore");
+        if gitignore_path.is_file() {
+            let mut builder = GitignoreBuilder::new(root);
+            if builder.add(&gitignore_path).is_none() {
+                gitignore = builder.build().ok();
+            }
+        }
+    }
+
+    if gitignore.is_none() && tldrignore.is_none() {
         return None;
     }
-    builder.build().ok().map(PathIgnoreMatcher)
+    Some(PathIgnoreMatcher {
+        gitignore,
+        tldrignore,
+    })
 }
 
 /// Directories skipped by default regardless of `.gitignore` presence.
@@ -327,11 +360,21 @@ impl ProjectWalker {
             builder.max_depth(Some(depth));
         }
 
-        if default_ignore {
+        let tldr_deny_matcher = if self.respect_gitignore {
+            build_path_ignore_matcher(&self.root, true)
+        } else {
+            None
+        };
+        if default_ignore || tldr_deny_matcher.is_some() {
             builder.filter_entry(move |entry| {
+                let is_dir = entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
+                if let Some(matcher) = &tldr_deny_matcher {
+                    if matcher.is_ignored(entry.path(), is_dir) {
+                        return false;
+                    }
+                }
                 // Only filter directory entries by the exclude list; files
                 // named "node_modules" are fine to yield (edge case).
-                let is_dir = entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
                 if !is_dir {
                     return true;
                 }
@@ -438,6 +481,7 @@ pub(crate) fn root_is_js_ts_dominated(dir: &Path) -> bool {
         .git_exclude(true)
         .parents(true)
         .follow_links(false);
+    walker.add_custom_ignore_filename(TLDRIGNORE_FILE);
     for entry in walker.build().flatten() {
         if inspected >= CAP {
             break;
@@ -561,6 +605,39 @@ mod tests {
 
         let files = collect_rel_files(root, walk_project(root));
         assert_eq!(files, vec!["foo.rs".to_string()]);
+    }
+
+    #[test]
+    fn test_path_matcher_combines_gitignore_and_tldrignore_as_denylists() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path();
+        write_file(&root.join(".gitignore"), "git-only/\n");
+        write_file(&root.join(".tldrignore"), "tldr-only/\n");
+
+        let matcher = build_path_ignore_matcher(root, true).unwrap();
+        assert!(matcher.is_ignored(&root.join("git-only/file.cpp"), false));
+        assert!(matcher.is_ignored(&root.join("tldr-only/file.cpp"), false));
+        assert!(!matcher.is_ignored(&root.join("src/file.cpp"), false));
+    }
+
+    #[test]
+    fn test_tldrignore_negation_cannot_reinclude_a_denied_path() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path();
+        write_file(&root.join(".gitignore"), "git-only/\n");
+        write_file(
+            &root.join(".tldrignore"),
+            "tldr-only/\n!tldr-only/keep.cpp\n",
+        );
+
+        let matcher = build_path_ignore_matcher(root, true).unwrap();
+        assert!(matcher.is_ignored(&root.join("tldr-only/keep.cpp"), false));
+
+        let files = collect_rel_files(root, walk_project(root));
+        assert!(
+            !files.iter().any(|file| file == "tldr-only/keep.cpp"),
+            "tldrignore negation must not re-include a denied file: {files:?}"
+        );
     }
 
     #[test]

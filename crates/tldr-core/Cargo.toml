@@ -45,7 +45,7 @@ tree-sitter-ocaml = { workspace = true }
 # M12: Use ignore crate for gitignore pattern handling
 # M13: walkdir for symlink cycle detection
 walkdir = "2"
-ignore = "0.4"
+ignore = "=0.4.25"
 
 # Path normalization - M9: Platform path handling
 dunce = "1.0"

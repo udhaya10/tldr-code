@@ -35,10 +35,7 @@ pub fn render_plist(vars: &LaunchdVars) -> String {
         .replace("{{LABEL}}", &vars.label)
         .replace("{{TLDR_BIN}}", &vars.tldr_bin.to_string_lossy())
         .replace("{{PROJECT}}", &vars.project.to_string_lossy())
-        .replace(
-            "{{WORKING_DIRECTORY}}",
-            &vars.project.to_string_lossy(),
-        )
+        .replace("{{WORKING_DIRECTORY}}", &vars.project.to_string_lossy())
         .replace("{{STDOUT_LOG}}", &vars.stdout_log.to_string_lossy())
         .replace("{{STDERR_LOG}}", &vars.stderr_log.to_string_lossy())
         .replace("{{PATH_ENV}}", &vars.path_env)
@@ -107,7 +104,11 @@ pub fn install_launch_agent(vars: &LaunchdVars, logs: &ServiceLogs) -> Result<La
         .output();
 
     let status = Command::new("launchctl")
-        .args(["bootstrap", &format!("gui/{uid}"), plist_path.to_str().unwrap_or("")])
+        .args([
+            "bootstrap",
+            &format!("gui/{uid}"),
+            plist_path.to_str().unwrap_or(""),
+        ])
         .output()
         .context("failed to run launchctl bootstrap")?;
     if !status.status.success() {

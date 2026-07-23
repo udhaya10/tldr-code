@@ -15,7 +15,6 @@ use std::path::{Path, PathBuf};
 
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use walkdir::WalkDir;
 
 use crate::error::TldrError;
 use crate::fs::tree::DEFAULT_SKIP_DIRS;
@@ -87,11 +86,9 @@ pub fn search(
     let mut files_searched = 0;
 
     // Walk directory tree
-    for entry in WalkDir::new(&canonical_root)
-        .follow_links(false)
-        .into_iter()
-        .filter_entry(|e| should_include_entry(e, ignore_spec))
-        .filter_map(|e| e.ok())
+    for entry in crate::walker::ProjectWalker::new(&canonical_root)
+        .iter()
+        .filter(|e| should_include_entry(e, ignore_spec))
     {
         // Check limits
         if results.len() >= max_results || files_searched >= max_files {
@@ -101,7 +98,11 @@ pub fn search(
         let path = entry.path();
 
         // Skip directories
-        if entry.file_type().is_dir() {
+        if entry
+            .file_type()
+            .map(|file_type| file_type.is_dir())
+            .unwrap_or(false)
+        {
             continue;
         }
 
@@ -139,7 +140,7 @@ pub fn search(
 }
 
 /// Check if a directory entry should be included in search
-fn should_include_entry(entry: &walkdir::DirEntry, ignore_spec: Option<&IgnoreSpec>) -> bool {
+fn should_include_entry(entry: &ignore::DirEntry, ignore_spec: Option<&IgnoreSpec>) -> bool {
     // Always include the root directory (depth 0)
     if entry.depth() == 0 {
         return true;
@@ -153,7 +154,12 @@ fn should_include_entry(entry: &walkdir::DirEntry, ignore_spec: Option<&IgnoreSp
     }
 
     // Skip default directories
-    if entry.file_type().is_dir() && DEFAULT_SKIP_DIRS.contains(&name.as_ref()) {
+    if entry
+        .file_type()
+        .map(|file_type| file_type.is_dir())
+        .unwrap_or(false)
+        && DEFAULT_SKIP_DIRS.contains(&name.as_ref())
+    {
         return false;
     }
 

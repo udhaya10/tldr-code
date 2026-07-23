@@ -33,10 +33,7 @@ pub fn resolve_project_root(project: &Path) -> Result<PathBuf> {
         );
     }
     if !candidate.is_dir() {
-        bail!(
-            "project path is not a directory: {}",
-            candidate.display()
-        );
+        bail!("project path is not a directory: {}", candidate.display());
     }
     candidate.canonicalize().with_context(|| {
         format!(
@@ -65,11 +62,8 @@ pub fn ensure_project_files(project: &Path) -> Result<ProjectFilesReport> {
 
     let ignore_path = project.join(".tldrignore");
     let ignore_created = if !ignore_path.exists() {
-        fs::write(
-            &ignore_path,
-            "# tldr ignore patterns (gitignore syntax)\n",
-        )
-        .with_context(|| format!("failed to write {}", ignore_path.display()))?;
+        fs::write(&ignore_path, "# tldr ignore patterns (gitignore syntax)\n")
+            .with_context(|| format!("failed to write {}", ignore_path.display()))?;
         true
     } else {
         false

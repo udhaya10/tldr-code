@@ -276,7 +276,10 @@ fn test_get_file_tree_honors_tldrignore_file() {
     }
     collect(&tree, &mut names);
 
-    assert!(names.iter().any(|n| n == "main.py"), "main.py should remain");
+    assert!(
+        names.iter().any(|n| n == "main.py"),
+        "main.py should remain"
+    );
     assert!(
         !names.iter().any(|n| n == "vendored"),
         "vendored/ dir must be excluded by .tldrignore, got: {names:?}"

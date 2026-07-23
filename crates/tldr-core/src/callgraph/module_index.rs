@@ -214,6 +214,7 @@ impl ModuleIndex {
             .git_ignore(respect_ignore)
             .git_global(respect_ignore)
             .git_exclude(respect_ignore)
+            .add_custom_ignore_filename(crate::walker::TLDRIGNORE_FILE)
             .filter_entry(|entry| {
                 // Skip common non-source directories
                 let file_name = entry.file_name().to_string_lossy();

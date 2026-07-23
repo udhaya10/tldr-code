@@ -20,10 +20,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use walkdir::WalkDir;
 
 use super::tokenizer::Tokenizer;
-use crate::fs::tree::DEFAULT_SKIP_DIRS;
 use crate::types::Language;
 use crate::TldrResult;
 
@@ -263,54 +261,26 @@ impl Bm25Index {
     /// * `language` - Language to filter by (only index files of this language)
     pub fn from_project(root: &Path, language: Language) -> TldrResult<Self> {
         let mut index = Self::default();
-        let extensions: HashSet<&str> = language.extensions().iter().copied().collect();
+        let extensions: Vec<&'static str> = language
+            .scan_extensions()
+            .iter()
+            .copied()
+            .filter_map(|extension| extension.strip_prefix('.'))
+            .collect();
 
-        for entry in WalkDir::new(root)
-            .follow_links(false)
-            .into_iter()
-            .filter_entry(|e| {
-                // VAL-018: never reject the WalkDir root (depth 0). The
-                // user-supplied root may legitimately have a leading dot
-                // (e.g. `.tmpXXXXXX` from tempfile, or any path under a
-                // hidden parent). Filtering by depth 0 keeps the
-                // hidden-skip semantics for descendants while not
-                // silently producing 0 results when the project root
-                // itself starts with `.`.
-                if e.depth() == 0 {
-                    return true;
-                }
-                let name = e.file_name().to_string_lossy();
-                // Skip hidden and default skip directories below the root.
-                if name.starts_with('.') && name != "." {
-                    return false;
-                }
-                if e.file_type().is_dir() && DEFAULT_SKIP_DIRS.contains(&name.as_ref()) {
-                    return false;
-                }
-                true
-            })
-            .filter_map(|e| e.ok())
+        for entry in crate::walker::ProjectWalker::new(root)
+            .lang_hint(language)
+            .extensions(&extensions)
+            .iter()
         {
+            if !entry
+                .file_type()
+                .map(|kind| kind.is_file())
+                .unwrap_or(false)
+            {
+                continue;
+            }
             let path = entry.path();
-
-            // Skip directories
-            if entry.file_type().is_dir() {
-                continue;
-            }
-
-            // Check extension
-            let ext = path
-                .extension()
-                .and_then(|e| e.to_str())
-                .map(|e| format!(".{}", e));
-
-            if let Some(ext) = &ext {
-                if !extensions.contains(ext.as_str()) {
-                    continue;
-                }
-            } else {
-                continue;
-            }
 
             // Read and index file
             if let Ok(content) = fs::read_to_string(path) {
@@ -463,6 +433,30 @@ mod tests {
 
         let results = index.search("", 10);
         assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_bm25_from_project_respects_tldrignore_and_source_extensions() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join(".tldrignore"), "generated/\n").unwrap();
+        std::fs::write(tmp.path().join("src.cpp"), "int source_value = 1;\n").unwrap();
+        std::fs::create_dir_all(tmp.path().join("generated")).unwrap();
+        std::fs::write(
+            tmp.path().join("generated/ignored.cpp"),
+            "int generated_value = 1;\n",
+        )
+        .unwrap();
+        std::fs::write(tmp.path().join("events.csv"), "generated_value\n").unwrap();
+        std::fs::write(tmp.path().join("server.log"), "generated_value\n").unwrap();
+
+        let index = Bm25Index::from_project(tmp.path(), Language::Cpp).unwrap();
+        let paths: Vec<_> = index
+            .documents
+            .iter()
+            .map(|document| document.id.as_str())
+            .collect();
+
+        assert_eq!(paths, vec!["src.cpp"]);
     }
 
     #[test]

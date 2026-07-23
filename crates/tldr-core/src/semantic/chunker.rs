@@ -417,16 +417,25 @@ pub fn is_corpus_file(root: &Path, file: &Path) -> bool {
 
 /// Enumerate the candidate source files under `root` — the **pre-parse** corpus
 /// the chunker feeds to `chunk_file()`: `ProjectWalker` (honours `.gitignore`,
-/// `DEFAULT_EXCLUDE_DIRS`, generated-dir sentinels) → regular files → not
-/// binary/hidden. This is the SINGLE source of truth for "which files are in the
-/// corpus", shared by `chunk_directory` and the store freshness gate (TLDR-kkt),
-/// so the two can never drift. Membership is decided BEFORE parsing, so a
-/// supported file that yields ZERO chunks (e.g. a `mod.rs` of only `pub mod`
+/// `.tldrignore`, `DEFAULT_EXCLUDE_DIRS`, generated-dir sentinels, and the
+/// supported-language extension set) → regular files → not binary/hidden.
+/// This is the SINGLE source of truth for "which files are in the corpus",
+/// shared by `chunk_directory` and the store freshness gate (TLDR-kkt), so the
+/// two can never drift. Membership is decided BEFORE parsing, so a supported
+/// file that yields ZERO chunks (e.g. a `mod.rs` of only `pub mod`
 /// declarations) still counts here — which is exactly what keeps the freshness
 /// digest from spuriously flagging such files as additions.
 pub(crate) fn enumerate_corpus_files(root: &Path) -> Vec<PathBuf> {
+    let extensions: Vec<&'static str> = crate::Language::all()
+        .iter()
+        .flat_map(|language| language.scan_extensions().iter().copied())
+        .filter_map(|extension| extension.strip_prefix('.'))
+        .collect();
     let mut files = Vec::new();
-    for entry in crate::walker::ProjectWalker::new(root).iter() {
+    for entry in crate::walker::ProjectWalker::new(root)
+        .extensions(&extensions)
+        .iter()
+    {
         let Some(file_type) = entry.file_type() else {
             continue;
         };
@@ -1438,6 +1447,21 @@ fn bar() {}
         assert!(
             !files.iter().any(|p| p.ends_with("dep.py")),
             "tldrignored file must not be enumerated: {files:?}"
+        );
+    }
+
+    #[test]
+    fn enumerate_corpus_files_excludes_unsupported_extensions() {
+        let tmp = TempDir::new().unwrap();
+        fs::write(tmp.path().join("main.cpp"), "int main() { return 0; }\n").unwrap();
+        fs::write(tmp.path().join("events.csv"), "id,value\n1,large\n").unwrap();
+        fs::write(tmp.path().join("server.log"), "request completed\n").unwrap();
+
+        let files = enumerate_corpus_files(tmp.path());
+        assert_eq!(
+            files,
+            vec![tmp.path().join("main.cpp")],
+            "only supported source files belong to the semantic corpus: {files:?}"
         );
     }
 }

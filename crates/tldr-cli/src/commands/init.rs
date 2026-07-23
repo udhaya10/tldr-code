@@ -10,10 +10,10 @@ use anyhow::{Context, Result};
 use clap::Args;
 use serde::Serialize;
 
+use crate::commands::daemon::ipc::check_socket_alive;
 use crate::commands::daemon::start::DaemonStartArgs;
 use crate::commands::daemon::stop::DaemonStopArgs;
 use crate::commands::daemon::warm::WarmArgs;
-use crate::commands::daemon::ipc::check_socket_alive;
 use crate::lifecycle::launchd::{
     default_path_env, install_launch_agent, remove_launch_agent, resolve_tldr_bin, LaunchdVars,
 };

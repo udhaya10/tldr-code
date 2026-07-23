@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
-use walkdir::WalkDir;
+use ignore::WalkBuilder;
 
 use super::types::{BuildConfig, BuildError};
 use crate::types::Language;
@@ -307,13 +307,6 @@ pub fn scan_project_files(
     // Get language extensions
     let extensions = get_language_extensions(language)?;
 
-    // Load .tldrignore patterns if respect_ignore is enabled
-    let gitignore = if config.respect_ignore {
-        load_tldrignore(root)
-    } else {
-        None
-    };
-
     // Track visited canonical paths for symlink cycle detection
     let mut visited_dirs: HashSet<PathBuf> = HashSet::new();
     visited_dirs.insert(canonical_root.clone());
@@ -329,37 +322,34 @@ pub fn scan_project_files(
     for scan_root in scan_roots {
         // Walk the directory tree
         let lang_for_filter = language.to_string();
-        let walker = WalkDir::new(&scan_root)
-            .follow_links(true) // Follow symlinks, but detect cycles
-            .into_iter()
+        let mut walker = WalkBuilder::new(&scan_root);
+        walker
+            .hidden(true)
+            .git_ignore(config.respect_ignore)
+            .git_global(config.respect_ignore)
+            .git_exclude(config.respect_ignore)
+            .parents(config.respect_ignore)
+            .follow_links(true)
             .filter_entry(move |entry| {
-                // Skip hidden files/dirs and known ignored directories
+                let is_dir = entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
                 let file_name = entry.file_name().to_string_lossy();
 
-                // Skip hidden files/directories (except root)
                 if entry.depth() > 0 && file_name.starts_with('.') {
                     return false;
                 }
-
-                // Skip known ignored directories
-                if entry.file_type().is_dir() && should_skip_directory(&file_name) {
+                if is_dir && should_skip_directory(&file_name) {
                     return false;
                 }
-
-                // language-specific-bugs-v1 (P14.AGG14-7): per-language
-                // exclusion of `build`/`dist`/`out`/`bin`/`obj`. JS/TS
-                // projects keep authored source under these names and
-                // would otherwise have it silently excluded.
-                if entry.file_type().is_dir()
-                    && should_skip_build_or_dist_for_lang(&file_name, &lang_for_filter)
-                {
+                if is_dir && should_skip_build_or_dist_for_lang(&file_name, &lang_for_filter) {
                     return false;
                 }
-
                 true
             });
+        if config.respect_ignore {
+            walker.add_custom_ignore_filename(crate::walker::TLDRIGNORE_FILE);
+        }
 
-        for entry_result in walker {
+        for entry_result in walker.build() {
             let entry = match entry_result {
                 Ok(e) => e,
                 Err(err) => {
@@ -372,7 +362,7 @@ pub fn scan_project_files(
             };
 
             // Handle symlink cycle detection for directories
-            if entry.file_type().is_dir() {
+            if entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
                 if let Ok(canonical) = entry.path().canonicalize() {
                     if !visited_dirs.insert(canonical.clone()) {
                         // Already visited this directory - symlink cycle detected
@@ -389,7 +379,7 @@ pub fn scan_project_files(
             }
 
             // Only process regular files
-            if !entry.file_type().is_file() {
+            if !entry.file_type().map(|ft| ft.is_file()).unwrap_or(false) {
                 continue;
             }
 
@@ -398,14 +388,6 @@ pub fn scan_project_files(
             // Check file extension matches language
             if !has_matching_extension(path, &extensions) {
                 continue;
-            }
-
-            // Check .tldrignore patterns
-            if let Some(ref gi) = gitignore {
-                let relative_path = path.strip_prefix(root).unwrap_or(path);
-                if gi.matched(relative_path, false).is_ignore() {
-                    continue;
-                }
             }
 
             if !seen_files.insert(path.to_path_buf()) {
