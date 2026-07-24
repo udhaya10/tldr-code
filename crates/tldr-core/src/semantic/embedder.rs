@@ -43,6 +43,12 @@ use crate::semantic::similarity::normalize;
 use crate::semantic::types::EmbeddingModel;
 use crate::TldrResult;
 
+/// Fixed batch size for [`Embedder::embed_batch`] (TLDR-3rh).
+///
+/// Deliberately small and unconditional — see the comment in `embed_batch`
+/// for why this must not vary with `show_progress` or corpus size.
+const EMBED_BATCH_SIZE: usize = 32;
+
 /// Options for embedding operations
 ///
 /// Controls embedding behavior such as progress display and query prefixes.
@@ -281,7 +287,8 @@ impl Embedder {
     /// # Arguments
     ///
     /// * `texts` - Texts to embed
-    /// * `show_progress` - Whether to show progress (uses batch_size for chunking)
+    /// * `show_progress` - Reserved for future progress-UI wiring. No longer
+    ///   affects batch size (TLDR-3rh) — see [`EMBED_BATCH_SIZE`].
     ///
     /// # Returns
     ///
@@ -290,7 +297,7 @@ impl Embedder {
     /// # Performance
     ///
     /// * Batching reduces overhead for multiple texts
-    /// * Default batch size: 32
+    /// * Fixed batch size: [`EMBED_BATCH_SIZE`] (32), regardless of `show_progress`
     ///
     /// # Example
     ///
@@ -309,13 +316,22 @@ impl Embedder {
             return Ok(Vec::new());
         }
 
-        // Batch size for fastembed's internal chunking. Restored to match main
-        // (Some(32) under progress): with fastembed's BatchLongest padding, code
-        // chunks are bimodal (many short funcs + a few ~512-token ones), so a
-        // large batch (256) pads ALL members to ~512 -> 8x memory + wasted compute
-        // and a major slowdown on real corpora. Smaller batches keep short-func
-        // batches short. (My earlier "always None=256" change was the regression.)
-        let batch_size = if show_progress { Some(32) } else { None };
+        // TLDR-3rh: batch size must NOT depend on show_progress. It used to
+        // (Some(32) when true, None -> fastembed's internal default of 256
+        // when false), which silently routed every caller that doesn't
+        // display progress — most importantly the daemon's own background
+        // index build (tldr-cli/src/commands/daemon/index_manager.rs, which
+        // always passes show_progress: false) — into the 256 branch. With
+        // fastembed's BatchLongest padding, code chunks are bimodal (many
+        // short funcs + a few ~512-token ones), so a large batch pads ALL
+        // members up to the batch's longest sequence -> ~8x memory and a
+        // major slowdown. Measured impact: the daemon's cold semantic build
+        // on this repo (1590 files) plateaued at ~13GB RSS and never
+        // completed in a 3-minute window before this fix. `show_progress` is
+        // kept as a parameter for API/signature stability and possible
+        // future progress-UI use; it no longer selects batch size.
+        let _ = show_progress;
+        let batch_size = Some(EMBED_BATCH_SIZE);
 
         let results = self
             .model
@@ -323,6 +339,41 @@ impl Embedder {
             .map_err(|e| TldrError::Embedding(format!("Failed to embed batch: {}", e)))?;
 
         // Normalize all embeddings
+        let normalized: Vec<Vec<f32>> = results
+            .into_iter()
+            .map(|mut v| {
+                normalize(&mut v);
+                v
+            })
+            .collect();
+
+        Ok(normalized)
+    }
+
+    /// Embed multiple texts using an explicit batch size (diagnostic use).
+    ///
+    /// [`Self::embed_batch`] always uses the fixed, memory-safe
+    /// [`EMBED_BATCH_SIZE`] and should be preferred by all production
+    /// callers. This method exists so benchmarks/tools (e.g.
+    /// `examples/embed_bench.rs`) can still probe other batch sizes —
+    /// including reproducing the pre-TLDR-3rh 256-batch behavior — without
+    /// weakening the production path's guarantee. `batch_size = None`
+    /// defers to fastembed's own internal default (256 as of fastembed
+    /// 5.8.1).
+    pub fn embed_batch_with_size(
+        &mut self,
+        texts: Vec<&str>,
+        batch_size: Option<usize>,
+    ) -> TldrResult<Vec<Vec<f32>>> {
+        if texts.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let results = self
+            .model
+            .embed(texts, batch_size)
+            .map_err(|e| TldrError::Embedding(format!("Failed to embed batch: {}", e)))?;
+
         let normalized: Vec<Vec<f32>> = results
             .into_iter()
             .map(|mut v| {
