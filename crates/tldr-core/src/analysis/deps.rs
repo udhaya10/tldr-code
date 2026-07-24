@@ -35,7 +35,7 @@ use std::path::{Path, PathBuf};
 
 use crate::ast::imports::get_imports;
 use crate::fs::tree::{collect_files, get_file_tree};
-use crate::types::{IgnoreSpec, ImportInfo, Language};
+use crate::types::{ImportInfo, Language};
 use crate::TldrResult;
 use std::str::FromStr as _;
 
@@ -442,7 +442,7 @@ pub fn analyze_dependencies(path: &Path, options: &DepsOptions) -> TldrResult<De
         .collect();
 
     // Get file tree and collect files
-    let tree = get_file_tree(&root, Some(&extensions), true, Some(&IgnoreSpec::default()))?;
+    let tree = get_file_tree(&root, Some(&extensions), true)?;
     let candidate_files = collect_files(&tree, &root);
 
     // M-Z11 (deps-and-surface-graceful-degrade-v1): apply the central

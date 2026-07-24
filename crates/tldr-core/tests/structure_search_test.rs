@@ -43,7 +43,7 @@ class SearchEngine:
     .unwrap();
 
     // Build structure cache
-    let structure = get_code_structure(&src, Language::Python, 0, None).unwrap();
+    let structure = get_code_structure(&src, Language::Python, 0).unwrap();
     let cache_path = dir.path().join("structure.json");
     write_structure_cache(&structure, &cache_path).unwrap();
     let lookup = read_structure_cache(&cache_path).unwrap();
@@ -91,7 +91,7 @@ def divide(a, b):
     )
     .unwrap();
 
-    let structure = get_code_structure(&src, Language::Python, 0, None).unwrap();
+    let structure = get_code_structure(&src, Language::Python, 0).unwrap();
     let cache_path = dir.path().join("structure.json");
     write_structure_cache(&structure, &cache_path).unwrap();
     let lookup = read_structure_cache(&cache_path).unwrap();
@@ -153,7 +153,7 @@ def handle_error(err):
     )
     .unwrap();
 
-    let structure = get_code_structure(&src, Language::Python, 0, None).unwrap();
+    let structure = get_code_structure(&src, Language::Python, 0).unwrap();
     let cache_path = dir.path().join("structure.json");
     write_structure_cache(&structure, &cache_path).unwrap();
     let lookup = read_structure_cache(&cache_path).unwrap();
@@ -187,7 +187,7 @@ fn test_enriched_search_with_structure_cache_falls_back_on_miss() {
     std::fs::write(src.join("b.py"), "def beta():\n    return 2\n").unwrap();
 
     // Build full structure cache, then remove b.py from the lookup
-    let structure = get_code_structure(&src, Language::Python, 0, None).unwrap();
+    let structure = get_code_structure(&src, Language::Python, 0).unwrap();
     let cache_path = dir.path().join("structure.json");
     write_structure_cache(&structure, &cache_path).unwrap();
     let mut lookup = read_structure_cache(&cache_path).unwrap();
@@ -223,7 +223,7 @@ fn test_enriched_search_with_structure_cache_search_mode_string() {
     std::fs::create_dir_all(&src).unwrap();
     std::fs::write(src.join("x.py"), "def foo():\n    return 42\n").unwrap();
 
-    let structure = get_code_structure(&src, Language::Python, 0, None).unwrap();
+    let structure = get_code_structure(&src, Language::Python, 0).unwrap();
     let cache_path = dir.path().join("structure.json");
     write_structure_cache(&structure, &cache_path).unwrap();
     let lookup = read_structure_cache(&cache_path).unwrap();

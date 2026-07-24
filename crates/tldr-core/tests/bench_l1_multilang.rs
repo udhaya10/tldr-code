@@ -35,7 +35,7 @@ mod tree_tests {
         let dir = extractor_fixtures_dir();
 
         // WHEN: We get the file tree
-        let tree = get_file_tree(&dir, None, true, None);
+        let tree = get_file_tree(&dir, None, true);
 
         // THEN: It should succeed and contain files
         assert!(tree.is_ok(), "tree failed: {:?}", tree.err());
@@ -53,7 +53,7 @@ mod tree_tests {
         let extensions: HashSet<String> = [".py".to_string()].into_iter().collect();
 
         // WHEN: We filter by .py
-        let tree = get_file_tree(&dir, Some(&extensions), true, None);
+        let tree = get_file_tree(&dir, Some(&extensions), true);
 
         // THEN: Only .py files should appear
         let tree = tree.unwrap();
@@ -86,7 +86,7 @@ mod tree_tests {
         let extensions: HashSet<String> = [".rs".to_string()].into_iter().collect();
 
         // WHEN: We filter by .rs
-        let tree = get_file_tree(&dir, Some(&extensions), true, None);
+        let tree = get_file_tree(&dir, Some(&extensions), true);
 
         // THEN: Only .rs files should appear
         let tree = tree.unwrap();
@@ -104,7 +104,7 @@ mod tree_tests {
         let dir = extractor_fixtures_dir();
 
         // WHEN: We get the file tree
-        let tree = get_file_tree(&dir, None, true, None).unwrap();
+        let tree = get_file_tree(&dir, None, true).unwrap();
 
         // THEN: It should contain all expected fixture files
         let file_names: Vec<String> = tree.children.iter().map(|c| c.name.clone()).collect();
@@ -148,7 +148,7 @@ mod structure_tests {
     /// Helper: run get_code_structure on a single fixture file and return the FileStructure
     fn structure_for(filename: &str, lang: Language) -> tldr_core::FileStructure {
         let file = extractor_fixtures_dir().join(filename);
-        let result = get_code_structure(&file, lang, 0, None);
+        let result = get_code_structure(&file, lang, 0);
         assert!(
             result.is_ok(),
             "get_code_structure failed for {}: {:?}",
@@ -1910,7 +1910,7 @@ mod importers_tests {
         //
         // For the C# fixture that has "using System;", structure should include it.
         let file = extractor_fixtures_dir().join("test_csharp.cs");
-        let result = get_code_structure(&file, Language::CSharp, 0, None);
+        let result = get_code_structure(&file, Language::CSharp, 0);
         assert!(result.is_ok());
         let cs = result.unwrap();
         let file_struct = &cs.files[0];
@@ -1937,7 +1937,7 @@ mod importers_tests {
     fn test_importers_c_includes() {
         // C file structure should include #include imports
         let file = extractor_fixtures_dir().join("test_c.c");
-        let result = get_code_structure(&file, Language::C, 0, None);
+        let result = get_code_structure(&file, Language::C, 0);
         assert!(result.is_ok());
         let cs = result.unwrap();
         let file_struct = &cs.files[0];

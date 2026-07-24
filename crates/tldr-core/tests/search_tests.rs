@@ -11,7 +11,7 @@ use tldr_core::search::bm25::Bm25Index;
 use tldr_core::search::hybrid::hybrid_search;
 use tldr_core::search::text::search;
 use tldr_core::search::tokenizer::Tokenizer;
-use tldr_core::{IgnoreSpec, Language};
+use tldr_core::Language;
 
 fn fixtures_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
@@ -30,7 +30,7 @@ mod regex_search_tests {
         let project = fixtures_dir().join("simple-project");
 
         // WHEN: We search for the pattern
-        let results = search("def main", &project, None, 0, 100, 100, None);
+        let results = search("def main", &project, None, 0, 100, 100);
 
         // THEN: Matches should be found
         assert!(results.is_ok());
@@ -44,7 +44,7 @@ mod regex_search_tests {
         let project = fixtures_dir().join("simple-project");
 
         // WHEN: We search with regex pattern for function definitions
-        let results = search(r"def\s+\w+", &project, None, 0, 100, 100, None);
+        let results = search(r"def\s+\w+", &project, None, 0, 100, 100);
 
         // THEN: Function definitions should match
         assert!(results.is_ok());
@@ -60,7 +60,7 @@ mod regex_search_tests {
         let extensions: HashSet<String> = [".py".to_string()].into_iter().collect();
 
         // WHEN: We search with extension filter
-        let results = search("def", &project, Some(&extensions), 0, 100, 100, None);
+        let results = search("def", &project, Some(&extensions), 0, 100, 100);
 
         // THEN: Only .py files should be searched
         let results = results.unwrap();
@@ -75,7 +75,7 @@ mod regex_search_tests {
         let project = fixtures_dir().join("simple-project");
 
         // WHEN: We search with context_lines > 0
-        let results = search("def main", &project, None, 2, 100, 100, None);
+        let results = search("def main", &project, None, 2, 100, 100);
 
         // THEN: Context should be included
         let results = results.unwrap();
@@ -92,7 +92,7 @@ mod regex_search_tests {
         let project = fixtures_dir().join("simple-project");
 
         // WHEN: We search with max_results=1
-        let results = search("def", &project, None, 0, 1, 100, None);
+        let results = search("def", &project, None, 0, 1, 100);
 
         // THEN: At most 1 result should be returned
         let results = results.unwrap();
@@ -105,7 +105,7 @@ mod regex_search_tests {
         let project = fixtures_dir().join("simple-project");
 
         // WHEN: We search with max_files=1
-        let results = search("def", &project, None, 0, 100, 1, None);
+        let results = search("def", &project, None, 0, 100, 1);
 
         // THEN: Results should come from at most 1 file
         let results = results.unwrap();
@@ -119,7 +119,7 @@ mod regex_search_tests {
         let project = fixtures_dir();
 
         // WHEN: We search
-        let results = search("pattern", &project, None, 0, 100, 100, None);
+        let results = search("pattern", &project, None, 0, 100, 100);
 
         // THEN: Default skip directories should be excluded
         // This test passes if no error - the directories are skipped internally
@@ -127,16 +127,25 @@ mod regex_search_tests {
     }
 
     #[test]
-    fn search_respects_ignore_spec() {
-        // GIVEN: A project with ignore patterns
-        let project = fixtures_dir().join("simple-project");
-        let ignore = IgnoreSpec::new(vec!["test_*.py".to_string()]);
+    fn search_respects_tldrignore() {
+        // GIVEN: A temp project whose `.tldrignore` excludes test_*.py (the
+        // canonical exclusion path, replacing the retired caller-supplied
+        // IgnoreSpec — TLDR-boa.4). Tempdir avoids polluting the shared fixture.
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(project.path().join("main.py"), "def main():\n    pass\n").unwrap();
+        std::fs::write(project.path().join("test_extra.py"), "def test_extra():\n    pass\n")
+            .unwrap();
+        std::fs::write(project.path().join(".tldrignore"), "test_*.py\n").unwrap();
 
-        // WHEN: We search with ignore spec
-        let results = search("def", &project, None, 0, 100, 100, Some(&ignore));
+        // WHEN: We search (canonical walker honors `.tldrignore`)
+        let results = search("def", project.path(), None, 0, 100, 100).unwrap();
 
-        // THEN: Search completes (ignore spec applied internally)
-        assert!(results.is_ok());
+        // THEN: The ignored file is excluded from results
+        assert!(
+            !results.iter().any(|m| m.file.ends_with("test_extra.py")),
+            "test_extra.py must be excluded by .tldrignore, got: {:?}",
+            results.iter().map(|m| m.file.clone()).collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -145,7 +154,7 @@ mod regex_search_tests {
         let project = fixtures_dir().join("simple-project");
 
         // WHEN: We search
-        let results = search("def main", &project, None, 0, 100, 100, None);
+        let results = search("def main", &project, None, 0, 100, 100);
 
         // THEN: Line numbers should be accurate (>= 1)
         let results = results.unwrap();
@@ -168,7 +177,6 @@ mod regex_search_tests {
             0,
             100,
             100,
-            None,
         );
 
         // THEN: Empty results, no error
@@ -182,7 +190,7 @@ mod regex_search_tests {
         let project = fixtures_dir().join("simple-project");
 
         // WHEN: We search with invalid regex
-        let results = search("[invalid(", &project, None, 0, 100, 100, None);
+        let results = search("[invalid(", &project, None, 0, 100, 100);
 
         // THEN: Should return an error
         assert!(results.is_err());

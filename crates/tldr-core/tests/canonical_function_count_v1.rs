@@ -15,10 +15,9 @@ use tldr_core::ast::count_functions_canonical;
 use tldr_core::quality::complexity::analyze_complexity;
 use tldr_core::quality::dead_code::analyze_dead_code;
 use tldr_core::types::Language;
-use tldr_core::IgnoreSpec;
 
 fn structure_func_method_sum(path: &Path, lang: Language) -> u32 {
-    let s = tldr_core::get_code_structure(path, lang, 0, Some(&IgnoreSpec::default())).unwrap();
+    let s = tldr_core::get_code_structure(path, lang, 0).unwrap();
     let mut total: u32 = 0;
     for f in &s.files {
         total = total.saturating_add(f.functions.len() as u32);

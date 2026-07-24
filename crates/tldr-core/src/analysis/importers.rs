@@ -13,7 +13,7 @@ use std::path::Path;
 
 use crate::ast::imports::get_imports;
 use crate::fs::tree::{collect_files, get_file_tree};
-use crate::types::{IgnoreSpec, ImporterInfo, ImportersReport, Language};
+use crate::types::{ImporterInfo, ImportersReport, Language};
 use crate::TldrResult;
 
 /// Find all files that import a given module.
@@ -36,7 +36,7 @@ pub fn find_importers(
         .map(|s| s.to_string())
         .collect();
 
-    let tree = get_file_tree(root, Some(&extensions), true, Some(&IgnoreSpec::default()))?;
+    let tree = get_file_tree(root, Some(&extensions), true)?;
     let files = collect_files(&tree, root);
 
     let mut importers = Vec::new();

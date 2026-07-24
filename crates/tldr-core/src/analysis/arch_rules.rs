@@ -30,7 +30,7 @@ use std::path::{Path, PathBuf};
 use crate::ast::imports::get_imports;
 use crate::fs::tree::{collect_files, get_file_tree};
 use crate::types::{
-    ArchRule, ArchRuleType, ArchRulesFile, ArchitectureReport, IgnoreSpec, ImportInfo, Language,
+    ArchRule, ArchRuleType, ArchRulesFile, ArchitectureReport, ImportInfo, Language,
     LayerDefinition, LayerDefinitions, LayerType, RulesGenerationContext, Violation, ViolationInfo,
     ViolationReport,
 };
@@ -115,7 +115,7 @@ pub fn build_import_graph(root: &Path, language: Language) -> TldrResult<ImportG
         .map(|s| s.to_string())
         .collect();
 
-    let tree = get_file_tree(root, Some(&extensions), true, Some(&IgnoreSpec::default()))?;
+    let tree = get_file_tree(root, Some(&extensions), true)?;
     let files = collect_files(&tree, root);
 
     let mut graph = ImportGraph::new();

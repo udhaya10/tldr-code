@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use tldr_core::analysis::{detect_clones, ClonesOptions, NormalizationMode};
 use tldr_core::{
     build_project_call_graph, dead_code_analysis, get_cfg_context, get_code_structure,
-    get_dfg_context, get_file_tree, impact_analysis, FunctionRef, IgnoreSpec, Language,
+    get_dfg_context, get_file_tree, impact_analysis, FunctionRef, Language,
 };
 
 /// Get the workspace root directory.
@@ -58,7 +58,7 @@ fn bench_tree(c: &mut Criterion) {
             BenchmarkId::new("get_file_tree", name),
             &full_path,
             |b, path| {
-                b.iter(|| get_file_tree(black_box(path), None, true, Some(&IgnoreSpec::default())))
+                b.iter(|| get_file_tree(black_box(path), None, true))
             },
         );
     }
@@ -94,14 +94,7 @@ fn bench_structure(c: &mut Criterion) {
             BenchmarkId::new("get_code_structure", name),
             &(full_path.clone(), lang),
             |b, (path, lang)| {
-                b.iter(|| {
-                    get_code_structure(
-                        black_box(path),
-                        *lang,
-                        0, // no max_results limit
-                        Some(&IgnoreSpec::default()),
-                    )
-                })
+                b.iter(|| get_code_structure(black_box(path), *lang, 0))
             },
         );
     }

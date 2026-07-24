@@ -194,7 +194,7 @@ fn regex_opts(pattern: &str, top_k: usize) -> EnrichedSearchOptions {
 fn build_structure_lookup(root: &std::path::Path) -> StructureLookup {
     let dir = tempfile::TempDir::new().unwrap();
     let cache_path = dir.path().join("structure_cache.json");
-    let structure = get_code_structure(root, Language::Python, 0, None).unwrap();
+    let structure = get_code_structure(root, Language::Python, 0).unwrap();
     write_structure_cache(&structure, &cache_path).unwrap();
     read_structure_cache(&cache_path).unwrap()
 }

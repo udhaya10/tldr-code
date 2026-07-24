@@ -9,7 +9,7 @@ use anyhow::Result;
 use clap::Args;
 
 use tldr_core::types::CodeStructure;
-use tldr_core::{get_code_structure, IgnoreSpec, Language};
+use tldr_core::{get_code_structure, Language};
 
 use crate::commands::daemon_router::{is_oneshot, route_for_path};
 use crate::output::{format_structure_text, OutputFormat, OutputWriter};
@@ -55,10 +55,9 @@ impl StructureArgs {
             self.compute_local(language, &writer)?
         } else {
             // Full flag envelope on the wire: language (resolved) + max_results
-            // so the daemon computes EXACTLY what compute_local computes,
-            // including the default IgnoreSpec (previously the daemon path
-            // dropped both the ignore spec and --max-results — a latent parity
-            // break this conversion fixes).
+            // so the daemon computes EXACTLY what compute_local computes
+            // (previously the daemon path dropped --max-results — a latent
+            // parity break this conversion fixes).
             let params = serde_json::json!({
                 "path": self.path,
                 "language": language.as_str(),
@@ -87,11 +86,6 @@ impl StructureArgs {
             language
         ));
 
-        Ok(get_code_structure(
-            &self.path,
-            language,
-            self.max_results,
-            Some(&IgnoreSpec::default()),
-        )?)
+        Ok(get_code_structure(&self.path, language, self.max_results)?)
     }
 }

@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::callgraph::build_project_call_graph;
 use crate::fs::tree::{collect_files, get_file_tree};
-use crate::types::{FunctionRef, IgnoreSpec, Language, ProjectCallGraph};
+use crate::types::{FunctionRef, Language, ProjectCallGraph};
 use crate::TldrResult;
 
 /// Resolved path to the `git` binary, cached for the lifetime of the process.
@@ -957,12 +957,7 @@ fn get_all_project_files(project: &Path, language: Language) -> TldrResult<Vec<P
         .map(|s| s.to_string())
         .collect();
 
-    let tree = get_file_tree(
-        project,
-        Some(&extensions),
-        true,
-        Some(&IgnoreSpec::default()),
-    )?;
+    let tree = get_file_tree(project, Some(&extensions), true)?;
     Ok(collect_files(&tree, project))
 }
 

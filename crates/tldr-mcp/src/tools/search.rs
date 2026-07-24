@@ -52,7 +52,6 @@ pub fn handle_search(args: Value) -> ToolsCallResult {
         context_lines,
         max_results,
         max_files,
-        None,
     ) {
         Ok(matches) => {
             match serde_json::to_string_pretty(&serde_json::json!({

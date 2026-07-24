@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::Args;
 
-use tldr_core::{search, IgnoreSpec, SearchMatch};
+use tldr_core::{search, SearchMatch};
 
 use crate::commands::daemon_router::{params_with_pattern, try_daemon_route};
 use crate::output::{format_search_text, OutputFormat, OutputWriter};
@@ -96,7 +96,6 @@ impl SearchArgs {
             self.context,
             self.max_results,
             self.max_files,
-            Some(&IgnoreSpec::default()),
         )?;
 
         // Output based on format

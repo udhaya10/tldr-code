@@ -364,39 +364,10 @@ fn test_file_entry_serde() {
     assert_eq!(entry.size_bytes, parsed.size_bytes);
 }
 
-#[test]
-fn test_ignore_spec_creation() {
-    let patterns = vec!["*.pyc".to_string(), "__pycache__/".to_string()];
-    let spec = IgnoreSpec::new(patterns.clone());
-
-    assert_eq!(spec.patterns, patterns);
-}
-
-#[test]
-fn test_ignore_spec_default() {
-    let spec: IgnoreSpec = Default::default();
-    assert!(spec.patterns.is_empty());
-}
-
-#[test]
-fn test_ignore_spec_from_file_loads_patterns() {
-    let dir = tempfile::tempdir().unwrap();
-    let ignore_path = dir.path().join(".tldrignore");
-    std::fs::write(&ignore_path, "generated/\n*.pyc\n# comment\n").unwrap();
-
-    let spec = IgnoreSpec::from_file(&ignore_path).unwrap();
-    assert_eq!(spec.patterns, vec!["generated/".to_string(), "*.pyc".to_string()]);
-    assert!(spec.is_ignored(&dir.path().join("generated/auto.py")));
-    assert!(spec.is_ignored(&dir.path().join("cache.pyc")));
-    assert!(!spec.is_ignored(&dir.path().join("src/main.py")));
-}
-
-#[test]
-fn test_ignore_spec_matches_relative_patterns() {
-    let spec = IgnoreSpec::new(vec!["*.pyc".to_string()]);
-    assert!(spec.is_ignored(std::path::Path::new("test.pyc")));
-    assert!(!spec.is_ignored(std::path::Path::new("test.py")));
-}
+// `IgnoreSpec` (and its four tests below) were removed in TLDR-boa.4. The
+// canonical `crate::walker::ProjectWalker` honors `.gitignore`/`.tldrignore`
+// directly; no production caller ever passed a populated spec. See the
+// memorializing comment at `crates/tldr-core/src/types.rs`.
 
 // =============================================================================
 // AST Types Tests

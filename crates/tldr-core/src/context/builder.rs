@@ -507,10 +507,9 @@ fn scan_project_for_function(
     file_filter: Option<&Path>,
 ) -> TldrResult<Option<(PathBuf, String)>> {
     use crate::fs::tree::{collect_files, get_file_tree};
-    use crate::types::IgnoreSpec;
 
     // Get all source files
-    let tree = get_file_tree(project, None, true, Some(&IgnoreSpec::default()))?;
+    let tree = get_file_tree(project, None, true)?;
     let files = collect_files(&tree, project);
 
     for file_path in files {

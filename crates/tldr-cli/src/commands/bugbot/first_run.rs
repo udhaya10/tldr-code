@@ -414,10 +414,7 @@ fn build_temporal_baseline(project_root: &Path) -> Result<()> {
     for file in &source_files {
         let lang = tldr_core::Language::from_path(file);
         if let Some(language) = lang {
-            let _structure = tldr_core::ast::get_code_structure(
-                file, language, 0, // no depth limit
-                None,
-            );
+            let _structure = tldr_core::ast::get_code_structure(file, language, 0);
         }
     }
     Ok(())

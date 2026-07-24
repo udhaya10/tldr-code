@@ -989,7 +989,7 @@ function process_data(input) {
     fn test_search_finds_pattern() {
         let dir = search_fixture();
 
-        let results = search("process_data", dir.path(), None, 0, 100, 100, None).unwrap();
+        let results = search("process_data", dir.path(), None, 0, 100, 100).unwrap();
 
         assert!(
             !results.is_empty(),
@@ -1001,7 +1001,7 @@ function process_data(input) {
     fn test_search_returns_file_and_line() {
         let dir = search_fixture();
 
-        let results = search("def main", dir.path(), None, 0, 100, 100, None).unwrap();
+        let results = search("def main", dir.path(), None, 0, 100, 100).unwrap();
 
         assert!(!results.is_empty(), "expected 'def main' match");
         let first = &results[0];
@@ -1021,7 +1021,7 @@ function process_data(input) {
     fn test_search_with_context_lines() {
         let dir = search_fixture();
 
-        let results = search("def main", dir.path(), None, 2, 100, 100, None).unwrap();
+        let results = search("def main", dir.path(), None, 2, 100, 100).unwrap();
 
         assert!(!results.is_empty());
         let first = &results[0];
@@ -1047,7 +1047,6 @@ function process_data(input) {
             0,
             100,
             100,
-            None,
         )
         .unwrap();
 
@@ -1069,7 +1068,6 @@ function process_data(input) {
             0,
             100,
             100,
-            None,
         )
         .unwrap();
 
@@ -1086,7 +1084,7 @@ function process_data(input) {
     fn test_search_regex_pattern() {
         let dir = search_fixture();
 
-        let results = search(r"def\s+\w+\(", dir.path(), None, 0, 100, 100, None).unwrap();
+        let results = search(r"def\s+\w+\(", dir.path(), None, 0, 100, 100).unwrap();
 
         assert!(
             results.len() >= 3,
@@ -1099,7 +1097,7 @@ function process_data(input) {
     fn test_search_respects_max_results() {
         let dir = search_fixture();
 
-        let results = search("process_data", dir.path(), None, 0, 1, 100, None).unwrap();
+        let results = search("process_data", dir.path(), None, 0, 1, 100).unwrap();
 
         assert!(
             results.len() <= 1,
@@ -1119,7 +1117,6 @@ function process_data(input) {
             0,
             100,
             100,
-            None,
         )
         .unwrap();
 
@@ -1133,7 +1130,7 @@ function process_data(input) {
     fn test_search_invalid_regex_returns_error() {
         let dir = search_fixture();
 
-        let result = search("[invalid(regex", dir.path(), None, 0, 100, 100, None);
+        let result = search("[invalid(regex", dir.path(), None, 0, 100, 100);
 
         assert!(result.is_err(), "expected error for invalid regex");
     }
@@ -2394,7 +2391,7 @@ module.exports = { handleRequest };
         let dir = multilang_search_fixture();
 
         // Search for a pattern that appears in all files
-        let results = search("handle", dir.path(), None, 0, 100, 100, None).unwrap();
+        let results = search("handle", dir.path(), None, 0, 100, 100).unwrap();
 
         // Should find matches in multiple file types
         let file_extensions: HashSet<String> = results
@@ -2419,7 +2416,7 @@ module.exports = { handleRequest };
         let dir = multilang_search_fixture();
         let py_exts: HashSet<String> = [".py".to_string()].into_iter().collect();
 
-        let results = search("def handle", dir.path(), Some(&py_exts), 0, 100, 100, None).unwrap();
+        let results = search("def handle", dir.path(), Some(&py_exts), 0, 100, 100).unwrap();
 
         assert!(!results.is_empty(), "expected Python search results");
         assert!(results
@@ -2432,7 +2429,7 @@ module.exports = { handleRequest };
         let dir = multilang_search_fixture();
         let go_exts: HashSet<String> = [".go".to_string()].into_iter().collect();
 
-        let results = search("func Handle", dir.path(), Some(&go_exts), 0, 100, 100, None).unwrap();
+        let results = search("func Handle", dir.path(), Some(&go_exts), 0, 100, 100).unwrap();
 
         assert!(!results.is_empty(), "expected Go search results");
         assert!(results
@@ -2452,7 +2449,6 @@ module.exports = { handleRequest };
             0,
             100,
             100,
-            None,
         )
         .unwrap();
 
@@ -2474,7 +2470,6 @@ module.exports = { handleRequest };
             0,
             100,
             100,
-            None,
         )
         .unwrap();
 

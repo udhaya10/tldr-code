@@ -85,7 +85,6 @@ pub async fn search(
             context_lines,
             max_results,
             max_files,
-            None,
         )
     })
     .await

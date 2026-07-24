@@ -651,7 +651,7 @@ fn find_function_in_ast(
     let files = if root.is_file() {
         vec![root.to_path_buf()]
     } else {
-        match get_file_tree(root, Some(&extensions), true, None) {
+        match get_file_tree(root, Some(&extensions), true) {
             Ok(tree) => collect_files(&tree, root),
             Err(_) => return None,
         }

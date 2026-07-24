@@ -38,7 +38,7 @@ pub fn handle_tree(args: Value) -> ToolsCallResult {
             .collect::<std::collections::HashSet<String>>()
     });
 
-    match tldr_core::get_file_tree(&path, ext_set.as_ref(), exclude_hidden, None) {
+    match tldr_core::get_file_tree(&path, ext_set.as_ref(), exclude_hidden) {
         Ok(tree) => match serde_json::to_string_pretty(&tree) {
             Ok(json) => ToolsCallResult::text(json),
             Err(e) => ToolsCallResult::error(format!("Serialization error: {}", e)),
@@ -71,7 +71,7 @@ pub fn handle_structure(args: Value) -> ToolsCallResult {
         Err(e) => return ToolsCallResult::error(e),
     };
 
-    match tldr_core::get_code_structure(&path, lang, max_results, None) {
+    match tldr_core::get_code_structure(&path, lang, max_results) {
         Ok(structure) => match serde_json::to_string_pretty(&structure) {
             Ok(json) => ToolsCallResult::text(json),
             Err(e) => ToolsCallResult::error(format!("Serialization error: {}", e)),

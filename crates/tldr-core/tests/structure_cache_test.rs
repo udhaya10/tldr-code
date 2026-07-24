@@ -17,7 +17,7 @@ fn test_write_read_structure_cache_roundtrip() {
     .unwrap();
 
     // Build structure
-    let structure = get_code_structure(&src, Language::Python, 0, None).unwrap();
+    let structure = get_code_structure(&src, Language::Python, 0).unwrap();
     assert!(
         !structure.files[0].definitions.is_empty(),
         "Definitions should be populated (Phase 2)"
@@ -67,7 +67,7 @@ fn test_structure_lookup_finds_definitions_by_path() {
     std::fs::write(src.join("a.py"), "def alpha():\n    pass\n").unwrap();
     std::fs::write(src.join("b.py"), "def beta():\n    pass\n").unwrap();
 
-    let structure = get_code_structure(&src, Language::Python, 0, None).unwrap();
+    let structure = get_code_structure(&src, Language::Python, 0).unwrap();
     let cache_path = dir.path().join("cache.json");
     write_structure_cache(&structure, &cache_path).unwrap();
     let lookup = read_structure_cache(&cache_path).unwrap();

@@ -17,7 +17,6 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 use crate::error::TldrError;
-use crate::types::IgnoreSpec;
 use crate::TldrResult;
 
 /// A single search match result
@@ -43,7 +42,6 @@ pub struct SearchMatch {
 /// * `context_lines` - Number of context lines before and after each match
 /// * `max_results` - Maximum number of matches to return
 /// * `max_files` - Maximum number of files to search
-/// * `ignore_spec` - Optional gitignore-style patterns to exclude
 ///
 /// # Returns
 /// * `Ok(Vec<SearchMatch>)` - List of matches found
@@ -55,7 +53,7 @@ pub struct SearchMatch {
 /// use tldr_core::search::text::search;
 ///
 /// let extensions: HashSet<String> = [".py".to_string()].into_iter().collect();
-/// let matches = search("def main", Path::new("src"), Some(&extensions), 2, 100, 100, None)?;
+/// let matches = search("def main", Path::new("src"), Some(&extensions), 2, 100, 100)?;
 /// ```
 pub fn search(
     pattern: &str,
@@ -64,7 +62,6 @@ pub fn search(
     context_lines: usize,
     max_results: usize,
     max_files: usize,
-    ignore_spec: Option<&IgnoreSpec>,
 ) -> TldrResult<Vec<SearchMatch>> {
     // Compile regex pattern
     let regex = Regex::new(pattern).map_err(|e| TldrError::ParseError {
@@ -84,11 +81,9 @@ pub fn search(
     let mut results = Vec::new();
     let mut files_searched = 0;
 
-    // Walk directory tree
-    for entry in crate::walker::ProjectWalker::new(&canonical_root)
-        .iter()
-        .filter(|e| should_include_entry(e, ignore_spec))
-    {
+    // Walk directory tree (ProjectWalker honors hidden files,
+    // DEFAULT_EXCLUDE_DIRS, sentinels, `.gitignore` and `.tldrignore`).
+    for entry in crate::walker::ProjectWalker::new(&canonical_root).iter() {
         // Check limits
         if results.len() >= max_results || files_searched >= max_files {
             break;
@@ -136,31 +131,6 @@ pub fn search(
     }
 
     Ok(results)
-}
-
-/// Check if a directory entry should be included in search.
-///
-/// The walk already runs through [`crate::walker::ProjectWalker`], which honors
-/// hidden files, `DEFAULT_EXCLUDE_DIRS`, generated-dir sentinels, `.gitignore`
-/// and `.tldrignore`. The only filter left here is the caller-supplied
-/// [`IgnoreSpec`] (extra exclude patterns passed to [`search`]), which the
-/// canonical walker does not see. (TLDR-boa.3: the previous hand-rolled hidden
-/// + `DEFAULT_SKIP_DIRS` checks were redundant with `ProjectWalker` once
-/// `venv`/`env` joined `DEFAULT_EXCLUDE_DIRS`.)
-fn should_include_entry(entry: &ignore::DirEntry, ignore_spec: Option<&IgnoreSpec>) -> bool {
-    // Always include the root directory (depth 0)
-    if entry.depth() == 0 {
-        return true;
-    }
-
-    // Check caller-supplied ignore patterns
-    if let Some(spec) = ignore_spec {
-        if spec.is_ignored(entry.path()) {
-            return false;
-        }
-    }
-
-    true
 }
 
 /// Search a single file for matches
@@ -266,7 +236,7 @@ mod tests {
             "def main():\n    pass\ndef helper():\n    pass",
         );
 
-        let results = search("def main", tmp.path(), None, 0, 100, 100, None).unwrap();
+        let results = search("def main", tmp.path(), None, 0, 100, 100).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].line, 1);
         assert!(results[0].content.contains("def main"));
@@ -281,7 +251,7 @@ mod tests {
             "def foo():\n    pass\ndef bar():\n    pass",
         );
 
-        let results = search(r"def\s+\w+", tmp.path(), None, 0, 100, 100, None).unwrap();
+        let results = search(r"def\s+\w+", tmp.path(), None, 0, 100, 100).unwrap();
         assert_eq!(results.len(), 2);
     }
 
@@ -294,7 +264,7 @@ mod tests {
             "line1\nline2\ndef main():\nline4\nline5",
         );
 
-        let results = search("def main", tmp.path(), None, 1, 100, 100, None).unwrap();
+        let results = search("def main", tmp.path(), None, 1, 100, 100).unwrap();
         assert_eq!(results.len(), 1);
         assert!(results[0].context.is_some());
         let ctx = results[0].context.as_ref().unwrap();
@@ -308,7 +278,7 @@ mod tests {
         create_test_file(tmp.path(), "test.js", "function main() {}");
 
         let exts: HashSet<String> = [".py".to_string()].into_iter().collect();
-        let results = search("main", tmp.path(), Some(&exts), 0, 100, 100, None).unwrap();
+        let results = search("main", tmp.path(), Some(&exts), 0, 100, 100).unwrap();
         assert_eq!(results.len(), 1);
         assert!(results[0].file.to_string_lossy().ends_with(".py"));
     }
@@ -322,7 +292,7 @@ mod tests {
             "def a():\ndef b():\ndef c():\ndef d():",
         );
 
-        let results = search("def", tmp.path(), None, 0, 2, 100, None).unwrap();
+        let results = search("def", tmp.path(), None, 0, 2, 100).unwrap();
         assert!(results.len() <= 2);
     }
 
@@ -331,14 +301,14 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         create_test_file(tmp.path(), "test.py", "def main():");
 
-        let results = search("nonexistent_pattern", tmp.path(), None, 0, 100, 100, None).unwrap();
+        let results = search("nonexistent_pattern", tmp.path(), None, 0, 100, 100).unwrap();
         assert!(results.is_empty());
     }
 
     #[test]
     fn test_search_invalid_regex() {
         let tmp = TempDir::new().unwrap();
-        let result = search("[invalid(", tmp.path(), None, 0, 100, 100, None);
+        let result = search("[invalid(", tmp.path(), None, 0, 100, 100);
         assert!(result.is_err());
     }
 }

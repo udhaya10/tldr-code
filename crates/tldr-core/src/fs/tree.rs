@@ -22,10 +22,8 @@
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use ignore::gitignore::GitignoreBuilder;
-
 use crate::error::TldrError;
-use crate::types::{FileTree, IgnoreSpec, NodeType};
+use crate::types::{FileTree, NodeType};
 use crate::walker::ProjectWalker;
 use crate::TldrResult;
 
@@ -38,11 +36,16 @@ use crate::TldrResult;
 
 /// Get file tree structure with optional extension filtering.
 ///
+/// `.gitignore`/`.tldrignore`, hidden files, vendor/build dirs and generated-dir
+/// sentinels are honored by the canonical [`crate::walker::ProjectWalker`] this
+/// delegates to. (TLDR-boa.4 retired the caller-supplied `IgnoreSpec` parameter:
+/// every production caller passed `IgnoreSpec::default()`/`None`, and the
+/// canonical walker's on-disk ignore files now cover the need.)
+///
 /// # Arguments
 /// * `root` - Root directory to scan
 /// * `extensions` - Optional set of extensions to include (e.g., `{".py", ".ts"}`)
 /// * `exclude_hidden` - Skip hidden files/directories (default: true)
-/// * `ignore_spec` - Optional gitignore-style patterns
 ///
 /// # Returns
 /// * `Ok(FileTree)` - Tree structure with files and directories
@@ -55,13 +58,12 @@ use crate::TldrResult;
 /// use tldr_core::fs::tree::get_file_tree;
 ///
 /// let extensions: HashSet<String> = [".py".to_string()].into_iter().collect();
-/// let tree = get_file_tree(Path::new("src"), Some(&extensions), true, None)?;
+/// let tree = get_file_tree(Path::new("src"), Some(&extensions), true)?;
 /// ```
 pub fn get_file_tree(
     root: &Path,
     extensions: Option<&HashSet<String>>,
     exclude_hidden: bool,
-    ignore_spec: Option<&IgnoreSpec>,
 ) -> TldrResult<FileTree> {
     // Validate root path exists
     if !root.exists() {
@@ -89,11 +91,6 @@ pub fn get_file_tree(
         }
     }
 
-    // Caller-supplied ignore patterns (compat shim). `.gitignore` and
-    // `.tldrignore` are honored by ProjectWalker; only the extra patterns
-    // carried by `IgnoreSpec` are applied here. Retired in TLDR-boa.4.
-    let caller_ignore = build_caller_ignore_matcher(&canonical, ignore_spec);
-
     // Get root directory name
     let root_name = canonical
         .file_name()
@@ -118,14 +115,6 @@ pub fn get_file_tree(
         };
         let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
 
-        // Caller-supplied ignore patterns (gitignore semantics; directory
-        // patterns exclude contents via matched_path_or_any_parents).
-        if let Some(gi) = &caller_ignore {
-            if gi.matched_path_or_any_parents(&rel, is_dir).is_ignore() {
-                continue;
-            }
-        }
-
         // Extension allow-list applies to files only; directories always pass
         // (a directory is kept iff it has surviving children — see below).
         if let Some(exts) = extensions {
@@ -149,33 +138,6 @@ pub fn get_file_tree(
     let children = build_tree_from_entries(&entries, extensions.is_some());
 
     Ok(FileTree::dir(root_name, children))
-}
-
-/// Build a gitignore matcher from the caller-supplied [`IgnoreSpec`] patterns
-/// only, rooted at `root`.
-///
-/// Unlike the retired `build_gitignore`, this does NOT load the project's
-/// `.tldrignore` or `.gitignore` — those are honored by [`ProjectWalker`].
-/// Only the extra patterns a caller passes via `IgnoreSpec` reach this matcher,
-/// which keeps the `Option<&IgnoreSpec>` parameter of [`get_file_tree`]
-/// behavior-compatible while the canonical walker owns the on-disk ignore
-/// files. The whole shim is removed when `IgnoreSpec` is retired (TLDR-boa.4).
-fn build_caller_ignore_matcher(
-    root: &Path,
-    ignore_spec: Option<&IgnoreSpec>,
-) -> Option<ignore::gitignore::Gitignore> {
-    let spec = ignore_spec?;
-    if spec.patterns.is_empty() {
-        return None;
-    }
-    let mut builder = GitignoreBuilder::new(root);
-    let mut added = false;
-    for pattern in &spec.patterns {
-        if builder.add_line(None, pattern).is_ok() {
-            added = true;
-        }
-    }
-    added.then(|| builder.build().ok()).flatten()
 }
 
 /// Reconstruct a nested [`FileTree`] from a flat list of `(relative_path,
@@ -310,7 +272,7 @@ mod tests {
     #[test]
     fn test_get_file_tree_basic() {
         let dir = create_test_dir();
-        let tree = get_file_tree(dir.path(), None, true, None).unwrap();
+        let tree = get_file_tree(dir.path(), None, true).unwrap();
 
         assert_eq!(tree.node_type, NodeType::Dir);
         assert!(!tree.children.is_empty());
@@ -320,7 +282,7 @@ mod tests {
     fn test_get_file_tree_extension_filter() {
         let dir = create_test_dir();
         let extensions: HashSet<String> = [".py".to_string()].into_iter().collect();
-        let tree = get_file_tree(dir.path(), Some(&extensions), true, None).unwrap();
+        let tree = get_file_tree(dir.path(), Some(&extensions), true).unwrap();
 
         // All files should be .py
         fn check_extensions(node: &FileTree) {
@@ -341,7 +303,7 @@ mod tests {
     #[test]
     fn test_get_file_tree_excludes_hidden() {
         let dir = create_test_dir();
-        let tree = get_file_tree(dir.path(), None, true, None).unwrap();
+        let tree = get_file_tree(dir.path(), None, true).unwrap();
 
         // No hidden files in children (root can be hidden like .tmp...)
         fn check_no_hidden(node: &FileTree) {
@@ -363,7 +325,7 @@ mod tests {
     #[test]
     fn test_get_file_tree_includes_hidden() {
         let dir = create_test_dir();
-        let tree = get_file_tree(dir.path(), None, false, None).unwrap();
+        let tree = get_file_tree(dir.path(), None, false).unwrap();
 
         // Should have hidden file
         fn has_hidden(node: &FileTree) -> bool {
@@ -377,15 +339,17 @@ mod tests {
 
     #[test]
     fn test_get_file_tree_nonexistent() {
-        let result = get_file_tree(Path::new("/nonexistent/path"), None, true, None);
+        let result = get_file_tree(Path::new("/nonexistent/path"), None, true);
         assert!(matches!(result, Err(TldrError::PathNotFound(_))));
     }
 
     #[test]
-    fn test_get_file_tree_ignore_patterns() {
+    fn test_get_file_tree_respects_tldrignore() {
         let dir = create_test_dir();
-        let ignore = IgnoreSpec::new(vec!["*.json".to_string()]);
-        let tree = get_file_tree(dir.path(), None, true, Some(&ignore)).unwrap();
+        // The caller-supplied IgnoreSpec was retired in TLDR-boa.4; exclusion
+        // now flows through the canonical walker's `.tldrignore` support.
+        fs::write(dir.path().join(".tldrignore"), "*.json\n").unwrap();
+        let tree = get_file_tree(dir.path(), None, true).unwrap();
 
         // No .json files
         fn check_no_json(node: &FileTree) {
@@ -404,7 +368,7 @@ mod tests {
     #[test]
     fn test_collect_files() {
         let dir = create_test_dir();
-        let tree = get_file_tree(dir.path(), None, true, None).unwrap();
+        let tree = get_file_tree(dir.path(), None, true).unwrap();
         let files = collect_files(&tree, dir.path());
 
         assert!(!files.is_empty());
@@ -429,7 +393,7 @@ mod tests {
         assert!(original.exists());
         assert!(hard.exists());
 
-        let result = get_file_tree(dir.path(), None, true, None);
+        let result = get_file_tree(dir.path(), None, true);
 
         // Pre-fix: returns Err(TldrError::SymlinkCycle(...)).
         // Post-fix: returns Ok with both files listed.
