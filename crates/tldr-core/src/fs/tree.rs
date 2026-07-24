@@ -29,58 +29,12 @@ use crate::types::{FileTree, IgnoreSpec, NodeType};
 use crate::walker::ProjectWalker;
 use crate::TldrResult;
 
-/// Maximum file size to process (5MB) - M6 mitigation
-pub const MAX_FILE_SIZE: u64 = 5 * 1024 * 1024;
-
-/// Default directories to skip during traversal.
-///
-/// **api-check-and-patterns-accuracy-v1 (P11.BUG-AGG-7)**: extended this
-/// list to include common generated artifact dirs (e.g. `out`, `bin`,
-/// `obj`, `.gradle`, `dox` for doxygen, `.pytest_cache`, `.mypy_cache`,
-/// `.ruff_cache`) so `tldr patterns` and other tree-driven commands
-/// don't mis-classify projects whose generated docs/build output happens
-/// to outnumber authored sources.
-pub const DEFAULT_SKIP_DIRS: &[&str] = &[
-    // Vendored / package-manager output
-    "node_modules",
-    "vendor",
-    // Build sinks (general)
-    "target",
-    "dist",
-    "build",
-    "out",
-    "bin",
-    "obj",
-    // JavaScript framework caches
-    ".next",
-    ".nuxt",
-    // Doxygen output (typical custom-config dir; see GENERATED_DIR_SENTINELS
-    // below for the `docs/` doxygen-output detection).
-    "dox",
-    // Python tooling
-    "__pycache__",
-    "venv",
-    ".venv",
-    "env",
-    ".env",
-    ".tox",
-    ".pytest_cache",
-    ".mypy_cache",
-    ".ruff_cache",
-    // Coverage artefacts
-    "coverage",
-    ".coverage",
-    // JVM tooling
-    ".gradle",
-    // Version control
-    ".git",
-    ".svn",
-    ".hg",
-    // Editor caches
-    ".idea",
-    ".vscode",
-    ".cache",
-];
+// `MAX_FILE_SIZE` (5MB, dead) and `DEFAULT_SKIP_DIRS` (28-entry skip list) lived
+// here historically. Both removed in TLDR-boa.3: oversize is enforced centrally
+// via `crate::fs::check_size`, and the skip list collapsed onto the canonical
+// `crate::walker::DEFAULT_EXCLUDE_DIRS` (every tree walk now goes through
+// `ProjectWalker`). `venv`/`env` — the two entries stricter than the canonical
+// list — were added to `DEFAULT_EXCLUDE_DIRS` to preserve behaviour.
 
 /// Get file tree structure with optional extension filtering.
 ///

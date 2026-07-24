@@ -178,8 +178,14 @@ pub const DEFAULT_EXCLUDE_DIRS: &[&str] = &[
     // is detected via the `doxygen.css` sentinel below since `docs/` may
     // legitimately hold authored markdown).
     "dox",
-    // Python tooling
+    // Python tooling. `venv`/`env` are the non-dotfile virtualenv dir names
+    // (`.venv`/`.env` are dotfiles and already caught by the hidden filter);
+    // added in TLDR-boa.3 when `fs/tree.rs::DEFAULT_SKIP_DIRS` was collapsed
+    // onto this list, preserving the old tree/text-skip behaviour for the two
+    // entries that were stricter than the canonical walker.
     "__pycache__",
+    "venv",
+    "env",
     ".pytest_cache",
     ".tox",
     ".mypy_cache",
@@ -380,23 +386,13 @@ impl ProjectWalker {
             );
 
         let mut builder = WalkBuilder::new(&self.root);
-        builder
-            .hidden(self.exclude_hidden) // skip dotfiles unless include_hidden()
-            .git_ignore(self.respect_gitignore)
-            .git_global(self.respect_gitignore)
-            .git_exclude(self.respect_gitignore)
-            .parents(self.respect_gitignore)
-            .follow_links(false); // CRITICAL: avoid pnpm symlink loops
-
-        // Honor `.tldrignore` with full gitignore semantics at every directory
-        // level (TLDR-1j2 / TLDR-vti). Tied to the same `respect_gitignore`
-        // gate as `.gitignore`: a caller that opts out of ignore files
-        // (`--no-respect-ignore`) opts out of both. This is THE shared corpus
-        // walk (`enumerate_corpus_files`), so honoring it here keeps the full
-        // warm build consistent with the single-file gate (`is_corpus_file`).
-        if self.respect_gitignore {
-            builder.add_custom_ignore_filename(TLDRIGNORE_FILE);
-        }
+        // Shared canonical walk config (hidden, gitignore family, `.tldrignore`,
+        // follow_links). See [`apply_canonical_walk_config`].
+        apply_canonical_walk_config(
+            &mut builder,
+            self.exclude_hidden,
+            self.respect_gitignore,
+        );
 
         if let Some(depth) = self.max_depth {
             builder.max_depth(Some(depth));
@@ -585,6 +581,45 @@ fn classify_explicit_path(
     }
 
     None
+}
+
+/// Apply the canonical project-walk **config** to a raw [`WalkBuilder`]:
+/// hidden-file filtering, `.gitignore` / global gitignore / `.git/info/exclude`
+/// / parent traversal, `.tldrignore` registration, and `follow_links(false)`.
+///
+/// This is the single config shared by [`ProjectWalker::iter`] and the
+/// single-file corpus gate (`CorpusPolicy::accepts_path` →
+/// `is_corpus_file_impl` in `semantic/chunker.rs`), so the two cannot drift on
+/// *which* ignore sources they honour — only the *config* is shared.
+///
+/// Callers still own their own `filter_entry`: [`ProjectWalker::iter`] applies
+/// [`DEFAULT_EXCLUDE_DIRS`] + generated-dir sentinels (via
+/// [`classify_explicit_path`]); the single-file gate additionally prunes the
+/// walk to the target file's ancestor chain.
+///
+/// # Why `.tldrignore` rides the `respect_gitignore` gate
+///
+/// `.tldrignore` is registered with full gitignore semantics at every
+/// directory level (TLDR-1j2 / TLDR-vti). It is tied to the same
+/// `respect_gitignore` gate as `.gitignore`: a caller that opts out of ignore
+/// files (`--no-respect-ignore`) opts out of both. This is THE shared corpus
+/// walk (`enumerate_corpus_files`), so honoring it here keeps the full warm
+/// build consistent with the single-file gate (`is_corpus_file`).
+pub(crate) fn apply_canonical_walk_config(
+    builder: &mut WalkBuilder,
+    exclude_hidden: bool,
+    respect_gitignore: bool,
+) {
+    builder
+        .hidden(exclude_hidden)
+        .git_ignore(respect_gitignore)
+        .git_global(respect_gitignore)
+        .git_exclude(respect_gitignore)
+        .parents(respect_gitignore)
+        .follow_links(false); // CRITICAL: avoid pnpm symlink loops
+    if respect_gitignore {
+        builder.add_custom_ignore_filename(TLDRIGNORE_FILE);
+    }
 }
 
 /// cross-cutting-and-clear-fix-bugs-v1 (P18.X4): permissive JS/TS

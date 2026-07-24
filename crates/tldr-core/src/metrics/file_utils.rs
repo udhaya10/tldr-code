@@ -17,6 +17,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use crate::types::Language;
+use crate::walker::ProjectWalker;
 use crate::TldrError;
 
 // =============================================================================
@@ -77,35 +78,25 @@ pub fn walk_source_files(
         return Ok((vec![path.to_path_buf()], vec![]));
     }
 
-    // Directory walk using ignore::WalkBuilder (matches loc.rs pattern)
+    // Directory walk via the canonical ProjectWalker (TLDR-boa.3): honors
+    // `.gitignore`/`.tldrignore`, hidden files, `DEFAULT_EXCLUDE_DIRS` and
+    // generated-dir sentinels — the same policy every other walk uses.
+    // `should_skip_path` is kept as a backstop so the `--include-hidden` path
+    // still applies its `.github`/`.claude` exception exactly; it is redundant
+    // in the default case where ProjectWalker already pruned these.
     let mut files = Vec::new();
     let mut warnings = Vec::new();
     let mut had_entries = false;
 
-    let mut builder = ignore::WalkBuilder::new(path);
-    builder.follow_links(false); // CM-1: Don't follow symlinks
-    builder.hidden(!options.include_hidden);
-
-    if options.gitignore {
-        builder.git_ignore(true);
-        builder.git_global(true);
-    } else {
-        builder.git_ignore(false);
-        builder.git_global(false);
+    let mut walker = ProjectWalker::new(path).respect_gitignore(options.gitignore);
+    if options.include_hidden {
+        walker = walker.include_hidden();
     }
 
-    for entry in builder.build() {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(e) => {
-                warnings.push(format!("Walk error: {}", e));
-                continue;
-            }
-        };
-
+    for entry in walker.iter() {
         let entry_path = entry.path();
 
-        // Skip directories
+        // Skip directories (ProjectWalker yields them so the walk can descend).
         if entry_path.is_dir() {
             continue;
         }
@@ -124,7 +115,7 @@ pub fn walk_source_files(
         // Get relative path for pattern checking
         let relative_path = entry_path.strip_prefix(path).unwrap_or(entry_path);
 
-        // Skip paths matching skip patterns (node_modules, .git, etc.)
+        // Backstop skip patterns (node_modules, .git, etc.) — see note above.
         if should_skip_path(relative_path) {
             continue;
         }

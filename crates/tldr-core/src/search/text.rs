@@ -17,7 +17,6 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 use crate::error::TldrError;
-use crate::fs::tree::DEFAULT_SKIP_DIRS;
 use crate::types::IgnoreSpec;
 use crate::TldrResult;
 
@@ -139,31 +138,22 @@ pub fn search(
     Ok(results)
 }
 
-/// Check if a directory entry should be included in search
+/// Check if a directory entry should be included in search.
+///
+/// The walk already runs through [`crate::walker::ProjectWalker`], which honors
+/// hidden files, `DEFAULT_EXCLUDE_DIRS`, generated-dir sentinels, `.gitignore`
+/// and `.tldrignore`. The only filter left here is the caller-supplied
+/// [`IgnoreSpec`] (extra exclude patterns passed to [`search`]), which the
+/// canonical walker does not see. (TLDR-boa.3: the previous hand-rolled hidden
+/// + `DEFAULT_SKIP_DIRS` checks were redundant with `ProjectWalker` once
+/// `venv`/`env` joined `DEFAULT_EXCLUDE_DIRS`.)
 fn should_include_entry(entry: &ignore::DirEntry, ignore_spec: Option<&IgnoreSpec>) -> bool {
     // Always include the root directory (depth 0)
     if entry.depth() == 0 {
         return true;
     }
 
-    let name = entry.file_name().to_string_lossy();
-
-    // Skip hidden files/directories
-    if name.starts_with('.') && name != "." {
-        return false;
-    }
-
-    // Skip default directories
-    if entry
-        .file_type()
-        .map(|file_type| file_type.is_dir())
-        .unwrap_or(false)
-        && DEFAULT_SKIP_DIRS.contains(&name.as_ref())
-    {
-        return false;
-    }
-
-    // Check ignore spec
+    // Check caller-supplied ignore patterns
     if let Some(spec) = ignore_spec {
         if spec.is_ignored(entry.path()) {
             return false;

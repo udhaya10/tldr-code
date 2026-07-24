@@ -306,7 +306,7 @@ fn find_function_in_graph(
     // modes that share a root cause:
     //
     //   - OCaml `path/.../vendor/x.ml:fn`: the project tree-walker
-    //     skips `vendor/` (DEFAULT_SKIP_DIRS), so `scan_project_for_function`
+    //     skips `vendor/` (`DEFAULT_EXCLUDE_DIRS`), so `scan_project_for_function`
     //     never visits the file even though the user pointed us at it.
     //   - TypeScript `src/build/x.ts:fn`: the walker skips `build/`
     //     (build sink), with the same outcome.
