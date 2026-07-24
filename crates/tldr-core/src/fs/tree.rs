@@ -1,21 +1,32 @@
-//! File tree traversal with ignore support
+//! File tree traversal with ignore support.
 //!
 //! Implements the `tree` command functionality (spec Section 2.1.1).
 //!
+//! As of TLDR-boa.2 the bespoke `walkdir` traversal has been replaced by the
+//! canonical [`crate::walker::ProjectWalker`]. `get_file_tree` is now a thin
+//! adapter: it walks once via `ProjectWalker` — which honors `.gitignore`,
+//! `.tldrignore`, hidden files, vendor/build dirs, generated-dir sentinels and
+//! `follow_links(false)` — and reconstructs the nested [`FileTree`] from the
+//! flat walk. This closes the gap where the tree walker honored only
+//! `.tldrignore` while every other walk honored `.gitignore` too.
+//!
 //! # Mitigations Addressed
-//! - M6: Large file memory (skip files > MAX_FILE_SIZE)
-//! - M9: Path handling platform (use PathBuf, dunce for normalization)
-//! - M12: Gitignore pattern edge cases (use ignore crate)
-//! - M13: Symlink cycle detection (walkdir with inode tracking)
+//! - M6: Large file memory (oversize is enforced centrally via
+//!   [`crate::fs::check_size`], not by the tree walker).
+//! - M9: Path handling platform (use PathBuf, dunce for normalization).
+//! - M12: Gitignore pattern edge cases (use the `ignore` crate via
+//!   [`crate::walker::ProjectWalker`]).
+//! - M13: Symlink cycle detection ([`crate::walker::ProjectWalker`] sets
+//!   `follow_links(false)`).
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use ignore::gitignore::GitignoreBuilder;
-use walkdir::{DirEntry, WalkDir};
 
 use crate::error::TldrError;
 use crate::types::{FileTree, IgnoreSpec, NodeType};
+use crate::walker::ProjectWalker;
 use crate::TldrResult;
 
 /// Maximum file size to process (5MB) - M6 mitigation
@@ -71,30 +82,6 @@ pub const DEFAULT_SKIP_DIRS: &[&str] = &[
     ".cache",
 ];
 
-/// Files whose presence at the top level of a directory mark it as
-/// generator output rather than authored source. Used by the file-tree
-/// walker to skip directories whose name is ambiguous (e.g. `docs/`
-/// containing doxygen html output vs `docs/` with authored markdown).
-///
-/// (api-check-and-patterns-accuracy-v1, P11.BUG-AGG-7)
-const GENERATED_DIR_SENTINELS: &[&str] = &["doxygen.css", "doxygen.svg"];
-
-/// Whether a directory contains any [`GENERATED_DIR_SENTINELS`] at its
-/// top level. Cheap top-level read; nested matches are not considered.
-pub(crate) fn dir_has_generated_sentinel(dir: &Path) -> bool {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return false;
-    };
-    for entry in entries.flatten() {
-        if let Some(name) = entry.file_name().to_str() {
-            if GENERATED_DIR_SENTINELS.contains(&name) {
-                return true;
-            }
-        }
-    }
-    false
-}
-
 /// Get file tree structure with optional extension filtering.
 ///
 /// # Arguments
@@ -148,8 +135,10 @@ pub fn get_file_tree(
         }
     }
 
-    // Build gitignore matcher if patterns provided
-    let gitignore = build_gitignore(&canonical, ignore_spec);
+    // Caller-supplied ignore patterns (compat shim). `.gitignore` and
+    // `.tldrignore` are honored by ProjectWalker; only the extra patterns
+    // carried by `IgnoreSpec` are applied here. Retired in TLDR-boa.4.
+    let caller_ignore = build_caller_ignore_matcher(&canonical, ignore_spec);
 
     // Get root directory name
     let root_name = canonical
@@ -157,126 +146,37 @@ pub fn get_file_tree(
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| ".".to_string());
 
-    // Build tree recursively
-    let children = build_tree_children(
-        &canonical,
-        &canonical,
-        extensions,
-        exclude_hidden,
-        gitignore.as_ref(),
-    )?;
-
-    Ok(FileTree::dir(root_name, children))
-}
-
-/// Build gitignore matcher from IgnoreSpec patterns + the project `.tldrignore`.
-///
-/// TLDR-vti: `tree` previously consulted only the explicit `IgnoreSpec`
-/// patterns passed by the caller (which is `IgnoreSpec::default()` — empty — on
-/// both the daemon and `--oneshot` paths), so it silently ignored the project's
-/// `<root>/.tldrignore` that every index/corpus command honors. Load it here so
-/// both `tree` serve paths respect the same exclusion contract. Root-level
-/// `.tldrignore` only (matches the file the warm build auto-creates); nested
-/// `.tldrignore` files are out of scope for the bespoke tree walker.
-fn build_gitignore(
-    root: &Path,
-    ignore_spec: Option<&IgnoreSpec>,
-) -> Option<ignore::gitignore::Gitignore> {
-    let mut builder = GitignoreBuilder::new(root);
-    let mut added = false;
-
-    // `<root>/.tldrignore` first (TLDR-vti). `GitignoreBuilder::add` returns
-    // `Some(err)` on failure, `None` on success.
-    let tldrignore = root.join(crate::walker::TLDRIGNORE_FILE);
-    if tldrignore.is_file() && builder.add(&tldrignore).is_none() {
-        added = true;
+    // Single canonical walk. ProjectWalker honors `.gitignore` + `.tldrignore`,
+    // skips hidden (unless `exclude_hidden` is false), skips vendor/build and
+    // generated dirs, and does not follow symlinks.
+    let mut walker = ProjectWalker::new(canonical.as_path());
+    if !exclude_hidden {
+        walker = walker.include_hidden();
     }
 
-    // Explicit caller-supplied patterns (existing behavior).
-    if let Some(spec) = ignore_spec {
-        for pattern in &spec.patterns {
-            // Add pattern - ignore errors for invalid patterns
-            if builder.add_line(None, pattern).is_ok() {
-                added = true;
-            }
-        }
-    }
+    // Collect (relative path, is_dir) for every surviving entry.
+    let mut entries: Vec<(PathBuf, bool)> = Vec::new();
+    for entry in walker.iter() {
+        // Skip the root entry itself (rel == "").
+        let rel = match entry.path().strip_prefix(&canonical) {
+            Ok(r) if !r.as_os_str().is_empty() => r.to_path_buf(),
+            _ => continue,
+        };
+        let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
 
-    if !added {
-        return None;
-    }
-
-    builder.build().ok()
-}
-
-/// Recursively build tree children
-fn build_tree_children(
-    dir: &Path,
-    root: &Path,
-    extensions: Option<&HashSet<String>>,
-    exclude_hidden: bool,
-    gitignore: Option<&ignore::gitignore::Gitignore>,
-) -> TldrResult<Vec<FileTree>> {
-    let mut children = Vec::new();
-
-    // Use WalkDir with follow_links disabled for M13 (symlink cycle detection).
-    // Because follow_links is false, walkdir physically cannot traverse a
-    // symlink-induced cycle, so no in-walk inode tracking is required.
-    // Issue #15: a previous inode-tracking heuristic incorrectly flagged
-    // hardlinked files as cycles; that heuristic has been removed.
-    // Note: We don't use filter_entry on the root, as filter_entry would skip
-    // the entire directory if the root has a hidden name (like .tmp...)
-    let walker = WalkDir::new(dir)
-        .max_depth(1)
-        .follow_links(false)
-        .into_iter()
-        .filter_entry(|e| {
-            // Don't filter the root directory itself (depth 0)
-            if e.depth() == 0 {
-                return true;
-            }
-            should_include_entry(e, exclude_hidden, gitignore)
-        });
-
-    for entry in walker.filter_map(|e| e.ok()) {
-        let path = entry.path();
-
-        // Skip the directory itself
-        if path == dir {
-            continue;
-        }
-
-        let name = entry.file_name().to_string_lossy().to_string();
-
-        if entry.file_type().is_dir() {
-            // Skip default skip directories
-            if DEFAULT_SKIP_DIRS.contains(&name.as_str()) {
+        // Caller-supplied ignore patterns (gitignore semantics; directory
+        // patterns exclude contents via matched_path_or_any_parents).
+        if let Some(gi) = &caller_ignore {
+            if gi.matched_path_or_any_parents(&rel, is_dir).is_ignore() {
                 continue;
             }
+        }
 
-            // api-check-and-patterns-accuracy-v1 (P11.BUG-AGG-7):
-            // skip directories that look like generator output (e.g.
-            // doxygen-emitted `docs/`). The name-based ignore list above
-            // can't catch these because `docs/` is also a legitimate
-            // authored-content directory; the sentinel-file check
-            // disambiguates by reading the dir's top level for
-            // unambiguous generator artefacts.
-            if dir_has_generated_sentinel(path) {
-                continue;
-            }
-
-            // Recurse into directory
-            let sub_children =
-                build_tree_children(path, root, extensions, exclude_hidden, gitignore)?;
-
-            // Only include directory if it has children (or no extension filter)
-            if !sub_children.is_empty() || extensions.is_none() {
-                children.push(FileTree::dir(name, sub_children));
-            }
-        } else if entry.file_type().is_file() {
-            // Check extension filter
-            if let Some(exts) = extensions {
-                let ext = path
+        // Extension allow-list applies to files only; directories always pass
+        // (a directory is kept iff it has surviving children — see below).
+        if let Some(exts) = extensions {
+            if !is_dir {
+                let ext = rel
                     .extension()
                     .map(|e| format!(".{}", e.to_string_lossy()))
                     .unwrap_or_default();
@@ -284,46 +184,127 @@ fn build_tree_children(
                     continue;
                 }
             }
-
-            // Get relative path from root
-            let relative_path = path.strip_prefix(root).unwrap_or(path).to_path_buf();
-
-            children.push(FileTree::file(name, relative_path));
         }
+
+        entries.push((rel, is_dir));
     }
 
-    // Sort children: directories first, then files, alphabetically within each group
+    // Reconstruct the nested FileTree. When an extension filter is active,
+    // directories with no surviving files are pruned; otherwise every walked
+    // directory is kept (matching the prior walkdir behavior).
+    let children = build_tree_from_entries(&entries, extensions.is_some());
+
+    Ok(FileTree::dir(root_name, children))
+}
+
+/// Build a gitignore matcher from the caller-supplied [`IgnoreSpec`] patterns
+/// only, rooted at `root`.
+///
+/// Unlike the retired `build_gitignore`, this does NOT load the project's
+/// `.tldrignore` or `.gitignore` — those are honored by [`ProjectWalker`].
+/// Only the extra patterns a caller passes via `IgnoreSpec` reach this matcher,
+/// which keeps the `Option<&IgnoreSpec>` parameter of [`get_file_tree`]
+/// behavior-compatible while the canonical walker owns the on-disk ignore
+/// files. The whole shim is removed when `IgnoreSpec` is retired (TLDR-boa.4).
+fn build_caller_ignore_matcher(
+    root: &Path,
+    ignore_spec: Option<&IgnoreSpec>,
+) -> Option<ignore::gitignore::Gitignore> {
+    let spec = ignore_spec?;
+    if spec.patterns.is_empty() {
+        return None;
+    }
+    let mut builder = GitignoreBuilder::new(root);
+    let mut added = false;
+    for pattern in &spec.patterns {
+        if builder.add_line(None, pattern).is_ok() {
+            added = true;
+        }
+    }
+    added.then(|| builder.build().ok()).flatten()
+}
+
+/// Reconstruct a nested [`FileTree`] from a flat list of `(relative_path,
+/// is_dir)` entries.
+///
+/// `prune_empty_dirs` controls the directory-pruning rule the prior recursive
+/// walker applied: when an extension filter is active, directories with no
+/// surviving files are dropped; when there is no filter, every walked directory
+/// is kept (including empty ones).
+fn build_tree_from_entries(entries: &[(PathBuf, bool)], prune_empty_dirs: bool) -> Vec<FileTree> {
+    let mut root = TreeNode::default();
+    for (rel, is_dir) in entries {
+        insert_entry(&mut root, rel, *is_dir);
+    }
+    convert_children(&root.children, prune_empty_dirs)
+}
+
+#[derive(Default)]
+struct TreeNode {
+    children: BTreeMap<String, TreeNode>,
+    is_file: bool,
+    file_rel: Option<PathBuf>,
+}
+
+/// Insert one walked entry into the tree by splitting its relative path into
+/// components. Intermediate components become directory nodes; the final
+/// component is marked as a file (with its relative path) or a directory.
+fn insert_entry(root: &mut TreeNode, rel: &Path, is_dir: bool) {
+    let comps: Vec<&str> = rel
+        .components()
+        .filter_map(|c| c.as_os_str().to_str())
+        .collect();
+    let mut node = root;
+    for (i, comp) in comps.iter().enumerate() {
+        let is_last = i + 1 == comps.len();
+        let child = node.children.entry((*comp).to_string()).or_default();
+        if is_last {
+            child.is_file = !is_dir;
+            if !is_dir {
+                child.file_rel = Some(rel.to_path_buf());
+            }
+        }
+        node = child;
+    }
+}
+
+/// Convert a tree node's children into sorted [`FileTree`] nodes.
+fn convert_children(
+    children: &BTreeMap<String, TreeNode>,
+    prune_empty_dirs: bool,
+) -> Vec<FileTree> {
+    let mut out: Vec<FileTree> = children
+        .iter()
+        .filter_map(|(name, node)| convert_node(name, node, prune_empty_dirs))
+        .collect();
+    sort_children(&mut out);
+    out
+}
+
+fn convert_node(name: &str, node: &TreeNode, prune_empty_dirs: bool) -> Option<FileTree> {
+    if node.is_file {
+        Some(FileTree::file(
+            name.to_string(),
+            node.file_rel.clone().unwrap_or_default(),
+        ))
+    } else {
+        let children = convert_children(&node.children, prune_empty_dirs);
+        if prune_empty_dirs && children.is_empty() {
+            None
+        } else {
+            Some(FileTree::dir(name.to_string(), children))
+        }
+    }
+}
+
+/// Sort children: directories first, then files, alphabetically within each
+/// group — matching the prior recursive walker's ordering.
+fn sort_children(children: &mut [FileTree]) {
     children.sort_by(|a, b| match (&a.node_type, &b.node_type) {
         (NodeType::Dir, NodeType::File) => std::cmp::Ordering::Less,
         (NodeType::File, NodeType::Dir) => std::cmp::Ordering::Greater,
         _ => a.name.cmp(&b.name),
     });
-
-    Ok(children)
-}
-
-/// Check if a directory entry should be included
-fn should_include_entry(
-    entry: &DirEntry,
-    exclude_hidden: bool,
-    gitignore: Option<&ignore::gitignore::Gitignore>,
-) -> bool {
-    let name = entry.file_name().to_string_lossy();
-
-    // Exclude hidden files if requested
-    if exclude_hidden && name.starts_with('.') && name != "." && name != ".." {
-        return false;
-    }
-
-    // Check gitignore patterns
-    if let Some(gi) = gitignore {
-        let is_dir = entry.file_type().is_dir();
-        if gi.matched(entry.path(), is_dir).is_ignore() {
-            return false;
-        }
-    }
-
-    true
 }
 
 /// Collect all files from tree as flat list

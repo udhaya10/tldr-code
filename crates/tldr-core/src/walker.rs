@@ -269,6 +269,7 @@ pub struct ProjectWalker {
     root: PathBuf,
     respect_gitignore: bool,
     default_ignore: bool,
+    exclude_hidden: bool,
     max_depth: Option<usize>,
     extensions: Option<Vec<&'static str>>,
     lang_hint: Option<crate::types::Language>,
@@ -281,6 +282,7 @@ impl ProjectWalker {
             root: root.as_ref().to_path_buf(),
             respect_gitignore: true,
             default_ignore: true,
+            exclude_hidden: true,
             max_depth: None,
             extensions: None,
             lang_hint: None,
@@ -318,6 +320,18 @@ impl ProjectWalker {
     /// Control whether `.gitignore` rules are honored. Default: `true`.
     pub fn respect_gitignore(mut self, yes: bool) -> Self {
         self.respect_gitignore = yes;
+        self
+    }
+
+    /// Include hidden (dotfile/dotdir) entries instead of skipping them.
+    ///
+    /// `ProjectWalker` skips hidden entries by default (the `ignore` crate's
+    /// `hidden(true)`). Callers that need hidden entries — notably
+    /// `get_file_tree`'s `exclude_hidden = false` path — opt in here. Added
+    /// for TLDR-boa.2 so the canonical walker can faithfully replace the
+    /// bespoke tree walker.
+    pub fn include_hidden(mut self) -> Self {
+        self.exclude_hidden = false;
         self
     }
 
@@ -367,7 +381,7 @@ impl ProjectWalker {
 
         let mut builder = WalkBuilder::new(&self.root);
         builder
-            .hidden(true) // skip .hidden files/dirs
+            .hidden(self.exclude_hidden) // skip dotfiles unless include_hidden()
             .git_ignore(self.respect_gitignore)
             .git_global(self.respect_gitignore)
             .git_exclude(self.respect_gitignore)
@@ -455,11 +469,13 @@ impl ProjectWalker {
     pub fn classify_path(&self, path: &Path, is_dir: bool) -> PathClass {
         let name = path.file_name().and_then(|n| n.to_str());
 
-        // Hidden: dotfile/dotdir. `iter` always sets `hidden(true)` on the
-        // ignore builder, so this check is unconditional.
-        if let Some(n) = name {
-            if n.starts_with('.') && n != "." && n != ".." {
-                return PathClass::Hidden;
+        // Hidden: dotfile/dotdir. `iter` sets `hidden(self.exclude_hidden)`
+        // on the ignore builder, so this check mirrors it.
+        if self.exclude_hidden {
+            if let Some(n) = name {
+                if n.starts_with('.') && n != "." && n != ".." {
+                    return PathClass::Hidden;
+                }
             }
         }
 
@@ -924,6 +940,21 @@ mod tests {
         let tmp = tempdir().unwrap();
         write_file(&tmp.path().join(".hidden.rs"), "fn a() {}");
         assert_eq!(classify(tmp.path(), ".hidden.rs", false), PathClass::Hidden);
+    }
+
+    #[test]
+    fn classify_path_include_hidden_makes_dotfile_eligible() {
+        let tmp = tempdir().unwrap();
+        write_file(&tmp.path().join(".hidden.rs"), "fn a() {}");
+        // Default: hidden.
+        assert_eq!(classify(tmp.path(), ".hidden.rs", false), PathClass::Hidden);
+        // Opt in: the dotfile is eligible.
+        assert_eq!(
+            ProjectWalker::new(tmp.path())
+                .include_hidden()
+                .classify_path(&tmp.path().join(".hidden.rs"), false),
+            PathClass::Eligible
+        );
     }
 
     #[test]
