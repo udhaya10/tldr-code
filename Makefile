@@ -28,23 +28,29 @@ clean:
 # (see `install-restart`).
 install: build
 	@mkdir -p $(LOCAL_BIN)
-	cp target/release/tldr $(LOCAL_BIN)/tldr
+	@# rm before cp, never overwrite in place: on macOS, if a running process still
+	@# has this path mapped as its executable, an in-place overwrite corrupts the
+	@# kernel's code-signature validation cache for that vnode, and every subsequent
+	@# exec of the path gets SIGKILLed (exit 137) until the file gets a fresh inode.
+	rm -f $(LOCAL_BIN)/tldr && cp target/release/tldr $(LOCAL_BIN)/tldr
 	@# Keep the cargo-bin copy in sync too, if present, so it can't go stale.
-	@if [ -e "$(CARGO_BIN)/tldr" ]; then cp target/release/tldr $(CARGO_BIN)/tldr; echo "synced $(CARGO_BIN)/tldr"; fi
+	@if [ -e "$(CARGO_BIN)/tldr" ]; then rm -f "$(CARGO_BIN)/tldr" && cp target/release/tldr "$(CARGO_BIN)/tldr"; echo "synced $(CARGO_BIN)/tldr"; fi
 	@echo "installed: $$($(LOCAL_BIN)/tldr --version) -> $(LOCAL_BIN)/tldr"
 
-# Install AND restart running daemons so the long-lived process picks up the
-# new binary. launchd KeepAlive agents (com.parcadei.tldr-daemon.*) respawn
-# automatically with the freshly-installed binary; manually-started daemons
-# simply stop and come back on the next `tldr` invocation. This is the target
-# to use after changing daemon/serving code.
-install-restart: install restart-daemons
+# Stop daemons BEFORE installing (not after): a live daemon keeps the binary's
+# vnode mapped, so installing first and restarting after is exactly the
+# ordering that triggers the corruption described in `install` above. Stopping
+# first also means the real IPC shutdown (`tldr daemon stop --all`) is used
+# instead of `pkill -f 'tldr daemon start'`, which only sends SIGTERM — these
+# daemons only shut down via their own IPC protocol and ignore SIGTERM, so the
+# old pkill-based target silently left the old binary running.
+install-restart: restart-daemons install
 
 restart-daemons:
-	@echo "restarting running tldr daemons (launchd KeepAlive respawns with the new binary)..."
-	@pkill -f 'tldr daemon start' 2>/dev/null || true
-	@sleep 2
-	@echo "done. verify: tldr daemon status"
+	@echo "stopping running tldr daemons via IPC (SIGTERM alone does not stop them)..."
+	@tldr daemon stop --all 2>/dev/null || true
+	@sleep 1
+	@echo "done — daemons respawn via launchd KeepAlive or lazily on next tldr invocation."
 
 # Show every tldr on PATH (and flag drift) — quick staleness check.
 which-tldr:
