@@ -8,6 +8,9 @@ tmp/
 dist/
 build/
 
+# IDE / editor config
+.idea/
+
 # Environment
 .env
 .env.*
