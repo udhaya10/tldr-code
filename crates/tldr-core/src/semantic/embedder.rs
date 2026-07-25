@@ -350,6 +350,52 @@ impl Embedder {
         Ok(normalized)
     }
 
+    /// Embed `(index, text)` pairs with length-sorted batching.
+    ///
+    /// Sorts by byte length ascending so that consecutive internal batches of
+    /// [`EMBED_BATCH_SIZE`] have near-uniform longest-token-count, collapsing
+    /// the distinct ONNX input shapes the session sees. This bounds the ONNX
+    /// Runtime CPU arena's shape-diversity-driven growth (TLDR-vbw0.1 Tier 1):
+    /// with ~14k chunks / 32 per batch the unsorted path feeds the session up
+    /// to ~450 distinct `(32, L)` shapes; sorting collapses that to roughly
+    /// `N / EMBED_BATCH_SIZE` distinct `L` values, and the arena plateaus at a
+    /// small constant instead of climbing monotonically across the run.
+    ///
+    /// Returns embeddings paired with their **original input index**; callers
+    /// write results back to their own storage by that index. The sort is
+    /// stable ([`slice::sort_by_key`] is stable), so equal-length texts keep
+    /// their input order, making embedding output reproducible run-to-run.
+    ///
+    /// Prefer this over [`embed_batch`] for any caller embedding more than one
+    /// batch's worth of texts where input order is not semantically
+    /// significant (i.e. the caller maps results back by an explicit index,
+    /// not by input position). Position-sensitive callers (tests, single-batch
+    /// paths) should keep [`embed_batch`].
+    ///
+    /// # Arguments
+    ///
+    /// * `indexed` - `(caller_index, text)` pairs. The `caller_index` is
+    ///   opaque to this method; it is carried through the sort and returned
+    ///   alongside the embedding so the caller can write back by index.
+    /// * `show_progress` - Forwarded to [`embed_batch`]; see its docs.
+    pub fn embed_batch_indexed(
+        &mut self,
+        indexed: Vec<(usize, &str)>,
+        show_progress: bool,
+    ) -> TldrResult<Vec<(usize, Vec<f32>)>> {
+        if indexed.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut sorted = indexed;
+        // sort_by_key is stable: equal-length texts preserve input order,
+        // so output is deterministic across runs.
+        sorted.sort_by_key(|(_, t)| t.len());
+        let texts: Vec<&str> = sorted.iter().map(|(_, t)| *t).collect();
+        let embeddings = self.embed_batch(texts, show_progress)?;
+        let indices: Vec<usize> = sorted.into_iter().map(|(i, _)| i).collect();
+        Ok(indices.into_iter().zip(embeddings).collect())
+    }
+
     /// Embed multiple texts using an explicit batch size (diagnostic use).
     ///
     /// [`Self::embed_batch`] always uses the fixed, memory-safe

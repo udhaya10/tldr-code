@@ -1230,16 +1230,28 @@ impl VectorStore {
             } else {
                 Vec::new()
             };
-            let texts: Vec<&str> = if enrich {
-                enriched_texts.iter().map(|s| s.as_str()).collect()
-            } else {
-                uncached
-                    .iter()
-                    .map(|&i| chunks[i].content.as_str())
-                    .collect()
-            };
-            let embeddings = embedder.embed_batch(texts, options.show_progress)?;
-            for (&i, embedding) in uncached.iter().zip(embeddings) {
+            // TLDR-vbw0.1 Tier 1: build (chunk_index, text) pairs and route
+            // through embed_batch_indexed, which sorts by text length before
+            // batching. This collapses the distinct ONNX input shapes the
+            // session sees (~450 -> ~N/32) so the ONNX CPU arena plateaus
+            // instead of growing monotonically across the run. The first
+            // tuple element is the CHUNK index (for vectors[i] / cache.put
+            // writeback); enriched_texts is indexed by POSITION in uncached
+            // (it was built by mapping uncached in order), so we enumerate.
+            let indexed: Vec<(usize, &str)> = uncached
+                .iter()
+                .enumerate()
+                .map(|(pos, &i)| {
+                    let text = if enrich {
+                        enriched_texts[pos].as_str()
+                    } else {
+                        chunks[i].content.as_str()
+                    };
+                    (i, text)
+                })
+                .collect();
+            let embeddings = embedder.embed_batch_indexed(indexed, options.show_progress)?;
+            for (i, embedding) in embeddings {
                 if let Some(c) = cache.as_mut() {
                     c.put(&chunks[i], embedding.clone(), options.model);
                 }

@@ -376,12 +376,18 @@ impl IndexManager {
         // 3. Embed the changed chunks (lock-free, on the resident embedder).
         let mut embedded: HashMap<u64, Vec<f32>> = HashMap::new();
         if !to_embed.is_empty() {
-            let texts: Vec<&str> = to_embed
+            // TLDR-vbw0.1 Tier 1: route through embed_batch_indexed (via the
+            // embed() helper below) which sorts by text length before
+            // batching, collapsing ONNX input shapes so the CPU arena
+            // plateaus instead of climbing across the run. The first tuple
+            // element is the POSITION in to_embed/keyed/new_chunks (used to
+            // key the writeback into `embedded` via keyed[i].0).
+            let indexed: Vec<(usize, &str)> = to_embed
                 .iter()
-                .map(|&i| new_chunks[i].content.as_str())
+                .map(|&i| (i, new_chunks[i].content.as_str()))
                 .collect();
-            let vectors = self.embed(model, texts)?;
-            for (&i, vector) in to_embed.iter().zip(vectors) {
+            let vectors = self.embed(model, indexed)?;
+            for (i, vector) in vectors {
                 embedded.insert(keyed[i].0, vector);
             }
         }
@@ -406,9 +412,20 @@ impl IndexManager {
         })
     }
 
-    /// Embed `texts` with the resident embedder, (re)creating it on a model
-    /// change. Holds only the embedder `Mutex` — never the store lock.
-    fn embed(&self, model: EmbeddingModel, texts: Vec<&str>) -> Result<Vec<Vec<f32>>, String> {
+    /// Embed `(index, text)` pairs with the resident embedder, (re)creating
+    /// it on a model change. Holds only the embedder `Mutex` — never the
+    /// store lock.
+    ///
+    /// Delegates to [`Embedder::embed_batch_indexed`] which sorts by text
+    /// length before batching (TLDR-vbw0.1 Tier 1), collapsing ONNX input
+    /// shapes so the CPU arena plateaus instead of climbing across a long
+    /// embed run. Returns `(caller_index, embedding)` pairs; the caller maps
+    /// back by its own index, not by input position.
+    fn embed(
+        &self,
+        model: EmbeddingModel,
+        indexed: Vec<(usize, &str)>,
+    ) -> Result<Vec<(usize, Vec<f32>)>, String> {
         let mut guard = self.embedder.lock();
         if !guard.as_ref().is_some_and(|(m, _)| *m == model) {
             let embedder = Embedder::new(model).map_err(|e| e.to_string())?;
@@ -416,7 +433,7 @@ impl IndexManager {
         }
         let (_, embedder) = guard.as_mut().expect("embedder present after init");
         embedder
-            .embed_batch(texts, false)
+            .embed_batch_indexed(indexed, false)
             .map_err(|e| e.to_string())
     }
 
