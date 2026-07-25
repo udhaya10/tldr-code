@@ -146,7 +146,12 @@ pub fn load_or_build_store(
     let current_digest = compute_corpus_digest(root);
 
     match VectorStore::load(store_dir, &id) {
-        Ok(s) if s.corpus_digest() == current_digest => Ok(s),
+        // A fresh persisted store can be reused — UNLESS the caller asked for
+        // build instrumentation (TLDR-9bxa.1): a loaded store carries no
+        // metrics, so `collect_metrics` must force a rebuild. `collect_metrics`
+        // is off for every default caller (daemon, search), so this only
+        // affects `tldr embed --metrics`.
+        Ok(s) if s.corpus_digest() == current_digest && !build_options.collect_metrics => Ok(s),
         loaded => {
             if loaded.is_ok() {
                 eprintln!("[tldr-info] semantic store is stale (source changed); rebuilding");

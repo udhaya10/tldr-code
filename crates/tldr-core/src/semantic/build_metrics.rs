@@ -67,14 +67,18 @@ pub struct MetricsReport {
     pub options: BuildOptionsSummary,
     /// Build start time, unix epoch millis.
     pub started_at_unix_ms: u64,
-    /// Total wall time of the instrumented build, millis.
+    /// Total wall time of the instrumented build, millis. Excludes sampler
+    /// teardown (captured before the sampler join).
     pub duration_ms: u64,
-    /// Timed phase boundaries (`chunk`, `cache_lookup`, `embed`).
+    /// Timed phase boundaries (`chunk`, `cache_lookup`, `model_load`, `embed`).
     pub phases: Vec<PhaseRecord>,
     /// Total chunks (cached + embedded).
     pub chunks_total: usize,
     /// Chunks served from the content-addressed cache (Phase 1 hits).
     pub chunks_cached: usize,
+    /// Whether a dedup cache was actually opened (effective state), distinct
+    /// from the requested `options.use_cache`.
+    pub cache_opened: bool,
     /// Chunks actually embedded via ONNX (Phase 2; == cache misses).
     pub chunks_embedded: usize,
     /// Per-batch shape descriptors, one entry per `EMBED_BATCH_SIZE` group in
@@ -107,7 +111,8 @@ pub struct ModelInfo {
 pub struct BuildOptionsSummary {
     /// Chunking granularity (`File` / `Function`).
     pub granularity: String,
-    /// Whether the content-addressed dedup cache was used.
+    /// Whether the dedup cache was REQUESTED. The EFFECTIVE state (was one
+    /// actually opened?) is [`MetricsReport::cache_opened`].
     pub use_cache: bool,
     /// Whether enriched (vs raw) text was embedded — mirrors `TLDR_ENRICH`.
     pub enrich: bool,
@@ -168,11 +173,16 @@ pub struct BatchShape {
     pub token_length_available: bool,
 }
 
-/// RSS summary: peak, final sample, and the sampled timeline.
+/// RSS summary: build-scoped peak, process-lifetime peak, final sample, timeline.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RssSummary {
-    /// Peak (high-water) RSS via `getrusage`, bytes.
+    /// Peak RSS observed DURING this build (max of timeline + phase-end +
+    /// final samples), bytes. Build-scoped — excludes pre-build allocations.
     pub peak_bytes: Option<u64>,
+    /// Process-lifetime peak via `getrusage(RUSAGE_SELF).ru_maxrss`, bytes.
+    /// Cross-check against `peak_bytes`; on a fresh standalone `tldr embed`
+    /// process the two should agree within ~10%.
+    pub process_peak_bytes: Option<u64>,
     /// RSS sampled at build end, bytes.
     pub final_bytes: Option<u64>,
     /// Sampler cadence, millis.
@@ -218,6 +228,8 @@ pub struct BuildMetrics {
     cache_hits: usize,
     /// == cache misses == chunks embedded.
     cache_misses: usize,
+    /// Whether a dedup cache was actually opened (effective, not requested).
+    cache_opened: bool,
     /// Input byte lengths in the SAME (length-sorted ascending) order
     /// `embed_batch_indexed` feeds fastembed, so consecutive `EMBED_BATCH_SIZE`
     /// groups match the batches the session actually sees.
@@ -267,6 +279,7 @@ impl BuildMetrics {
             current_phase: None,
             cache_hits: 0,
             cache_misses: 0,
+            cache_opened: false,
             input_lengths: Vec::new(),
             embed_latency_ms: 0,
             rss_samples,
@@ -299,6 +312,13 @@ impl BuildMetrics {
         self.cache_misses = misses;
     }
 
+    /// Record whether a dedup cache was actually opened (effective state, not
+    /// just the requested option — `use_cache` + `cache_config: None` still
+    /// yields no cache).
+    pub fn record_cache_opened(&mut self, opened: bool) {
+        self.cache_opened = opened;
+    }
+
     /// Record the byte lengths of all Phase-2 embed inputs, in length-sorted
     /// ascending order (matching `embed_batch_indexed`'s internal sort).
     pub fn record_embed_inputs(&mut self, lengths_sorted: Vec<usize>) {
@@ -319,6 +339,10 @@ impl BuildMetrics {
     /// (cheap, one-time at build end); `self` is left drained and its `Drop`
     /// then no-ops (the sampler was already joined here).
     pub fn finalize(&mut self, chunks_total: usize) -> MetricsReport {
+        // Capture total build duration BEFORE tearing down the sampler, so the
+        // (up to one sleep-step) sampler-join wait is NOT counted in
+        // `duration_ms` (review: it was inflating the reported duration).
+        let duration_ms = self.start.elapsed().as_millis() as u64;
         self.end_phase();
         self.stop_sampler();
         let timeline = self
@@ -326,8 +350,21 @@ impl BuildMetrics {
             .lock()
             .map(|t| t.clone())
             .unwrap_or_default();
+        let final_bytes = util::current_rss_bytes();
+        // Build-scoped peak = the max RSS observed DURING this build (timeline
+        // samples + phase-end samples + the final sample) — NOT the process-
+        // lifetime `ru_maxrss`, which also covers everything before the build
+        // (review). `ru_maxrss` is still reported as `process_peak_bytes` so the
+        // OS figure remains available for cross-check (acceptance: agrees within
+        // 10% on a fresh standalone `tldr embed` process).
+        let mut peak_bytes = final_bytes;
+        for s in &timeline {
+            peak_bytes = max_opt(peak_bytes, Some(s.rss_bytes));
+        }
+        for p in &self.phases {
+            peak_bytes = max_opt(peak_bytes, p.rss_bytes_at_end);
+        }
         let chunks_embedded = self.cache_misses;
-        let duration_ms = self.start.elapsed().as_millis() as u64;
         let batches = compute_batch_shapes(&self.input_lengths, self.options.batch_size);
         let throughput = Throughput {
             chunks_per_second: ms_per_sec(duration_ms, chunks_total),
@@ -346,11 +383,13 @@ impl BuildMetrics {
             chunks_total,
             chunks_cached: self.cache_hits,
             chunks_embedded,
+            cache_opened: self.cache_opened,
             batches,
             embed_latency_ms: self.embed_latency_ms,
             rss: RssSummary {
-                peak_bytes: util::peak_rss_bytes(),
-                final_bytes: util::current_rss_bytes(),
+                peak_bytes,
+                process_peak_bytes: util::peak_rss_bytes(),
+                final_bytes,
                 sample_interval_ms: self.sample_interval_ms,
                 timeline,
             },
@@ -379,6 +418,15 @@ fn ms_per_sec(duration_ms: u64, count: usize) -> f64 {
         count as f64 * 1000.0 / duration_ms as f64
     } else {
         0.0
+    }
+}
+
+/// Max of two optional u64s (`None` treated as absent).
+fn max_opt(a: Option<u64>, b: Option<u64>) -> Option<u64> {
+    match (a, b) {
+        (Some(x), Some(y)) => Some(x.max(y)),
+        (Some(x), None) | (None, Some(x)) => Some(x),
+        (None, None) => None,
     }
 }
 
@@ -449,13 +497,14 @@ fn spawn_sampler(
                 guard.push(sample);
             }
         }
-        // Sleep in <=50ms steps so `stop` is noticed within ~50ms.
+        // Sleep in <=25ms steps so `stop` is noticed promptly (within ~25ms),
+        // keeping the sampler-join latency small relative to build duration.
         let mut slept = 0u64;
         while slept < interval_ms {
             if stop.load(Ordering::SeqCst) {
                 break;
             }
-            let step = 50u64.min(interval_ms.saturating_sub(slept));
+            let step = 25u64.min(interval_ms.saturating_sub(slept));
             std::thread::sleep(Duration::from_millis(step));
             slept += step;
         }
@@ -543,6 +592,7 @@ mod tests {
             }],
             chunks_total: 5,
             chunks_cached: 2,
+            cache_opened: false,
             chunks_embedded: 3,
             batches: vec![BatchShape {
                 index: 0,
@@ -555,6 +605,7 @@ mod tests {
             embed_latency_ms: 800,
             rss: RssSummary {
                 peak_bytes: Some(2_000_000),
+                process_peak_bytes: Some(2_500_000),
                 final_bytes: Some(1_000_000),
                 sample_interval_ms: 500,
                 timeline: vec![RssSample {
@@ -603,6 +654,38 @@ mod tests {
         // The sampler ran ~60ms at 500ms interval -> may have 0 or 1 samples;
         // either is fine, but the timeline field must exist and be bounded.
         assert!(report.rss.timeline.len() <= 2);
+    }
+
+    /// peak_bytes is the BUILD-SCOPED max (timeline + phase-end + final), not
+    /// the process-lifetime ru_maxrss (review finding 3).
+    #[test]
+    fn peak_is_build_scoped_max_of_observations() {
+        let opts = BuildOptions::default();
+        let mut m = BuildMetrics::new("ArcticM", 768, "/repo", 0, &opts, false);
+        m.begin_phase("chunk");
+        // Let the sampler capture at least one sample.
+        std::thread::sleep(Duration::from_millis(80));
+        m.end_phase();
+        let report = m.finalize(0);
+
+        // Recompute the max over exactly the observations finalize used.
+        let expected = report
+            .rss
+            .timeline
+            .iter()
+            .map(|s| s.rss_bytes)
+            .chain(report.phases.iter().filter_map(|p| p.rss_bytes_at_end))
+            .chain(report.rss.final_bytes.iter().copied())
+            .max();
+        assert_eq!(report.rss.peak_bytes, expected);
+        assert!(report.rss.peak_bytes.is_some(), "build must observe at least one RSS sample");
+
+        // A build-scoped peak can never exceed the process-lifetime peak.
+        if let (Some(peak), Some(proc_peak)) =
+            (report.rss.peak_bytes, report.rss.process_peak_bytes)
+        {
+            assert!(peak <= proc_peak, "build peak {peak} exceeds process peak {proc_peak}");
+        }
     }
 
     #[test]

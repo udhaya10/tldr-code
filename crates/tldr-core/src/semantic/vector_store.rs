@@ -1251,6 +1251,10 @@ impl VectorStore {
 
         // Phase 1: content-addressed cache hits vs. misses.
         if let Some(m) = metrics.as_mut() {
+            // Record the EFFECTIVE cache state (was a cache actually opened?),
+            // not just the requested option — `use_cache` + `cache_config: None`
+            // still yields no cache (review).
+            m.record_cache_opened(cache.is_some());
             m.begin_phase("cache_lookup");
         }
         let mut vectors: Vec<Vec<f32>> = vec![Vec::new(); chunks.len()];
@@ -1329,14 +1333,17 @@ impl VectorStore {
                 None
             };
             let embeddings = embedder.embed_batch_indexed(indexed, options.show_progress)?;
+            // Capture inference latency IMMEDIATELY after the embed call, before
+            // the cache-writeback / vector-assignment loop, so `embed_latency_ms`
+            // is pure inference (review: it was including writeback).
+            if let (Some(m), Some(start)) = (metrics.as_mut(), embed_call_start) {
+                m.record_embed_latency_ms(start.elapsed().as_millis() as u64);
+            }
             for (i, embedding) in embeddings {
                 if let Some(c) = cache.as_mut() {
                     c.put(&chunks[i], embedding.clone(), options.model);
                 }
                 vectors[i] = embedding;
-            }
-            if let (Some(m), Some(start)) = (metrics.as_mut(), embed_call_start) {
-                m.record_embed_latency_ms(start.elapsed().as_millis() as u64);
             }
             if let Some(m) = metrics.as_mut() {
                 m.end_phase();
@@ -2190,6 +2197,92 @@ mod tests {
             id,
             ManifestId::for_build(EmbeddingModel::ArcticL, p, "fn", "v1")
         );
+    }
+
+    /// TLDR-9bxa.1: `collect_metrics` must force a rebuild even when a fresh
+    /// persisted store exists (so `--metrics` always emits a report), and the
+    /// report's `cache_opened` reflects the EFFECTIVE state (`cache_config`
+    /// `None` → not opened, even though `use_cache` was requested). Ignored:
+    /// a real corpus needs the ONNX embedder.
+    #[test]
+    #[ignore = "loads the ONNX embedder; run on demand"]
+    fn collect_metrics_forces_rebuild_and_reports_effective_cache() {
+        use crate::semantic::store_search::load_or_build_store;
+        use crate::semantic::types::ChunkGranularity;
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.rs"), "fn alpha(x: i32) -> i32 { x + 1 }\n").unwrap();
+        let store_dir = dir.path().join("store");
+
+        let opts = BuildOptions {
+            model: EmbeddingModel::ArcticXS,
+            granularity: ChunkGranularity::Function,
+            languages: None,
+            show_progress: false,
+            use_cache: true,
+            collect_metrics: false,
+        };
+        // 1) Build + persist a fresh store with NO metrics.
+        let _s1 = load_or_build_store(dir.path(), &store_dir, &opts, None).unwrap();
+
+        // 2) A fresh store now exists. A no-metrics call would LOAD it;
+        //    `collect_metrics` must force a REBUILD so metrics are present.
+        let opts_m = BuildOptions {
+            collect_metrics: true,
+            ..opts
+        };
+        let s2 = load_or_build_store(dir.path(), &store_dir, &opts_m, None).unwrap();
+        let report = s2
+            .build_metrics()
+            .expect("collect_metrics must force a rebuild even when a fresh store exists");
+
+        assert!(report.chunks_total > 0, "corpus has a function -> >=1 chunk");
+        assert!(
+            !report.cache_opened,
+            "use_cache requested but cache_config None -> cache NOT opened"
+        );
+        assert!(
+            report.phases.iter().any(|p| p.name == "chunk"),
+            "chunk phase must be recorded"
+        );
+    }
+
+    /// TLDR-9bxa.1: turning `collect_metrics` on must NOT change the vectors.
+    /// Ignored (loads the model). Demonstrates equivalence at the observable
+    /// level — same vector count for the same corpus, metrics off vs on — and
+    /// that the report is only present on the instrumented build.
+    #[test]
+    #[ignore = "loads the ONNX embedder; run on demand"]
+    fn collect_metrics_does_not_change_vector_count() {
+        use crate::semantic::types::ChunkGranularity;
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.rs"), "fn alpha(x: i32) -> i32 { x + 1 }\n").unwrap();
+        std::fs::write(dir.path().join("b.rs"), "fn beta(y: i32) -> i32 { y * 2 }\n").unwrap();
+
+        let base = BuildOptions {
+            model: EmbeddingModel::ArcticXS,
+            granularity: ChunkGranularity::Function,
+            languages: None,
+            show_progress: false,
+            use_cache: false,
+            collect_metrics: false,
+        };
+        // Use `&base` (metrics off) first, THEN move `base` into `with_metrics`.
+        let s_off = VectorStore::build(dir.path(), &base, None).unwrap();
+        let with_metrics = BuildOptions {
+            collect_metrics: true,
+            ..base
+        };
+        let s_on = VectorStore::build(dir.path(), &with_metrics, None).unwrap();
+
+        assert_eq!(
+            s_off.len(),
+            s_on.len(),
+            "metrics must not change the embedded vector count"
+        );
+        assert!(s_off.build_metrics().is_none());
+        assert!(s_on.build_metrics().is_some());
     }
 
     /// End-to-end through the real ONNX embedder: build → search → manifest →
