@@ -444,7 +444,7 @@ pub struct ManifestId {
     pub scalar_kind: String,
     /// Search mode (`"exact"` vs `"hnsw"`).
     pub search_mode: String,
-    /// Embed-input recipe tag (`raw-v1` / `enriched-v1`).
+    /// Embed-input recipe tag (`raw-v2` / `enriched-v2`).
     pub embed_schema: String,
     /// Digest of ChunkOptions (granularity/max_tokens/overlap/lang filter).
     pub chunk_params: String,
@@ -1327,6 +1327,21 @@ impl VectorStore {
                 lens.sort();
                 m.record_embed_inputs(lens);
             }
+            // TLDR-9bxa.2: token-accurate budget check per embed input. Only
+            // when collecting metrics (tokenizing every input is real work);
+            // best-effort — if the tokenizer can't load (offline), the report's
+            // token_budget stays empty rather than failing the build.
+            if metrics.is_some() {
+                if let Ok(tb) =
+                    crate::semantic::token_budget::TokenBudget::for_model(options.model)
+                {
+                    for (_, text) in &indexed {
+                        if let Some(m) = metrics.as_mut() {
+                            m.record_token_check(tb.check(text));
+                        }
+                    }
+                }
+            }
             let embed_call_start = if metrics.is_some() {
                 Some(Instant::now())
             } else {
@@ -1406,9 +1421,9 @@ fn embed_schema_tag() -> String {
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
     if enrich {
-        "enriched-v1".to_string()
+        "enriched-v2".to_string()
     } else {
-        "raw-v1".to_string()
+        "raw-v2".to_string()
     }
 }
 
@@ -1699,7 +1714,7 @@ mod tests {
             metric: "cos".into(),
             scalar_kind: "f32".into(),
             search_mode: "exact".into(),
-            embed_schema: "raw-v1".into(),
+            embed_schema: "raw-v2".into(),
             chunk_params: "fn".into(),
             walker_version: "w1".into(),
             root: "/proj".into(),

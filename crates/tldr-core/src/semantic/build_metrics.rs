@@ -78,6 +78,9 @@ pub struct MetricsReport {
     /// Whether a dedup cache was actually opened (effective state), distinct
     /// from the requested `options.use_cache`.
     pub cache_opened: bool,
+    /// Token-budget outcomes (TLDR-9bxa.2): per-corpus oversized accounting.
+    /// `None` only if token checks were not run (tokenizer unavailable).
+    pub token_budget: Option<crate::semantic::token_budget::TokenStats>,
     /// Chunks actually embedded via ONNX (Phase 2; == cache misses).
     pub chunks_embedded: usize,
     /// Per-batch shape descriptors, one entry per `EMBED_BATCH_SIZE` group in
@@ -237,6 +240,8 @@ pub struct BuildMetrics {
     /// groups match the batches the session actually sees.
     input_lengths: Vec<usize>,
     embed_latency_ms: u64,
+    /// Token-budget outcomes per input (TLDR-9bxa.2), accumulated into the report.
+    token_stats: crate::semantic::token_budget::TokenStats,
     rss_samples: Arc<Mutex<Vec<RssSample>>>,
     /// Condvar-based shutdown signal so the sampler wakes and exits promptly
     /// (sub-millisecond) on finalize/drop, instead of polling a flag every
@@ -287,6 +292,7 @@ impl BuildMetrics {
             cache_opened: false,
             input_lengths: Vec::new(),
             embed_latency_ms: 0,
+            token_stats: crate::semantic::token_budget::TokenStats::default(),
             rss_samples,
             signal,
             sampler_handle,
@@ -333,6 +339,15 @@ impl BuildMetrics {
     /// Record the aggregate ONNX embed latency (Phase 2), millis.
     pub fn record_embed_latency_ms(&mut self, ms: u64) {
         self.embed_latency_ms = ms;
+    }
+
+    /// Record one input's token-budget check (TLDR-9bxa.2). Accumulated into
+    /// the report's `token_budget` stats.
+    pub fn record_token_check(
+        &mut self,
+        check: crate::semantic::token_budget::TokenCheck,
+    ) {
+        self.token_stats.record(check);
     }
 
     /// Stop the sampler, compute aggregates, and produce the final report.
@@ -395,6 +410,7 @@ impl BuildMetrics {
             chunks_cached: self.cache_hits,
             chunks_embedded,
             cache_opened: self.cache_opened,
+            token_budget: Some(self.token_stats.clone()),
             batches,
             embed_latency_ms: self.embed_latency_ms,
             rss: RssSummary {
@@ -634,6 +650,7 @@ mod tests {
             chunks_total: 5,
             chunks_cached: 2,
             cache_opened: false,
+            token_budget: None,
             chunks_embedded: 3,
             batches: vec![BatchShape {
                 index: 0,

@@ -83,9 +83,9 @@ fn embed_schema_version() -> &'static str {
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
     if enrich {
-        "enriched-v1"
+        "enriched-v2"
     } else {
-        "raw-v1"
+        "raw-v2"
     }
 }
 

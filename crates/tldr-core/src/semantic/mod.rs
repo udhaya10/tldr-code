@@ -132,6 +132,11 @@ pub mod vector_store;
 pub mod build_metrics;
 pub use build_metrics::{BuildMetrics, MetricsReport};
 
+// TLDR-9bxa.2: token-accurate input budgets — replaces the 4000-char silent
+// truncation with real model-tokenizer accounting.
+pub mod token_budget;
+pub use token_budget::{TokenBudget, TokenCheck, TokenStats};
+
 // TLDR-m01/zxb: store-backed semantic search — the ONLY search path (TLDR-lx7).
 // No SemanticIndex fallback. VectorStore works or the user gets an error.
 pub mod store_search;

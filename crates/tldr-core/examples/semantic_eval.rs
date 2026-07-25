@@ -331,7 +331,7 @@ fn main() {
     // show_progress: true is REQUIRED for batched embedding — embedder.rs ties
     // batch_size to it (None when false), so false embeds the whole corpus in one
     // unbatched call (17GB, minutes). Cache ON: the schema tag is recipe-honest
-    // (raw-v1/enriched-v1) and the query prefix never changes document vectors,
+    // (raw-v2/enriched-v2) and the query prefix never changes document vectors,
     // so prefix A/B re-runs reuse cached docs and only re-embed the query.
     // y0q: benchmark the DEPLOYED model (resolved from .tldr config exactly like
     // the CLI does), not the hardcoded enum default (ArcticM). Otherwise the eval

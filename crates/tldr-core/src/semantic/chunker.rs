@@ -47,7 +47,11 @@ use crate::{Language, TldrError, TldrResult};
 // Constants
 // =============================================================================
 
-/// Maximum chunk size in characters (default: ~4000 chars for ~1000 tokens)
+/// Legacy default chunk size in characters. **No longer used for truncation**
+/// (TLDR-9bxa.2 removed silent character truncation; oversized inputs are
+/// detected and reported at the embed boundary via the token budget). Retained
+/// as a published constant for compatibility; do not reintroduce char-budget
+/// correctness limits on it.
 pub const DEFAULT_MAX_CHUNK_SIZE: usize = 4000;
 
 /// Binary file extensions to skip
@@ -370,17 +374,17 @@ pub fn chunk_file<P: AsRef<Path>>(path: P, options: &ChunkOptions) -> TldrResult
     match options.granularity {
         ChunkGranularity::File => {
             // One chunk for entire file
-            chunks.push(create_file_chunk(path, &content, language, options));
+            chunks.push(create_file_chunk(path, &content, language));
         }
         ChunkGranularity::Function => {
             // Try to extract functions using tree-sitter
             match parse_result {
                 Ok((tree, source, lang)) => {
-                    let functions = extract_function_chunks(&tree, &source, path, lang, options);
+                    let functions = extract_function_chunks(&tree, &source, path, lang);
 
                     if functions.is_empty() {
                         // Fallback to file-level chunk if no functions found
-                        chunks.push(create_file_chunk(path, &content, language, options));
+                        chunks.push(create_file_chunk(path, &content, language));
                     } else {
                         chunks.extend(functions);
                     }
@@ -392,7 +396,7 @@ pub fn chunk_file<P: AsRef<Path>>(path: P, options: &ChunkOptions) -> TldrResult
                         path.display(),
                         e
                     );
-                    chunks.push(create_file_chunk(path, &content, language, options));
+                    chunks.push(create_file_chunk(path, &content, language));
                 }
             }
         }
@@ -659,15 +663,11 @@ fn create_file_chunk(
     path: &Path,
     content: &str,
     language: Language,
-    options: &ChunkOptions,
 ) -> CodeChunk {
-    let max_size = if options.max_chunk_size > 0 {
-        Some(options.max_chunk_size)
-    } else {
-        Some(DEFAULT_MAX_CHUNK_SIZE)
-    };
-
-    let (final_content, _truncated) = truncate_if_needed(content, max_size);
+    // TLDR-9bxa.2: no silent character truncation — the chunk keeps its full
+    // content; oversized inputs are detected and reported at the embed boundary
+    // via the token budget (and left for fastembed's token-level truncation).
+    // AST splitting is TLDR-9bxa.3.
     let line_count = content.lines().count();
 
     CodeChunk {
@@ -676,25 +676,9 @@ fn create_file_chunk(
         class_name: None,
         line_start: 1,
         line_end: line_count.max(1) as u32,
-        content: final_content,
+        content: content.to_string(),
         content_hash: compute_hash(content),
         language,
-    }
-}
-
-/// Truncate content if it exceeds max size
-fn truncate_if_needed(content: &str, max_size: Option<usize>) -> (String, bool) {
-    match max_size {
-        Some(max) if content.len() > max => {
-            // Truncate at character boundary
-            let truncated = content
-                .char_indices()
-                .take_while(|(i, _)| *i < max)
-                .map(|(_, c)| c)
-                .collect::<String>();
-            (truncated, true)
-        }
-        _ => (content.to_string(), false),
     }
 }
 
@@ -722,7 +706,6 @@ fn extract_function_chunks(
     source: &str,
     path: &Path,
     language: Language,
-    options: &ChunkOptions,
 ) -> Vec<CodeChunk> {
     let root = tree.root_node();
     let mut functions = Vec::new();
@@ -739,26 +722,22 @@ fn extract_function_chunks(
         _ => {}
     }
 
-    // Convert to CodeChunks
-    let max_size = if options.max_chunk_size > 0 {
-        Some(options.max_chunk_size)
-    } else {
-        Some(DEFAULT_MAX_CHUNK_SIZE)
-    };
-
+    // Convert to CodeChunks. TLDR-9bxa.2: no silent character truncation —
+    // functions keep their full content; oversized inputs are detected and
+    // reported at the embed boundary via the token budget (and left for
+    // fastembed's token-level truncation). AST splitting is TLDR-9bxa.3.
     functions
         .into_iter()
         .map(|func| {
-            let (final_content, _truncated) = truncate_if_needed(&func.content, max_size);
-
+            let content_hash = compute_hash(&func.content);
             CodeChunk {
                 file_path: path.to_path_buf(),
                 function_name: Some(func.name),
                 class_name: func.class_name,
                 line_start: func.line_start,
                 line_end: func.line_end,
-                content: final_content,
-                content_hash: compute_hash(&func.content),
+                content: func.content,
+                content_hash,
                 language,
             }
         })
@@ -1473,24 +1452,37 @@ fn bar() {}
     }
 
     #[test]
-    fn chunk_file_truncation() {
+    fn chunk_file_no_silent_truncation() {
+        // TLDR-9bxa.2: chunk content is never silently character-truncated.
+        // Oversized inputs keep their full content and are detected + reported
+        // at the embed boundary via the token budget. (max_chunk_size is no
+        // longer a correctness limit.)
         let tmp = TempDir::new().unwrap();
         let file_path = tmp.path().join("test.rs");
 
-        // Create a file with content longer than max
         let long_content = format!("fn foo() {{\n{}\n}}", "    let x = 1;\n".repeat(500));
         fs::write(&file_path, &long_content).unwrap();
 
         let options = ChunkOptions {
-            max_chunk_size: 100, // Very small limit
+            max_chunk_size: 100, // ignored for truncation correctness (TLDR-9bxa.2)
             ..Default::default()
         };
 
         let result = chunk_file(&file_path, &options).unwrap();
 
         assert!(!result.chunks.is_empty());
-        // Content should be truncated
-        assert!(result.chunks[0].content.len() <= 100);
+        let chunk = &result.chunks[0].content;
+        // Full content preserved — no silent char-truncation to 100 bytes.
+        assert!(
+            chunk.len() > 100,
+            "content was char-truncated: len={}",
+            chunk.len()
+        );
+        assert!(
+            chunk.lines().count() > 100,
+            "expected the full ~500-line function, got {} lines",
+            chunk.lines().count()
+        );
     }
 
     #[test]
