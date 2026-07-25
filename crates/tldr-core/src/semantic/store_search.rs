@@ -641,10 +641,10 @@ mod tests {
     fn store_freshness_gate_rebuilds_only_on_source_drift() {
         // PRECONDITION (also a hard requirement for PR2/TLDR-zxb): the store_dir and
         // cache_dir MUST live OUTSIDE the indexed corpus. Otherwise the store's own
-        // writes (manifest/index/cache.json) land in the walked tree and register as
-        // "source drift" -> rebuild-always. Production satisfies this via the global
-        // cache dir or the walker-skipped `.tldr/`. Here: corpus and work are
-        // separate tempdirs.
+        // writes (manifest/index/rkyv cache generations) land in the walked tree
+        // and register as "source drift" -> rebuild-always. Production satisfies
+        // this via the global cache dir or the walker-skipped `.tldr/`. Here:
+        // corpus and work are separate tempdirs.
         let corpus = tempfile::tempdir().unwrap();
         let work = tempfile::tempdir().unwrap();
         std::fs::write(

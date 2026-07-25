@@ -23,6 +23,8 @@ anyhow = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 # M5: Use preserve_order for consistent JSON serialization
 serde_json = { version = "1.0", features = ["preserve_order"] }
+rkyv = "=0.8.17"
+memmap2 = "=0.9.9"
 
 # Parsing - PINNED versions for PM-1.1 (Tree-sitter Version Mismatch)
 # See: docs/GRAMMAR_COMPATIBILITY.md for version rationale

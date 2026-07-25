@@ -441,7 +441,7 @@ impl Default for SearchOptions {
 /// Cache configuration
 #[derive(Debug, Clone)]
 pub struct CacheConfig {
-    /// Cache directory (default: ~/.cache/tldr/embeddings/)
+    /// Platform cache directory containing versioned rkyv embedding snapshots.
     pub cache_dir: PathBuf,
 
     /// Maximum cache size in MB (default: 500)

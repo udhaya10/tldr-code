@@ -1,9 +1,9 @@
-//! Embedding cache with JSON persistence and file locking
+//! Embedding cache with rkyv persistence and file locking
 //!
 //! This module provides persistent caching of embeddings to avoid
 //! re-computing embeddings for unchanged code. Key features:
 //!
-//! - JSON-based persistence for easy debugging and portability
+//! - Compact rkyv binary persistence for fast loading and flushing
 //
 // TLDR-AUDIT(TLDR-k4q): REGRESSION + wrong tool for the vectors. llm-tldr
 //   persisted a binary `.faiss` index (semantic.py:1072,1134); this rewrite
@@ -53,12 +53,14 @@
 //! ```
 
 use std::collections::HashMap;
-use std::fs::{self, File};
-use std::io::{BufReader, BufWriter};
+use std::fs::{self, File, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use fs2::FileExt;
+use memmap2::{Mmap, MmapOptions};
+use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 
 use crate::semantic::types::{CacheConfig, CacheStats, CodeChunk, EmbeddingModel};
@@ -166,7 +168,9 @@ impl CacheKey {
 }
 
 /// Cached embedding entry
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(
+    Archive, Debug, Clone, PartialEq, RkyvDeserialize, RkyvSerialize, Serialize, Deserialize
+)]
 struct CacheEntry {
     /// The embedding vector
     embedding: Vec<f32>,
@@ -174,6 +178,51 @@ struct CacheEntry {
     cached_at: u64,
     /// File modification time when cached (P1 mitigation)
     file_mtime: Option<u64>,
+}
+
+type DiskMap = HashMap<String, CacheEntry>;
+type ArchivedDiskMap = rkyv::Archived<DiskMap>;
+
+const CACHE_FILE_PREFIX: &str = "cache.v1.";
+const CACHE_FILE_SUFFIX: &str = ".rkyv";
+const CACHE_LOCK_FILE: &str = "cache.lock";
+const RETAINED_GENERATIONS: usize = 2;
+
+struct ValidatedMmap {
+    mmap: Mmap,
+}
+
+impl ValidatedMmap {
+    fn open(path: &Path) -> TldrResult<Self> {
+        let file = File::open(path)?;
+        if file.metadata()?.len() == 0 {
+            return Err(Self::parse_error(path, "empty cache archive"));
+        }
+
+        // SAFETY: published cache generations are immutable and are never
+        // truncated or rewritten. The mapping starts at offset zero, whose
+        // page alignment satisfies the archived root's alignment.
+        let mmap = unsafe { MmapOptions::new().map(&file)? };
+        rkyv::access::<ArchivedDiskMap, rkyv::rancor::Error>(&mmap[..]).map_err(|e| {
+            Self::parse_error(path, format!("cache archive validation failed: {e}"))
+        })?;
+
+        Ok(Self { mmap })
+    }
+
+    fn root(&self) -> &ArchivedDiskMap {
+        // SAFETY: `open` validated these exact bytes, the immutable mmap owns
+        // them for this borrow, and published generations are never modified.
+        unsafe { rkyv::access_unchecked::<ArchivedDiskMap>(&self.mmap[..]) }
+    }
+
+    fn parse_error(path: &Path, message: impl Into<String>) -> crate::TldrError {
+        crate::TldrError::ParseError {
+            file: path.to_path_buf(),
+            line: None,
+            message: message.into(),
+        }
+    }
 }
 
 /// Embedding cache with file locking for concurrent access
@@ -190,8 +239,14 @@ struct CacheEntry {
 pub struct EmbeddingCache {
     /// Cache configuration
     config: CacheConfig,
-    /// In-memory cache entries (key string -> entry)
-    entries: HashMap<String, CacheEntry>,
+    /// Immutable, validated zero-copy snapshot of the last committed generation.
+    base: Option<ValidatedMmap>,
+    /// Entries added or replaced since the base generation was opened.
+    overlay: DiskMap,
+    /// Keys removed from the logical cache and the base entry observed when
+    /// removed. Flush applies a tombstone only if the latest generation still
+    /// contains that exact entry, so a stale process cannot delete a refresh.
+    tombstones: HashMap<String, Option<CacheEntry>>,
     /// Cache statistics
     stats: CacheStats,
     /// Dirty flag for lazy writes
@@ -230,35 +285,36 @@ impl EmbeddingCache {
     /// let cache = EmbeddingCache::open(config)?;
     /// ```
     pub fn open(config: CacheConfig) -> TldrResult<Self> {
-        // Create cache directory if it doesn't exist
         fs::create_dir_all(&config.cache_dir)?;
 
-        // Clean up orphaned temp files from previous crashes
+        let lock = Self::open_lock_file(&config.cache_dir)?;
+        lock.lock_exclusive()?;
         Self::cleanup_temp_files(&config.cache_dir);
+        let base = Self::open_latest_valid_generation(&config.cache_dir);
+        FileExt::unlock(&lock)?;
 
-        let cache_file = config.cache_dir.join("cache.json");
-        let entries = if cache_file.exists() {
-            Self::load_with_lock(&cache_file).unwrap_or_else(|_| {
-                // If cache is corrupted, start fresh
-                HashMap::new()
+        let (entries, size_bytes) = base
+            .as_ref()
+            .map(|snapshot| {
+                let root = snapshot.root();
+                let size = root
+                    .iter()
+                    .map(|(_, entry)| entry.embedding.len() * std::mem::size_of::<f32>())
+                    .sum();
+                (root.len(), size)
             })
-        } else {
-            HashMap::new()
-        };
-
-        let size_bytes = entries
-            .values()
-            .map(|e| e.embedding.len() * std::mem::size_of::<f32>())
-            .sum();
+            .unwrap_or((0, 0));
 
         Ok(Self {
             config,
             stats: CacheStats {
-                entries: entries.len(),
+                entries,
                 size_bytes,
                 hit_rate: 0.0,
             },
-            entries,
+            base,
+            overlay: HashMap::new(),
+            tombstones: HashMap::new(),
             dirty: false,
             key_root: PathBuf::new(),
         })
@@ -278,29 +334,96 @@ impl EmbeddingCache {
     fn cleanup_temp_files(cache_dir: &Path) {
         if let Ok(entries) = fs::read_dir(cache_dir) {
             for entry in entries.flatten() {
-                if let Some(ext) = entry.path().extension() {
-                    if ext == "tmp" {
-                        let _ = fs::remove_file(entry.path());
-                    }
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                if name.starts_with(CACHE_FILE_PREFIX) && name.ends_with(".tmp") {
+                    let _ = fs::remove_file(entry.path());
                 }
             }
         }
     }
 
-    /// Load cache entries from disk with shared lock
-    fn load_with_lock(path: &Path) -> TldrResult<HashMap<String, CacheEntry>> {
-        let file = File::open(path)?;
-        // Shared lock for reading - allows multiple readers
-        file.lock_shared()?;
-        let reader = BufReader::new(&file);
-        let entries: HashMap<String, CacheEntry> =
-            serde_json::from_reader(reader).map_err(|e| crate::TldrError::ParseError {
-                file: path.to_path_buf(),
-                line: None,
-                message: format!("Cache file corrupted: {}", e),
-            })?;
-        file.unlock()?;
-        Ok(entries)
+    fn open_lock_file(cache_dir: &Path) -> TldrResult<File> {
+        Ok(OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(cache_dir.join(CACHE_LOCK_FILE))?)
+    }
+
+    fn generation_from_name(name: &str) -> Option<u64> {
+        name.strip_prefix(CACHE_FILE_PREFIX)?
+            .strip_suffix(CACHE_FILE_SUFFIX)?
+            .parse()
+            .ok()
+    }
+
+    fn generation_files(cache_dir: &Path) -> Vec<(u64, PathBuf)> {
+        let mut files: Vec<_> = fs::read_dir(cache_dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|entry| {
+                let name = entry.file_name();
+                let generation = Self::generation_from_name(&name.to_string_lossy())?;
+                Some((generation, entry.path()))
+            })
+            .collect();
+        files.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+        files
+    }
+
+    fn open_latest_valid_generation(cache_dir: &Path) -> Option<ValidatedMmap> {
+        Self::generation_files(cache_dir)
+            .into_iter()
+            .find_map(|(_, path)| ValidatedMmap::open(&path).ok())
+    }
+
+    fn archived_entry(&self, key: &str) -> Option<&rkyv::Archived<CacheEntry>> {
+        self.base.as_ref()?.root().get(key)
+    }
+
+    fn deserialize_archived_entry(
+        entry: &rkyv::Archived<CacheEntry>,
+    ) -> TldrResult<CacheEntry> {
+        rkyv::deserialize::<CacheEntry, rkyv::rancor::Error>(entry).map_err(|e| {
+            ValidatedMmap::parse_error(
+                Path::new("<embedding-cache>"),
+                format!("cache entry deserialization failed: {e}"),
+            )
+        })
+    }
+
+    fn entry_is_valid(
+        entry: &CacheEntry,
+        chunk: &CodeChunk,
+        ttl_days: u32,
+    ) -> bool {
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let ttl_secs = ttl_days as u64 * 24 * 60 * 60;
+        if now.saturating_sub(entry.cached_at) >= ttl_secs {
+            return false;
+        }
+
+        if let Some(cached_mtime) = entry.file_mtime {
+            if let Ok(metadata) = fs::metadata(&chunk.file_path) {
+                if let Ok(mtime) = metadata.modified() {
+                    let current_mtime = mtime
+                        .duration_since(SystemTime::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    if current_mtime > cached_mtime {
+                        return false;
+                    }
+                }
+            }
+        }
+
+        true
     }
 
     /// Get embedding from cache
@@ -327,41 +450,23 @@ impl EmbeddingCache {
         let key = CacheKey::from_chunk(chunk, model, &self.key_root);
         let key_str = key.to_key_string();
 
-        if let Some(entry) = self.entries.get(&key_str) {
-            // P0: Check TTL on every read
-            let now = SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-
-            let age_days = (now.saturating_sub(entry.cached_at)) / (24 * 60 * 60);
-            if age_days > self.config.ttl_days as u64 {
-                self.stats.hit_rate = self.calculate_hit_rate(false);
-                return None; // TTL expired
-            }
-
-            // P1: Check file mtime if available
-            if let Some(cached_mtime) = entry.file_mtime {
-                if let Ok(metadata) = fs::metadata(&chunk.file_path) {
-                    if let Ok(mtime) = metadata.modified() {
-                        let current_mtime = mtime
-                            .duration_since(SystemTime::UNIX_EPOCH)
-                            .map(|d| d.as_secs())
-                            .unwrap_or(0);
-                        if current_mtime > cached_mtime {
-                            self.stats.hit_rate = self.calculate_hit_rate(false);
-                            return None; // File modified since cached
-                        }
-                    }
-                }
-            }
-
-            self.stats.hit_rate = self.calculate_hit_rate(true);
-            Some(entry.embedding.clone())
-        } else {
+        if self.tombstones.contains_key(&key_str) {
             self.stats.hit_rate = self.calculate_hit_rate(false);
-            None
+            return None;
         }
+
+        let result = if let Some(entry) = self.overlay.get(&key_str) {
+            Self::entry_is_valid(entry, chunk, self.config.ttl_days)
+                .then(|| entry.embedding.clone())
+        } else {
+            self.archived_entry(&key_str)
+                .and_then(|entry| Self::deserialize_archived_entry(entry).ok())
+                .filter(|entry| Self::entry_is_valid(entry, chunk, self.config.ttl_days))
+                .map(|entry| entry.embedding)
+        };
+
+        self.stats.hit_rate = self.calculate_hit_rate(result.is_some());
+        result
     }
 
     /// Calculate hit rate (simple moving average approximation)
@@ -408,15 +513,30 @@ impl EmbeddingCache {
             .map(|d| d.as_secs())
             .unwrap_or(0);
 
+        let old_size = self
+            .overlay
+            .get(&key_str)
+            .map(|entry| entry.embedding.len() * std::mem::size_of::<f32>())
+            .or_else(|| {
+                (!self.tombstones.contains_key(&key_str))
+                    .then(|| {
+                        self.archived_entry(&key_str)
+                            .map(|entry| {
+                                entry.embedding.len() * std::mem::size_of::<f32>()
+                            })
+                    })
+                    .flatten()
+            });
         let entry_size = embedding.len() * std::mem::size_of::<f32>();
-
-        // Check if replacing existing entry
-        if !self.entries.contains_key(&key_str) {
+        if let Some(old_size) = old_size {
+            self.stats.size_bytes = self.stats.size_bytes.saturating_sub(old_size);
+        } else {
             self.stats.entries += 1;
-            self.stats.size_bytes += entry_size;
         }
+        self.stats.size_bytes += entry_size;
 
-        self.entries.insert(
+        self.tombstones.remove(&key_str);
+        self.overlay.insert(
             key_str,
             CacheEntry {
                 embedding,
@@ -445,48 +565,133 @@ impl EmbeddingCache {
             return Ok(());
         }
 
-        let cache_file = self.config.cache_dir.join("cache.json");
-        // Per-process unique temp name. A FIXED `cache.json.tmp` is shared
-        // across processes, so two concurrent flushers (e.g. two agents/CLI
-        // runs against the same cache) race: one renames the temp away and the
-        // other's rename hits `No such file or directory` (os error 2). A
-        // pid+nanos suffix gives each flusher its own temp to rename; it still
-        // ends in `.tmp` so `cleanup_temp_files` reaps orphans. (Lost-update
-        // under concurrent writers — last rename wins — is a deeper follow-up.)
+        let lock = Self::open_lock_file(&self.config.cache_dir)?;
+        lock.lock_exclusive()?;
+        let latest = Self::open_latest_valid_generation(&self.config.cache_dir);
+        let mut merged: DiskMap = latest
+            .as_ref()
+            .map(|snapshot| {
+                rkyv::deserialize::<DiskMap, rkyv::rancor::Error>(snapshot.root())
+                    .map_err(|e| {
+                        ValidatedMmap::parse_error(
+                            Path::new("<embedding-cache>"),
+                            format!("cache snapshot deserialization failed: {e}"),
+                        )
+                    })
+            })
+            .transpose()?
+            .unwrap_or_default();
+
+        for (key, observed_entry) in &self.tombstones {
+            if merged.get(key) == observed_entry.as_ref() {
+                merged.remove(key);
+            }
+        }
+        for (key, entry) in &self.overlay {
+            merged.insert(key.clone(), entry.clone());
+        }
+
+        let next_generation = Self::generation_files(&self.config.cache_dir)
+            .first()
+            .map(|(generation, _)| {
+                generation.checked_add(1).ok_or_else(|| {
+                    ValidatedMmap::parse_error(
+                        &self.config.cache_dir,
+                        "cache generation counter overflow",
+                    )
+                })
+            })
+            .transpose()?
+            .unwrap_or(1);
         let nanos = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or(0);
-        let temp_file =
-            self.config
-                .cache_dir
-                .join(format!("cache.json.{}.{}.tmp", std::process::id(), nanos));
+        let temp_file = self.config.cache_dir.join(format!(
+            "{CACHE_FILE_PREFIX}{}.{}.{}.tmp",
+            next_generation,
+            std::process::id(),
+            nanos
+        ));
+        let cache_file = self.config.cache_dir.join(format!(
+            "{CACHE_FILE_PREFIX}{next_generation:020}{CACHE_FILE_SUFFIX}"
+        ));
 
-        // Write to temp file with exclusive lock
-        {
-            let file = File::create(&temp_file)?;
-            file.lock_exclusive()?; // Exclusive lock for writing
-            let writer = BufWriter::new(&file);
-            serde_json::to_writer(writer, &self.entries).map_err(|e| {
-                crate::TldrError::ParseError {
-                    file: temp_file.clone(),
-                    line: None,
-                    message: format!("Failed to serialize cache: {}", e),
-                }
+        let write_result = (|| -> TldrResult<()> {
+            let mut bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&merged).map_err(|e| {
+                ValidatedMmap::parse_error(
+                    &temp_file,
+                    format!("failed to serialize cache: {e}"),
+                )
             })?;
+            let max_bytes = self.config.max_size_mb.saturating_mul(1024 * 1024);
+            while bytes.len() > max_bytes {
+                if merged.len() <= 1 {
+                    return Err(crate::TldrError::Embedding(format!(
+                        "one embedding cache entry requires {} bytes, exceeding configured maximum of {}MB",
+                        bytes.len(),
+                        self.config.max_size_mb
+                    )));
+                }
+
+                let excess = bytes.len() - max_bytes;
+                let remove_count = (((merged.len() as u128 * excess as u128)
+                    .div_ceil(bytes.len() as u128)) as usize)
+                    .max(1)
+                    .min(merged.len() - 1);
+                let mut oldest: Vec<_> = merged
+                    .iter()
+                    .map(|(key, entry)| (key.clone(), entry.cached_at))
+                    .collect();
+                oldest.sort_unstable_by_key(|(_, cached_at)| *cached_at);
+                for (key, _) in oldest.into_iter().take(remove_count) {
+                    merged.remove(&key);
+                }
+                bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&merged).map_err(
+                    |e| {
+                        ValidatedMmap::parse_error(
+                            &temp_file,
+                            format!("failed to serialize compacted cache: {e}"),
+                        )
+                    },
+                )?;
+            }
+            rkyv::access::<ArchivedDiskMap, rkyv::rancor::Error>(&bytes[..]).map_err(
+                |e| {
+                    ValidatedMmap::parse_error(
+                        &temp_file,
+                        format!("serialized cache validation failed: {e}"),
+                    )
+                },
+            )?;
+
+            let mut file = OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&temp_file)?;
+            file.write_all(&bytes)?;
             file.sync_all()?;
-            file.unlock()?;
-        }
-
-        // Atomic rename. On failure, best-effort remove our unique temp so a
-        // failed flush does not leave an orphan behind (cleanup_temp_files also
-        // reaps these on next open).
-        if let Err(e) = fs::rename(&temp_file, &cache_file) {
+            fs::rename(&temp_file, &cache_file)?;
+            Self::sync_dir(&self.config.cache_dir)?;
+            Ok(())
+        })();
+        if let Err(error) = write_result {
             let _ = fs::remove_file(&temp_file);
-            return Err(e.into());
+            return Err(error);
         }
 
+        self.base = Some(ValidatedMmap::open(&cache_file)?);
+        self.stats.entries = merged.len();
+        self.stats.size_bytes = merged
+            .values()
+            .map(|entry| entry.embedding.len() * std::mem::size_of::<f32>())
+            .sum();
+        self.overlay.clear();
+        self.tombstones.clear();
         self.dirty = false;
+        let _ = fs::remove_file(self.config.cache_dir.join("cache.json"));
+        let _ = fs::remove_file(self.config.cache_dir.join("cache.bin"));
+        Self::cleanup_old_generations(&self.config.cache_dir);
         Ok(())
     }
 
@@ -508,20 +713,50 @@ impl EmbeddingCache {
             .unwrap_or(0);
 
         let ttl_secs = self.config.ttl_days as u64 * 24 * 60 * 60;
-        let cutoff = now.saturating_sub(ttl_secs);
 
-        let before = self.entries.len();
-        self.entries.retain(|_, entry| entry.cached_at >= cutoff);
-        let evicted = before - self.entries.len();
+        let mut evicted_sizes = HashMap::new();
+        self.overlay.retain(|key, entry| {
+            if now.saturating_sub(entry.cached_at) >= ttl_secs {
+                evicted_sizes.insert(
+                    key.clone(),
+                    entry.embedding.len() * std::mem::size_of::<f32>(),
+                );
+                false
+            } else {
+                true
+            }
+        });
 
-        if evicted > 0 {
-            // Update stats
-            self.stats.entries = self.entries.len();
-            self.stats.size_bytes = self
-                .entries
-                .values()
-                .map(|e| e.embedding.len() * std::mem::size_of::<f32>())
-                .sum();
+        if let Some(base) = &self.base {
+            for (key, archived) in base.root().iter() {
+                let key = key.as_str();
+                if self.overlay.contains_key(key)
+                    || self.tombstones.contains_key(key)
+                    || evicted_sizes.contains_key(key)
+                {
+                    continue;
+                }
+                if let Ok(entry) = Self::deserialize_archived_entry(archived) {
+                    if now.saturating_sub(entry.cached_at) >= ttl_secs {
+                        evicted_sizes.insert(
+                            key.to_string(),
+                            entry.embedding.len() * std::mem::size_of::<f32>(),
+                        );
+                    }
+                }
+            }
+        }
+
+        for (key, size) in &evicted_sizes {
+            let observed_base = self
+                .archived_entry(key)
+                .and_then(|entry| Self::deserialize_archived_entry(entry).ok());
+            self.tombstones.insert(key.clone(), observed_base);
+            self.stats.entries = self.stats.entries.saturating_sub(1);
+            self.stats.size_bytes = self.stats.size_bytes.saturating_sub(*size);
+        }
+        let evicted = evicted_sizes.len();
+        if evicted != 0 {
             self.dirty = true;
         }
 
@@ -538,12 +773,37 @@ impl EmbeddingCache {
 
     /// Get number of entries
     pub fn len(&self) -> usize {
-        self.entries.len()
+        self.stats.entries
     }
 
     /// Check if cache is empty
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.len() == 0
+    }
+
+    fn sync_dir(dir: &Path) -> TldrResult<()> {
+        #[cfg(unix)]
+        {
+            File::open(dir)?.sync_all()?;
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = dir;
+        }
+        Ok(())
+    }
+
+    fn cleanup_old_generations(cache_dir: &Path) {
+        let mut valid_kept = 0;
+        for (_, path) in Self::generation_files(cache_dir) {
+            if ValidatedMmap::open(&path).is_ok() {
+                valid_kept += 1;
+                if valid_kept <= RETAINED_GENERATIONS {
+                    continue;
+                }
+            }
+            let _ = fs::remove_file(path);
+        }
     }
 }
 
@@ -777,7 +1037,7 @@ mod cache_tests {
         // Manually age the entry to be older than TTL (8 days ago)
         let key =
             CacheKey::from_chunk(&chunk, EmbeddingModel::ArcticM, Path::new("")).to_key_string();
-        if let Some(entry) = cache.entries.get_mut(&key) {
+        if let Some(entry) = cache.overlay.get_mut(&key) {
             // Set cached_at to 8 days ago
             let now = SystemTime::now()
                 .duration_since(SystemTime::UNIX_EPOCH)
@@ -874,36 +1134,17 @@ mod cache_tests {
 
     #[test]
     fn cache_ttl_checked_on_read() {
-        // This test verifies P0 mitigation: TTL is checked on every read
-        // We can't easily test time-based expiration without mocking time,
-        // but we verify the TTL logic exists by using ttl_days = 0
-
         let temp = tempdir().unwrap();
         let config = CacheConfig {
             cache_dir: temp.path().to_path_buf(),
             max_size_mb: 100,
-            ttl_days: 0, // Immediate expiration
+            ttl_days: 0,
         };
         let mut cache = EmbeddingCache::open(config).unwrap();
         let chunk = create_test_chunk("foo", "fn foo() {}");
-        let embedding = vec![0.1, 0.2, 0.3];
+        cache.put(&chunk, vec![0.1, 0.2, 0.3], EmbeddingModel::ArcticM);
 
-        // Put entry
-        cache.put(&chunk, embedding, EmbeddingModel::ArcticM);
-
-        // Entry is in the HashMap but should fail TTL check
-        // With ttl_days = 0, any entry cached at time T will have age > 0 days
-        // when read at time T (since we use integer division)
-        let _result = cache.get(&chunk, EmbeddingModel::ArcticM);
-
-        // Note: This might pass or fail depending on timing - entry was just created
-        // so it might still be within the 0-day window. The important thing is
-        // that the TTL check exists in the code path.
-        // For a more robust test, we'd need time mocking.
-        // At minimum, verify the cache entry exists
-        assert!(cache.entries.contains_key(
-            &CacheKey::from_chunk(&chunk, EmbeddingModel::ArcticM, Path::new("")).to_key_string()
-        ));
+        assert_eq!(cache.get(&chunk, EmbeddingModel::ArcticM), None);
     }
 
     #[test]
@@ -933,8 +1174,8 @@ mod cache_tests {
     fn cache_handles_corrupted_file() {
         // GIVEN: A corrupted cache file
         let temp = tempdir().unwrap();
-        let cache_file = temp.path().join("cache.json");
-        fs::write(&cache_file, "not valid json{{{").unwrap();
+        let cache_file = temp.path().join("cache.v1.00000000000000000001.rkyv");
+        fs::write(&cache_file, b"not a valid rkyv archive").unwrap();
 
         // WHEN: We try to open the cache
         let config = CacheConfig {
@@ -950,10 +1191,54 @@ mod cache_tests {
     }
 
     #[test]
+    fn cache_removes_legacy_json_only_after_successful_flush() {
+        let temp = tempdir().unwrap();
+        let legacy = temp.path().join("cache.json");
+        fs::write(&legacy, b"legacy cache").unwrap();
+
+        let config = CacheConfig {
+            cache_dir: temp.path().to_path_buf(),
+            max_size_mb: 100,
+            ttl_days: 7,
+        };
+        let mut cache = EmbeddingCache::open(config).unwrap();
+
+        assert!(cache.is_empty());
+        assert!(legacy.exists());
+
+        let chunk = create_test_chunk("foo", "fn foo() {}");
+        cache.put(&chunk, vec![0.1, 0.2], EmbeddingModel::ArcticM);
+        cache.flush().unwrap();
+
+        assert!(!legacy.exists());
+        assert_eq!(EmbeddingCache::generation_files(temp.path()).len(), 1);
+    }
+
+    #[test]
+    fn failed_flush_preserves_legacy_json_and_dirty_overlay() {
+        let temp = tempdir().unwrap();
+        let legacy = temp.path().join("cache.json");
+        fs::write(&legacy, b"legacy cache").unwrap();
+        let config = CacheConfig {
+            cache_dir: temp.path().to_path_buf(),
+            max_size_mb: 0,
+            ttl_days: 7,
+        };
+        let chunk = create_test_chunk("foo", "fn foo() {}");
+        let mut cache = EmbeddingCache::open(config).unwrap();
+        cache.put(&chunk, vec![0.1, 0.2], EmbeddingModel::ArcticM);
+
+        assert!(cache.flush().is_err());
+        assert!(legacy.exists());
+        assert!(cache.dirty);
+        assert_eq!(cache.overlay.len(), 1);
+    }
+
+    #[test]
     fn cache_cleans_up_temp_files() {
         // GIVEN: A cache directory with orphaned temp files
         let temp = tempdir().unwrap();
-        let temp_file = temp.path().join("cache.json.tmp");
+        let temp_file = temp.path().join("cache.v1.1.123.456.tmp");
         fs::write(&temp_file, "orphaned temp file").unwrap();
         assert!(temp_file.exists());
 
@@ -967,5 +1252,204 @@ mod cache_tests {
 
         // THEN: The temp file should be cleaned up
         assert!(!temp_file.exists());
+    }
+
+    #[test]
+    fn reopened_cache_uses_mmap_base_without_owned_entries() {
+        let temp = tempdir().unwrap();
+        let config = CacheConfig {
+            cache_dir: temp.path().to_path_buf(),
+            max_size_mb: 100,
+            ttl_days: 7,
+        };
+        let chunk = create_test_chunk("foo", "fn foo() {}");
+        let embedding = vec![0.1, 0.2, 0.3];
+
+        let mut writer = EmbeddingCache::open(config.clone()).unwrap();
+        writer.put(&chunk, embedding.clone(), EmbeddingModel::ArcticM);
+        writer.flush().unwrap();
+
+        let mut reopened = EmbeddingCache::open(config).unwrap();
+        assert!(reopened.base.is_some());
+        assert!(reopened.overlay.is_empty());
+        assert_eq!(
+            reopened.get(&chunk, EmbeddingModel::ArcticM),
+            Some(embedding)
+        );
+    }
+
+    #[test]
+    fn stale_instances_merge_latest_generation_on_flush() {
+        let temp = tempdir().unwrap();
+        let config = CacheConfig {
+            cache_dir: temp.path().to_path_buf(),
+            max_size_mb: 100,
+            ttl_days: 7,
+        };
+        let chunk_a = create_test_chunk("a", "fn a() {}");
+        let chunk_b = create_test_chunk("b", "fn b() {}");
+
+        let mut first = EmbeddingCache::open(config.clone()).unwrap();
+        let mut stale = EmbeddingCache::open(config.clone()).unwrap();
+        first.put(&chunk_a, vec![1.0], EmbeddingModel::ArcticM);
+        first.flush().unwrap();
+        stale.put(&chunk_b, vec![2.0], EmbeddingModel::ArcticM);
+        stale.flush().unwrap();
+
+        let mut reopened = EmbeddingCache::open(config).unwrap();
+        assert_eq!(
+            reopened.get(&chunk_a, EmbeddingModel::ArcticM),
+            Some(vec![1.0])
+        );
+        assert_eq!(
+            reopened.get(&chunk_b, EmbeddingModel::ArcticM),
+            Some(vec![2.0])
+        );
+    }
+
+    #[test]
+    fn stale_tombstone_does_not_delete_concurrent_refresh() {
+        let temp = tempdir().unwrap();
+        let normal = CacheConfig {
+            cache_dir: temp.path().to_path_buf(),
+            max_size_mb: 100,
+            ttl_days: 7,
+        };
+        let immediate_expiry = CacheConfig {
+            ttl_days: 0,
+            ..normal.clone()
+        };
+        let chunk = create_test_chunk("foo", "fn foo() {}");
+
+        let mut seed = EmbeddingCache::open(normal.clone()).unwrap();
+        seed.put(&chunk, vec![1.0], EmbeddingModel::ArcticM);
+        seed.flush().unwrap();
+
+        let mut stale = EmbeddingCache::open(immediate_expiry).unwrap();
+        assert_eq!(stale.evict_stale(), 1);
+
+        let mut refresher = EmbeddingCache::open(normal.clone()).unwrap();
+        refresher.put(&chunk, vec![2.0], EmbeddingModel::ArcticM);
+        refresher.flush().unwrap();
+        stale.flush().unwrap();
+
+        let mut reopened = EmbeddingCache::open(normal).unwrap();
+        assert_eq!(
+            reopened.get(&chunk, EmbeddingModel::ArcticM),
+            Some(vec![2.0])
+        );
+    }
+
+    #[test]
+    fn mmap_snapshot_satisfies_archived_root_alignment() {
+        let temp = tempdir().unwrap();
+        let config = CacheConfig {
+            cache_dir: temp.path().to_path_buf(),
+            max_size_mb: 100,
+            ttl_days: 7,
+        };
+        let chunk = create_test_chunk("foo", "fn foo() {}");
+        let mut cache = EmbeddingCache::open(config.clone()).unwrap();
+        cache.put(&chunk, vec![0.1, 0.2], EmbeddingModel::ArcticM);
+        cache.flush().unwrap();
+
+        let reopened = EmbeddingCache::open(config).unwrap();
+        let mmap = &reopened.base.as_ref().unwrap().mmap;
+        assert_eq!(
+            mmap.as_ptr() as usize % std::mem::align_of::<ArchivedDiskMap>(),
+            0
+        );
+    }
+
+    #[test]
+    fn corrupt_newest_generation_falls_back_to_previous_snapshot() {
+        let temp = tempdir().unwrap();
+        let config = CacheConfig {
+            cache_dir: temp.path().to_path_buf(),
+            max_size_mb: 100,
+            ttl_days: 7,
+        };
+        let chunk = create_test_chunk("foo", "fn foo() {}");
+        let embedding = vec![0.1, 0.2];
+        let mut cache = EmbeddingCache::open(config.clone()).unwrap();
+        cache.put(&chunk, embedding.clone(), EmbeddingModel::ArcticM);
+        cache.flush().unwrap();
+        fs::write(
+            temp.path().join("cache.v1.00000000000000000002.rkyv"),
+            b"corrupt",
+        )
+        .unwrap();
+
+        let mut reopened = EmbeddingCache::open(config).unwrap();
+        assert_eq!(
+            reopened.get(&chunk, EmbeddingModel::ArcticM),
+            Some(embedding)
+        );
+    }
+
+    #[test]
+    fn rkyv_archive_is_smaller_than_json_for_embedding_payloads() {
+        let entries: DiskMap = (0..100)
+            .map(|i| {
+                (
+                    format!("src/file_{i}.rs:function_{i}:hash:model"),
+                    CacheEntry {
+                        embedding: (0..384)
+                            .map(|j| ((i * 384 + j) as f32).sin())
+                            .collect(),
+                        cached_at: 1_700_000_000 + i,
+                        file_mtime: Some(1_700_000_000 + i),
+                    },
+                )
+            })
+            .collect();
+        let json = serde_json::to_vec(&entries).unwrap();
+        let archived = rkyv::to_bytes::<rkyv::rancor::Error>(&entries).unwrap();
+
+        assert!(
+            archived.len() * 2 < json.len(),
+            "expected rkyv to use less than half the JSON storage: rkyv={} JSON={}",
+            archived.len(),
+            json.len()
+        );
+    }
+
+    #[test]
+    fn flush_compacts_oldest_entries_to_configured_size() {
+        let temp = tempdir().unwrap();
+        let config = CacheConfig {
+            cache_dir: temp.path().to_path_buf(),
+            max_size_mb: 1,
+            ttl_days: 7,
+        };
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let mut cache = EmbeddingCache::open(config.clone()).unwrap();
+        let mut newest = None;
+        for i in 0..1_000 {
+            let chunk = create_test_chunk(&format!("f{i}"), &format!("fn f{i}() {{}}"));
+            cache.put(&chunk, vec![i as f32; 384], EmbeddingModel::ArcticS);
+            let key =
+                CacheKey::from_chunk(&chunk, EmbeddingModel::ArcticS, Path::new(""))
+                    .to_key_string();
+            cache.overlay.get_mut(&key).unwrap().cached_at = now + i;
+            newest = Some(chunk);
+        }
+
+        cache.flush().unwrap();
+        let generation = EmbeddingCache::generation_files(temp.path())
+            .into_iter()
+            .next()
+            .unwrap()
+            .1;
+        assert!(fs::metadata(generation).unwrap().len() <= 1024 * 1024);
+
+        let mut reopened = EmbeddingCache::open(config).unwrap();
+        assert!(reopened.len() < 1_000);
+        assert!(reopened
+            .get(&newest.unwrap(), EmbeddingModel::ArcticS)
+            .is_some());
     }
 }
