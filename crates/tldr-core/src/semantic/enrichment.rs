@@ -164,8 +164,8 @@ impl FileAnalysisCache {
 /// Build enriched text for embedding from all 5 analysis layers.
 ///
 /// # Contract
-/// - Output MUST be <= 2000 characters to fit in 512-token context
-///   with room for model overhead.
+/// - Output is NOT character-truncated (TLDR-9bxa.2); oversized enriched text is
+///   kept in full and reported at the embed boundary via the token budget.
 /// - Each layer is optional: if analysis fails, that layer is silently omitted.
 /// - Output format matches Python reference (semantic.py:212-262).
 /// - Does NOT include raw source code.
@@ -194,14 +194,11 @@ pub fn build_embedding_text(unit: &EmbeddingUnit) -> String {
     });
     parts.push(format!("Function: {}", name));
 
-    // L1: Signature (truncate to 200 chars if needed)
+    // L1: Signature. TLDR-9bxa.2: no character truncation — the old
+    // `&unit.signature[..200]` also panicked on multi-byte UTF-8. The full
+    // signature is kept; the embed-boundary token budget governs size.
     if !unit.signature.is_empty() {
-        let sig = if unit.signature.len() > 200 {
-            &unit.signature[..200]
-        } else {
-            &unit.signature
-        };
-        parts.push(format!("Signature: {}", sig));
+        parts.push(format!("Signature: {}", unit.signature));
     }
 
     // L1: Description (docstring)
@@ -236,14 +233,10 @@ pub fn build_embedding_text(unit: &EmbeddingUnit) -> String {
         parts.push(format!("Dependencies: {}", unit.dependencies));
     }
 
-    let text = parts.join("\n");
-
-    // Truncate to 2000 chars if needed (~512 tokens)
-    if text.len() > 2000 {
-        text[..2000].to_string()
-    } else {
-        text
-    }
+    // TLDR-9bxa.2: no silent character truncation — the old `text[..2000]` also
+    // panicked on multi-byte UTF-8. Oversized enriched text is kept in full and
+    // reported at the embed boundary via the token budget.
+    parts.join("\n")
 }
 
 /// Build a CFG summary string from CfgInfo data.

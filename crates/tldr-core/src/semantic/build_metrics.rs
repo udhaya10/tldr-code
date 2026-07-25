@@ -38,8 +38,10 @@ use crate::semantic::index::BuildOptions;
 use crate::util;
 
 /// Metrics report schema version. Bump when the serialized shape of
-/// [`MetricsReport`] changes in a way that breaks consumers.
-pub const METRICS_SCHEMA_VERSION: u32 = 1;
+/// [`MetricsReport`] changes in a way that breaks consumers. (`2` = added the
+/// `token_budget` field in TLDR-9bxa.2; that field is `#[serde(default)]` so v1
+/// reports still parse.)
+pub const METRICS_SCHEMA_VERSION: u32 = 2;
 
 /// Default RSS sampling interval for the timeline.
 const DEFAULT_RSS_SAMPLE_INTERVAL_MS: u64 = 500;
@@ -80,6 +82,7 @@ pub struct MetricsReport {
     pub cache_opened: bool,
     /// Token-budget outcomes (TLDR-9bxa.2): per-corpus oversized accounting.
     /// `None` only if token checks were not run (tokenizer unavailable).
+    #[serde(default)]
     pub token_budget: Option<crate::semantic::token_budget::TokenStats>,
     /// Chunks actually embedded via ONNX (Phase 2; == cache misses).
     pub chunks_embedded: usize,
@@ -341,13 +344,11 @@ impl BuildMetrics {
         self.embed_latency_ms = ms;
     }
 
-    /// Record one input's token-budget check (TLDR-9bxa.2). Accumulated into
-    /// the report's `token_budget` stats.
-    pub fn record_token_check(
-        &mut self,
-        check: crate::semantic::token_budget::TokenCheck,
-    ) {
-        self.token_stats.record(check);
+    /// Set the token-budget stats from the Embedder's accumulated checks
+    /// (TLDR-9bxa.2). The Embedder checks every input across all embed paths;
+    /// the build copies the aggregate into the report.
+    pub fn set_token_stats(&mut self, stats: crate::semantic::token_budget::TokenStats) {
+        self.token_stats = stats;
     }
 
     /// Stop the sampler, compute aggregates, and produce the final report.
@@ -618,8 +619,9 @@ mod tests {
     }
 
     #[test]
-    fn schema_version_is_one() {
-        assert_eq!(METRICS_SCHEMA_VERSION, 1);
+    fn schema_version_is_two_after_9bxa2() {
+        // TLDR-9bxa.2 added token_budget -> bumped from 1 to 2.
+        assert_eq!(METRICS_SCHEMA_VERSION, 2);
     }
 
     #[test]

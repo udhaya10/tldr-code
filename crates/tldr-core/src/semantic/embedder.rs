@@ -87,6 +87,15 @@ pub struct Embedder {
 
     /// Configuration for this embedder
     config: EmbeddingModel,
+
+    /// Model tokenizer for input-budget checks (TLDR-9bxa.2). `None` if the
+    /// tokenizer could not be loaded from fastembed's cache (checks skipped,
+    /// surfaced — never silently empty).
+    token_budget: Option<crate::semantic::token_budget::TokenBudget>,
+
+    /// Accumulated token-budget outcomes across this embedder's inputs
+    /// (read by `VectorStore::build` for the metrics report).
+    token_stats: crate::semantic::token_budget::TokenStats,
 }
 
 impl Embedder {
@@ -159,7 +168,7 @@ impl Embedder {
         // directory cannot be created or is not writable.
         let _ = std::fs::create_dir_all(&cache_dir);
         let mut embedding =
-            TextEmbedding::try_new(InitOptions::new(fast_model).with_cache_dir(cache_dir))
+            TextEmbedding::try_new(InitOptions::new(fast_model).with_cache_dir(cache_dir.clone()))
                 .map_err(|e| TldrError::ModelLoadError {
                     model: model.model_name().to_string(),
                     detail: e.to_string(),
@@ -187,9 +196,35 @@ impl Embedder {
             )));
         }
 
+        // TLDR-9bxa.2: load the model tokenizer from fastembed's cache (now that
+        // try_new has downloaded the model) for input-budget checks. Best-effort:
+        // a failure disables checks but does not break embedding; it is surfaced
+        // as a warning and recorded as `unavailable` in the stats (review #3).
+        let token_budget =
+            match crate::semantic::token_budget::TokenBudget::for_model_in_cache(
+                model,
+                &cache_dir,
+            ) {
+                Ok(tb) => Some(tb),
+                Err(e) => {
+                    if std::env::var_os("TLDR_QUIET").is_none() {
+                        eprintln!("[tldr-warn] token-budget checks disabled: {e}");
+                    }
+                    None
+                }
+            };
+
+        let mut token_stats = crate::semantic::token_budget::TokenStats::default();
+        if token_budget.is_none() {
+            // Distinct from "checked, 0 oversized" — review #3.
+            token_stats.mark_unavailable();
+        }
+
         Ok(Self {
             model: embedding,
             config: model,
+            token_budget,
+            token_stats,
         })
     }
 
@@ -243,6 +278,10 @@ impl Embedder {
         if text.is_empty() {
             return Ok(vec![0.0; self.config.dimensions()]);
         }
+
+        // TLDR-9bxa.2: token-budget check (covers queries incl. the query prefix,
+        // since embed_query routes through here).
+        self.check_token_budget(text);
 
         let result = self
             .model
@@ -335,6 +374,12 @@ impl Embedder {
         // future progress-UI use; it no longer selects batch size.
         let _ = show_progress;
         let batch_size = Some(EMBED_BATCH_SIZE);
+
+        // TLDR-9bxa.2: token-budget check on every input (covers builds + daemon
+        // bulk embed paths, not just --metrics).
+        for t in &texts {
+            self.check_token_budget(t);
+        }
 
         let results = self
             .model
@@ -446,6 +491,31 @@ impl Embedder {
     /// Convenience method that delegates to `config().dimensions()`.
     pub fn dimensions(&self) -> usize {
         self.config.dimensions()
+    }
+
+    /// Check one input against the model token budget (TLDR-9bxa.2): record the
+    /// outcome and warn on oversized. Report-only — fastembed performs the actual
+    /// token-level truncation; this never changes the embedded vector. No-op if
+    /// the tokenizer could not be loaded (stats already marked `unavailable`).
+    fn check_token_budget(&mut self, text: &str) {
+        let Some(c) = self.token_budget.as_ref().map(|tb| tb.check(text)) else {
+            return;
+        };
+        if c.truncated && std::env::var_os("TLDR_QUIET").is_none() {
+            eprintln!(
+                "[tldr-warn] embedding input exceeds model token budget \
+                 ({} > {} tokens); fastembed will truncate it to the model context",
+                c.original_tokens, c.budget
+            );
+        }
+        self.token_stats.record(c);
+    }
+
+    /// Token-budget statistics accumulated across this embedder's inputs
+    /// (TLDR-9bxa.2). `unavailable == true` means checks were skipped because the
+    /// tokenizer could not be loaded (distinct from "0 oversized").
+    pub fn token_stats(&self) -> &crate::semantic::token_budget::TokenStats {
+        &self.token_stats
     }
 }
 

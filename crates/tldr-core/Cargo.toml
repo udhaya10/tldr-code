@@ -102,8 +102,9 @@ fastembed = { workspace = true, optional = true }
 usearch = { workspace = true, optional = true }
 
 # TLDR-9bxa.2: model tokenizer for token-accurate input budgets (replaces the
-# 4000-char silent truncation). `http` feature enables Tokenizer::from_pretrained.
-tokenizers = { version = "0.22", features = ["http"], optional = true }
+# 4000-char silent truncation). Loaded from fastembed's on-disk cache so it is
+# the exact tokenizer (same revision) fastembed uses — no `http` feature needed.
+tokenizers = { version = "0.22", optional = true }
 
 # Phase 4: Content hashing for cache keys
 md5 = { workspace = true }

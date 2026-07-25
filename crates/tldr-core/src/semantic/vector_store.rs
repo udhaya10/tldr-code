@@ -1327,27 +1327,18 @@ impl VectorStore {
                 lens.sort();
                 m.record_embed_inputs(lens);
             }
-            // TLDR-9bxa.2: token-accurate budget check per embed input. Only
-            // when collecting metrics (tokenizing every input is real work);
-            // best-effort — if the tokenizer can't load (offline), the report's
-            // token_budget stays empty rather than failing the build.
-            if metrics.is_some() {
-                if let Ok(tb) =
-                    crate::semantic::token_budget::TokenBudget::for_model(options.model)
-                {
-                    for (_, text) in &indexed {
-                        if let Some(m) = metrics.as_mut() {
-                            m.record_token_check(tb.check(text));
-                        }
-                    }
-                }
-            }
             let embed_call_start = if metrics.is_some() {
                 Some(Instant::now())
             } else {
                 None
             };
             let embeddings = embedder.embed_batch_indexed(indexed, options.show_progress)?;
+            // TLDR-9bxa.2: the Embedder checked every input's token budget during
+            // the embed (covers all paths); copy its accumulated stats into the
+            // report when collecting metrics.
+            if let Some(m) = metrics.as_mut() {
+                m.set_token_stats(embedder.token_stats().clone());
+            }
             // Capture inference latency IMMEDIATELY after the embed call, before
             // the cache-writeback / vector-assignment loop, so `embed_latency_ms`
             // is pure inference (review: it was including writeback).
