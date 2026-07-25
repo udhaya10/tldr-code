@@ -2248,17 +2248,19 @@ mod tests {
     }
 
     /// TLDR-9bxa.1: turning `collect_metrics` on must NOT change the vectors.
-    /// Ignored (loads the model). Demonstrates equivalence at the observable
-    /// level — same vector count for the same corpus, metrics off vs on — and
-    /// that the report is only present on the instrumented build.
+    /// STRONG check: for several probe queries the metrics-off and metrics-on
+    /// stores return identical top-K `key` rankings AND identical cosine
+    /// `distance`s (same vectors → same rankings/scores). Ignored: needs model.
     #[test]
     #[ignore = "loads the ONNX embedder; run on demand"]
-    fn collect_metrics_does_not_change_vector_count() {
+    fn collect_metrics_does_not_change_vectors() {
+        use crate::semantic::embedder::Embedder;
         use crate::semantic::types::ChunkGranularity;
 
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.rs"), "fn alpha(x: i32) -> i32 { x + 1 }\n").unwrap();
         std::fs::write(dir.path().join("b.rs"), "fn beta(y: i32) -> i32 { y * 2 }\n").unwrap();
+        std::fs::write(dir.path().join("c.rs"), "fn gamma(z: i32) -> bool { z > 0 }\n").unwrap();
 
         let base = BuildOptions {
             model: EmbeddingModel::ArcticXS,
@@ -2268,7 +2270,7 @@ mod tests {
             use_cache: false,
             collect_metrics: false,
         };
-        // Use `&base` (metrics off) first, THEN move `base` into `with_metrics`.
+        // Use `&base` first, THEN move it into `with_metrics`.
         let s_off = VectorStore::build(dir.path(), &base, None).unwrap();
         let with_metrics = BuildOptions {
             collect_metrics: true,
@@ -2276,12 +2278,131 @@ mod tests {
         };
         let s_on = VectorStore::build(dir.path(), &with_metrics, None).unwrap();
 
-        assert_eq!(
-            s_off.len(),
-            s_on.len(),
-            "metrics must not change the embedded vector count"
-        );
+        assert_eq!(s_off.len(), s_on.len());
         assert!(s_off.build_metrics().is_none());
+        assert!(s_on.build_metrics().is_some());
+
+        let mut emb = Embedder::new(EmbeddingModel::ArcticXS).unwrap();
+        for q in ["alpha increment", "double the value", "is it positive"] {
+            let qv = emb.embed_query(q).unwrap();
+            let off = s_off.search(&qv, 3).unwrap();
+            let on = s_on.search(&qv, 3).unwrap();
+            assert_eq!(off.len(), on.len(), "query {q:?}: hit count differs");
+            for (o, n) in off.iter().zip(on.iter()) {
+                assert_eq!(o.key, n.key, "query {q:?}: ranking key differs");
+                assert!(
+                    (o.distance - n.distance).abs() < 1e-6,
+                    "query {q:?}: distance {} vs {} differs beyond tolerance",
+                    o.distance,
+                    n.distance
+                );
+            }
+        }
+    }
+
+    /// TLDR-9bxa.1: a real cold build (no cache) must COMPLETE and emit a
+    /// complete, sane metrics report — all phases, inference latency, a
+    /// build-scoped RSS peak bounded by the process peak. Ignored: needs model.
+    #[test]
+    #[ignore = "loads the ONNX embedder; run on demand"]
+    fn cold_build_emits_complete_metrics() {
+        use crate::semantic::types::ChunkGranularity;
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("a.rs"),
+            "fn alpha(x: i32) -> i32 { x + 1 }\nfn beta(y: i32) -> i32 { y - 1 }\n",
+        )
+        .unwrap();
+
+        let opts = BuildOptions {
+            model: EmbeddingModel::ArcticXS,
+            granularity: ChunkGranularity::Function,
+            languages: None,
+            show_progress: false,
+            use_cache: false,
+            collect_metrics: true,
+        };
+        let store = VectorStore::build(dir.path(), &opts, None).unwrap();
+        let r = store
+            .build_metrics()
+            .expect("cold build with collect_metrics must emit a report");
+
+        assert!(r.chunks_total >= 2);
+        assert!(r.chunks_embedded >= 2, "no cache -> all chunks embedded");
+        assert!(!r.cache_opened, "cache_config None -> not opened");
+        for phase in ["chunk", "cache_lookup", "model_load", "embed"] {
+            assert!(
+                r.phases.iter().any(|p| p.name == phase),
+                "missing phase {phase}"
+            );
+        }
+        assert!(r.embed_latency_ms > 0, "embed phase must reflect real inference");
+        assert!(r.batches.iter().all(|b| !b.token_length_available));
+
+        // RSS: build-scoped peak observed, bounded by the process-lifetime peak,
+        // and (on this fresh test process) the same order of magnitude. The
+        // strict "within 10%" acceptance is verified on the real cold-build run
+        // (a fresh `tldr embed` process), where build peak ≈ process peak.
+        let peak = r.rss.peak_bytes.expect("peak must be observed");
+        assert!(peak > 1 << 20, "peak {peak} implausibly small");
+        if let Some(pp) = r.rss.process_peak_bytes {
+            assert!(peak <= pp, "build peak {peak} > process peak {pp}");
+            assert!(
+                peak >= pp / 2,
+                "build peak {peak} far below process peak {pp} (expected same order of magnitude)"
+            );
+        }
+    }
+
+    /// TLDR-9bxa.1: instrumentation overhead is structurally negligible
+    /// (O(n) length reads + a sleeping sampler thread, all outside inference).
+    /// This measures a small cold build with metrics off vs on and asserts the
+    /// ABSOLUTE overhead is tiny. A rigorous <3% relative figure requires a
+    /// real-sized corpus run (the deferred baseline). Ignored: needs model.
+    #[test]
+    #[ignore = "loads the ONNX embedder; run on demand"]
+    fn collect_metrics_overhead_is_tiny() {
+        use crate::semantic::types::ChunkGranularity;
+        use std::time::Instant;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut src = String::new();
+        for i in 0..40 {
+            src.push_str(&format!("fn f{i}(x: i32) -> i32 {{ x + {i} }}\n"));
+        }
+        std::fs::write(dir.path().join("m.rs"), src).unwrap();
+
+        let base = BuildOptions {
+            model: EmbeddingModel::ArcticXS,
+            granularity: ChunkGranularity::Function,
+            languages: None,
+            show_progress: false,
+            use_cache: false,
+            collect_metrics: false,
+        };
+
+        let t_off = Instant::now();
+        let _s_off = VectorStore::build(dir.path(), &base, None).unwrap();
+        let off_ms = t_off.elapsed().as_millis();
+
+        let with_metrics = BuildOptions {
+            collect_metrics: true,
+            ..base
+        };
+        let t_on = Instant::now();
+        let s_on = VectorStore::build(dir.path(), &with_metrics, None).unwrap();
+        let on_ms = t_on.elapsed().as_millis();
+        let delta = on_ms as i64 - off_ms as i64;
+
+        eprintln!("overhead: off={off_ms}ms on={on_ms}ms delta={delta}ms");
+        // Absolute overhead bound (sampler + length sort): inference itself is
+        // far larger, so a few hundred ms of slack never masks a real regression
+        // while tolerating single-shot timing noise on a tiny corpus.
+        assert!(
+            delta < 500,
+            "metrics overhead delta={delta}ms (off={off_ms}ms on={on_ms}ms) exceeds 500ms absolute bound"
+        );
         assert!(s_on.build_metrics().is_some());
     }
 

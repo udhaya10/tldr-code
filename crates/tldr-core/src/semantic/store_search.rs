@@ -152,13 +152,29 @@ pub fn load_or_build_store(
         // is off for every default caller (daemon, search), so this only
         // affects `tldr embed --metrics`.
         Ok(s) if s.corpus_digest() == current_digest && !build_options.collect_metrics => Ok(s),
-        loaded => {
-            if loaded.is_ok() {
+        Ok(s) => {
+            // A store loaded but not reused: either stale, or fresh-but-metrics.
+            // Report the ACTUAL reason(s) — staleness and metrics are
+            // independent and can both apply (TLDR-9bxa.1 review).
+            let fresh = s.corpus_digest() == current_digest;
+            if !fresh {
                 eprintln!("[tldr-info] semantic store is stale (source changed); rebuilding");
             }
-            let s = VectorStore::build(root, build_options, cache_config)?;
-            s.save(store_dir, &id)?;
-            Ok(s)
+            if build_options.collect_metrics {
+                eprintln!(
+                    "[tldr-info] rebuilding{} to collect build metrics (--metrics)",
+                    if fresh { "" } else { " (also)" }
+                );
+            }
+            let built = VectorStore::build(root, build_options, cache_config)?;
+            built.save(store_dir, &id)?;
+            Ok(built)
+        }
+        Err(_) => {
+            // No usable persisted store: initial build (not "stale").
+            let built = VectorStore::build(root, build_options, cache_config)?;
+            built.save(store_dir, &id)?;
+            Ok(built)
         }
     }
 }

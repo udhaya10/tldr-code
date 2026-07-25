@@ -29,8 +29,7 @@
 //! These limits are recorded verbatim in every emitted report's `limitations`.
 
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -176,8 +175,11 @@ pub struct BatchShape {
 /// RSS summary: build-scoped peak, process-lifetime peak, final sample, timeline.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RssSummary {
-    /// Peak RSS observed DURING this build (max of timeline + phase-end +
-    /// final samples), bytes. Build-scoped — excludes pre-build allocations.
+    /// Peak RSS observed during the build WINDOW (max of timeline + phase-end +
+    /// final samples), bytes. Time-scoped to the build (vs
+    /// [`RssSummary::process_peak_bytes`]'s process lifetime) — but the value is
+    /// still total resident memory at each sample, so it INCLUDES any resident
+    /// pages allocated before the build began.
     pub peak_bytes: Option<u64>,
     /// Process-lifetime peak via `getrusage(RUSAGE_SELF).ru_maxrss`, bytes.
     /// Cross-check against `peak_bytes`; on a fresh standalone `tldr embed`
@@ -236,7 +238,10 @@ pub struct BuildMetrics {
     input_lengths: Vec<usize>,
     embed_latency_ms: u64,
     rss_samples: Arc<Mutex<Vec<RssSample>>>,
-    sampler_stop: Arc<AtomicBool>,
+    /// Condvar-based shutdown signal so the sampler wakes and exits promptly
+    /// (sub-millisecond) on finalize/drop, instead of polling a flag every
+    /// 25ms (TLDR-9bxa.1 review).
+    signal: Arc<SamplerSignal>,
     sampler_handle: Option<JoinHandle<()>>,
     sample_interval_ms: u64,
 }
@@ -258,12 +263,12 @@ impl BuildMetrics {
             .unwrap_or(0);
         let sample_interval_ms = DEFAULT_RSS_SAMPLE_INTERVAL_MS;
         let rss_samples = Arc::new(Mutex::new(Vec::new()));
-        let sampler_stop = Arc::new(AtomicBool::new(false));
+        let signal = SamplerSignal::new();
         let sampler_handle = Some(spawn_sampler(
             start,
             sample_interval_ms,
             Arc::clone(&rss_samples),
-            Arc::clone(&sampler_stop),
+            Arc::clone(&signal),
         ));
         Self {
             model: ModelInfo {
@@ -283,7 +288,7 @@ impl BuildMetrics {
             input_lengths: Vec::new(),
             embed_latency_ms: 0,
             rss_samples,
-            sampler_stop,
+            signal,
             sampler_handle,
             sample_interval_ms,
         }
@@ -339,17 +344,23 @@ impl BuildMetrics {
     /// (cheap, one-time at build end); `self` is left drained and its `Drop`
     /// then no-ops (the sampler was already joined here).
     pub fn finalize(&mut self, chunks_total: usize) -> MetricsReport {
-        // Capture total build duration BEFORE tearing down the sampler, so the
-        // (up to one sleep-step) sampler-join wait is NOT counted in
-        // `duration_ms` (review: it was inflating the reported duration).
-        let duration_ms = self.start.elapsed().as_millis() as u64;
+        // Close any open phase FIRST so its end is included, THEN capture total
+        // build duration, THEN tear down the sampler. Ordering matters: the
+        // final phase must close before duration is read (review), and the
+        // sampler join must NOT be counted in duration.
         self.end_phase();
+        let duration_ms = self.start.elapsed().as_millis() as u64;
         self.stop_sampler();
-        let timeline = self
+        let mut timeline = self
             .rss_samples
             .lock()
             .map(|t| t.clone())
             .unwrap_or_default();
+        // Drop any sample taken AFTER duration_ms was captured: a sample can
+        // land in the sub-ms window before the condvar shutdown reaches the
+        // sampler, which would otherwise yield a timeline point past the
+        // reported build duration (TLDR-9bxa.1 review).
+        timeline.retain(|s| s.t_offset_ms <= duration_ms);
         let final_bytes = util::current_rss_bytes();
         // Build-scoped peak = the max RSS observed DURING this build (timeline
         // samples + phase-end samples + the final sample) — NOT the process-
@@ -399,7 +410,12 @@ impl BuildMetrics {
     }
 
     fn stop_sampler(&mut self) {
-        self.sampler_stop.store(true, Ordering::SeqCst);
+        // Set the stop flag and notify the condvar so the sampler wakes from
+        // its timed wait IMMEDIATELY (no up-to-25ms poll delay) and exits.
+        if let Ok(mut g) = self.signal.stop.lock() {
+            *g = true;
+        }
+        self.signal.cv.notify_all();
         if let Some(h) = self.sampler_handle.take() {
             let _ = h.join();
         }
@@ -475,19 +491,33 @@ fn fastembed_limitations() -> Vec<String> {
     ]
 }
 
-/// Spawn the RSS sampler thread. Loops until `stop` is set, pushing
-/// `(t_offset_ms, rss_bytes)` samples at `interval_ms` cadence. Sleeps in small
-/// increments so it remains responsive to `stop` (prompt teardown on finalize).
+/// Condvar-based shutdown signal shared with the sampler thread. The sampler
+/// waits on `cv` for the sample interval; `stop_sampler` sets `stop` and
+/// notifies `cv`, waking the sampler immediately (no poll delay).
+struct SamplerSignal {
+    stop: Mutex<bool>,
+    cv: Condvar,
+}
+
+impl SamplerSignal {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            stop: Mutex::new(false),
+            cv: Condvar::new(),
+        })
+    }
+}
+
+/// Spawn the RSS sampler thread. Pushes `(t_offset_ms, rss_bytes)` samples at
+/// `interval_ms` cadence, and exits within sub-millisecond of `stop_sampler`
+/// via the condvar (TLDR-9bxa.1 review: was polling every 25ms).
 fn spawn_sampler(
     start: Instant,
     interval_ms: u64,
     samples: Arc<Mutex<Vec<RssSample>>>,
-    stop: Arc<AtomicBool>,
+    signal: Arc<SamplerSignal>,
 ) -> JoinHandle<()> {
     std::thread::spawn(move || loop {
-        if stop.load(Ordering::SeqCst) {
-            break;
-        }
         if let Some(rss) = util::current_rss_bytes() {
             let sample = RssSample {
                 t_offset_ms: start.elapsed().as_millis() as u64,
@@ -497,16 +527,27 @@ fn spawn_sampler(
                 guard.push(sample);
             }
         }
-        // Sleep in <=25ms steps so `stop` is noticed promptly (within ~25ms),
-        // keeping the sampler-join latency small relative to build duration.
-        let mut slept = 0u64;
-        while slept < interval_ms {
-            if stop.load(Ordering::SeqCst) {
-                break;
+        // Wait for the interval, OR return promptly when stopped. Poisoned
+        // mutexes (a sampler panic — shouldn't happen) are recovered, not fatal.
+        let guard = signal.stop.lock().unwrap_or_else(|p| p.into_inner());
+        if *guard {
+            break;
+        }
+        match signal
+            .cv
+            .wait_timeout(guard, Duration::from_millis(interval_ms))
+        {
+            Ok((g, _)) => {
+                if *g {
+                    break;
+                }
             }
-            let step = 25u64.min(interval_ms.saturating_sub(slept));
-            std::thread::sleep(Duration::from_millis(step));
-            slept += step;
+            Err(p) => {
+                let (g, _) = p.into_inner();
+                if *g {
+                    break;
+                }
+            }
         }
     })
 }

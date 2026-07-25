@@ -53,8 +53,9 @@ pub struct EmbedArgs {
 
     /// Write build instrumentation (per-batch shape, cache accounting, RSS
     /// timeline + peak, phase boundaries, throughput) as JSON to this path
-    /// (TLDR-9bxa.1). Only emitted when a fresh build runs — pair with
-    /// `--no-cache` to force one.
+    /// (TLDR-9bxa.1). Forces a fresh build (a loaded store carries no
+    /// metrics), so a report is always emitted — `--no-cache` is not required
+    /// for metrics (use it only to also bypass the dedup cache).
     #[arg(long)]
     pub metrics: Option<PathBuf>,
 }
@@ -132,24 +133,17 @@ impl EmbedArgs {
         let store_dir = store_dir_for(&self.path);
         let store = load_or_build_store(&self.path, &store_dir, &build_opts, cache_config)?;
 
-        // TLDR-9bxa.1: emit the build-instrumentation report if requested. It is
-        // only present when a fresh build ran (a loaded store carries no metrics);
-        // pair `--metrics` with `--no-cache` to guarantee a build.
+        // TLDR-9bxa.1: emit the build-instrumentation report. `--metrics` sets
+        // collect_metrics, which forces a fresh build, so a report is always
+        // present here (a loaded store carries no metrics, but we never load
+        // when collecting).
         if let Some(ref metrics_path) = self.metrics {
-            match store.build_metrics() {
-                Some(report) => {
-                    let file = std::fs::File::create(metrics_path)?;
-                    serde_json::to_writer_pretty(file, report)?;
-                    writer.progress(&format!(
-                        "Metrics written to {}",
-                        metrics_path.display()
-                    ));
-                }
-                None => writer.progress(
-                    "Note: --metrics set but no metrics collected (store was loaded, not \
-                     built — re-run with --no-cache to force a build).",
-                ),
-            }
+            let report = store
+                .build_metrics()
+                .expect("--metrics forces a fresh build, so build_metrics is always present");
+            let file = std::fs::File::create(metrics_path)?;
+            serde_json::to_writer_pretty(file, report)?;
+            writer.progress(&format!("Metrics written to {}", metrics_path.display()));
         }
 
         let total_chunks = store.len();
