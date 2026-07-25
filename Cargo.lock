@@ -3833,6 +3833,7 @@ dependencies = [
  "ignore",
  "indexmap",
  "lazy_static",
+ "libc",
  "lru",
  "md5",
  "memmap2",

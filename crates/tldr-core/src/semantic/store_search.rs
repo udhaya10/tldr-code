@@ -353,6 +353,7 @@ mod tests {
             languages: langs.map(|l| l.iter().map(|s| s.to_string()).collect()),
             show_progress: false,
             use_cache: true,
+            collect_metrics: false,
         }
     }
 

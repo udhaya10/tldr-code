@@ -20,6 +20,10 @@ serde_json = { workspace = true, features = ["preserve_order"] }
 rkyv = { workspace = true }
 memmap2 = { workspace = true }
 
+# System introspection — process RSS readout for embedding-pipeline metrics
+# (TLDR-9bxa.1). Canonical impl lives in util; tldr-cli's daemon::rss delegates.
+libc = "0.2"
+
 # Parsing - Phase 2: AST Layer
 tree-sitter = { workspace = true }
 tree-sitter-python = { workspace = true }

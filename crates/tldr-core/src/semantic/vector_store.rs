@@ -110,6 +110,9 @@ pub struct VectorStore {
     /// which simply never trip the freshness gate.
     corpus_digest: u64,
     build_stats: crate::semantic::chunker::ChunkStats,
+    /// Build-time instrumentation captured when `BuildOptions::collect_metrics`
+    /// was set (TLDR-9bxa.1). `None` for stores built/loaded without metrics.
+    build_metrics: Option<crate::semantic::build_metrics::MetricsReport>,
 }
 
 impl VectorStore {
@@ -129,6 +132,7 @@ impl VectorStore {
             files: HashMap::new(),
             corpus_digest: 0,
             build_stats: Default::default(),
+            build_metrics: None,
         })
     }
 
@@ -156,6 +160,14 @@ impl VectorStore {
     /// Counts captured during the most recent build.
     pub fn build_stats(&self) -> crate::semantic::chunker::ChunkStats {
         self.build_stats
+    }
+
+    /// Build-time instrumentation captured when `BuildOptions::collect_metrics`
+    /// was set (TLDR-9bxa.1). `None` for stores built/loaded without metrics
+    /// (the default path), so callers requesting `--metrics` can tell whether a
+    /// fresh build actually ran.
+    pub fn build_metrics(&self) -> Option<&crate::semantic::build_metrics::MetricsReport> {
+        self.build_metrics.as_ref()
     }
 
     /// The build-time corpus digest persisted with this store (TLDR-kkt). Compare
@@ -739,6 +751,7 @@ impl VectorStore {
             // compare it against the current on-disk corpus (TLDR-kkt).
             corpus_digest: manifest.corpus_digest,
             build_stats: Default::default(),
+            build_metrics: None,
         })
     }
 }
@@ -1154,6 +1167,7 @@ impl VectorStore {
         use crate::semantic::enrichment::{build_embedding_text, enrich_chunks};
         use crate::semantic::index::{BYTES_PER_CHUNK, MAX_INDEX_SIZE, MAX_MEMORY_BYTES};
         use crate::semantic::types::ChunkOptions;
+        use std::time::Instant;
 
         let languages = options.languages.as_ref().map(|langs| {
             langs
@@ -1174,7 +1188,39 @@ impl VectorStore {
         // skews the other way: a mid-build edit makes stored != the post-edit
         // digest, so the next load rebuilds (correct).
         let corpus_digest = compute_corpus_digest(root);
+
+        // TLDR_ENRICH is read ONCE here and reused in Phase 2 so the report's
+        // `enrich` summary cannot diverge from the actual embed recipe
+        // (TLDR-9bxa.1 review m3).
+        let enrich = std::env::var("TLDR_ENRICH")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+
+        // TLDR-9bxa.1: instrument this build only when asked. When `None`, every
+        // hook below is a skipped branch and the path is byte-identical to the
+        // un-instrumented build (vectors unchanged). When `Some`, recording only
+        // reads input lengths/timestamps and runs an RSS sampler thread; it never
+        // touches the texts, vectors, or cache.
+        let mut metrics = if options.collect_metrics {
+            Some(crate::semantic::build_metrics::BuildMetrics::new(
+                options.model.model_name(),
+                options.model.dimensions(),
+                root.to_string_lossy().into_owned(),
+                corpus_digest,
+                options,
+                enrich,
+            ))
+        } else {
+            None
+        };
+
+        if let Some(m) = metrics.as_mut() {
+            m.begin_phase("chunk");
+        }
         let chunk_result = chunk_code(root, &chunk_opts)?;
+        if let Some(m) = metrics.as_mut() {
+            m.end_phase();
+        }
         let build_stats = chunk_result.stats;
         let chunks = chunk_result.chunks;
 
@@ -1204,6 +1250,9 @@ impl VectorStore {
         }
 
         // Phase 1: content-addressed cache hits vs. misses.
+        if let Some(m) = metrics.as_mut() {
+            m.begin_phase("cache_lookup");
+        }
         let mut vectors: Vec<Vec<f32>> = vec![Vec::new(); chunks.len()];
         let mut uncached: Vec<usize> = Vec::new();
         for (i, chunk) in chunks.iter().enumerate() {
@@ -1212,15 +1261,31 @@ impl VectorStore {
                 None => uncached.push(i),
             }
         }
+        if let Some(m) = metrics.as_mut() {
+            // misses == chunks that will be embedded in Phase 2.
+            m.record_cache(
+                chunks.len().saturating_sub(uncached.len()),
+                uncached.len(),
+            );
+            m.end_phase();
+        }
 
         // Phase 2: embed the misses. Honor TLDR_ENRICH exactly like
         // SemanticIndex::build, so the store embeds the SAME text the index does
         // (else the vectors — and the cache keys' embed_schema tag — diverge).
         if !uncached.is_empty() {
+            // TLDR-9bxa.1: model load (download on a cold cache + the
+            // integrity-check inference) is a distinct phase from inference
+            // itself. Timing only the embed call keeps `embed_latency_ms` and
+            // the derived `embeddings_per_second` honest (review M2).
+            if let Some(m) = metrics.as_mut() {
+                m.begin_phase("model_load");
+            }
             let mut embedder = Embedder::new(options.model)?;
-            let enrich = std::env::var("TLDR_ENRICH")
-                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                .unwrap_or(false);
+            if let Some(m) = metrics.as_mut() {
+                m.end_phase();
+                m.begin_phase("embed");
+            }
             let enriched_texts: Vec<String> = if enrich {
                 let units = enrich_chunks(&chunks, root);
                 uncached
@@ -1250,12 +1315,31 @@ impl VectorStore {
                     (i, text)
                 })
                 .collect();
+            // TLDR-9bxa.1: record the byte lengths of the embed inputs in the
+            // length-sorted order embed_batch_indexed feeds fastembed, so the
+            // derived batch shapes match the groups the ONNX session sees.
+            if let Some(m) = metrics.as_mut() {
+                let mut lens: Vec<usize> = indexed.iter().map(|(_, t)| t.len()).collect();
+                lens.sort();
+                m.record_embed_inputs(lens);
+            }
+            let embed_call_start = if metrics.is_some() {
+                Some(Instant::now())
+            } else {
+                None
+            };
             let embeddings = embedder.embed_batch_indexed(indexed, options.show_progress)?;
             for (i, embedding) in embeddings {
                 if let Some(c) = cache.as_mut() {
                     c.put(&chunks[i], embedding.clone(), options.model);
                 }
                 vectors[i] = embedding;
+            }
+            if let (Some(m), Some(start)) = (metrics.as_mut(), embed_call_start) {
+                m.record_embed_latency_ms(start.elapsed().as_millis() as u64);
+            }
+            if let Some(m) = metrics.as_mut() {
+                m.end_phase();
             }
         }
         if let Some(c) = cache.as_mut() {
@@ -1267,6 +1351,9 @@ impl VectorStore {
         // freshness gate compares against the snapshot the vectors describe.
         store.corpus_digest = corpus_digest;
         store.build_stats = build_stats;
+        if let Some(mut m) = metrics {
+            store.build_metrics = Some(m.finalize(chunks.len()));
+        }
         Ok(store)
     }
 }
@@ -2133,6 +2220,7 @@ mod tests {
             languages: None,
             show_progress: false,
             use_cache: true,
+            collect_metrics: false,
         };
         let cache = CacheConfig {
             cache_dir: dir.path().join("cache"),

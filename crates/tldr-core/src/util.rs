@@ -68,9 +68,104 @@ pub fn truncate_at_char_boundary_from_end(s: &str, max_bytes: usize) -> &str {
     &s[start..]
 }
 
+// =========================================================================
+// Process RSS readout (TLDR-9bxa.1).
+//
+// Canonical, cross-platform impl. `tldr-cli`'s `commands::daemon::rss` delegates
+// here so there is a single source of truth. Best-effort by design: every reader
+// returns `Option` and a failure is reported as `None`, never an error. Kept out
+// of the `semantic` module (which is `--features semantic`-gated) so the always-on
+// daemon can use it without that feature.
+// =========================================================================
+
+/// Current resident set size of THIS process, in bytes.
+#[cfg(target_os = "macos")]
+#[allow(deprecated)] // mach_task_self_ deprecated in libc in favor of the mach2 crate
+pub fn current_rss_bytes() -> Option<u64> {
+    // mach task_info(MACH_TASK_BASIC_INFO) — there is no procfs on macOS.
+    use libc::{
+        mach_task_basic_info, mach_task_self_, natural_t, task_info, KERN_SUCCESS,
+        MACH_TASK_BASIC_INFO,
+    };
+    unsafe {
+        let mut info: mach_task_basic_info = std::mem::zeroed();
+        let mut count =
+            (std::mem::size_of::<mach_task_basic_info>() / std::mem::size_of::<natural_t>())
+                as u32;
+        let kr = task_info(
+            mach_task_self_,
+            MACH_TASK_BASIC_INFO,
+            &mut info as *mut _ as *mut _,
+            &mut count,
+        );
+        (kr == KERN_SUCCESS).then_some(info.resident_size)
+    }
+}
+
+/// Current resident set size of THIS process, in bytes.
+#[cfg(target_os = "linux")]
+pub fn current_rss_bytes() -> Option<u64> {
+    // /proc/self/statm field 2 is RSS in pages.
+    let statm = std::fs::read_to_string("/proc/self/statm").ok()?;
+    let rss_pages: u64 = statm.split_whitespace().nth(1)?.parse().ok()?;
+    let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    (page > 0).then(|| rss_pages * page as u64)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+pub fn current_rss_bytes() -> Option<u64> {
+    None
+}
+
+/// Peak (high-water) resident set size of THIS process, in bytes.
+#[cfg(unix)]
+pub fn peak_rss_bytes() -> Option<u64> {
+    unsafe {
+        let mut ru: libc::rusage = std::mem::zeroed();
+        if libc::getrusage(libc::RUSAGE_SELF, &mut ru) != 0 {
+            return None;
+        }
+        let raw = ru.ru_maxrss as u64;
+        // ru_maxrss unit differs: bytes on macOS, kilobytes on Linux/BSD.
+        Some(if cfg!(target_os = "macos") {
+            raw
+        } else {
+            raw * 1024
+        })
+    }
+}
+
+#[cfg(not(unix))]
+pub fn peak_rss_bytes() -> Option<u64> {
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn current_rss_is_sane() {
+        let rss = current_rss_bytes().expect("RSS readable on this platform");
+        // A running test binary occupies between 1 MB and 1 TB.
+        assert!(rss > 1 << 20, "RSS implausibly small: {rss}");
+        assert!(rss < 1 << 40, "RSS implausibly large: {rss}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn peak_rss_at_least_current_order_of_magnitude() {
+        let peak = peak_rss_bytes().expect("peak RSS readable");
+        if let Some(current) = current_rss_bytes() {
+            // Allow slack: current is sampled after peak and pages can be
+            // reclaimed, but peak must be in the same order of magnitude.
+            assert!(
+                peak * 4 >= current,
+                "peak {peak} implausibly below current {current}"
+            );
+        }
+    }
 
     #[test]
     fn truncate_ascii_short_passthrough() {

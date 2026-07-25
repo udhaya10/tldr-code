@@ -126,6 +126,12 @@ pub use enrichment::{build_embedding_text, enrich_chunks, EmbeddingUnit};
 // (docs/INCREMENTAL_REINDEX_DESIGN.md §4/§7).
 pub mod vector_store;
 
+// TLDR-9bxa.1: build-time instrumentation for the embedding pipeline. Observe
+// only — never alters chunking, vectors, cache, or search results. Gated by
+// BuildOptions::collect_metrics.
+pub mod build_metrics;
+pub use build_metrics::{BuildMetrics, MetricsReport};
+
 // TLDR-m01/zxb: store-backed semantic search — the ONLY search path (TLDR-lx7).
 // No SemanticIndex fallback. VectorStore works or the user gets an error.
 pub mod store_search;

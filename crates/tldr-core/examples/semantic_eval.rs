@@ -353,6 +353,7 @@ fn main() {
             languages: None,
             show_progress: true,
             use_cache: true,
+            ..Default::default()
         },
         Some(Default::default()),
     )

@@ -47,7 +47,10 @@ use crate::TldrResult;
 ///
 /// Deliberately small and unconditional — see the comment in `embed_batch`
 /// for why this must not vary with `show_progress` or corpus size.
-const EMBED_BATCH_SIZE: usize = 32;
+///
+/// `pub(crate)` so the build-metrics instrumentation (TLDR-9bxa.1) can derive
+/// the exact batch grouping fastembed will form, without duplicating the value.
+pub(crate) const EMBED_BATCH_SIZE: usize = 32;
 
 /// Options for embedding operations
 ///

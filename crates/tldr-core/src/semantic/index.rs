@@ -61,6 +61,13 @@ pub struct BuildOptions {
 
     /// Use embedding cache
     pub use_cache: bool,
+
+    /// Collect build-time instrumentation (per-batch shape, cache accounting,
+    /// RSS timeline + peak, phase boundaries, throughput) and expose it via
+    /// [`crate::semantic::vector_store::VectorStore::build_metrics`].
+    /// Off by default so the production path is byte-identical to the
+    /// un-instrumented build (TLDR-9bxa.1: observe without changing behavior).
+    pub collect_metrics: bool,
 }
 
 impl Default for BuildOptions {
@@ -71,6 +78,7 @@ impl Default for BuildOptions {
             languages: None,
             show_progress: true,
             use_cache: true,
+            collect_metrics: false,
         }
     }
 }

@@ -50,6 +50,13 @@ pub struct EmbedArgs {
     /// Disable embedding cache
     #[arg(long)]
     pub no_cache: bool,
+
+    /// Write build instrumentation (per-batch shape, cache accounting, RSS
+    /// timeline + peak, phase boundaries, throughput) as JSON to this path
+    /// (TLDR-9bxa.1). Only emitted when a fresh build runs — pair with
+    /// `--no-cache` to force one.
+    #[arg(long)]
+    pub metrics: Option<PathBuf>,
 }
 
 impl EmbedArgs {
@@ -113,6 +120,7 @@ impl EmbedArgs {
             languages: self.langs.clone(),
             show_progress: !quiet,
             use_cache: !self.no_cache,
+            collect_metrics: self.metrics.is_some(),
         };
 
         let cache_config = if self.no_cache {
@@ -123,6 +131,26 @@ impl EmbedArgs {
 
         let store_dir = store_dir_for(&self.path);
         let store = load_or_build_store(&self.path, &store_dir, &build_opts, cache_config)?;
+
+        // TLDR-9bxa.1: emit the build-instrumentation report if requested. It is
+        // only present when a fresh build ran (a loaded store carries no metrics);
+        // pair `--metrics` with `--no-cache` to guarantee a build.
+        if let Some(ref metrics_path) = self.metrics {
+            match store.build_metrics() {
+                Some(report) => {
+                    let file = std::fs::File::create(metrics_path)?;
+                    serde_json::to_writer_pretty(file, report)?;
+                    writer.progress(&format!(
+                        "Metrics written to {}",
+                        metrics_path.display()
+                    ));
+                }
+                None => writer.progress(
+                    "Note: --metrics set but no metrics collected (store was loaded, not \
+                     built — re-run with --no-cache to force a build).",
+                ),
+            }
+        }
 
         let total_chunks = store.len();
         let latency_ms = start.elapsed().as_millis() as u64;
@@ -182,6 +210,7 @@ mod tests {
                 model: None,
                 langs: None,
                 no_cache: true,
+                metrics: None,
             };
             let err = args
                 .run(OutputFormat::Json, true)
