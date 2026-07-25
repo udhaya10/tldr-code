@@ -138,9 +138,12 @@ impl EmbedArgs {
         // present here (a loaded store carries no metrics, but we never load
         // when collecting).
         if let Some(ref metrics_path) = self.metrics {
-            let report = store
-                .build_metrics()
-                .expect("--metrics forces a fresh build, so build_metrics is always present");
+            let report = store.build_metrics().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "--metrics was set but no build metrics were collected \
+                     (expected a forced fresh build)"
+                )
+            })?;
             let file = std::fs::File::create(metrics_path)?;
             serde_json::to_writer_pretty(file, report)?;
             writer.progress(&format!("Metrics written to {}", metrics_path.display()));
