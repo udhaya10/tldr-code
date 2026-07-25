@@ -38,10 +38,9 @@ use crate::semantic::index::BuildOptions;
 use crate::util;
 
 /// Metrics report schema version. Bump when the serialized shape of
-/// [`MetricsReport`] changes in a way that breaks consumers. (`2` = added the
-/// `token_budget` field in TLDR-9bxa.2; that field is `#[serde(default)]` so v1
-/// reports still parse.)
-pub const METRICS_SCHEMA_VERSION: u32 = 2;
+/// [`MetricsReport`] changes in a way that breaks consumers. (`3` = explicit
+/// token-check status; serde defaults preserve parsing of older reports.)
+pub const METRICS_SCHEMA_VERSION: u32 = 3;
 
 /// Default RSS sampling interval for the timeline.
 const DEFAULT_RSS_SAMPLE_INTERVAL_MS: u64 = 500;
@@ -81,7 +80,9 @@ pub struct MetricsReport {
     /// from the requested `options.use_cache`.
     pub cache_opened: bool,
     /// Token-budget outcomes (TLDR-9bxa.2): per-corpus oversized accounting.
-    /// `None` only if token checks were not run (tokenizer unavailable).
+    /// New reports use `TokenStats::status` to distinguish checked, empty/not
+    /// checked, and unavailable outcomes. `None` is reserved for older reports
+    /// that predate this field.
     #[serde(default)]
     pub token_budget: Option<crate::semantic::token_budget::TokenStats>,
     /// Chunks actually embedded via ONNX (Phase 2; == cache misses).
@@ -619,9 +620,8 @@ mod tests {
     }
 
     #[test]
-    fn schema_version_is_two_after_9bxa2() {
-        // TLDR-9bxa.2 added token_budget -> bumped from 1 to 2.
-        assert_eq!(METRICS_SCHEMA_VERSION, 2);
+    fn schema_version_is_three_after_9bxa2_review() {
+        assert_eq!(METRICS_SCHEMA_VERSION, 3);
     }
 
     #[test]
@@ -738,13 +738,19 @@ mod tests {
             .chain(report.rss.final_bytes.iter().copied())
             .max();
         assert_eq!(report.rss.peak_bytes, expected);
-        assert!(report.rss.peak_bytes.is_some(), "build must observe at least one RSS sample");
+        assert!(
+            report.rss.peak_bytes.is_some(),
+            "build must observe at least one RSS sample"
+        );
 
         // A build-scoped peak can never exceed the process-lifetime peak.
         if let (Some(peak), Some(proc_peak)) =
             (report.rss.peak_bytes, report.rss.process_peak_bytes)
         {
-            assert!(peak <= proc_peak, "build peak {peak} exceeds process peak {proc_peak}");
+            assert!(
+                peak <= proc_peak,
+                "build peak {peak} exceeds process peak {proc_peak}"
+            );
         }
     }
 

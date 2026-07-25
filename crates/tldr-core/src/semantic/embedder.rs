@@ -196,14 +196,11 @@ impl Embedder {
             )));
         }
 
-        // TLDR-9bxa.2: load the model tokenizer from fastembed's cache (now that
-        // try_new has downloaded the model) for input-budget checks. Best-effort:
-        // a failure disables checks but does not break embedding; it is surfaced
-        // as a warning and recorded as `unavailable` in the stats (review #3).
+        // Clone FastEmbed's configured tokenizer. Only the clone has truncation
+        // and padding disabled; inference continues using FastEmbed's original.
         let token_budget =
-            match crate::semantic::token_budget::TokenBudget::for_model_in_cache(
-                model,
-                &cache_dir,
+            match crate::semantic::token_budget::TokenBudget::from_configured_tokenizer(
+                &embedding.tokenizer,
             ) {
                 Ok(tb) => Some(tb),
                 Err(e) => {
@@ -375,27 +372,7 @@ impl Embedder {
         let _ = show_progress;
         let batch_size = Some(EMBED_BATCH_SIZE);
 
-        // TLDR-9bxa.2: token-budget check on every input (covers builds + daemon
-        // bulk embed paths, not just --metrics).
-        for t in &texts {
-            self.check_token_budget(t);
-        }
-
-        let results = self
-            .model
-            .embed(texts, batch_size)
-            .map_err(|e| TldrError::Embedding(format!("Failed to embed batch: {}", e)))?;
-
-        // Normalize all embeddings
-        let normalized: Vec<Vec<f32>> = results
-            .into_iter()
-            .map(|mut v| {
-                normalize(&mut v);
-                v
-            })
-            .collect();
-
-        Ok(normalized)
+        self.embed_batch_checked(texts, batch_size)
     }
 
     /// Embed `(index, text)` pairs with length-sorted batching.
@@ -459,24 +436,7 @@ impl Embedder {
         texts: Vec<&str>,
         batch_size: Option<usize>,
     ) -> TldrResult<Vec<Vec<f32>>> {
-        if texts.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let results = self
-            .model
-            .embed(texts, batch_size)
-            .map_err(|e| TldrError::Embedding(format!("Failed to embed batch: {}", e)))?;
-
-        let normalized: Vec<Vec<f32>> = results
-            .into_iter()
-            .map(|mut v| {
-                normalize(&mut v);
-                v
-            })
-            .collect();
-
-        Ok(normalized)
+        self.embed_batch_checked(texts, batch_size)
     }
 
     /// Get the model configuration
@@ -498,8 +458,18 @@ impl Embedder {
     /// token-level truncation; this never changes the embedded vector. No-op if
     /// the tokenizer could not be loaded (stats already marked `unavailable`).
     fn check_token_budget(&mut self, text: &str) {
-        let Some(c) = self.token_budget.as_ref().map(|tb| tb.check(text)) else {
+        let Some(result) = self.token_budget.as_ref().map(|tb| tb.check(text)) else {
             return;
+        };
+        let c = match result {
+            Ok(c) => c,
+            Err(e) => {
+                self.token_stats.mark_unavailable();
+                if std::env::var_os("TLDR_QUIET").is_none() {
+                    eprintln!("[tldr-warn] token-budget check failed: {e}");
+                }
+                return;
+            }
         };
         if c.truncated && std::env::var_os("TLDR_QUIET").is_none() {
             eprintln!(
@@ -511,9 +481,56 @@ impl Embedder {
         self.token_stats.record(c);
     }
 
-    /// Token-budget statistics accumulated across this embedder's inputs
-    /// (TLDR-9bxa.2). `unavailable == true` means checks were skipped because the
-    /// tokenizer could not be loaded (distinct from "0 oversized").
+    fn embed_batch_checked(
+        &mut self,
+        texts: Vec<&str>,
+        batch_size: Option<usize>,
+    ) -> TldrResult<Vec<Vec<f32>>> {
+        if texts.is_empty() {
+            return Ok(Vec::new());
+        }
+        for text in &texts {
+            self.check_token_budget(text);
+        }
+        let results = self
+            .model
+            .embed(texts, batch_size)
+            .map_err(|e| TldrError::Embedding(format!("Failed to embed batch: {e}")))?;
+        Ok(results
+            .into_iter()
+            .map(|mut vector| {
+                normalize(&mut vector);
+                vector
+            })
+            .collect())
+    }
+
+    /// Account a corpus independently of inference/cache classification.
+    pub(crate) fn check_corpus(&self, texts: &[&str]) -> crate::semantic::token_budget::TokenStats {
+        let Some(budget) = self.token_budget.as_ref() else {
+            let mut stats = crate::semantic::token_budget::TokenStats::default();
+            stats.mark_unavailable();
+            return stats;
+        };
+        let mut stats = crate::semantic::token_budget::TokenStats::default();
+        for text in texts {
+            match budget.check(text) {
+                Ok(check) => stats.record(check),
+                Err(e) => {
+                    stats.mark_unavailable();
+                    if std::env::var_os("TLDR_QUIET").is_none() {
+                        eprintln!("[tldr-warn] corpus token-budget check failed: {e}");
+                    }
+                    break;
+                }
+            }
+        }
+        stats
+    }
+
+    /// Token-budget statistics accumulated across this embedder's inputs.
+    /// `TokenCheckStatus::Unavailable` means at least one check could not run,
+    /// distinct from a checked corpus with zero oversized inputs.
     pub fn token_stats(&self) -> &crate::semantic::token_budget::TokenStats {
         &self.token_stats
     }
@@ -699,5 +716,84 @@ mod tests {
                 b
             );
         }
+    }
+
+    #[test]
+    #[ignore = "Requires Arctic-M-Long model download"]
+    fn configured_tokenizer_limit_and_all_entrypoints_are_checked() {
+        let mut embedder = Embedder::new(EmbeddingModel::ArcticMLong).expect("load model");
+        assert_eq!(
+            embedder
+                .token_budget
+                .as_ref()
+                .expect("token budget")
+                .budget(),
+            512,
+            "FastEmbed 5.8.1 caps Arctic-M-Long at its InitOptions default"
+        );
+        let oversized = format!(
+            "fn {}() {{ /* {} 世界 🌍 */ }}",
+            "very_long_identifier_".repeat(600),
+            "long comment token ".repeat(700)
+        );
+        let oversized_check = embedder
+            .token_budget
+            .as_ref()
+            .unwrap()
+            .check(&oversized)
+            .unwrap();
+        assert!(oversized_check.original_tokens > oversized_check.budget);
+        assert!(oversized_check.truncated);
+        assert_eq!(oversized_check.embedded_tokens, 512);
+        embedder.embed_text(&oversized).unwrap();
+        assert_eq!(embedder.token_stats().oversized, 1);
+        assert!(embedder.token_stats().max_original_tokens > 512);
+        let before_query_tokens = embedder.token_stats().total_original_tokens;
+        let query = "find callers";
+        let use_prefix = std::env::var("TLDR_QUERY_PREFIX")
+            .map(|value| value != "0" && !value.eq_ignore_ascii_case("false"))
+            .unwrap_or(true);
+        let query_input = if use_prefix {
+            format!("{}{}", EmbeddingModel::ArcticMLong.query_prefix(), query)
+        } else {
+            query.to_string()
+        };
+        let expected_query_tokens = embedder
+            .token_budget
+            .as_ref()
+            .unwrap()
+            .check(&query_input)
+            .unwrap()
+            .original_tokens;
+        embedder.embed_query(query).unwrap();
+        assert_eq!(
+            embedder.token_stats().total_original_tokens - before_query_tokens,
+            expected_query_tokens,
+            "query accounting must include FastEmbed's final prefixed input"
+        );
+        embedder.embed_batch(vec!["a", "b"], false).unwrap();
+        embedder
+            .embed_batch_indexed(vec![(0, "c"), (1, "d")], false)
+            .unwrap();
+        embedder
+            .embed_batch_with_size(vec!["e", "f"], Some(2))
+            .unwrap();
+        assert_eq!(embedder.token_stats().inputs_checked, 8);
+        assert_eq!(
+            embedder.token_stats().status,
+            crate::semantic::token_budget::TokenCheckStatus::Checked
+        );
+
+        let corpus_stats = embedder.check_corpus(&["corpus one", "corpus two"]);
+        assert_eq!(corpus_stats.inputs_checked, 2);
+        assert_eq!(
+            corpus_stats.status,
+            crate::semantic::token_budget::TokenCheckStatus::Checked
+        );
+        assert_eq!(
+            embedder.token_stats().inputs_checked,
+            8,
+            "independent corpus accounting must not alter entrypoint statistics"
+        );
     }
 }

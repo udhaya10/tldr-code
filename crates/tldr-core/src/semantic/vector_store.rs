@@ -1267,12 +1267,49 @@ impl VectorStore {
         }
         if let Some(m) = metrics.as_mut() {
             // misses == chunks that will be embedded in Phase 2.
-            m.record_cache(
-                chunks.len().saturating_sub(uncached.len()),
-                uncached.len(),
-            );
+            m.record_cache(chunks.len().saturating_sub(uncached.len()), uncached.len());
             m.end_phase();
         }
+
+        // Compose the final corpus inputs independently of cache hit/miss. A
+        // metrics build accounts every one of these texts, including a fully
+        // warm cache; non-metrics warm builds still avoid loading the model.
+        let enriched_texts: Vec<String> = if enrich && (!uncached.is_empty() || metrics.is_some()) {
+            enrich_chunks(&chunks, root)
+                .iter()
+                .map(build_embedding_text)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let corpus_texts: Vec<&str> = if metrics.is_some() {
+            chunks
+                .iter()
+                .enumerate()
+                .map(|(i, chunk)| {
+                    if enrich {
+                        enriched_texts[i].as_str()
+                    } else {
+                        chunk.content.as_str()
+                    }
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let mut embedder = if !uncached.is_empty() || (metrics.is_some() && !chunks.is_empty()) {
+            if let Some(m) = metrics.as_mut() {
+                m.begin_phase("model_load");
+            }
+            let embedder = Embedder::new(options.model)?;
+            if let Some(m) = metrics.as_mut() {
+                m.end_phase();
+                m.set_token_stats(embedder.check_corpus(&corpus_texts));
+            }
+            Some(embedder)
+        } else {
+            None
+        };
 
         // Phase 2: embed the misses. Honor TLDR_ENRICH exactly like
         // SemanticIndex::build, so the store embeds the SAME text the index does
@@ -1283,22 +1320,8 @@ impl VectorStore {
             // itself. Timing only the embed call keeps `embed_latency_ms` and
             // the derived `embeddings_per_second` honest (review M2).
             if let Some(m) = metrics.as_mut() {
-                m.begin_phase("model_load");
-            }
-            let mut embedder = Embedder::new(options.model)?;
-            if let Some(m) = metrics.as_mut() {
-                m.end_phase();
                 m.begin_phase("embed");
             }
-            let enriched_texts: Vec<String> = if enrich {
-                let units = enrich_chunks(&chunks, root);
-                uncached
-                    .iter()
-                    .map(|&i| build_embedding_text(&units[i]))
-                    .collect()
-            } else {
-                Vec::new()
-            };
             // TLDR-vbw0.1 Tier 1: build (chunk_index, text) pairs and route
             // through embed_batch_indexed, which sorts by text length before
             // batching. This collapses the distinct ONNX input shapes the
@@ -1309,10 +1332,9 @@ impl VectorStore {
             // (it was built by mapping uncached in order), so we enumerate.
             let indexed: Vec<(usize, &str)> = uncached
                 .iter()
-                .enumerate()
-                .map(|(pos, &i)| {
+                .map(|&i| {
                     let text = if enrich {
-                        enriched_texts[pos].as_str()
+                        enriched_texts[i].as_str()
                     } else {
                         chunks[i].content.as_str()
                     };
@@ -1332,13 +1354,10 @@ impl VectorStore {
             } else {
                 None
             };
-            let embeddings = embedder.embed_batch_indexed(indexed, options.show_progress)?;
-            // TLDR-9bxa.2: the Embedder checked every input's token budget during
-            // the embed (covers all paths); copy its accumulated stats into the
-            // report when collecting metrics.
-            if let Some(m) = metrics.as_mut() {
-                m.set_token_stats(embedder.token_stats().clone());
-            }
+            let embeddings = embedder
+                .as_mut()
+                .expect("embedder initialized for cache misses")
+                .embed_batch_indexed(indexed, options.show_progress)?;
             // Capture inference latency IMMEDIATELY after the embed call, before
             // the cache-writeback / vector-assignment loop, so `embed_latency_ms`
             // is pure inference (review: it was including writeback).
@@ -1359,7 +1378,11 @@ impl VectorStore {
             c.flush()?;
         }
 
-        let mut store = Self::from_embedded(&chunks, &vectors, root)?;
+        let mut store = if chunks.is_empty() {
+            Self::new(options.model.dimensions(), Self::MIN_CAPACITY)?
+        } else {
+            Self::from_embedded(&chunks, &vectors, root)?
+        };
         // Stamp the digest captured BEFORE chunking (see TOCTOU note above), so the
         // freshness gate compares against the snapshot the vectors describe.
         store.corpus_digest = corpus_digest;
@@ -2217,7 +2240,11 @@ mod tests {
         use crate::semantic::types::ChunkGranularity;
 
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("a.rs"), "fn alpha(x: i32) -> i32 { x + 1 }\n").unwrap();
+        std::fs::write(
+            dir.path().join("a.rs"),
+            "fn alpha(x: i32) -> i32 { x + 1 }\n",
+        )
+        .unwrap();
         let store_dir = dir.path().join("store");
 
         let opts = BuildOptions {
@@ -2242,7 +2269,10 @@ mod tests {
             .build_metrics()
             .expect("collect_metrics must force a rebuild even when a fresh store exists");
 
-        assert!(report.chunks_total > 0, "corpus has a function -> >=1 chunk");
+        assert!(
+            report.chunks_total > 0,
+            "corpus has a function -> >=1 chunk"
+        );
         assert!(
             !report.cache_opened,
             "use_cache requested but cache_config None -> cache NOT opened"
@@ -2251,6 +2281,134 @@ mod tests {
             report.phases.iter().any(|p| p.name == "chunk"),
             "chunk phase must be recorded"
         );
+        let tokens = report.token_budget.as_ref().expect("token accounting");
+        assert_eq!(tokens.inputs_checked, report.chunks_total);
+        assert_eq!(
+            tokens.status,
+            crate::semantic::token_budget::TokenCheckStatus::Checked
+        );
+    }
+
+    #[test]
+    fn empty_metrics_corpus_is_explicitly_not_checked() {
+        let dir = tempfile::tempdir().unwrap();
+        let opts = BuildOptions {
+            collect_metrics: true,
+            use_cache: false,
+            show_progress: false,
+            ..BuildOptions::default()
+        };
+        let store = VectorStore::build(dir.path(), &opts, None).unwrap();
+        let report = store.build_metrics().expect("metrics report");
+        assert_eq!(report.chunks_total, 0);
+        let tokens = report.token_budget.as_ref().expect("token status");
+        assert_eq!(tokens.inputs_checked, 0);
+        assert_eq!(
+            tokens.status,
+            crate::semantic::token_budget::TokenCheckStatus::NotChecked
+        );
+    }
+
+    #[test]
+    #[ignore = "loads the ONNX embedder; run on demand"]
+    fn corpus_token_metrics_cover_cold_partial_warm_cache_and_enrichment() {
+        use crate::semantic::types::{CacheConfig, ChunkGranularity};
+
+        fn checked_report(store: &VectorStore) -> &crate::semantic::build_metrics::MetricsReport {
+            let report = store.build_metrics().expect("metrics report");
+            let tokens = report.token_budget.as_ref().expect("token report");
+            assert_eq!(
+                tokens.status,
+                crate::semantic::token_budget::TokenCheckStatus::Checked
+            );
+            assert_eq!(tokens.inputs_checked, report.chunks_total);
+            report
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("corpus");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("alpha.rs"), "fn alpha(x: i32) -> i32 { x + 1 }\n").unwrap();
+        std::fs::write(root.join("beta.rs"), "fn beta(x: i32) -> i32 { x * 2 }\n").unwrap();
+        let cache = CacheConfig {
+            cache_dir: dir.path().join("cache"),
+            ..CacheConfig::default()
+        };
+        let opts = BuildOptions {
+            model: EmbeddingModel::ArcticXS,
+            granularity: ChunkGranularity::Function,
+            show_progress: false,
+            use_cache: true,
+            collect_metrics: true,
+            ..BuildOptions::default()
+        };
+
+        let cold = VectorStore::build(&root, &opts, Some(cache.clone())).unwrap();
+        let cold_report = checked_report(&cold);
+        assert_eq!(cold_report.chunks_cached, 0);
+        assert_eq!(cold_report.chunks_embedded, cold_report.chunks_total);
+
+        let warm = VectorStore::build(&root, &opts, Some(cache.clone())).unwrap();
+        let warm_report = checked_report(&warm);
+        assert_eq!(warm_report.chunks_cached, warm_report.chunks_total);
+        assert_eq!(warm_report.chunks_embedded, 0);
+
+        std::fs::write(root.join("gamma.rs"), "fn gamma(x: i32) -> i32 { x - 3 }\n").unwrap();
+        let partial = VectorStore::build(&root, &opts, Some(cache)).unwrap();
+        let partial_report = checked_report(&partial);
+        assert!(partial_report.chunks_cached > 0);
+        assert!(partial_report.chunks_embedded > 0);
+        assert_eq!(
+            partial_report.chunks_cached + partial_report.chunks_embedded,
+            partial_report.chunks_total
+        );
+
+        let previous_enrich = std::env::var_os("TLDR_ENRICH");
+        std::env::set_var("TLDR_ENRICH", "1");
+        let enriched_opts = BuildOptions {
+            use_cache: false,
+            ..opts
+        };
+        let enriched_result = VectorStore::build(&root, &enriched_opts, None);
+        match previous_enrich {
+            Some(value) => std::env::set_var("TLDR_ENRICH", value),
+            None => std::env::remove_var("TLDR_ENRICH"),
+        }
+        let enriched = enriched_result.unwrap();
+        let enriched_report = checked_report(&enriched);
+        assert!(enriched_report.options.enrich);
+        assert_eq!(
+            enriched_report
+                .token_budget
+                .as_ref()
+                .unwrap()
+                .inputs_checked,
+            enriched_report.chunks_total
+        );
+
+        // Regression: an enriched, fully warm build without metrics must not
+        // compose/index a nonexistent corpus-text vector just for accounting.
+        let enriched_cache = CacheConfig {
+            cache_dir: dir.path().join("enriched-cache"),
+            ..CacheConfig::default()
+        };
+        let enriched_no_metrics = BuildOptions {
+            use_cache: true,
+            collect_metrics: false,
+            ..enriched_opts
+        };
+        let previous_enrich = std::env::var_os("TLDR_ENRICH");
+        std::env::set_var("TLDR_ENRICH", "1");
+        let first = VectorStore::build(&root, &enriched_no_metrics, Some(enriched_cache.clone()));
+        let second = VectorStore::build(&root, &enriched_no_metrics, Some(enriched_cache));
+        match previous_enrich {
+            Some(value) => std::env::set_var("TLDR_ENRICH", value),
+            None => std::env::remove_var("TLDR_ENRICH"),
+        }
+        let first = first.unwrap();
+        let second = second.unwrap();
+        assert_eq!(first.len(), second.len());
+        assert!(second.build_metrics().is_none());
     }
 
     /// TLDR-9bxa.1: turning `collect_metrics` on must NOT change the vectors.
@@ -2264,9 +2422,21 @@ mod tests {
         use crate::semantic::types::ChunkGranularity;
 
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("a.rs"), "fn alpha(x: i32) -> i32 { x + 1 }\n").unwrap();
-        std::fs::write(dir.path().join("b.rs"), "fn beta(y: i32) -> i32 { y * 2 }\n").unwrap();
-        std::fs::write(dir.path().join("c.rs"), "fn gamma(z: i32) -> bool { z > 0 }\n").unwrap();
+        std::fs::write(
+            dir.path().join("a.rs"),
+            "fn alpha(x: i32) -> i32 { x + 1 }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("b.rs"),
+            "fn beta(y: i32) -> i32 { y * 2 }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("c.rs"),
+            "fn gamma(z: i32) -> bool { z > 0 }\n",
+        )
+        .unwrap();
 
         let base = BuildOptions {
             model: EmbeddingModel::ArcticXS,
@@ -2343,7 +2513,10 @@ mod tests {
                 "missing phase {phase}"
             );
         }
-        assert!(r.embed_latency_ms > 0, "embed phase must reflect real inference");
+        assert!(
+            r.embed_latency_ms > 0,
+            "embed phase must reflect real inference"
+        );
         assert!(r.batches.iter().all(|b| !b.token_length_available));
 
         // RSS: build-scoped peak observed, bounded by the process-lifetime peak,
