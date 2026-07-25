@@ -125,7 +125,7 @@ pub fn handle_dead(args: Value) -> ToolsCallResult {
     };
 
     // Get all functions from structure
-    let all_functions = match tldr_core::get_code_structure(&path, lang, 0, None) {
+    let all_functions = match tldr_core::get_code_structure(&path, lang, 0) {
         Ok(structure) => {
             let mut funcs = Vec::new();
             for file in structure.files {

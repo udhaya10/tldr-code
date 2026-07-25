@@ -7,7 +7,7 @@ use std::fs;
 use std::path::Path;
 
 use tldr_core::fs::tree::{collect_files, get_file_tree};
-use tldr_core::types::{FileTree, IgnoreSpec, NodeType};
+use tldr_core::types::{FileTree, NodeType};
 
 // =============================================================================
 // Basic get_file_tree tests
@@ -21,7 +21,7 @@ fn test_get_file_tree_basic() {
     fs::write(temp_dir.path().join("main.py"), "# main").unwrap();
     fs::write(temp_dir.path().join("utils.py"), "# utils").unwrap();
 
-    let tree = get_file_tree(temp_dir.path(), None, true, None).unwrap();
+    let tree = get_file_tree(temp_dir.path(), None, true).unwrap();
 
     assert_eq!(tree.node_type, NodeType::Dir);
     assert!(!tree.children.is_empty());
@@ -31,7 +31,7 @@ fn test_get_file_tree_basic() {
 fn test_get_file_tree_empty_directory() {
     let temp_dir = tempfile::tempdir().unwrap();
 
-    let tree = get_file_tree(temp_dir.path(), None, true, None).unwrap();
+    let tree = get_file_tree(temp_dir.path(), None, true).unwrap();
 
     assert_eq!(tree.node_type, NodeType::Dir);
     // Empty dir might have 0 children or include itself depending on implementation
@@ -39,7 +39,7 @@ fn test_get_file_tree_empty_directory() {
 
 #[test]
 fn test_get_file_tree_nonexistent() {
-    let result = get_file_tree(Path::new("/nonexistent/path"), None, true, None);
+    let result = get_file_tree(Path::new("/nonexistent/path"), None, true);
 
     assert!(result.is_err());
     let err = result.unwrap_err();
@@ -60,7 +60,7 @@ fn test_get_file_tree_extension_filter_python() {
     fs::write(temp_dir.path().join("readme.md"), "# readme").unwrap();
 
     let extensions: HashSet<String> = [".py".to_string()].into_iter().collect();
-    let tree = get_file_tree(temp_dir.path(), Some(&extensions), true, None).unwrap();
+    let tree = get_file_tree(temp_dir.path(), Some(&extensions), true).unwrap();
 
     // All files in tree should be .py
     fn check_extensions(node: &FileTree) {
@@ -88,7 +88,7 @@ fn test_get_file_tree_extension_filter_multiple() {
     fs::write(temp_dir.path().join("readme.md"), "# readme").unwrap();
 
     let extensions: HashSet<String> = [".py".to_string(), ".ts".to_string()].into_iter().collect();
-    let tree = get_file_tree(temp_dir.path(), Some(&extensions), true, None).unwrap();
+    let tree = get_file_tree(temp_dir.path(), Some(&extensions), true).unwrap();
 
     fn check_extensions(node: &FileTree, allowed: &HashSet<String>) {
         if node.node_type == NodeType::File {
@@ -116,7 +116,7 @@ fn test_get_file_tree_no_extension_match() {
     fs::write(temp_dir.path().join("file.txt"), "text").unwrap();
 
     let extensions: HashSet<String> = [".py".to_string()].into_iter().collect();
-    let _tree = get_file_tree(temp_dir.path(), Some(&extensions), true, None).unwrap();
+    let _tree = get_file_tree(temp_dir.path(), Some(&extensions), true).unwrap();
 
     // Tree should exist but have no file children (just the directory)
     // or be empty depending on implementation
@@ -134,7 +134,7 @@ fn test_get_file_tree_exclude_hidden() {
     fs::write(temp_dir.path().join(".hidden"), "hidden").unwrap();
     fs::write(temp_dir.path().join(".hidden.py"), "# hidden python").unwrap();
 
-    let tree = get_file_tree(temp_dir.path(), None, true, None).unwrap();
+    let tree = get_file_tree(temp_dir.path(), None, true).unwrap();
 
     fn check_no_hidden(node: &FileTree) {
         if node.node_type == NodeType::File {
@@ -161,7 +161,7 @@ fn test_get_file_tree_include_hidden() {
     fs::write(temp_dir.path().join("visible.py"), "# visible").unwrap();
     fs::write(temp_dir.path().join(".hidden"), "hidden").unwrap();
 
-    let tree = get_file_tree(temp_dir.path(), None, false, None).unwrap();
+    let tree = get_file_tree(temp_dir.path(), None, false).unwrap();
 
     fn has_hidden(node: &FileTree) -> bool {
         if node.name.starts_with('.') && node.name != "." {
@@ -184,8 +184,8 @@ fn test_get_file_tree_ignore_single_pattern() {
     fs::write(temp_dir.path().join("keep.py"), "# keep").unwrap();
     fs::write(temp_dir.path().join("skip.pyc"), "binary").unwrap();
 
-    let ignore = IgnoreSpec::new(vec!["*.pyc".to_string()]);
-    let tree = get_file_tree(temp_dir.path(), None, true, Some(&ignore)).unwrap();
+    fs::write(temp_dir.path().join(".tldrignore"), "*.pyc\n").unwrap();
+    let tree = get_file_tree(temp_dir.path(), None, true).unwrap();
 
     fn check_no_pyc(node: &FileTree) {
         if node.node_type == NodeType::File {
@@ -211,8 +211,8 @@ fn test_get_file_tree_ignore_multiple_patterns() {
     fs::write(temp_dir.path().join("temp.tmp"), "temp").unwrap();
     fs::write(temp_dir.path().join("readme.md"), "# readme").unwrap();
 
-    let ignore = IgnoreSpec::new(vec!["*.pyc".to_string(), "*.tmp".to_string()]);
-    let tree = get_file_tree(temp_dir.path(), None, true, Some(&ignore)).unwrap();
+    fs::write(temp_dir.path().join(".tldrignore"), "*.pyc\n*.tmp\n").unwrap();
+    let tree = get_file_tree(temp_dir.path(), None, true).unwrap();
 
     fn check_patterns(node: &FileTree) {
         if node.node_type == NodeType::File {
@@ -232,29 +232,32 @@ fn test_get_file_tree_ignore_multiple_patterns() {
 #[test]
 fn test_get_file_tree_ignore_directory() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let subdir = temp_dir.path().join("__pycache__");
+    let subdir = temp_dir.path().join("vendored");
     fs::create_dir(&subdir).unwrap();
 
     fs::write(temp_dir.path().join("main.py"), "# main").unwrap();
-    fs::write(subdir.join("cache.pyc"), "binary").unwrap();
+    fs::write(subdir.join("cache.py"), "vendored dep").unwrap();
+    // `vendored/` (not the default-excluded `vendor`) so the `.tldrignore`
+    // exclusion below is load-bearing — it would NOT be skipped by default.
+    fs::write(temp_dir.path().join(".tldrignore"), "vendored/\n").unwrap();
 
-    let ignore = IgnoreSpec::new(vec!["__pycache__/".to_string()]);
-    let tree = get_file_tree(temp_dir.path(), None, true, Some(&ignore)).unwrap();
+    let tree = get_file_tree(temp_dir.path(), None, true).unwrap();
 
-    fn check_no_pycache(node: &FileTree) {
-        assert!(node.name != "__pycache__", "Found __pycache__ directory");
+    fn check_no_vendored(node: &FileTree) {
+        assert!(node.name != "vendored", "Found vendored directory");
         for child in &node.children {
-            check_no_pycache(child);
+            check_no_vendored(child);
         }
     }
-    check_no_pycache(&tree);
+    check_no_vendored(&tree);
 }
 
 #[test]
 fn test_get_file_tree_honors_tldrignore_file() {
     // TLDR-vti: `tree` must honor the project `.tldrignore`, like the index
-    // commands do. The production call passes `IgnoreSpec::default()` (empty),
-    // so the exclusion has to come from loading `<root>/.tldrignore` itself.
+    // commands do. The production call passes no caller ignore spec
+    // (TLDR-boa.4 retired IgnoreSpec), so the exclusion has to come from
+    // loading `<root>/.tldrignore` itself.
     let temp_dir = tempfile::tempdir().unwrap();
     let vendored = temp_dir.path().join("vendored");
     fs::create_dir(&vendored).unwrap();
@@ -264,8 +267,9 @@ fn test_get_file_tree_honors_tldrignore_file() {
     fs::write(temp_dir.path().join("model.gen.py"), "# generated").unwrap();
     fs::write(vendored.join("dep.py"), "# vendored").unwrap();
 
-    // Mirror the production/daemon call: default (empty) IgnoreSpec.
-    let tree = get_file_tree(temp_dir.path(), None, true, Some(&IgnoreSpec::default())).unwrap();
+    // Mirror the production/daemon call: no caller ignore spec — exclusion
+    // comes solely from the canonical walker's `.tldrignore` support.
+    let tree = get_file_tree(temp_dir.path(), None, true).unwrap();
 
     let mut names = Vec::new();
     fn collect(node: &FileTree, names: &mut Vec<String>) {
@@ -296,8 +300,7 @@ fn test_get_file_tree_empty_ignore() {
 
     fs::write(temp_dir.path().join("file.py"), "# file").unwrap();
 
-    let ignore = IgnoreSpec::new(vec![]);
-    let tree = get_file_tree(temp_dir.path(), None, true, Some(&ignore)).unwrap();
+    let tree = get_file_tree(temp_dir.path(), None, true).unwrap();
 
     assert!(!tree.children.is_empty());
 }
@@ -317,7 +320,7 @@ fn test_get_file_tree_nested_directories() {
     fs::write(src_dir.join("main.py"), "# main").unwrap();
     fs::write(utils_dir.join("helper.py"), "# helper").unwrap();
 
-    let tree = get_file_tree(temp_dir.path(), None, true, None).unwrap();
+    let tree = get_file_tree(temp_dir.path(), None, true).unwrap();
 
     // Should find both files
     let files = collect_files(&tree, temp_dir.path());
@@ -343,7 +346,7 @@ fn test_get_file_tree_default_skip_dirs() {
     fs::write(target_dir.join("binary"), "binary").unwrap();
     fs::write(temp_dir.path().join("main.py"), "# main").unwrap();
 
-    let tree = get_file_tree(temp_dir.path(), None, true, None).unwrap();
+    let tree = get_file_tree(temp_dir.path(), None, true).unwrap();
 
     // Should not include skipped directories
     fn check_skip_dirs(node: &FileTree) {
@@ -370,7 +373,7 @@ fn test_collect_files_basic() {
     fs::write(temp_dir.path().join("a.py"), "# a").unwrap();
     fs::write(temp_dir.path().join("b.py"), "# b").unwrap();
 
-    let tree = get_file_tree(temp_dir.path(), None, true, None).unwrap();
+    let tree = get_file_tree(temp_dir.path(), None, true).unwrap();
     let files = collect_files(&tree, temp_dir.path());
 
     assert_eq!(files.len(), 2);
@@ -384,7 +387,7 @@ fn test_collect_files_empty_tree() {
 
     // Create tree with no files (using extension filter that matches nothing)
     let extensions: HashSet<String> = [".nonexistent".to_string()].into_iter().collect();
-    let tree = get_file_tree(temp_dir.path(), Some(&extensions), true, None).unwrap();
+    let tree = get_file_tree(temp_dir.path(), Some(&extensions), true).unwrap();
     let files = collect_files(&tree, temp_dir.path());
 
     // Should return empty or minimal set
@@ -401,7 +404,7 @@ fn test_collect_files_nested() {
     fs::write(deep_dir.join("deep.py"), "# deep").unwrap();
     fs::write(temp_dir.path().join("shallow.py"), "# shallow").unwrap();
 
-    let tree = get_file_tree(temp_dir.path(), None, true, None).unwrap();
+    let tree = get_file_tree(temp_dir.path(), None, true).unwrap();
     let files = collect_files(&tree, temp_dir.path());
 
     assert_eq!(files.len(), 2);
@@ -422,7 +425,7 @@ fn test_get_file_tree_special_characters_in_filename() {
     fs::write(temp_dir.path().join("file_with_underscores.py"), "# file").unwrap();
     fs::write(temp_dir.path().join("file.with.dots.py"), "# file").unwrap();
 
-    let tree = get_file_tree(temp_dir.path(), None, true, None).unwrap();
+    let tree = get_file_tree(temp_dir.path(), None, true).unwrap();
     let files = collect_files(&tree, temp_dir.path());
 
     assert_eq!(files.len(), 3);
@@ -436,7 +439,7 @@ fn test_get_file_tree_unicode_filenames() {
     fs::write(temp_dir.path().join("файл.py"), "# cyrillic").unwrap();
     fs::write(temp_dir.path().join("🚀emoji.py"), "# emoji").unwrap();
 
-    let tree = get_file_tree(temp_dir.path(), None, true, None).unwrap();
+    let tree = get_file_tree(temp_dir.path(), None, true).unwrap();
     let files = collect_files(&tree, temp_dir.path());
 
     assert_eq!(files.len(), 3);
@@ -457,7 +460,7 @@ fn test_get_file_tree_symlinks() {
     {
         match std::os::unix::fs::symlink(&real_file, &symlink) {
             Ok(_) => {
-                let tree = get_file_tree(temp_dir.path(), None, true, None).unwrap();
+                let tree = get_file_tree(temp_dir.path(), None, true).unwrap();
                 // Symlinks might be followed or not depending on implementation
                 // Just verify the operation doesn't panic
                 let _files = collect_files(&tree, temp_dir.path());
@@ -490,7 +493,7 @@ fn test_get_file_tree_readonly_directory() {
         fs::set_permissions(temp_dir.path(), perms).unwrap();
 
         // Should still be able to read
-        let result = get_file_tree(temp_dir.path(), None, true, None);
+        let result = get_file_tree(temp_dir.path(), None, true);
         // Restore permissions for cleanup
         let mut perms = fs::metadata(temp_dir.path()).unwrap().permissions();
         perms.set_mode(0o755);
@@ -529,7 +532,7 @@ fn test_realistic_python_project_structure() {
 
     // Get tree with Python filter
     let extensions: HashSet<String> = [".py".to_string()].into_iter().collect();
-    let tree = get_file_tree(temp_dir.path(), Some(&extensions), true, None).unwrap();
+    let tree = get_file_tree(temp_dir.path(), Some(&extensions), true).unwrap();
     let files = collect_files(&tree, temp_dir.path());
 
     // Should only have Python files. The fixture creates 6 .py files:
@@ -556,7 +559,7 @@ fn test_node_modules_exclusion() {
     fs::write(temp_dir.path().join("app.js"), "// app").unwrap();
 
     let extensions: HashSet<String> = [".js".to_string()].into_iter().collect();
-    let tree = get_file_tree(temp_dir.path(), Some(&extensions), true, None).unwrap();
+    let tree = get_file_tree(temp_dir.path(), Some(&extensions), true).unwrap();
     let files = collect_files(&tree, temp_dir.path());
 
     // Should only have app.js, not node_modules files
@@ -575,8 +578,8 @@ fn test_gitignore_style_patterns() {
     fs::write(temp_dir.path().join("error.log"), "log").unwrap();
 
     // Ignore all log files and temp.py
-    let ignore = IgnoreSpec::new(vec!["*.log".to_string(), "temp.py".to_string()]);
-    let tree = get_file_tree(temp_dir.path(), None, true, Some(&ignore)).unwrap();
+    fs::write(temp_dir.path().join(".tldrignore"), "*.log\ntemp.py\n").unwrap();
+    let tree = get_file_tree(temp_dir.path(), None, true).unwrap();
     let files = collect_files(&tree, temp_dir.path());
 
     // Should only have main.py
@@ -593,7 +596,7 @@ fn test_file_tree_sorting() {
     fs::write(temp_dir.path().join("alpha.py"), "# a").unwrap();
     fs::write(temp_dir.path().join("beta.py"), "# b").unwrap();
 
-    let tree = get_file_tree(temp_dir.path(), None, true, None).unwrap();
+    let tree = get_file_tree(temp_dir.path(), None, true).unwrap();
 
     // Children should be sorted alphabetically
     let file_names: Vec<&str> = tree
@@ -625,7 +628,7 @@ fn test_directories_before_files_sorting() {
     fs::create_dir(&subdir).unwrap();
     fs::write(subdir.join("file.py"), "# file").unwrap();
 
-    let tree = get_file_tree(temp_dir.path(), None, true, None).unwrap();
+    let tree = get_file_tree(temp_dir.path(), None, true).unwrap();
 
     // All directories should come before files
     let mut saw_file = false;
@@ -645,7 +648,7 @@ fn test_directories_before_files_sorting() {
 #[test]
 fn test_path_traversal_protection() {
     // Attempt path traversal - should be handled safely
-    let result = get_file_tree(Path::new("../../../etc"), None, true, None);
+    let result = get_file_tree(Path::new("../../../etc"), None, true);
     assert!(result.is_err());
 }
 
@@ -658,7 +661,7 @@ fn test_relative_path_handling() {
     let original_dir = std::env::current_dir().unwrap();
     std::env::set_current_dir(&temp_dir).unwrap();
 
-    let result = get_file_tree(Path::new("."), None, true, None);
+    let result = get_file_tree(Path::new("."), None, true);
 
     std::env::set_current_dir(original_dir).unwrap();
 
@@ -671,6 +674,6 @@ fn test_absolute_path_handling() {
     fs::write(temp_dir.path().join("file.py"), "# file").unwrap();
 
     // Test with absolute path
-    let result = get_file_tree(temp_dir.path(), None, true, None);
+    let result = get_file_tree(temp_dir.path(), None, true);
     assert!(result.is_ok());
 }

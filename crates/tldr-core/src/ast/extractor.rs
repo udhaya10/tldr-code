@@ -9,7 +9,7 @@ use tree_sitter::{Node, Tree};
 
 use crate::fs::tree::{collect_files, get_file_tree};
 use crate::types::{
-    CodeStructure, DefinitionInfo, FileStructure, IgnoreSpec, Language, MethodInfo,
+    CodeStructure, DefinitionInfo, FileStructure, Language, MethodInfo,
 };
 use crate::TldrResult;
 
@@ -33,7 +33,6 @@ pub fn get_code_structure(
     root: &Path,
     language: Language,
     max_results: usize,
-    ignore_spec: Option<&IgnoreSpec>,
 ) -> TldrResult<CodeStructure> {
     // typescript-large-file-perf-v1: oversize files are surfaced as
     // a warning + a non-zero `files_skipped` counter on the result,
@@ -116,7 +115,7 @@ pub fn get_code_structure(
         .map(|s| s.to_string())
         .collect();
 
-    let tree = get_file_tree(root, Some(&extensions), true, ignore_spec)?;
+    let tree = get_file_tree(root, Some(&extensions), true)?;
     let files = collect_files(&tree, root);
 
     let mut file_structures = Vec::new();

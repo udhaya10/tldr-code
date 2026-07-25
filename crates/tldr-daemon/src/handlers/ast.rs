@@ -58,7 +58,7 @@ pub async fn tree(
 
     // Run in blocking context for CPU-bound work (M10)
     let result = tokio::task::spawn_blocking(move || {
-        get_file_tree(&project, extensions.as_ref(), request.exclude_hidden, None)
+        get_file_tree(&project, extensions.as_ref(), request.exclude_hidden)
     })
     .await
     .map_err(|e| {
@@ -100,7 +100,7 @@ pub async fn structure(
 
     // Run in blocking context (M10)
     let result = tokio::task::spawn_blocking(move || {
-        get_code_structure(&project, language, max_results, None)
+        get_code_structure(&project, language, max_results)
     })
     .await
     .map_err(|e| {

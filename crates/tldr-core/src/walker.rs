@@ -178,8 +178,14 @@ pub const DEFAULT_EXCLUDE_DIRS: &[&str] = &[
     // is detected via the `doxygen.css` sentinel below since `docs/` may
     // legitimately hold authored markdown).
     "dox",
-    // Python tooling
+    // Python tooling. `venv`/`env` are the non-dotfile virtualenv dir names
+    // (`.venv`/`.env` are dotfiles and already caught by the hidden filter);
+    // added in TLDR-boa.3 when `fs/tree.rs::DEFAULT_SKIP_DIRS` was collapsed
+    // onto this list, preserving the old tree/text-skip behaviour for the two
+    // entries that were stricter than the canonical walker.
     "__pycache__",
+    "venv",
+    "env",
     ".pytest_cache",
     ".tox",
     ".mypy_cache",
@@ -224,6 +230,34 @@ const GENERATED_DIR_SENTINELS: &[&str] = &["doxygen.css", "doxygen.svg"];
 /// 112 nodes / 200 edges from the same file (`src/build/emitter.ts`).
 pub(crate) const JS_TS_PRESERVED_DIRS: &[&str] = &["build", "dist", "out", "bin", "obj"];
 
+/// How a path is classified by the canonical walker.
+///
+/// Unifies the scattered eligibility signals — the implicit "did the walker
+/// yield it?", the binary sniff, the oversize cap, the generated-dir
+/// detection — into a single vocabulary. See [`ProjectWalker::classify_path`]
+/// (cheap, pure-path) and [`classify_content`] (expensive, reads the file).
+///
+/// `Hidden`/`Ignored`/`Unsupported`/`Generated` are pure-path (no I/O);
+/// `Binary`/`Oversized` require a `stat()` and, for binary, a byte sniff.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathClass {
+    /// Source file the walker would process: supported extension, within the
+    /// size cap, valid UTF-8.
+    Eligible,
+    /// Matched `.gitignore` / `.tldrignore` / `.git/info/exclude`.
+    Ignored,
+    /// Dotfile/dotdir (the `ignore` crate's `hidden(true)` rule).
+    Hidden,
+    /// Extension not in the configured allow-list (or no recognisable language).
+    Unsupported,
+    /// Under a default-skip or sentinel-marked generated/vendored directory.
+    Generated,
+    /// Content is not valid UTF-8 (binary).
+    Binary,
+    /// Exceeds the size cap (`fs::oversize.rs` policy).
+    Oversized,
+}
+
 /// Builder for project walks.
 ///
 /// Produces an iterator of [`ignore::DirEntry`]s after applying:
@@ -241,6 +275,7 @@ pub struct ProjectWalker {
     root: PathBuf,
     respect_gitignore: bool,
     default_ignore: bool,
+    exclude_hidden: bool,
     max_depth: Option<usize>,
     extensions: Option<Vec<&'static str>>,
     lang_hint: Option<crate::types::Language>,
@@ -253,6 +288,7 @@ impl ProjectWalker {
             root: root.as_ref().to_path_buf(),
             respect_gitignore: true,
             default_ignore: true,
+            exclude_hidden: true,
             max_depth: None,
             extensions: None,
             lang_hint: None,
@@ -290,6 +326,18 @@ impl ProjectWalker {
     /// Control whether `.gitignore` rules are honored. Default: `true`.
     pub fn respect_gitignore(mut self, yes: bool) -> Self {
         self.respect_gitignore = yes;
+        self
+    }
+
+    /// Include hidden (dotfile/dotdir) entries instead of skipping them.
+    ///
+    /// `ProjectWalker` skips hidden entries by default (the `ignore` crate's
+    /// `hidden(true)`). Callers that need hidden entries — notably
+    /// `get_file_tree`'s `exclude_hidden = false` path — opt in here. Added
+    /// for TLDR-boa.2 so the canonical walker can faithfully replace the
+    /// bespoke tree walker.
+    pub fn include_hidden(mut self) -> Self {
+        self.exclude_hidden = false;
         self
     }
 
@@ -338,23 +386,13 @@ impl ProjectWalker {
             );
 
         let mut builder = WalkBuilder::new(&self.root);
-        builder
-            .hidden(true) // skip .hidden files/dirs
-            .git_ignore(self.respect_gitignore)
-            .git_global(self.respect_gitignore)
-            .git_exclude(self.respect_gitignore)
-            .parents(self.respect_gitignore)
-            .follow_links(false); // CRITICAL: avoid pnpm symlink loops
-
-        // Honor `.tldrignore` with full gitignore semantics at every directory
-        // level (TLDR-1j2 / TLDR-vti). Tied to the same `respect_gitignore`
-        // gate as `.gitignore`: a caller that opts out of ignore files
-        // (`--no-respect-ignore`) opts out of both. This is THE shared corpus
-        // walk (`enumerate_corpus_files`), so honoring it here keeps the full
-        // warm build consistent with the single-file gate (`is_corpus_file`).
-        if self.respect_gitignore {
-            builder.add_custom_ignore_filename(TLDRIGNORE_FILE);
-        }
+        // Shared canonical walk config (hidden, gitignore family, `.tldrignore`,
+        // follow_links). See [`apply_canonical_walk_config`].
+        apply_canonical_walk_config(
+            &mut builder,
+            self.exclude_hidden,
+            self.respect_gitignore,
+        );
 
         if let Some(depth) = self.max_depth {
             builder.max_depth(Some(depth));
@@ -368,44 +406,18 @@ impl ProjectWalker {
         if default_ignore || tldr_deny_matcher.is_some() {
             builder.filter_entry(move |entry| {
                 let is_dir = entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
-                if let Some(matcher) = &tldr_deny_matcher {
-                    if matcher.is_ignored(entry.path(), is_dir) {
-                        return false;
-                    }
-                }
-                // Only filter directory entries by the exclude list; files
-                // named "node_modules" are fine to yield (edge case).
-                if !is_dir {
-                    return true;
-                }
-                let name_excluded = match entry.file_name().to_str() {
-                    Some(name) => {
-                        if preserve_js_ts_dirs && JS_TS_PRESERVED_DIRS.contains(&name) {
-                            // JS/TS hint active and the directory name is
-                            // one of the names JS/TS callers commonly use
-                            // for authored source — defer to .gitignore.
-                            false
-                        } else {
-                            DEFAULT_EXCLUDE_DIRS.contains(&name)
-                        }
-                    }
-                    None => false,
-                };
-                if name_excluded {
-                    return false;
-                }
-                // api-check-and-patterns-accuracy-v1 (P11.BUG-AGG-7):
-                // sentinel-file detection for generator output whose
-                // directory name is ambiguous (e.g. `docs/` containing
-                // doxygen output). When a directory contains any of the
-                // sentinel files at its top level, treat it as generated
-                // and skip descent. This is a cheap top-level dir read,
-                // performed only on directories not already excluded by
-                // name above.
-                if dir_has_generated_sentinel(entry.path()) {
-                    return false;
-                }
-                true
+                let name = entry.file_name().to_str();
+                // Shared with `ProjectWalker::classify_path`: the explicit
+                // walk filters (root-level ignore deny-list + generated-dir
+                // name/sentinel). `Some` => drop the entry, `None` => keep.
+                classify_explicit_path(
+                    entry.path(),
+                    name,
+                    is_dir,
+                    tldr_deny_matcher.as_ref(),
+                    preserve_js_ts_dirs,
+                )
+                .is_none()
             });
         }
 
@@ -428,6 +440,73 @@ impl ProjectWalker {
                 Some(entry)
             }
         })
+    }
+
+    /// Classify a single path the way this walker would treat it during a
+    /// walk — without performing one.
+    ///
+    /// Cheap (pure-path): no `stat()` or file read. Resolves `Hidden`,
+    /// `Ignored` (root-level `.gitignore`/`.tldrignore` only), `Generated`,
+    /// and `Unsupported` (extension). Use [`classify_content`] to resolve the
+    /// remaining `Binary`/`Oversized`/`Eligible` cases on a file the caller
+    /// actually intends to process.
+    ///
+    /// # Faithfulness notes
+    ///
+    /// - `Hidden`, `Generated` and `Unsupported` are authoritative here.
+    /// - `Ignored` is a **best-effort under-approximation**: it reflects the
+    ///   root-level ignore files only. The `ignore` crate's in-walk engine
+    ///   (per-directory `.gitignore`, parent traversal) is richer and remains
+    ///   authoritative during [`Self::iter`]. For the authoritative
+    ///   high-throughput walk, use [`Self::iter`].
+    /// - The auto JS/TS-dominance heuristic ([`root_is_js_ts_dominated`]) is
+    ///   an `iter`-time optimisation and is NOT consulted here; only an
+    ///   explicit [`Self::lang_hint`] relaxes the generated-dir list.
+    pub fn classify_path(&self, path: &Path, is_dir: bool) -> PathClass {
+        let name = path.file_name().and_then(|n| n.to_str());
+
+        // Hidden: dotfile/dotdir. `iter` sets `hidden(self.exclude_hidden)`
+        // on the ignore builder, so this check mirrors it.
+        if self.exclude_hidden {
+            if let Some(n) = name {
+                if n.starts_with('.') && n != "." && n != ".." {
+                    return PathClass::Hidden;
+                }
+            }
+        }
+
+        // Explicit walk filters — applied only when `iter` would install its
+        // `filter_entry` (i.e. `default_ignore` OR a root-level ignore file).
+        let deny = if self.respect_gitignore {
+            build_path_ignore_matcher(&self.root, true)
+        } else {
+            None
+        };
+        if self.default_ignore || deny.is_some() {
+            let preserve_js_ts = matches!(
+                self.lang_hint,
+                Some(crate::types::Language::JavaScript)
+                    | Some(crate::types::Language::TypeScript)
+            );
+            if let Some(class) =
+                classify_explicit_path(path, name, is_dir, deny.as_ref(), preserve_js_ts)
+            {
+                return class;
+            }
+        }
+
+        // Unsupported: extension not in the configured allow-list (files only).
+        if !is_dir {
+            if let Some(allowed) = &self.extensions {
+                let ext = path.extension().and_then(|e| e.to_str());
+                match ext {
+                    Some(e) if allowed.contains(&e) => {}
+                    _ => return PathClass::Unsupported,
+                }
+            }
+        }
+
+        PathClass::Eligible
     }
 }
 
@@ -452,6 +531,95 @@ pub(crate) fn dir_has_generated_sentinel(dir: &Path) -> bool {
         }
     }
     false
+}
+
+/// Pure-path explicit-walk classification shared by [`ProjectWalker::iter`]'s
+/// `filter_entry` and [`ProjectWalker::classify_path`].
+///
+/// Encodes ONLY the filters the walker applies explicitly (not the `ignore`
+/// crate's in-walk `hidden(true)` / per-directory-`.gitignore` engine):
+/// - root-level `.gitignore` + `.tldrignore` via `deny` (when present);
+/// - generated/vendored directory names ([`DEFAULT_EXCLUDE_DIRS`], subject to
+///   the JS/TS-preserved subset when `preserve_js_ts_dirs`);
+/// - generator-output sentinel files ([`dir_has_generated_sentinel`]).
+///
+/// The directory-only checks mirror `iter`'s `filter_entry` exactly: files are
+/// never matched against the exclude list (a file literally named
+/// `node_modules` is yielded). Returns `Some(class)` when the entry should be
+/// dropped, `None` when it passes the explicit filters.
+fn classify_explicit_path(
+    path: &Path,
+    name: Option<&str>,
+    is_dir: bool,
+    deny: Option<&PathIgnoreMatcher>,
+    preserve_js_ts_dirs: bool,
+) -> Option<PathClass> {
+    // Root-level ignore deny-list applies to files AND directories.
+    if let Some(matcher) = deny {
+        if matcher.is_ignored(path, is_dir) {
+            return Some(PathClass::Ignored);
+        }
+    }
+
+    // Name + sentinel checks are directory-only.
+    if is_dir {
+        if let Some(name) = name {
+            let name_excluded = if preserve_js_ts_dirs && JS_TS_PRESERVED_DIRS.contains(&name) {
+                // JS/TS callers commonly keep authored source under these
+                // build-sink names — defer to `.gitignore`.
+                false
+            } else {
+                DEFAULT_EXCLUDE_DIRS.contains(&name)
+            };
+            if name_excluded {
+                return Some(PathClass::Generated);
+            }
+        }
+        if dir_has_generated_sentinel(path) {
+            return Some(PathClass::Generated);
+        }
+    }
+
+    None
+}
+
+/// Apply the canonical project-walk **config** to a raw [`WalkBuilder`]:
+/// hidden-file filtering, `.gitignore` / global gitignore / `.git/info/exclude`
+/// / parent traversal, `.tldrignore` registration, and `follow_links(false)`.
+///
+/// This is the single config shared by [`ProjectWalker::iter`] and the
+/// single-file corpus gate (`CorpusPolicy::accepts_path` →
+/// `is_corpus_file_impl` in `semantic/chunker.rs`), so the two cannot drift on
+/// *which* ignore sources they honour — only the *config* is shared.
+///
+/// Callers still own their own `filter_entry`: [`ProjectWalker::iter`] applies
+/// [`DEFAULT_EXCLUDE_DIRS`] + generated-dir sentinels (via
+/// [`classify_explicit_path`]); the single-file gate additionally prunes the
+/// walk to the target file's ancestor chain.
+///
+/// # Why `.tldrignore` rides the `respect_gitignore` gate
+///
+/// `.tldrignore` is registered with full gitignore semantics at every
+/// directory level (TLDR-1j2 / TLDR-vti). It is tied to the same
+/// `respect_gitignore` gate as `.gitignore`: a caller that opts out of ignore
+/// files (`--no-respect-ignore`) opts out of both. This is THE shared corpus
+/// walk (`enumerate_corpus_files`), so honoring it here keeps the full warm
+/// build consistent with the single-file gate (`is_corpus_file`).
+pub(crate) fn apply_canonical_walk_config(
+    builder: &mut WalkBuilder,
+    exclude_hidden: bool,
+    respect_gitignore: bool,
+) {
+    builder
+        .hidden(exclude_hidden)
+        .git_ignore(respect_gitignore)
+        .git_global(respect_gitignore)
+        .git_exclude(respect_gitignore)
+        .parents(respect_gitignore)
+        .follow_links(false); // CRITICAL: avoid pnpm symlink loops
+    if respect_gitignore {
+        builder.add_custom_ignore_filename(TLDRIGNORE_FILE);
+    }
 }
 
 /// cross-cutting-and-clear-fix-bugs-v1 (P18.X4): permissive JS/TS
@@ -508,6 +676,41 @@ pub(crate) fn root_is_js_ts_dominated(dir: &Path) -> bool {
         }
     }
     js_ts_count > other_count && js_ts_count > 0
+}
+
+/// Content-based classification of a file: `Oversized` or `Binary`, else
+/// `Eligible`.
+///
+/// Consolidates the two existing content policies onto the [`PathClass`]
+/// vocabulary:
+/// - [`PathClass::Oversized`] ← [`crate::fs::check_size`] (the autogen-aware
+///   size cap from `fs::oversize.rs`);
+/// - [`PathClass::Binary`] ← [`crate::fs::read_to_string_tolerant`] returning
+///   [`crate::fs::ReadOutcome::NonUtf8`].
+///
+/// # Cost
+///
+/// This reads the whole file (to validate UTF-8). Production paths that already
+/// read the file should detect binary/oversize from that single read rather
+/// than calling this separately; this function exists to give the
+/// classification a single, testable home.
+///
+/// Undeterminable files (un-stat-able or unreadable) return
+/// [`PathClass::Eligible`] so genuine I/O failures are surfaced by the
+/// caller's own read path rather than masked as `Binary`.
+pub fn classify_content(path: &Path) -> PathClass {
+    use crate::fs::{check_size, read_to_string_tolerant, ReadOutcome, SizeCheck};
+
+    match check_size(path) {
+        SizeCheck::Oversize { .. } => return PathClass::Oversized,
+        SizeCheck::Unknown | SizeCheck::WithinLimit { .. } => {}
+    }
+
+    match read_to_string_tolerant(path) {
+        Ok(ReadOutcome::Ok(_)) => PathClass::Eligible,
+        Ok(ReadOutcome::NonUtf8 { .. }) => PathClass::Binary,
+        Err(_) => PathClass::Eligible,
+    }
 }
 
 /// Convenience free function: walk project with all defaults on.
@@ -759,5 +962,133 @@ mod tests {
             !files.contains(&"a/b/deep.rs".to_string()),
             "max_depth=1 should have excluded deep file: {files:?}"
         );
+    }
+
+    // --- PathClass / classify_path / classify_content (TLDR-boa.1) ---------
+
+    fn classify(root: &Path, rel: &str, is_dir: bool) -> PathClass {
+        ProjectWalker::new(root).classify_path(&root.join(rel), is_dir)
+    }
+
+    #[test]
+    fn classify_path_hidden_dotfile() {
+        let tmp = tempdir().unwrap();
+        write_file(&tmp.path().join(".hidden.rs"), "fn a() {}");
+        assert_eq!(classify(tmp.path(), ".hidden.rs", false), PathClass::Hidden);
+    }
+
+    #[test]
+    fn classify_path_include_hidden_makes_dotfile_eligible() {
+        let tmp = tempdir().unwrap();
+        write_file(&tmp.path().join(".hidden.rs"), "fn a() {}");
+        // Default: hidden.
+        assert_eq!(classify(tmp.path(), ".hidden.rs", false), PathClass::Hidden);
+        // Opt in: the dotfile is eligible.
+        assert_eq!(
+            ProjectWalker::new(tmp.path())
+                .include_hidden()
+                .classify_path(&tmp.path().join(".hidden.rs"), false),
+            PathClass::Eligible
+        );
+    }
+
+    #[test]
+    fn classify_path_generated_default_skip_dir() {
+        let tmp = tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join("node_modules")).unwrap();
+        assert_eq!(
+            classify(tmp.path(), "node_modules", true),
+            PathClass::Generated
+        );
+    }
+
+    #[test]
+    fn classify_path_generated_sentinel_dir() {
+        let tmp = tempdir().unwrap();
+        // `docs/` is NOT a name-excluded dir, but a doxygen sentinel marks it
+        // generated (api-check-and-patterns-accuracy-v1 / P11.BUG-AGG-7).
+        let docs = tmp.path().join("docs");
+        fs::create_dir_all(&docs).unwrap();
+        write_file(&docs.join("doxygen.css"), "/* generated */");
+        assert_eq!(classify(tmp.path(), "docs", true), PathClass::Generated);
+    }
+
+    #[test]
+    fn classify_path_generated_respects_js_ts_hint() {
+        let tmp = tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join("build")).unwrap();
+        // No lang hint: `build/` is a default exclude -> Generated.
+        assert_eq!(classify(tmp.path(), "build", true), PathClass::Generated);
+        // TypeScript hint: `build/` is preserved -> Eligible.
+        assert_eq!(
+            ProjectWalker::new(tmp.path())
+                .lang_hint(crate::types::Language::TypeScript)
+                .classify_path(&tmp.path().join("build"), true),
+            PathClass::Eligible
+        );
+    }
+
+    #[test]
+    fn classify_path_unsupported_extension() {
+        let tmp = tempdir().unwrap();
+        write_file(&tmp.path().join("foo.py"), "x = 1");
+        assert_eq!(
+            ProjectWalker::new(tmp.path())
+                .extensions(&["rs"])
+                .classify_path(&tmp.path().join("foo.py"), false),
+            PathClass::Unsupported
+        );
+        // Allowed extension -> Eligible.
+        write_file(&tmp.path().join("bar.rs"), "fn b() {}");
+        assert_eq!(
+            ProjectWalker::new(tmp.path())
+                .extensions(&["rs"])
+                .classify_path(&tmp.path().join("bar.rs"), false),
+            PathClass::Eligible
+        );
+    }
+
+    #[test]
+    fn classify_path_eligible_source() {
+        let tmp = tempdir().unwrap();
+        write_file(&tmp.path().join("foo.rs"), "fn main() {}");
+        assert_eq!(classify(tmp.path(), "foo.rs", false), PathClass::Eligible);
+    }
+
+    #[test]
+    fn classify_path_ignored_by_tldrignore() {
+        let tmp = tempdir().unwrap();
+        write_file(&tmp.path().join(".tldrignore"), "*.gen.rs\n");
+        write_file(&tmp.path().join("model.gen.rs"), "fn g() {}");
+        assert_eq!(
+            classify(tmp.path(), "model.gen.rs", false),
+            PathClass::Ignored
+        );
+    }
+
+    #[test]
+    fn classify_content_oversized_autogen() {
+        let tmp = tempdir().unwrap();
+        let path = tmp.path().join("huge.d.ts");
+        let bytes = vec![b'a'; (crate::fs::MAX_AUTOGEN_FILE_SIZE_BYTES as usize) + 1];
+        fs::write(&path, &bytes).unwrap();
+        assert_eq!(classify_content(&path), PathClass::Oversized);
+    }
+
+    #[test]
+    fn classify_content_binary() {
+        let tmp = tempdir().unwrap();
+        let path = tmp.path().join("blob.bin");
+        // 0xFF is never a valid UTF-8 leading byte.
+        fs::write(&path, b"valid prefix \xFF\xFE invalid").unwrap();
+        assert_eq!(classify_content(&path), PathClass::Binary);
+    }
+
+    #[test]
+    fn classify_content_eligible() {
+        let tmp = tempdir().unwrap();
+        let path = tmp.path().join("ok.rs");
+        fs::write(&path, b"fn main() {}\n").unwrap();
+        assert_eq!(classify_content(&path), PathClass::Eligible);
     }
 }

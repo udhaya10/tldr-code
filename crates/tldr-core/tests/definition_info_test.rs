@@ -48,7 +48,7 @@ fn test_extract_populates_definitions_python() {
     let file = dir.path().join("test.py");
     std::fs::write(&file, "def foo(x, y):\n    return x + y\n\nclass Bar:\n    def method(self):\n        pass\n\ndef baz():\n    pass\n").unwrap();
 
-    let structure = get_code_structure(dir.path(), Language::Python, 0, None).unwrap();
+    let structure = get_code_structure(dir.path(), Language::Python, 0).unwrap();
     assert_eq!(structure.files.len(), 1);
     let defs = &structure.files[0].definitions;
     assert!(
@@ -75,7 +75,7 @@ fn test_extract_populates_definitions_rust() {
     let file = dir.path().join("test.rs");
     std::fs::write(&file, "pub fn hello(name: &str) -> String {\n    format!(\"Hello, {}\", name)\n}\n\nstruct Point {\n    x: f64,\n    y: f64,\n}\n\nfn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n").unwrap();
 
-    let structure = get_code_structure(dir.path(), Language::Rust, 0, None).unwrap();
+    let structure = get_code_structure(dir.path(), Language::Rust, 0).unwrap();
     assert_eq!(structure.files.len(), 1);
     let defs = &structure.files[0].definitions;
     assert!(
@@ -107,7 +107,7 @@ fn test_definitions_line_ranges_correct() {
     )
     .unwrap();
 
-    let structure = get_code_structure(dir.path(), Language::Python, 0, None).unwrap();
+    let structure = get_code_structure(dir.path(), Language::Python, 0).unwrap();
     let defs = &structure.files[0].definitions;
 
     let foo = defs
@@ -139,7 +139,7 @@ fn test_definitions_names_match_functions_field() {
     let file = dir.path().join("match.py");
     std::fs::write(&file, "def alpha():\n    pass\n\ndef beta():\n    pass\n").unwrap();
 
-    let structure = get_code_structure(dir.path(), Language::Python, 0, None).unwrap();
+    let structure = get_code_structure(dir.path(), Language::Python, 0).unwrap();
     let fs = &structure.files[0];
 
     // Every function name in the `functions` field should appear in `definitions`

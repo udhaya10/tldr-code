@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 use tldr_core::{
     ast::extract::extract_file, ast::extractor::get_code_structure, ast::imports::get_imports,
-    fs::tree::get_file_tree, FileTree, IgnoreSpec, Language, NodeType, TldrError,
+    fs::tree::get_file_tree, FileTree, Language, NodeType, TldrError,
 };
 
 /// Get the fixtures directory path
@@ -30,7 +30,7 @@ mod tree_tests {
         let project = fixtures_dir().join("simple-project");
 
         // WHEN: We get the file tree
-        let tree = get_file_tree(&project, None, true, None);
+        let tree = get_file_tree(&project, None, true);
 
         // THEN: It should succeed and contain files
         assert!(tree.is_ok());
@@ -45,7 +45,7 @@ mod tree_tests {
         let extensions: HashSet<String> = [".py".to_string()].into_iter().collect();
 
         // WHEN: We filter by .py extension
-        let tree = get_file_tree(&project, Some(&extensions), true, None);
+        let tree = get_file_tree(&project, Some(&extensions), true);
 
         // THEN: All files should be Python files
         let tree = tree.unwrap();
@@ -70,7 +70,7 @@ mod tree_tests {
         let nonexistent = PathBuf::from("/nonexistent/path/that/does/not/exist");
 
         // WHEN: We try to get the file tree
-        let result = get_file_tree(&nonexistent, None, true, None);
+        let result = get_file_tree(&nonexistent, None, true);
 
         // THEN: It should return PathNotFound error
         assert!(matches!(result, Err(TldrError::PathNotFound(_))));
@@ -82,7 +82,7 @@ mod tree_tests {
         let empty_dir = fixtures_dir().join("empty-dir");
 
         // WHEN: We get the file tree
-        let tree = get_file_tree(&empty_dir, None, true, None);
+        let tree = get_file_tree(&empty_dir, None, true);
 
         // THEN: It should succeed with empty children
         assert!(tree.is_ok());
@@ -96,7 +96,7 @@ mod tree_tests {
         let project = fixtures_dir().join("simple-project");
 
         // WHEN: We get the file tree with exclude_hidden=true
-        let tree = get_file_tree(&project, None, true, None);
+        let tree = get_file_tree(&project, None, true);
 
         // THEN: No files should start with a dot (in children)
         fn check_no_hidden(node: &FileTree) {
@@ -120,7 +120,7 @@ mod tree_tests {
         let project = fixtures_dir().join("simple-project");
 
         // WHEN: We get the file tree with exclude_hidden=false
-        let tree = get_file_tree(&project, None, false, None);
+        let tree = get_file_tree(&project, None, false);
 
         // THEN: It should succeed
         assert!(tree.is_ok());
@@ -128,12 +128,17 @@ mod tree_tests {
 
     #[test]
     fn tree_respects_ignore_patterns() {
-        // GIVEN: A project with an ignore spec
-        let project = fixtures_dir().join("simple-project");
-        let ignore = IgnoreSpec::new(vec!["*.pyc".to_string(), "__pycache__".to_string()]);
+        // GIVEN: A temp project with a `.tldrignore` (the canonical exclusion
+        // path, replacing the retired caller-supplied IgnoreSpec — TLDR-boa.4).
+        // Uses a tempdir, not the shared fixture, so the ignore file cannot leak
+        // into parallel tests.
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(project.path().join("keep.py"), "# keep").unwrap();
+        std::fs::write(project.path().join("skip.pyc"), "binary").unwrap();
+        std::fs::write(project.path().join(".tldrignore"), "*.pyc\n__pycache__\n").unwrap();
 
-        // WHEN: We get the file tree with ignore patterns
-        let tree = get_file_tree(&project, None, true, Some(&ignore));
+        // WHEN: We get the file tree (canonical walker honors `.tldrignore`)
+        let tree = get_file_tree(project.path(), None, true);
 
         // THEN: Ignored patterns should not appear
         fn check_no_ignored(node: &FileTree, patterns: &[String]) {
@@ -161,7 +166,7 @@ mod tree_tests {
         let malicious = fixtures_dir().join("../../../etc/passwd");
 
         // WHEN: We try to get the file tree
-        let result = get_file_tree(&malicious, None, true, None);
+        let result = get_file_tree(&malicious, None, true);
 
         // THEN: It should return error (either PathTraversal or PathNotFound)
         assert!(result.is_err());
@@ -175,7 +180,7 @@ mod tree_tests {
 
         // WHEN: We time the file tree generation
         let start = std::time::Instant::now();
-        let _tree = get_file_tree(&project, None, true, None);
+        let _tree = get_file_tree(&project, None, true);
         let elapsed = start.elapsed();
 
         // THEN: It should complete in under 10ms for 1000 files
@@ -200,7 +205,7 @@ mod structure_tests {
         let project = fixtures_dir().join("simple-project");
 
         // WHEN: We extract the code structure
-        let structure = get_code_structure(&project, Language::Python, 0, None);
+        let structure = get_code_structure(&project, Language::Python, 0);
 
         // THEN: It should find the functions
         assert!(structure.is_ok());
@@ -220,7 +225,7 @@ mod structure_tests {
         let project = fixtures_dir().join("simple-project");
 
         // WHEN: We extract the code structure
-        let structure = get_code_structure(&project, Language::Python, 0, None);
+        let structure = get_code_structure(&project, Language::Python, 0);
 
         // THEN: It should find the classes
         let utils_file = structure
@@ -239,7 +244,7 @@ mod structure_tests {
         let project = fixtures_dir().join("simple-project");
 
         // WHEN: We extract the code structure
-        let structure = get_code_structure(&project, Language::Python, 0, None);
+        let structure = get_code_structure(&project, Language::Python, 0);
 
         // THEN: Methods should be extracted
         let utils = structure
@@ -259,7 +264,7 @@ mod structure_tests {
         let project = fixtures_dir().join("typescript-project");
 
         // WHEN: We extract the code structure
-        let structure = get_code_structure(&project, Language::TypeScript, 0, None);
+        let structure = get_code_structure(&project, Language::TypeScript, 0);
 
         // THEN: It should find TypeScript functions and classes
         assert!(structure.is_ok());
@@ -273,7 +278,7 @@ mod structure_tests {
         let project = fixtures_dir().join("simple-project");
 
         // WHEN: We limit the results
-        let structure = get_code_structure(&project, Language::Python, 1, None);
+        let structure = get_code_structure(&project, Language::Python, 1);
 
         // THEN: Only max_results files should be returned
         assert!(structure.unwrap().files.len() <= 1);
@@ -285,7 +290,7 @@ mod structure_tests {
         let project = fixtures_dir().join("simple-project");
 
         // WHEN: We extract the code structure
-        let structure = get_code_structure(&project, Language::Python, 0, None);
+        let structure = get_code_structure(&project, Language::Python, 0);
 
         // THEN: It should succeed
         assert!(structure.is_ok());
@@ -297,7 +302,7 @@ mod structure_tests {
         let project = fixtures_dir().join("simple-project");
 
         // WHEN: We extract the code structure
-        let structure = get_code_structure(&project, Language::Python, 0, None);
+        let structure = get_code_structure(&project, Language::Python, 0);
 
         // THEN: Imports should be extracted
         let utils = structure
@@ -318,7 +323,7 @@ mod structure_tests {
 
         // WHEN: We time the structure extraction
         let start = std::time::Instant::now();
-        let _structure = get_code_structure(&project, Language::Python, 0, None);
+        let _structure = get_code_structure(&project, Language::Python, 0);
         let elapsed = start.elapsed();
 
         // THEN: It should complete in under 500ms

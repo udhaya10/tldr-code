@@ -274,7 +274,7 @@ impl WarmJob {
         if self.cache.get::<serde_json::Value>(&struct_key).is_some() {
             warmed.push("structure (cached)");
         } else {
-            match get_code_structure(&self.project, self.lang, 0, None) {
+            match get_code_structure(&self.project, self.lang, 0) {
                 Ok(result) => {
                     // TLDR-9ae (F1): no to_value DOM — see call_graph step above.
                     // TLDR-iqr freshness: root-hash registration (see call_graph).
@@ -297,12 +297,7 @@ impl WarmJob {
         if self.cache.get::<serde_json::Value>(&tree_key).is_some() {
             warmed.push("file_tree (cached)");
         } else {
-            match get_file_tree(
-                &self.project,
-                None,
-                true,
-                Some(&tldr_core::IgnoreSpec::default()),
-            ) {
+            match get_file_tree(&self.project, None, true) {
                 Ok(result) => {
                     let file_count = count_tree_files(&result);
                     // TLDR-9ae (F1): no to_value DOM — see call_graph step above.
@@ -807,7 +802,7 @@ impl TLDRDaemon {
                 if let Some(cached) = self.cache.get::<serde_json::Value>(&key) {
                     return DaemonResponse::Result(cached);
                 }
-                match tldr_search(&pattern, &self.project, None, 2, max, 1000, None) {
+                match tldr_search(&pattern, &self.project, None, 2, max, 1000) {
                     Ok(result) => {
                         let val = serde_json::to_value(&result).unwrap_or_default();
                         // TLDR-fct freshness: search scans self.project — register
@@ -882,19 +877,15 @@ impl TLDRDaemon {
                 if let Some(cached) = self.cache.get::<serde_json::Value>(&key) {
                     return DaemonResponse::Result(cached);
                 }
-                // Mirror the CLI local path EXACTLY (tree.rs): extension set,
-                // skip-hidden = !include_hidden, and the default IgnoreSpec.
+                // Mirror the CLI local path EXACTLY (tree.rs): extension set
+                // and skip-hidden = !include_hidden. (TLDR-boa.4 retired the
+                // caller-supplied IgnoreSpec; exclusion is on-disk only.)
                 let ext_set: Option<std::collections::HashSet<String>> = if extensions.is_empty() {
                     None
                 } else {
                     Some(extensions.iter().cloned().collect())
                 };
-                match get_file_tree(
-                    &root,
-                    ext_set.as_ref(),
-                    !include_hidden,
-                    Some(&tldr_core::IgnoreSpec::default()),
-                ) {
+                match get_file_tree(&root, ext_set.as_ref(), !include_hidden) {
                     Ok(result) => {
                         let val = serde_json::to_value(&result).unwrap_or_default();
                         // TLDR-fct freshness: mirror Calls — register root+project
@@ -942,14 +933,9 @@ impl TLDRDaemon {
                     return DaemonResponse::Result(cached);
                 }
                 // Mirror structure.rs compute_local EXACTLY: the user's
-                // --max-results and the default IgnoreSpec (previously the
-                // daemon passed 0 + None, diverging from local compute).
-                match get_code_structure(
-                    &path,
-                    language,
-                    max_results,
-                    Some(&tldr_core::IgnoreSpec::default()),
-                ) {
+                // --max-results (TLDR-boa.4 retired the caller-supplied
+                // IgnoreSpec; exclusion is on-disk only).
+                match get_code_structure(&path, language, max_results) {
                     Ok(result) => {
                         let val = serde_json::to_value(&result).unwrap_or_default();
                         // TLDR-fct freshness: register the target path + project

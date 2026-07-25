@@ -17,6 +17,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use crate::types::Language;
+use crate::walker::ProjectWalker;
 use crate::TldrError;
 
 // =============================================================================
@@ -77,35 +78,25 @@ pub fn walk_source_files(
         return Ok((vec![path.to_path_buf()], vec![]));
     }
 
-    // Directory walk using ignore::WalkBuilder (matches loc.rs pattern)
+    // Directory walk via the canonical ProjectWalker (TLDR-boa.3): honors
+    // `.gitignore`/`.tldrignore`, hidden files, `DEFAULT_EXCLUDE_DIRS` and
+    // generated-dir sentinels — the same policy every other walk uses.
+    // `should_skip_path` is kept as a backstop so the `--include-hidden` path
+    // still applies its `.github`/`.claude` exception exactly; it is redundant
+    // in the default case where ProjectWalker already pruned these.
     let mut files = Vec::new();
     let mut warnings = Vec::new();
     let mut had_entries = false;
 
-    let mut builder = ignore::WalkBuilder::new(path);
-    builder.follow_links(false); // CM-1: Don't follow symlinks
-    builder.hidden(!options.include_hidden);
-
-    if options.gitignore {
-        builder.git_ignore(true);
-        builder.git_global(true);
-    } else {
-        builder.git_ignore(false);
-        builder.git_global(false);
+    let mut walker = ProjectWalker::new(path).respect_gitignore(options.gitignore);
+    if options.include_hidden {
+        walker = walker.include_hidden();
     }
 
-    for entry in builder.build() {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(e) => {
-                warnings.push(format!("Walk error: {}", e));
-                continue;
-            }
-        };
-
+    for entry in walker.iter() {
         let entry_path = entry.path();
 
-        // Skip directories
+        // Skip directories (ProjectWalker yields them so the walk can descend).
         if entry_path.is_dir() {
             continue;
         }
@@ -124,7 +115,7 @@ pub fn walk_source_files(
         // Get relative path for pattern checking
         let relative_path = entry_path.strip_prefix(path).unwrap_or(entry_path);
 
-        // Skip paths matching skip patterns (node_modules, .git, etc.)
+        // Backstop skip patterns (node_modules, .git, etc.) — see note above.
         if should_skip_path(relative_path) {
             continue;
         }
@@ -189,29 +180,11 @@ pub const DEFAULT_MAX_FILE_SIZE: usize = 10 * 1024 * 1024;
 /// Default maximum file size in megabytes
 pub const DEFAULT_MAX_FILE_SIZE_MB: usize = 10;
 
-/// Directories to skip by default
-const SKIP_DIRS: &[&str] = &[
-    "node_modules",
-    ".git",
-    ".svn",
-    ".hg",
-    "__pycache__",
-    ".pytest_cache",
-    ".mypy_cache",
-    ".tox",
-    ".venv",
-    "venv",
-    ".env",
-    "target",
-    "build",
-    "dist",
-    ".idea",
-    ".vscode",
-    ".next",
-    ".nuxt",
-    "coverage",
-    ".coverage",
-];
+// The default skip list was unified onto the canonical
+// `crate::walker::DEFAULT_EXCLUDE_DIRS` in TLDR-boa.7. The dotdir entries the
+// old `SKIP_DIRS` carried beyond the canonical list (`.svn`/`.hg`/`.venv`/
+// `.env`/`.idea`/`.vscode`) are still pruned — by the hidden-file check in
+// [`should_skip_path_with_lang`], not by name.
 
 /// File extensions that are typically binary
 const BINARY_EXTENSIONS: &[&str] = &[
@@ -366,21 +339,13 @@ pub fn should_skip_path(path: &Path) -> bool {
     should_skip_path_with_lang(path, None)
 }
 
-/// JS/TS-friendly subset of [`SKIP_DIRS`]: directories that are
-/// build sinks for some languages (Rust `build/`, Java `dist/`) but commonly
-/// hold authored source for JS/TS (`src/build/emitter.ts` in ts-dom-gen,
-/// monorepo `packages/x/dist/index.ts`).
-///
-/// cross-cutting-and-clear-fix-bugs-v1 (P18.X4): mirrors the per-language
-/// gate already in `walker.rs` (`JS_TS_PRESERVED_DIRS`). Without this,
-/// `tldr loc /tmp/repos/ts-dom-gen/src` returned `total_files: 0` because
-/// the only ts source file lives at `src/build/emitter.ts` and `build` is
-/// in `SKIP_DIRS`.
-const JS_TS_PRESERVED_DIRS: &[&str] = &["build", "dist", "out", "bin", "obj"];
+// The local JS/TS-preserved copy was removed in TLDR-boa.7;
+// [`should_skip_path_with_lang`] now uses `crate::walker::JS_TS_PRESERVED_DIRS`
+// directly — the same gate `ProjectWalker` and the callgraph scanner share.
 
 /// Like [`should_skip_path`] but with optional language context. When
-/// language is JavaScript or TypeScript, the JS/TS-friendly subset of
-/// SKIP_DIRS is preserved (deferred to `.gitignore`).
+/// language is JavaScript or TypeScript, the JS/TS-friendly subset of the
+/// canonical `DEFAULT_EXCLUDE_DIRS` is preserved (deferred to `.gitignore`).
 ///
 /// cross-cutting-and-clear-fix-bugs-v1 (P18.X4).
 pub fn should_skip_path_with_lang(path: &Path, lang: Option<crate::types::Language>) -> bool {
@@ -399,9 +364,10 @@ pub fn should_skip_path_with_lang(path: &Path, lang: Option<crate::types::Langua
                     }
                 }
 
-                // Skip known directories
-                if SKIP_DIRS.contains(&name_str) {
-                    if preserve_js_ts && JS_TS_PRESERVED_DIRS.contains(&name_str) {
+                // Skip known directories (canonical list, shared with
+                // `ProjectWalker` — TLDR-boa.7).
+                if crate::walker::DEFAULT_EXCLUDE_DIRS.contains(&name_str) {
+                    if preserve_js_ts && crate::walker::JS_TS_PRESERVED_DIRS.contains(&name_str) {
                         // JS/TS hint active and this is a name JS/TS
                         // callers commonly use for authored source —
                         // defer to `.gitignore`.
@@ -415,9 +381,10 @@ pub fn should_skip_path_with_lang(path: &Path, lang: Option<crate::types::Langua
     false
 }
 
-/// Get the set of directories that should be skipped.
+/// Get the set of directories that should be skipped (the canonical
+/// `DEFAULT_EXCLUDE_DIRS` — TLDR-boa.7 unified the old metrics-only list onto it).
 pub fn skip_directories() -> HashSet<&'static str> {
-    SKIP_DIRS.iter().copied().collect()
+    crate::walker::DEFAULT_EXCLUDE_DIRS.iter().copied().collect()
 }
 
 // =============================================================================

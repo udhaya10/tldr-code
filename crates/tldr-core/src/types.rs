@@ -1180,67 +1180,10 @@ pub struct FileEntry {
     pub size_bytes: u64,
 }
 
-/// Ignore specification (gitignore-style patterns).
-#[derive(Debug, Clone)]
-pub struct IgnoreSpec {
-    /// Glob patterns for files and directories to ignore
-    pub patterns: Vec<String>,
-    matcher: Option<ignore::gitignore::Gitignore>,
-}
-
-impl Default for IgnoreSpec {
-    fn default() -> Self {
-        Self {
-            patterns: Vec::new(),
-            matcher: None,
-        }
-    }
-}
-
-impl IgnoreSpec {
-    /// Create a new ignore spec from patterns
-    pub fn new(patterns: Vec<String>) -> Self {
-        let matcher = Self::build_matcher(Path::new("."), &patterns);
-        Self { patterns, matcher }
-    }
-
-    /// Load from a file (like .tldrignore or .gitignore)
-    pub fn from_file(path: &std::path::Path) -> std::io::Result<Self> {
-        let contents = std::fs::read_to_string(path)?;
-        let patterns = contents
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty() && !line.starts_with('#'))
-            .map(str::to_string)
-            .collect::<Vec<_>>();
-        let root = path.parent().unwrap_or_else(|| Path::new("."));
-        let matcher = Self::build_matcher(root, &patterns);
-        Ok(Self { patterns, matcher })
-    }
-
-    /// Check if a path should be ignored
-    pub fn is_ignored(&self, path: &std::path::Path) -> bool {
-        self.matcher.as_ref().is_some_and(|matcher| {
-            matcher
-                .matched_path_or_any_parents(path, path.is_dir())
-                .is_ignore()
-        })
-    }
-
-    fn build_matcher(
-        root: &Path,
-        patterns: &[String],
-    ) -> Option<ignore::gitignore::Gitignore> {
-        let mut builder = ignore::gitignore::GitignoreBuilder::new(root);
-        let mut added = false;
-        for pattern in patterns {
-            if builder.add_line(None, pattern).is_ok() {
-                added = true;
-            }
-        }
-        added.then(|| builder.build().ok()).flatten()
-    }
-}
+// IgnoreSpec (gitignore-style caller patterns) was removed in TLDR-boa.4. The
+// canonical `crate::walker::ProjectWalker` honors `.gitignore`/`.tldrignore`
+// directly; no production caller ever passed a populated spec (all used
+// `IgnoreSpec::default()`/`None`), so the parameter was dead weight.
 
 // =============================================================================
 // AST Types (Layer 1)

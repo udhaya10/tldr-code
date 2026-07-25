@@ -123,7 +123,7 @@ mod schema_tests {
         std::fs::create_dir(temp.path().join("subdir")).unwrap();
         std::fs::write(temp.path().join("file.py"), "# test").unwrap();
 
-        let tree = tldr_core::get_file_tree(temp.path(), None, true, None).unwrap();
+        let tree = tldr_core::get_file_tree(temp.path(), None, true).unwrap();
         let json = serde_json::to_string(&tree).unwrap();
 
         assert!(

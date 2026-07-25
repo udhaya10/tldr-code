@@ -316,10 +316,9 @@ impl PatternMiner {
         }
 
         let mut files = Vec::new();
-        let ignore_spec = crate::IgnoreSpec::default();
 
         // Use get_file_tree to collect files with ignore support
-        let tree = get_file_tree(path, None, true, Some(&ignore_spec))?;
+        let tree = get_file_tree(path, None, true)?;
         let source_files = collect_files(&tree, path);
 
         for file_path in source_files {

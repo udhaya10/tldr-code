@@ -504,20 +504,12 @@ fn is_corpus_file_impl(root: &Path, file: &Path) -> bool {
     };
 
     let mut builder = WalkBuilder::new(&canonical_root);
-    builder
-        .hidden(true)
-        .git_ignore(true)
-        .git_global(true)
-        .git_exclude(true)
-        .parents(true)
-        .follow_links(false)
-        .max_depth(Some(rel.components().count()));
-
-    // Honor `.tldrignore` (TLDR-1j2): the single-file corpus gate must agree
-    // with `enumerate_corpus_files` (which walks via `ProjectWalker`, also
-    // `.tldrignore`-aware), so the watcher delta path and the full warm build
-    // make the same membership decision for an excluded dir.
-    builder.add_custom_ignore_filename(crate::walker::TLDRIGNORE_FILE);
+    // Shared canonical walk config (hidden, gitignore family, `.tldrignore`,
+    // follow_links) — kept in lockstep with `ProjectWalker::iter` via
+    // [`crate::walker::apply_canonical_walk_config`] so the single-file gate
+    // agrees with `enumerate_corpus_files` on which ignore sources it honours.
+    crate::walker::apply_canonical_walk_config(&mut builder, true, true);
+    builder.max_depth(Some(rel.components().count()));
 
     builder.filter_entry(move |entry| {
         let is_dir = entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false);

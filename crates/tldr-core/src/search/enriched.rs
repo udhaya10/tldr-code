@@ -418,7 +418,6 @@ fn do_regex_search(
         0, // no context lines needed
         raw_limit,
         usize::MAX, // match BM25's behavior of scanning all files
-        None,       // no ignore spec (match BM25 behavior)
     )?;
     // Count unique files in the results as an approximation of files searched.
     // This undercounts (files with 0 matches are not counted), but avoids

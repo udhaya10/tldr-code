@@ -526,7 +526,7 @@ fn test_hybrid_with_structure_cache() {
 
     // Build a structure lookup from the project files.
     // We use the write/read_structure_cache round-trip to get a StructureLookup.
-    let structure = tldr_core::ast::get_code_structure(&root, Language::Rust, 0, None).unwrap();
+    let structure = tldr_core::ast::get_code_structure(&root, Language::Rust, 0).unwrap();
 
     let cache_dir = root.join(".tldr").join("cache");
     fs::create_dir_all(&cache_dir).unwrap();

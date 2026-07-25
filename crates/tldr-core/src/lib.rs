@@ -26,10 +26,10 @@
 //! assert_eq!(lang, Some(Language::Python));
 //!
 //! // Get file tree
-//! let tree = get_file_tree(Path::new("src"), None, true, None)?;
+//! let tree = get_file_tree(Path::new("src"), None, true)?;
 //!
 //! // Extract code structure
-//! let structure = get_code_structure(Path::new("src"), Language::Python, 0, None)?;
+//! let structure = get_code_structure(Path::new("src"), Language::Python, 0)?;
 //! ```
 
 #![warn(missing_docs)]

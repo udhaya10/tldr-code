@@ -385,11 +385,11 @@ mod enrichment_tests {
     }
 
     // =========================================================================
-    // Change 3: Bincode Cache
+    // Change 3: rkyv Cache
     // =========================================================================
 
     #[test]
-    fn cache_roundtrip_bincode() {
+    fn cache_roundtrip_rkyv() {
         // GIVEN: A cache with entries, flushed to disk
         let temp = TempDir::new().unwrap();
         let config = CacheConfig {
@@ -446,13 +446,18 @@ mod enrichment_tests {
         }
 
         // WHEN: We look at the cache file on disk
-        let cache_bin = temp.path().join("cache.bin");
+        let cache_bin = fs::read_dir(temp.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .find(|path| path.extension().is_some_and(|ext| ext == "rkyv"))
+            .expect("rkyv cache generation");
         let cache_json = temp.path().join("cache.json");
 
-        // THEN: cache.bin should exist (not cache.json)
+        // THEN: a versioned rkyv generation should exist (not cache.json)
         assert!(
             cache_bin.exists(),
-            "Cache file should be 'cache.bin' (bincode format), but cache.bin does not exist. Files in dir: {:?}",
+            "A versioned rkyv cache generation should exist. Files in dir: {:?}",
             fs::read_dir(temp.path())
                 .unwrap()
                 .filter_map(|e| e.ok())
@@ -467,14 +472,14 @@ mod enrichment_tests {
                 serde_json::from_slice(&contents);
             assert!(
                 json_result.is_err(),
-                "Cache file should be binary (bincode), not JSON"
+                "Cache file should be binary (rkyv), not JSON"
             );
         }
 
-        // cache.json should NOT exist (we switched to bincode)
+        // cache.json should NOT exist (we switched to rkyv)
         assert!(
             !cache_json.exists(),
-            "Old cache.json should not exist when using bincode format"
+            "Old cache.json should not exist when using rkyv format"
         );
     }
 
@@ -506,21 +511,21 @@ mod enrichment_tests {
         }
 
         // WHEN: We check the file size
-        // Look for either cache.bin (bincode) or cache.json (current)
-        let cache_file = if temp.path().join("cache.bin").exists() {
-            temp.path().join("cache.bin")
-        } else {
-            temp.path().join("cache.json")
-        };
+        let cache_file = fs::read_dir(temp.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .find(|path| path.extension().is_some_and(|ext| ext == "rkyv"))
+            .expect("rkyv cache generation");
 
         let file_size = fs::metadata(&cache_file).unwrap().len();
 
-        // THEN: 100 entries x 384-dim should be < 200KB with bincode
-        // (bincode: 100 * (384*4 + overhead) ~ 160KB)
+        // THEN: 100 entries x 384-dim should be < 200KB with rkyv
+        // (rkyv: 100 * (384*4 + overhead) ~ 160KB)
         // (JSON would be: 100 * (384*12 + overhead) ~ 500KB+)
         assert!(
             file_size < 200_000,
-            "Cache file with 100 x 384-dim entries should be < 200KB with bincode, got {} bytes ({:.1}KB)",
+            "Cache file with 100 x 384-dim entries should be < 200KB with rkyv, got {} bytes ({:.1}KB)",
             file_size,
             file_size as f64 / 1024.0
         );

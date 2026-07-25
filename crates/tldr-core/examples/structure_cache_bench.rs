@@ -24,7 +24,7 @@ fn main() {
 
     // Build structure cache
     let build_start = Instant::now();
-    let structure = get_code_structure(&root, language, 0, None).unwrap();
+    let structure = get_code_structure(&root, language, 0).unwrap();
     let build_time = build_start.elapsed();
     let total_defs: usize = structure.files.iter().map(|f| f.definitions.len()).sum();
     println!(
