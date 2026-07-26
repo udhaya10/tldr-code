@@ -132,6 +132,22 @@ impl FixedShapeEmbedder {
         &mut self,
         indexed: Vec<(usize, &str)>,
     ) -> TldrResult<Vec<(usize, Vec<f32>)>> {
+        self.embed_indexed_with_batch_size(indexed, None)
+    }
+
+    /// Embed latency-sensitive requests with exact batch-one tensors.
+    pub fn embed_indexed_batch_one(
+        &mut self,
+        indexed: Vec<(usize, &str)>,
+    ) -> TldrResult<Vec<(usize, Vec<f32>)>> {
+        self.embed_indexed_with_batch_size(indexed, Some(1))
+    }
+
+    fn embed_indexed_with_batch_size(
+        &mut self,
+        indexed: Vec<(usize, &str)>,
+        batch_size: Option<usize>,
+    ) -> TldrResult<Vec<(usize, Vec<f32>)>> {
         if indexed.is_empty() {
             return Ok(Vec::new());
         }
@@ -140,7 +156,7 @@ impl FixedShapeEmbedder {
             .tokenizer
             .tokenize_fixed_shape_batch(&indexed)
             .map_err(|error| TldrError::Embedding(error.to_string()))?;
-        let batches = self.planner.plan(tokenized)?;
+        let batches = self.planner.plan_with_batch_size(tokenized, batch_size)?;
         let mut by_index = HashMap::with_capacity(order.len());
         for batch in batches {
             let (rows, columns) = batch.shape();
@@ -183,6 +199,11 @@ impl FixedShapeEmbedder {
                     })
             })
             .collect()
+    }
+
+    /// Exact configured tokenizer used by this runner.
+    pub fn token_budget(&self) -> &TokenBudget {
+        &self.tokenizer
     }
 
     /// Drain per-execution telemetry collected since the previous call.

@@ -83,6 +83,11 @@ pub use fixed_shape_parity::{
     ModelParityReport, ParityCase, ParityMatrixReport, ParityTolerance, VectorParity,
 };
 
+pub mod inference_runners;
+pub use inference_runners::{
+    BulkInferenceRunner, FixedShapeInferenceRunner, InferenceRunnerSnapshot, InferenceWorkload,
+};
+
 pub mod fixed_shape_benchmark;
 pub use fixed_shape_benchmark::{
     LatencySummary, ModelPerformanceReport, PerformanceGate, PerformanceMatrixReport,

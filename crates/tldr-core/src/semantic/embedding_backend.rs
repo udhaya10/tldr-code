@@ -122,6 +122,7 @@ mod tests {
         }
         let batch = FixedShapeBatch {
             bucket: crate::semantic::fixed_shape::SequenceBucket::Tokens128,
+            batch_size: 64,
             request_indices: vec![7, 11],
             input_ids: vec![0; 64 * 128],
             attention_mask,

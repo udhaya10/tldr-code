@@ -112,6 +112,11 @@ impl TokenizedInput {
 pub struct FixedShapeBatch {
     /// Sequence bucket determining both tensor dimensions.
     pub bucket: SequenceBucket,
+    /// Exact tensor row count for this runner.
+    ///
+    /// Bulk and delta runners use measured bucket capacities; latency-oriented
+    /// query runners use one row while retaining the same finite sequence set.
+    pub batch_size: usize,
     /// Caller indices for real rows; dummy rows are intentionally absent.
     pub request_indices: Vec<usize>,
     /// Row-major `[batch_size, sequence_length]` token IDs.
@@ -125,7 +130,7 @@ pub struct FixedShapeBatch {
 impl FixedShapeBatch {
     /// Exact `(batch, sequence)` tensor dimensions.
     pub fn shape(&self) -> (usize, usize) {
-        (self.bucket.batch_size(), self.bucket.sequence_length())
+        (self.batch_size, self.bucket.sequence_length())
     }
 
     /// Number of real outputs to retain; remaining rows are valid dummies.
@@ -195,6 +200,23 @@ impl FixedShapePlanner {
 
     /// Group inputs by sequence bucket and emit exact rectangular batches.
     pub fn plan(&self, inputs: Vec<TokenizedInput>) -> TldrResult<Vec<FixedShapeBatch>> {
+        self.plan_with_batch_size(inputs, None)
+    }
+
+    /// Plan the same finite sequence buckets with one explicit row capacity.
+    ///
+    /// `None` uses each bucket's measured bulk capacity. `Some(1)` is the
+    /// latency-oriented query contract and emits only `(1, 128|256|384|512)`.
+    pub fn plan_with_batch_size(
+        &self,
+        inputs: Vec<TokenizedInput>,
+        batch_size: Option<usize>,
+    ) -> TldrResult<Vec<FixedShapeBatch>> {
+        if batch_size == Some(0) {
+            return Err(shape_error(
+                "fixed-shape batch size must be positive".to_string(),
+            ));
+        }
         let mut grouped: [Vec<TokenizedInput>; 4] = Default::default();
         let mut request_indices = std::collections::HashSet::new();
         for input in inputs {
@@ -212,8 +234,9 @@ impl FixedShapePlanner {
         let mut batches = Vec::new();
         for (index, inputs) in grouped.into_iter().enumerate() {
             let bucket = bucket_from_index(index);
-            for rows in inputs.chunks(bucket.batch_size()) {
-                batches.push(self.build_batch(bucket, rows)?);
+            let row_capacity = batch_size.unwrap_or_else(|| bucket.batch_size());
+            for rows in inputs.chunks(row_capacity) {
+                batches.push(self.build_batch(bucket, rows, row_capacity)?);
             }
         }
         Ok(batches)
@@ -223,13 +246,14 @@ impl FixedShapePlanner {
         &self,
         bucket: SequenceBucket,
         rows: &[TokenizedInput],
+        row_capacity: usize,
     ) -> TldrResult<FixedShapeBatch> {
-        let row_capacity = bucket.batch_size();
         let columns = bucket.sequence_length();
         let include_token_types = rows.iter().any(|row| row.token_type_ids.is_some())
             || self.dummy.token_type_ids.is_some();
         let mut batch = FixedShapeBatch {
             bucket,
+            batch_size: row_capacity,
             request_indices: rows.iter().map(|row| row.request_index).collect(),
             input_ids: Vec::with_capacity(row_capacity * columns),
             attention_mask: Vec::with_capacity(row_capacity * columns),
@@ -439,5 +463,25 @@ mod tests {
         assert_eq!(batches[0].real_rows(), 64);
         assert_eq!(batches[1].shape(), (64, 128));
         assert_eq!(batches[1].real_rows(), 1);
+    }
+
+    #[test]
+    fn query_plan_uses_batch_one_for_every_sequence_bucket() {
+        let batches = planner()
+            .plan_with_batch_size(
+                vec![input(0, 8), input(1, 200), input(2, 300), input(3, 500)],
+                Some(1),
+            )
+            .unwrap();
+        assert_eq!(
+            batches
+                .iter()
+                .map(FixedShapeBatch::shape)
+                .collect::<Vec<_>>(),
+            [(1, 128), (1, 256), (1, 384), (1, 512)]
+        );
+        assert!(planner()
+            .plan_with_batch_size(vec![input(0, 8)], Some(0))
+            .is_err());
     }
 }

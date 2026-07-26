@@ -22,8 +22,8 @@ use super::daemon_registry::live_entries;
 use super::error::DaemonError;
 use super::ipc::send_command;
 use super::types::{
-    DaemonCommand, DaemonResponse, DaemonStatus, LivenessStats, MemoryStats, SalsaCacheStats,
-    SemanticIndexStats,
+    DaemonCommand, DaemonResponse, DaemonStatus, InferenceRunnerStats, LivenessStats, MemoryStats,
+    SalsaCacheStats, SemanticIndexStats,
 };
 
 // =============================================================================
@@ -224,6 +224,9 @@ impl DaemonStatusArgs {
                         println!("Files:   {}", files);
                         if let Some(idx) = &semantic_index {
                             println!("Index:   {}", format_semantic_index(idx));
+                            if !idx.runners.is_empty() {
+                                println!("Runners: {}", format_inference_runners(&idx.runners));
+                            }
                         }
                         if let Some(mem) = &memory {
                             if let Some(line) = format_memory(mem) {
@@ -346,6 +349,37 @@ fn format_semantic_index(idx: &SemanticIndexStats) -> String {
         ("cold", _) => "cold (run 'tldr warm')".to_string(),
         (state, _) => state.to_string(),
     }
+}
+
+fn format_inference_runners(runners: &[InferenceRunnerStats]) -> String {
+    runners
+        .iter()
+        .map(|runner| {
+            let shapes = if runner.exact_shapes.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    " shapes={}",
+                    runner
+                        .exact_shapes
+                        .iter()
+                        .map(|(batch, sequence)| format!("{batch}x{sequence}"))
+                        .collect::<Vec<_>>()
+                        .join(",")
+                )
+            };
+            format!(
+                "{}={} sessions={} requests={} failures={}{}",
+                runner.workload,
+                runner.state,
+                runner.sessions_built,
+                runner.requests,
+                runner.failures,
+                shapes
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 /// Render the liveness block (TLDR-qzc): what kept the daemon alive, what
@@ -475,6 +509,15 @@ mod tests {
             semantic_index: Some(SemanticIndexStats {
                 state: "building".to_string(),
                 vectors: None,
+                runners: vec![InferenceRunnerStats {
+                    workload: "query".to_string(),
+                    state: "ready".to_string(),
+                    model: Some("arctic-m".to_string()),
+                    sessions_built: 1,
+                    requests: 2,
+                    failures: 0,
+                    exact_shapes: vec![(1, 128)],
+                }],
             }),
             memory: Some(MemoryStats {
                 rss_bytes: Some(1024 * 1024 * 1024),
@@ -489,6 +532,7 @@ mod tests {
         assert!(json.contains("hits"));
         assert!(json.contains("warm-build"));
         assert!(json.contains("building"));
+        assert!(json.contains("query"));
         assert!(json.contains("idle_timeout_secs"));
         // None deadline (busy) must be omitted, not "null"
         assert!(!json.contains("idle_shutdown_in_secs"));

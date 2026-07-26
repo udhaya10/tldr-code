@@ -313,6 +313,11 @@ impl Embedder {
         if query.is_empty() {
             return Ok(vec![0.0; self.config.dimensions()]);
         }
+        self.embed_text(&Self::query_document(self.config, query))
+    }
+
+    /// Compose the exact asymmetric query document used by Arctic inference.
+    pub fn query_document(model: EmbeddingModel, query: &str) -> String {
         // Prefix ON by default (the Arctic-intended usage). TLDR_QUERY_PREFIX=0
         // disables it for A/B measurement. TODO(TLDR-blm): promote to a real
         // option before shipping rather than an env toggle.
@@ -320,9 +325,9 @@ impl Embedder {
             .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
             .unwrap_or(true);
         if use_prefix {
-            self.embed_text(&format!("{}{}", self.config.query_prefix(), query))
+            format!("{}{}", model.query_prefix(), query)
         } else {
-            self.embed_text(query)
+            query.to_string()
         }
     }
 

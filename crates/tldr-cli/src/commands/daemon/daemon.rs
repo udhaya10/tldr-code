@@ -1732,18 +1732,35 @@ impl TLDRDaemon {
     #[cfg(feature = "semantic")]
     fn semantic_index_stats(&self) -> Option<super::types::SemanticIndexStats> {
         use super::index_manager::IndexState;
+        let runners = self
+            .semantic_store
+            .runner_states()
+            .into_iter()
+            .map(|runner| super::types::InferenceRunnerStats {
+                workload: runner.workload.as_str().to_string(),
+                state: runner.state,
+                model: runner.model,
+                sessions_built: runner.sessions_built,
+                requests: runner.requests,
+                failures: runner.failures,
+                exact_shapes: runner.exact_shapes,
+            })
+            .collect();
         Some(match self.semantic_store.state() {
             IndexState::Warm { vectors } => super::types::SemanticIndexStats {
                 state: "warm".to_string(),
                 vectors: Some(vectors),
+                runners,
             },
             IndexState::Building => super::types::SemanticIndexStats {
                 state: "building".to_string(),
                 vectors: None,
+                runners,
             },
             IndexState::Cold => super::types::SemanticIndexStats {
                 state: "cold".to_string(),
                 vectors: None,
+                runners,
             },
         })
     }

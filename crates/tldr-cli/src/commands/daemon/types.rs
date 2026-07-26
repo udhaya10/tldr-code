@@ -676,6 +676,23 @@ pub struct SemanticIndexStats {
     /// Vector count when warm.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vectors: Option<usize>,
+    /// Workload-specific embedding session state.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runners: Vec<InferenceRunnerStats>,
+}
+
+/// One query, delta, or bulk inference runner in daemon status.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InferenceRunnerStats {
+    pub workload: String,
+    pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    pub sessions_built: u64,
+    pub requests: u64,
+    pub failures: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exact_shapes: Vec<(usize, usize)>,
 }
 
 /// Daemon process memory (TLDR-yll): the observability counterweight to
@@ -824,6 +841,15 @@ mod tests {
             semantic_index: Some(SemanticIndexStats {
                 state: "building".to_string(),
                 vectors: None,
+                runners: vec![InferenceRunnerStats {
+                    workload: "query".to_string(),
+                    state: "ready".to_string(),
+                    model: Some("Snowflake/snowflake-arctic-embed-m".to_string()),
+                    sessions_built: 1,
+                    requests: 3,
+                    failures: 0,
+                    exact_shapes: vec![(1, 128)],
+                }],
             }),
             memory: Some(MemoryStats {
                 rss_bytes: Some(1024 * 1024 * 1024),
@@ -840,6 +866,7 @@ mod tests {
             } => {
                 assert_eq!(live.busy[0].label, "warm-build");
                 assert_eq!(idx.state, "building");
+                assert_eq!(idx.runners[0].workload, "query");
             }
             other => panic!("expected FullStatus with qzc fields, got {:?}", other),
         }

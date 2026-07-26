@@ -1,25 +1,23 @@
 //! Thin concurrency wrapper around the daemon's resident VectorStore.
 //!
-//! Owns `parking_lot::RwLock<Option<(EmbeddingModel, VectorStore)>>` and
-//! exposes `query` (shared read-lock warm path; honest [`QueryError::NotReady`]
-//! on a cold store — NEVER an inline build, TLDR-7xz.2), `warm` (write-lock
-//! build), `invalidate` (write-lock clear), and `apply_delta` (incremental
-//! per-file re-index — TLDR-t8f). The daemon and future watcher never touch a
-//! raw lock.
+//! Owns the resident store plus independent query, delta, and bulk inference
+//! runners. Full builds happen outside the store lock and publish briefly;
+//! query and delta inference likewise release the store before ONNX execution.
 
 use std::collections::HashMap;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use parking_lot::{Mutex, RwLock};
+use parking_lot::RwLock;
 
 use tldr_core::semantic::vector_store::{
     chunk_id_key, key_chunks_reconciled, plan_structural_delta, root_relative, stat_signal,
     VectorStore,
 };
 use tldr_core::semantic::{
-    load_or_build_store, query_store_with_vector, store_dir_for, BuildOptions, CacheConfig,
-    ChunkGranularity, Embedder, EmbeddingModel, IndexSearchOptions,
+    load_or_build_store, query_store_with_vector, store_dir_for, BuildOptions, BulkInferenceRunner,
+    CacheConfig, ChunkGranularity, EmbeddingModel, FixedShapeInferenceRunner, IndexSearchOptions,
+    InferenceRunnerSnapshot,
 };
 
 /// Why a semantic query could not be served (TLDR-7xz.1/.2).
@@ -85,17 +83,12 @@ pub enum DeltaOutcome {
 
 pub struct IndexManager {
     store: RwLock<Option<(EmbeddingModel, VectorStore)>>,
-    /// Resident embedder, kept loaded across deltas so a per-save incremental
-    /// re-index pays no ONNX startup cost (design intent — TLDR-t8f). Lazily
-    /// created and re-created on a model change. Behind its own `Mutex` so a
-    /// delta's embed doesn't touch the store lock.
-    embedder: Mutex<Option<(EmbeddingModel, Embedder)>>,
-    /// Test-only counter of how many times the resident embedder was actually
-    /// constructed (`Embedder::new`). Lets a test prove the warm query path
-    /// REUSES the embedder (built once, not per query — TLDR-ac0.5) rather than
-    /// just proving result-equivalence. Per-instance to avoid cross-test races.
-    #[cfg(test)]
-    embedder_builds: std::sync::atomic::AtomicUsize,
+    /// Batch-one query session. Never shared with document workloads.
+    query_runner: FixedShapeInferenceRunner,
+    /// Small fixed-shape delta session. Never shared with queries or bulk.
+    delta_runner: FixedShapeInferenceRunner,
+    /// Serialized full-build boundary. Epic 10 moves this into a child process.
+    bulk_runner: BulkInferenceRunner,
 }
 
 impl Default for IndexManager {
@@ -108,9 +101,9 @@ impl IndexManager {
     pub fn new() -> Self {
         Self {
             store: RwLock::new(None),
-            embedder: Mutex::new(None),
-            #[cfg(test)]
-            embedder_builds: std::sync::atomic::AtomicUsize::new(0),
+            query_runner: FixedShapeInferenceRunner::query(),
+            delta_runner: FixedShapeInferenceRunner::delta(),
+            bulk_runner: BulkInferenceRunner::default(),
         }
     }
 
@@ -155,11 +148,8 @@ impl IndexManager {
             }
         } // drop read lock before embedding
 
-        // Embed the query on the RESIDENT embedder OUTSIDE the store lock
-        // (TLDR-ac0.5): reuses the same warm embedder as the delta path, so no
-        // per-query `Embedder::new` ONNX reload — and the brief embedder-`Mutex`
-        // wait doesn't extend the store read lock, so warm queries still run
-        // `store.search` truly in parallel (ac0.1).
+        // Embed on the batch-one QUERY session outside the store lock. Delta
+        // and bulk work own different sessions and cannot pollute its arena.
         let qv = self
             .embed_query(model, query)
             .map_err(QueryError::Internal)?;
@@ -206,65 +196,60 @@ impl IndexManager {
         serde_json::to_value(&report).map_err(|e| format!("Serialization error: {e}"))
     }
 
-    /// Embed a search QUERY on the resident embedder (TLDR-ac0.5), (re)creating it
-    /// on a model change. Applies the model's asymmetric query prefix via
-    /// [`Embedder::embed_query`] — the query counterpart to [`Self::embed`] (which
-    /// uses `embed_batch`, no prefix, for indexed documents on the delta path).
-    /// Shares the SAME `embedder` field; holds only the embedder `Mutex`, never the
-    /// store lock.
+    /// Embed a search query on the dedicated batch-one fixed-shape runner.
     fn embed_query(&self, model: EmbeddingModel, query: &str) -> Result<Vec<f32>, String> {
-        let mut guard = self.embedder.lock();
-        if !guard.as_ref().is_some_and(|(m, _)| *m == model) {
-            let embedder = Embedder::new(model).map_err(|e| e.to_string())?;
-            #[cfg(test)]
-            self.embedder_builds
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            *guard = Some((model, embedder));
-        }
-        let (_, embedder) = guard.as_mut().expect("embedder present after init");
-        embedder.embed_query(query).map_err(|e| e.to_string())
+        self.query_runner.embed_query(model, query)
     }
 
     /// Test-only: how many times the resident embedder was constructed.
     #[cfg(test)]
     fn embedder_builds(&self) -> usize {
-        self.embedder_builds
-            .load(std::sync::atomic::Ordering::SeqCst)
+        self.query_runner.snapshot().sessions_built as usize
     }
 
-    /// Write-lock build: load from disk (if fresh) or full-rebuild. Used by the
-    /// `warm` command at daemon startup.
+    /// Build a replacement outside the store lock, then publish under a brief
+    /// write guard. Used by the `warm` command at daemon startup.
     ///
     /// Returns `Ok(true)` if the store was built/replaced, `Ok(false)` if
     /// already warm with the same model.
     pub fn warm(&self, project: &Path, model: EmbeddingModel) -> Result<bool, String> {
-        let guard = self.store.upgradable_read();
-        if guard.as_ref().is_some_and(|(m, _)| *m == model) {
+        if self
+            .store
+            .read()
+            .as_ref()
+            .is_some_and(|(resident_model, _)| *resident_model == model)
+        {
             return Ok(false);
         }
-
-        let mut guard = parking_lot::RwLockUpgradableReadGuard::upgrade(guard);
-        // Re-check after upgrade.
-        if guard.as_ref().is_some_and(|(m, _)| *m == model) {
-            return Ok(false);
-        }
-
-        let build_opts = BuildOptions {
-            model,
-            show_progress: false,
-            use_cache: true,
-            ..Default::default()
-        };
-        let store_dir = store_dir_for(project);
-        let store = load_or_build_store(
-            project,
-            &store_dir,
-            &build_opts,
-            Some(CacheConfig::default()),
-        )
-        .map_err(|e| e.to_string())?;
-        *guard = Some((model, store));
-        Ok(true)
+        self.bulk_runner.run(model, || {
+            // Re-check after serializing competing warm calls.
+            if self
+                .store
+                .read()
+                .as_ref()
+                .is_some_and(|(resident_model, _)| *resident_model == model)
+            {
+                return Ok(false);
+            }
+            let build_opts = BuildOptions {
+                model,
+                show_progress: false,
+                use_cache: true,
+                ..Default::default()
+            };
+            let store_dir = store_dir_for(project);
+            let replacement = load_or_build_store(
+                project,
+                &store_dir,
+                &build_opts,
+                Some(CacheConfig::default()),
+            )
+            .map_err(|error| error.to_string())?;
+            // Publication alone takes the write lock; an existing generation
+            // continues serving while the replacement is built.
+            *self.store.write() = Some((model, replacement));
+            Ok(true)
+        })
     }
 
     /// Incremental per-file re-index (TLDR-t8f, design doc §5). On a file change,
@@ -350,19 +335,10 @@ impl IndexManager {
         // resident model's tokenizer. This is the same raw structural recipe
         // as a whole build.
         let planned_signal = stat_signal(file);
-        let (new_chunks, documents) = {
-            let mut guard = self.embedder.lock();
-            if !guard.as_ref().is_some_and(|(m, _)| *m == model) {
-                let embedder = Embedder::new(model).map_err(|e| e.to_string())?;
-                *guard = Some((model, embedder));
-            }
-            let (_, embedder) = guard.as_ref().expect("embedder present after init");
-            let budget = embedder
-                .token_budget()
-                .ok_or_else(|| "delta structural planning requires tokenizer budget".to_string())?;
+        let (new_chunks, documents) = self.delta_runner.with_token_budget(model, |budget| {
             plan_structural_delta(project, file, budget, ChunkGranularity::Function)
-                .map_err(|error| error.to_string())?
-        };
+                .map_err(|error| error.to_string())
+        })?;
         let file_rel = root_relative(project, file);
         let prior = {
             let guard = self.store.read();
@@ -400,7 +376,8 @@ impl IndexManager {
                 .collect()
         };
 
-        // 3. Embed the changed chunks (lock-free, on the resident embedder).
+        // 3. Embed the changed chunks on the delta-only session, without the
+        //    store lock.
         let mut embedded: HashMap<u64, Vec<f32>> = HashMap::new();
         if !to_embed.is_empty() {
             // TLDR-vbw0.1 Tier 1: route through embed_batch_indexed (via the
@@ -438,29 +415,13 @@ impl IndexManager {
         })
     }
 
-    /// Embed `(index, text)` pairs with the resident embedder, (re)creating
-    /// it on a model change. Holds only the embedder `Mutex` — never the
-    /// store lock.
-    ///
-    /// Delegates to [`Embedder::embed_batch_indexed`] which sorts by text
-    /// length before batching (TLDR-vbw0.1 Tier 1), collapsing ONNX input
-    /// shapes so the CPU arena plateaus instead of climbing across a long
-    /// embed run. Returns `(caller_index, embedding)` pairs; the caller maps
-    /// back by its own index, not by input position.
+    /// Embed `(index, text)` pairs on the dedicated delta runner.
     fn embed(
         &self,
         model: EmbeddingModel,
         indexed: Vec<(usize, &str)>,
     ) -> Result<Vec<(usize, Vec<f32>)>, String> {
-        let mut guard = self.embedder.lock();
-        if !guard.as_ref().is_some_and(|(m, _)| *m == model) {
-            let embedder = Embedder::new(model).map_err(|e| e.to_string())?;
-            *guard = Some((model, embedder));
-        }
-        let (_, embedder) = guard.as_mut().expect("embedder present after init");
-        embedder
-            .embed_batch_indexed(indexed, false)
-            .map_err(|e| e.to_string())
+        self.delta_runner.embed_documents(model, indexed)
     }
 
     /// Write-lock invalidate: drops the resident store so the next query
@@ -491,9 +452,19 @@ impl IndexManager {
                 Some((_, store)) => IndexState::Warm {
                     vectors: store.len(),
                 },
+                None if self.bulk_runner.snapshot().state == "busy" => IndexState::Building,
                 None => IndexState::Cold,
             },
         }
+    }
+
+    /// Query, delta, and bulk runner state for daemon status.
+    pub fn runner_states(&self) -> [InferenceRunnerSnapshot; 3] {
+        [
+            self.query_runner.snapshot(),
+            self.delta_runner.snapshot(),
+            self.bulk_runner.snapshot(),
+        ]
     }
 
     /// Number of vectors in the resident store, or `None` if cold. A delta's
@@ -528,6 +499,50 @@ fn deleted_file_rel(project: &Path, file: &Path) -> String {
 mod tests {
     use super::*;
     use std::sync::{Arc, Barrier};
+
+    #[test]
+    fn runner_states_start_cold_and_workload_specific() {
+        let manager = IndexManager::new();
+        let states = manager.runner_states();
+        assert_eq!(
+            states
+                .iter()
+                .map(|state| state.workload.as_str())
+                .collect::<Vec<_>>(),
+            ["query", "delta", "bulk"]
+        );
+        assert!(states.iter().all(|state| state.state == "cold"));
+    }
+
+    #[test]
+    fn busy_bulk_boundary_does_not_hold_store_lock() {
+        let manager = Arc::new(seeded_manager());
+        let entered = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        let worker = {
+            let manager = Arc::clone(&manager);
+            let entered = Arc::clone(&entered);
+            let release = Arc::clone(&release);
+            std::thread::spawn(move || {
+                manager
+                    .bulk_runner
+                    .run(EmbeddingModel::default(), || {
+                        entered.wait();
+                        release.wait();
+                        Ok(())
+                    })
+                    .unwrap();
+            })
+        };
+        entered.wait();
+        assert!(
+            manager.store.try_read().is_some(),
+            "bulk work must not hold the VectorStore write lock"
+        );
+        assert_eq!(manager.runner_states()[2].state, "busy");
+        release.wait();
+        worker.join().unwrap();
+    }
 
     /// TLDR-qzc: the status state probe must answer without blocking on the
     /// store lock — Cold on an empty store, Building while a writer (a warm
@@ -912,6 +927,136 @@ mod tests {
             1,
             "embedder REUSED on the second query — not reconstructed"
         );
+    }
+
+    /// TLDR-9bxa.6 live acceptance gate: query and delta own different
+    /// sessions, query shapes stay batch-one across varied lengths, RSS
+    /// plateaus after all finite shapes are exercised, and a busy bulk
+    /// boundary adds no query-session mutex wait.
+    #[test]
+    #[ignore = "loads two cached Arctic-M ONNX sessions; run at TLDR-9bxa.6 gate"]
+    fn workload_specific_sessions_preserve_query_latency_and_plateau() {
+        fn p95(mut samples: Vec<f64>) -> f64 {
+            samples.sort_by(f64::total_cmp);
+            samples[((samples.len() as f64 * 0.95).ceil() as usize)
+                .saturating_sub(1)
+                .min(samples.len() - 1)]
+        }
+
+        let manager = Arc::new(seeded_manager());
+        let model = EmbeddingModel::default();
+        let project = tempfile::tempdir().unwrap();
+        let opts = IndexSearchOptions {
+            top_k: 5,
+            threshold: 0.0,
+            include_snippet: false,
+            snippet_lines: 5,
+        };
+
+        // Initialize distinct sessions before measuring contention.
+        manager
+            .query(project.path(), "find parser", &opts, model)
+            .unwrap();
+        manager
+            .delta_runner
+            .embed_documents(model, vec![(0, "fn changed() -> bool { true }")])
+            .unwrap();
+        let initialized = manager.runner_states();
+        assert_eq!(initialized[0].sessions_built, 1);
+        assert_eq!(initialized[1].sessions_built, 1);
+
+        // Query and delta inference can execute concurrently because they do
+        // not share a session mutex or the VectorStore lock.
+        let start = Arc::new(Barrier::new(3));
+        let query_thread = {
+            let manager = Arc::clone(&manager);
+            let start = Arc::clone(&start);
+            let opts = opts.clone();
+            let project = project.path().to_path_buf();
+            std::thread::spawn(move || {
+                start.wait();
+                manager
+                    .query(&project, &"query ".repeat(220), &opts, model)
+                    .unwrap();
+            })
+        };
+        let delta_thread = {
+            let manager = Arc::clone(&manager);
+            let start = Arc::clone(&start);
+            std::thread::spawn(move || {
+                start.wait();
+                manager
+                    .delta_runner
+                    .embed_documents(model, vec![(0, &"fn delta_value() {}".repeat(20))])
+                    .unwrap();
+            })
+        };
+        start.wait();
+        query_thread.join().unwrap();
+        delta_thread.join().unwrap();
+
+        let measure_queries = || {
+            (0..5)
+                .map(|index| {
+                    let started = Instant::now();
+                    manager
+                        .query(
+                            project.path(),
+                            &format!("query latency sample {index}"),
+                            &opts,
+                            model,
+                        )
+                        .unwrap();
+                    started.elapsed().as_secs_f64() * 1_000.0
+                })
+                .collect::<Vec<_>>()
+        };
+        let baseline_p95 = p95(measure_queries());
+        let entered = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        let bulk = {
+            let manager = Arc::clone(&manager);
+            let entered = Arc::clone(&entered);
+            let release = Arc::clone(&release);
+            std::thread::spawn(move || {
+                manager
+                    .bulk_runner
+                    .run(model, || {
+                        entered.wait();
+                        release.wait();
+                        Ok(())
+                    })
+                    .unwrap();
+            })
+        };
+        entered.wait();
+        let during_bulk_p95 = p95(measure_queries());
+        release.wait();
+        bulk.join().unwrap();
+        assert!(
+            during_bulk_p95 <= baseline_p95 * 2.0 + 20.0,
+            "query p95 regressed materially: baseline={baseline_p95:.2}ms bulk={during_bulk_p95:.2}ms"
+        );
+
+        let queries = [40, 170, 300, 440].map(|words| "token ".repeat(words));
+        let mut cycle_rss = Vec::new();
+        for _ in 0..3 {
+            for query in &queries {
+                manager.query_runner.embed_query(model, query).unwrap();
+            }
+            cycle_rss.push(tldr_core::util::current_rss_bytes().unwrap());
+        }
+        let spread = cycle_rss.iter().max().unwrap() - cycle_rss.iter().min().unwrap();
+        assert!(spread <= 64 * 1024 * 1024, "query RSS spread={spread}");
+        let final_states = manager.runner_states();
+        assert_eq!(
+            final_states[0].exact_shapes,
+            [(1, 128), (1, 256), (1, 384), (1, 512)]
+        );
+        assert!(final_states[1]
+            .exact_shapes
+            .iter()
+            .all(|(batch, _)| *batch != 1));
     }
 
     /// Two searches on a WARM (seeded) store overlap under shared read locks rather

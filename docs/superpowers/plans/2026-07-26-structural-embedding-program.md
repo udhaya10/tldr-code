@@ -33,10 +33,10 @@
 - Modify: `crates/tldr-cli/src/commands/daemon/types.rs`
 - Test: `crates/tldr-cli/src/commands/daemon/index_manager.rs`
 
-- [ ] Replace the shared embedder mutex with query, delta, and bulk runner state.
-- [ ] Preserve Arctic query-prefix numerical parity and keep tokenization/inference outside usearch locks.
-- [ ] Expose each runner state in daemon status and prove concurrent query/delta operation.
-- [ ] Run the epic gate once, including query p95 under simultaneous bulk work and varied-query RSS plateau.
+- [x] Replace the shared embedder mutex with query, delta, and bulk runner state.
+- [x] Preserve Arctic query-prefix numerical parity and keep tokenization/inference outside usearch locks.
+- [x] Expose each runner state in daemon status and prove concurrent query/delta operation.
+- [x] Run the epic gate once, including query p95 under simultaneous bulk work and varied-query RSS plateau.
 
 ### Task 3: Complete `TLDR-9bxa.7` bounded streaming build
 
