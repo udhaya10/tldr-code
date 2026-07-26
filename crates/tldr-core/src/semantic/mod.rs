@@ -80,6 +80,12 @@ pub use fixed_shape_parity::{
     ModelParityReport, ParityCase, ParityMatrixReport, ParityTolerance, VectorParity,
 };
 
+pub mod fixed_shape_benchmark;
+pub use fixed_shape_benchmark::{
+    LatencySummary, ModelPerformanceReport, PerformanceGate, PerformanceMatrixReport,
+    RssPlateauReport, ShapePerformanceReport,
+};
+
 pub mod model_artifacts;
 pub use model_artifacts::{
     ModelArtifactError, ModelArtifactSpec, ModelOutput, ModelPooling, ResolvedModelArtifacts,
