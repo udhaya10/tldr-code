@@ -11,11 +11,14 @@
 //! its effective truncation limit while disabling truncation and padding on the
 //! clone only. This observes original lengths without changing inference.
 //!
-//! Non-goals (separate epics): AST recursive splitting (TLDR-9bxa.3) and
-//! fixed-shape ONNX execution (TLDR-9bxa.5).
+//! AST recursive splitting is implemented separately by TLDR-9bxa.3. The exact
+//! token tensors exposed here are also the tokenizer boundary for the
+//! fixed-shape ONNX work in TLDR-9bxa.5.
 
 use serde::{Deserialize, Serialize};
 use tokenizers::Tokenizer;
+
+use super::fixed_shape::{FixedShapePlanner, TokenizedInput};
 
 /// Input-budget diagnostic schema version. Bump whenever accounting semantics
 /// change. Embedding-content cache invalidation is controlled separately by the
@@ -43,6 +46,7 @@ pub struct TokenCheck {
 pub struct TokenBudget {
     tokenizer: Tokenizer,
     budget: usize,
+    pad_token_id: Option<u32>,
 }
 
 impl TokenBudget {
@@ -54,12 +58,17 @@ impl TokenBudget {
             .get_truncation()
             .map(|params| params.max_length)
             .ok_or(TokenBudgetError::MissingTruncation)?;
+        let pad_token_id = tokenizer.get_padding().map(|params| params.pad_id);
         let mut tokenizer = tokenizer.clone();
         tokenizer
             .with_truncation(None)
             .map_err(|e| TokenBudgetError::TokenizerConfig(e.to_string()))?;
         tokenizer.with_padding(None);
-        Ok(Self { tokenizer, budget })
+        Ok(Self {
+            tokenizer,
+            budget,
+            pad_token_id,
+        })
     }
 
     /// Exact token count of `text` under this model's tokenizer.
@@ -73,6 +82,66 @@ impl TokenBudget {
     /// FastEmbed's configured maximum encoded sequence length.
     pub fn budget(&self) -> usize {
         self.budget
+    }
+
+    /// Numeric pad token configured by FastEmbed before padding was disabled on
+    /// the accounting clone.
+    pub fn pad_token_id(&self) -> Result<i64, TokenBudgetError> {
+        self.pad_token_id
+            .map(i64::from)
+            .ok_or(TokenBudgetError::MissingPadding)
+    }
+
+    /// Encode one input exactly once into the token tensors consumed by the
+    /// fixed-shape planner. Oversized inputs are rejected instead of silently
+    /// truncating; structural splitting must make them fit first.
+    pub fn tokenize_fixed_shape(
+        &self,
+        request_index: usize,
+        text: &str,
+    ) -> Result<TokenizedInput, TokenBudgetError> {
+        let encoding = self
+            .tokenizer
+            .encode(text, true)
+            .map_err(|e| TokenBudgetError::Encode(e.to_string()))?;
+        let tokens = encoding.get_ids().len();
+        if tokens > self.budget {
+            return Err(TokenBudgetError::InputExceedsBudget {
+                tokens,
+                budget: self.budget,
+            });
+        }
+        Ok(TokenizedInput {
+            request_index,
+            input_ids: encoding.get_ids().iter().copied().map(i64::from).collect(),
+            attention_mask: encoding
+                .get_attention_mask()
+                .iter()
+                .copied()
+                .map(i64::from)
+                .collect(),
+            token_type_ids: Some(
+                encoding
+                    .get_type_ids()
+                    .iter()
+                    .copied()
+                    .map(i64::from)
+                    .collect(),
+            ),
+        })
+    }
+
+    /// Build a fixed-shape planner from this exact configured tokenizer.
+    ///
+    /// `dummy_text` is tokenized normally so partial batches contain valid,
+    /// attended model inputs rather than fully masked synthetic rows.
+    pub fn fixed_shape_planner(
+        &self,
+        dummy_text: &str,
+    ) -> Result<FixedShapePlanner, TokenBudgetError> {
+        let dummy = self.tokenize_fixed_shape(usize::MAX, dummy_text)?;
+        FixedShapePlanner::new(self.pad_token_id()?, dummy)
+            .map_err(|error| TokenBudgetError::FixedShape(error.to_string()))
     }
 
     /// Check `text` against the budget (report only — does not mutate the text;
@@ -274,10 +343,21 @@ impl TokenStats {
 pub enum TokenBudgetError {
     /// FastEmbed did not configure truncation, so no effective limit is known.
     MissingTruncation,
+    /// FastEmbed did not configure a numeric pad token.
+    MissingPadding,
     /// The tokenizer clone could not be reconfigured for accounting.
     TokenizerConfig(String),
     /// Encoding an input failed.
     Encode(String),
+    /// Structural splitting failed to fit an input into the model context.
+    InputExceedsBudget {
+        /// Exact encoded input length.
+        tokens: usize,
+        /// Configured model context limit.
+        budget: usize,
+    },
+    /// The exact tokenizer output could not satisfy the fixed-shape contract.
+    FixedShape(String),
     /// Even one non-empty UTF-8 scalar plus tokenizer special tokens cannot fit.
     ImpossibleBudget(usize),
 }
@@ -286,8 +366,16 @@ impl std::fmt::Display for TokenBudgetError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::MissingTruncation => write!(f, "FastEmbed tokenizer has no truncation limit"),
+            Self::MissingPadding => write!(f, "FastEmbed tokenizer has no padding configuration"),
             Self::TokenizerConfig(e) => write!(f, "tokenizer configuration failed: {e}"),
             Self::Encode(e) => write!(f, "tokenizer encode failed: {e}"),
+            Self::InputExceedsBudget { tokens, budget } => {
+                write!(
+                    f,
+                    "input has {tokens} tokens, exceeding model budget {budget}"
+                )
+            }
+            Self::FixedShape(e) => write!(f, "fixed-shape planner configuration failed: {e}"),
             Self::ImpossibleBudget(n) => write!(f, "token budget {n} cannot fit one input unit"),
         }
     }
@@ -321,6 +409,7 @@ mod tests {
                 ..Default::default()
             }))
             .unwrap();
+        tokenizer.with_padding(Some(tokenizers::PaddingParams::default()));
         TokenBudget::from_configured_tokenizer(&tokenizer).unwrap()
     }
 
@@ -477,5 +566,60 @@ mod tests {
         let budget = TokenBudget::from_configured_tokenizer(&tokenizer).unwrap();
         assert_eq!(budget.budget(), 37);
         assert_eq!(tokenizer.get_truncation().unwrap().max_length, 37);
+    }
+
+    #[test]
+    fn fixed_shape_encoding_preserves_exact_numeric_tokenizer_outputs() {
+        let budget = word_budget(3);
+        let input = budget.tokenize_fixed_shape(42, "alpha beta").unwrap();
+
+        assert_eq!(budget.pad_token_id().unwrap(), 0);
+        assert_eq!(input.request_index, 42);
+        assert_eq!(input.input_ids, [1, 2]);
+        assert_eq!(input.attention_mask, [1, 1]);
+        assert_eq!(input.token_type_ids.as_deref(), Some([0, 0].as_slice()));
+    }
+
+    #[test]
+    fn configured_tokenizer_outputs_feed_the_fixed_shape_planner() {
+        let budget = word_budget(3);
+        let planner = budget.fixed_shape_planner("alpha").unwrap();
+        let input = budget.tokenize_fixed_shape(7, "alpha beta").unwrap();
+        let batch = planner.plan(vec![input]).unwrap().remove(0);
+
+        assert_eq!(batch.request_indices, [7]);
+        assert_eq!(&batch.input_ids[..2], [1, 2]);
+        assert_eq!(batch.input_ids[2], budget.pad_token_id().unwrap());
+        assert_eq!(&batch.attention_mask[..3], [1, 1, 0]);
+        assert!(batch.validate().is_ok());
+    }
+
+    #[test]
+    fn fixed_shape_encoding_rejects_oversized_inputs_without_truncating() {
+        let budget = word_budget(1);
+        assert!(matches!(
+            budget.tokenize_fixed_shape(0, "alpha beta"),
+            Err(TokenBudgetError::InputExceedsBudget {
+                tokens: 2,
+                budget: 1
+            })
+        ));
+    }
+
+    #[test]
+    fn missing_padding_is_reported_only_when_fixed_shape_backend_needs_it() {
+        let mut tokenizer = Tokenizer::new(tokenizers::models::bpe::BPE::default());
+        tokenizer
+            .with_truncation(Some(tokenizers::TruncationParams {
+                max_length: 37,
+                ..Default::default()
+            }))
+            .unwrap();
+
+        let budget = TokenBudget::from_configured_tokenizer(&tokenizer).unwrap();
+        assert!(matches!(
+            budget.pad_token_id(),
+            Err(TokenBudgetError::MissingPadding)
+        ));
     }
 }
