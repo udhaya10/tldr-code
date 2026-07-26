@@ -3902,6 +3902,8 @@ dependencies = [
  "lru",
  "md5",
  "memmap2",
+ "ndarray",
+ "ort",
  "proptest",
  "quick-xml",
  "rayon",

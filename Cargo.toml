@@ -94,6 +94,8 @@ blake3 = "1.8"
 # PINNED per premortem P0 - do not use ^5.8 or 5
 fastembed = "=5.8.1"
 hf-hub = { version = "=0.4.3", default-features = false }
+ndarray = { version = "=0.17.2", default-features = false }
+ort = { version = "=2.0.0-rc.11", default-features = false, features = ["ndarray", "std"] }
 
 # TLDR-l5d: usearch vector store (exact_search_f32 + save/load). C++/cxx dep
 # (decision-locked TLDR-rgc). Pinned to match the researched API (rust/lib.rs).

@@ -72,6 +72,9 @@ pub use fixed_shape::{FixedShapeBatch, FixedShapePlanner, SequenceBucket, Tokeni
 pub mod embedding_backend;
 pub use embedding_backend::{EmbeddingBackend, EmbeddingBackendKind};
 
+pub mod fixed_shape_ort;
+pub use fixed_shape_ort::{FixedShapeOrtBackend, OrtBackendConfig, ShapeObservation};
+
 pub mod model_artifacts;
 pub use model_artifacts::{
     ModelArtifactError, ModelArtifactSpec, ModelOutput, ModelPooling, ResolvedModelArtifacts,
