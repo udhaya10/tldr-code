@@ -160,6 +160,16 @@ impl VectorStore {
         self.files.get(file_rel_path)
     }
 
+    /// Persisted lineage evidence for every chunk currently owned by a file.
+    pub fn file_chunk_meta(&self, file_rel_path: &str) -> Vec<ChunkMeta> {
+        self.files
+            .get(file_rel_path)
+            .into_iter()
+            .flat_map(|record| record.keys.iter())
+            .filter_map(|key| self.meta.get(key).cloned())
+            .collect()
+    }
+
     /// Number of vectors currently in the store.
     pub fn len(&self) -> usize {
         self.index.size()
@@ -253,11 +263,14 @@ impl VectorStore {
         Ok(present)
     }
 
-    /// The stored content-hash for `key`, if present. The delta path reads this
-    /// to classify a re-chunked function as EMBED (hash changed / new key) vs
-    /// META-ONLY (unchanged body, shifted lines) — design doc §5 (TLDR-t8f).
+    /// The stored source content hash for `key`, if present.
     pub fn content_hash(&self, key: u64) -> Option<&str> {
         self.meta.get(&key).map(|m| m.content_hash.as_str())
+    }
+
+    /// Exact composed-document revision stored for `key`.
+    pub fn revision(&self, key: u64) -> Option<ChunkRevision> {
+        self.meta.get(&key).map(|meta| meta.revision)
     }
 
     /// Drop a file's per-file record. Returns the removed record (its keys), if
@@ -322,11 +335,11 @@ impl VectorStore {
             }
         }
 
-        // 2. Add / update each current chunk.
+        // 2. Add / update each current chunk using exact document revisions.
         for (key, meta) in keyed {
-            let needs_embed = match self.content_hash(*key) {
-                None => true,                               // new key
-                Some(h) => h != meta.content_hash.as_str(), // changed body
+            let needs_embed = match self.revision(*key) {
+                None => true,
+                Some(revision) => revision != meta.revision,
             };
             if needs_embed {
                 match embedded.get(key) {
@@ -359,6 +372,37 @@ impl VectorStore {
             },
         );
         Ok(())
+    }
+
+    /// Apply a reconciled delta only if its prior lineage snapshot is current.
+    ///
+    /// Planning and embedding happen outside the store write lock. A concurrent
+    /// edit may therefore replace the file record before this call; rejecting
+    /// that stale snapshot prevents an older reconciliation from deleting the
+    /// newer lineage and restoring obsolete keys.
+    pub fn apply_file_delta_reconciled(
+        &mut self,
+        file_rel_path: &str,
+        expected_old_keys: &std::collections::BTreeSet<u64>,
+        keyed: &[(u64, ChunkMeta)],
+        embedded: &HashMap<u64, Vec<f32>>,
+        signal: (u64, u64, FileKind),
+    ) -> TldrResult<()> {
+        let current_keys = self
+            .files
+            .get(file_rel_path)
+            .map(|record| record.keys.clone())
+            .unwrap_or_default();
+        if current_keys != *expected_old_keys {
+            return Err(vs_err(
+                "delta",
+                format!(
+                    "stale lineage snapshot for {file_rel_path}: expected {:?}, current {:?}",
+                    expected_old_keys, current_keys
+                ),
+            ));
+        }
+        self.apply_file_delta(file_rel_path, keyed, embedded, signal)
     }
 
     /// Exact (100% recall) top-`k` search. Returns hits joined to their sidecar
@@ -1137,6 +1181,36 @@ fn structural_source_files(
     )
 }
 
+/// Plan and compose one changed file exactly like the raw whole-corpus build.
+///
+/// Corpus inclusion must be checked by the caller with
+/// [`crate::semantic::is_corpus_file`] before invoking this helper.
+pub fn plan_structural_delta(
+    root: &Path,
+    file: &Path,
+    budget: &crate::semantic::TokenBudget,
+    granularity: crate::semantic::ChunkGranularity,
+) -> TldrResult<(Vec<CodeChunk>, Vec<String>)> {
+    let result = crate::semantic::chunk_file(
+        file,
+        &crate::semantic::ChunkOptions {
+            granularity: crate::semantic::ChunkGranularity::File,
+            ..Default::default()
+        },
+    )?;
+    let mut files = result.chunks;
+    for chunk in &mut files {
+        chunk.structure.repository_path = root_relative(root, &chunk.file_path);
+    }
+    let chunks = crate::semantic::structural_planner::plan_chunks(&files, budget, granularity)?;
+    let documents = chunks
+        .iter()
+        .map(|chunk| crate::semantic::structural_planner::compose_minimal(chunk, budget))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| TldrError::Embedding(format!("delta composition failed: {error}")))?;
+    Ok((chunks, documents))
+}
+
 /// `(mtime_secs, size, kind)` for a path — the per-file reconcile signal.
 /// Best-effort: an un-stattable path yields `(0, 0, Other)`. Also the signal a
 /// delta stamps into the refreshed [`FileRecord`] (TLDR-t8f).
@@ -1743,7 +1817,7 @@ mod tests {
         ChunkMeta {
             identity: id.to_string(),
             chunk_id: Default::default(),
-            revision: Default::default(),
+            revision: ChunkRevision::from_document(hash),
             anchor: Default::default(),
             file_rel_path: "f.rs".to_string(),
             function_name: Some(id.to_string()),
@@ -1825,6 +1899,45 @@ mod tests {
             .apply_file_delta("f.rs", &keyed, &embedded, (0, 0, FileKind::Regular))
             .unwrap_err();
         assert!(format!("{err}").contains("stale snapshot"));
+    }
+
+    #[test]
+    fn reconciled_delta_rejects_changed_lineage_snapshot_before_mutation() {
+        const D: usize = 8;
+        let mut store = VectorStore::new(D, 4).unwrap();
+        store
+            .add(1, &unit(D, 1), fmeta("newer", "h-new", 1))
+            .unwrap();
+        store.set_file_record(
+            "f.rs".into(),
+            FileRecord {
+                keys: [1].into_iter().collect(),
+                mtime: 2,
+                size: 2,
+                file_type: FileKind::Regular,
+            },
+        );
+        let stale_expected = [9].into_iter().collect();
+        let keyed = vec![(9, fmeta("older", "h-old", 1))];
+        let embedded = HashMap::from([(9, unit(D, 2))]);
+
+        let error = store
+            .apply_file_delta_reconciled(
+                "f.rs",
+                &stale_expected,
+                &keyed,
+                &embedded,
+                (1, 1, FileKind::Regular),
+            )
+            .unwrap_err();
+
+        assert!(format!("{error}").contains("stale lineage snapshot"));
+        assert!(store.contains(1));
+        assert!(!store.contains(9));
+        assert_eq!(
+            store.file_record("f.rs").unwrap().keys,
+            [1].into_iter().collect()
+        );
     }
 
     #[test]

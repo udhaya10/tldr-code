@@ -13,10 +13,13 @@ use std::time::{Duration, Instant};
 
 use parking_lot::{Mutex, RwLock};
 
-use tldr_core::semantic::vector_store::{key_chunks, root_relative, stat_signal, VectorStore};
+use tldr_core::semantic::vector_store::{
+    chunk_id_key, key_chunks_reconciled, plan_structural_delta, root_relative, stat_signal,
+    VectorStore,
+};
 use tldr_core::semantic::{
-    chunk_file, load_or_build_store, query_store_with_vector, store_dir_for, BuildOptions,
-    CacheConfig, ChunkOptions, Embedder, EmbeddingModel, IndexSearchOptions,
+    load_or_build_store, query_store_with_vector, store_dir_for, BuildOptions, CacheConfig,
+    ChunkGranularity, Embedder, EmbeddingModel, IndexSearchOptions,
 };
 
 /// Why a semantic query could not be served (TLDR-7xz.1/.2).
@@ -316,17 +319,6 @@ impl IndexManager {
             return Ok(DeltaOutcome::NeedsRebuild);
         }
 
-        // Structural embedding schema v3 plans complete files, composes
-        // repository-relative context, and may split one source edit into
-        // several AST-derived documents.  The legacy delta path below only
-        // chunks this file into raw function bodies, so applying it would mix
-        // incompatible recipes in one store.  Until the delta planner is wired
-        // in TLDR-9bxa.6, every eligible source edit must rebuild.  Deletes are
-        // still safe because they only remove already-planned keys.
-        if !is_delete {
-            return Ok(DeltaOutcome::NeedsRebuild);
-        }
-
         // Deletion: `Notify` can't always distinguish edit from delete (§5). Use
         // the resident store as the source of truth (TLDR-ac0.6): apply_file_delete
         // is a clean no-op (`Ok(0)`, no FileRecord written) for a path it has no
@@ -354,17 +346,41 @@ impl IndexManager {
             };
         }
 
-        // 1. Re-chunk ONLY this file (lock-free). Match the build's chunk options:
-        //    BuildOptions defaults to function granularity, all languages.
-        let chunk_opts = ChunkOptions::default();
-        let new_chunks = chunk_file(file, &chunk_opts)
-            .map_err(|e| format!("delta chunk_file failed: {e}"))?
-            .chunks;
-        // Shared key computation — identical keys to the build (else removes miss).
-        let keyed = key_chunks(project, &new_chunks);
+        // 1. Snapshot, then plan + compose ONLY this complete file with the
+        // resident model's tokenizer. This is the same raw structural recipe
+        // as a whole build.
+        let planned_signal = stat_signal(file);
+        let (new_chunks, documents) = {
+            let mut guard = self.embedder.lock();
+            if !guard.as_ref().is_some_and(|(m, _)| *m == model) {
+                let embedder = Embedder::new(model).map_err(|e| e.to_string())?;
+                *guard = Some((model, embedder));
+            }
+            let (_, embedder) = guard.as_ref().expect("embedder present after init");
+            let budget = embedder
+                .token_budget()
+                .ok_or_else(|| "delta structural planning requires tokenizer budget".to_string())?;
+            plan_structural_delta(project, file, budget, ChunkGranularity::Function)
+                .map_err(|error| error.to_string())?
+        };
+        let file_rel = root_relative(project, file);
+        let prior = {
+            let guard = self.store.read();
+            match guard.as_ref() {
+                Some((m, store)) if *m == model => store.file_chunk_meta(&file_rel),
+                _ => return Ok(DeltaOutcome::Skipped),
+            }
+        };
+        let keyed = key_chunks_reconciled(project, &new_chunks, &documents, &prior)
+            .map_err(|error| error.to_string())?;
+        let expected_old_keys = prior
+            .iter()
+            .map(|meta| chunk_id_key(meta.chunk_id))
+            .collect();
 
         // 2. Classify under a shared read lock: which keys need re-embedding
-        //    (new, or content-hash changed). Drop the lock before embedding.
+        //    (new, or exact composed-document revision changed). Drop the lock
+        //    before embedding.
         let to_embed: Vec<usize> = {
             let guard = self.store.read();
             let store = match guard.as_ref() {
@@ -375,9 +391,9 @@ impl IndexManager {
                 .iter()
                 .enumerate()
                 .filter_map(|(i, (key, meta))| {
-                    let changed = match store.content_hash(*key) {
+                    let changed = match store.revision(*key) {
                         None => true,
-                        Some(h) => h != meta.content_hash.as_str(),
+                        Some(revision) => revision != meta.revision,
                     };
                     changed.then_some(i)
                 })
@@ -395,7 +411,7 @@ impl IndexManager {
             // key the writeback into `embedded` via keyed[i].0).
             let indexed: Vec<(usize, &str)> = to_embed
                 .iter()
-                .map(|&i| (i, new_chunks[i].content.as_str()))
+                .map(|&i| (i, documents[i].as_str()))
                 .collect();
             let vectors = self.embed(model, indexed)?;
             for (i, vector) in vectors {
@@ -405,17 +421,16 @@ impl IndexManager {
 
         // 4. Apply under the write lock — re-validates against the current store.
         let signal = stat_signal(file);
-        let file_rel = keyed
-            .first()
-            .map(|(_, m)| m.file_rel_path.clone())
-            .unwrap_or_else(|| root_relative(project, file));
+        if signal != planned_signal {
+            return Ok(DeltaOutcome::NeedsRebuild);
+        }
         let mut guard = self.store.write();
         let store = match guard.as_mut() {
             Some((m, s)) if *m == model => s,
             _ => return Ok(DeltaOutcome::Skipped),
         };
         store
-            .apply_file_delta(&file_rel, &keyed, &embedded, signal)
+            .apply_file_delta_reconciled(&file_rel, &expected_old_keys, &keyed, &embedded, signal)
             .map_err(|e| e.to_string())?;
         Ok(DeltaOutcome::Applied {
             embedded: embedded.len(),
@@ -590,6 +605,8 @@ mod tests {
     fn seeded_manager() -> IndexManager {
         let manager = IndexManager::new();
         let model = EmbeddingModel::default();
+        let seed_id = tldr_core::semantic::ChunkId(1);
+        let seed_key = chunk_id_key(seed_id);
         let dims = model.dimensions();
         let mut vector = vec![0.0; dims];
         vector[0] = 1.0;
@@ -597,11 +614,11 @@ mod tests {
         let mut store = VectorStore::new(dims, 8).unwrap();
         store
             .add(
-                1,
+                seed_key,
                 &vector,
                 ChunkMeta {
-                    identity: "src/lib.rs::seed::0".to_string(),
-                    chunk_id: Default::default(),
+                    identity: format!("{:032x}", seed_id.0),
+                    chunk_id: seed_id,
                     revision: Default::default(),
                     anchor: Default::default(),
                     file_rel_path: "src/lib.rs".to_string(),
@@ -620,7 +637,7 @@ mod tests {
         store.set_file_record(
             "src/lib.rs".to_string(),
             FileRecord {
-                keys: std::iter::once(1).collect(),
+                keys: std::iter::once(seed_key).collect(),
                 mtime: 0,
                 size: 0,
                 file_type: FileKind::Regular,
@@ -667,7 +684,8 @@ mod tests {
     }
 
     #[test]
-    fn structural_schema_v3_source_edit_requires_full_rebuild() {
+    #[ignore = "loads the ONNX embedder; run on demand"]
+    fn structural_source_edit_applies_planned_delta() {
         let tmp = tempfile::tempdir().unwrap();
         let file = write_file(tmp.path(), "src/lib.rs", b"fn changed() {}\n");
         let manager = seeded_manager();
@@ -675,8 +693,8 @@ mod tests {
             .store
             .read()
             .as_ref()
-            .and_then(|(_, store)| store.content_hash(1))
-            .map(str::to_owned);
+            .and_then(|(_, store)| store.file_chunk_meta("src/lib.rs").into_iter().next())
+            .map(|meta| meta.content_hash);
 
         let previous_enrich = std::env::var_os("TLDR_ENRICH");
         std::env::remove_var("TLDR_ENRICH");
@@ -685,20 +703,22 @@ mod tests {
             Some(value) => std::env::set_var("TLDR_ENRICH", value),
             None => std::env::remove_var("TLDR_ENRICH"),
         }
-        assert_eq!(
+        assert!(matches!(
             outcome.unwrap(),
-            DeltaOutcome::NeedsRebuild,
-            "schema v3 must not mix legacy raw delta vectors with planned documents"
-        );
+            DeltaOutcome::Applied {
+                embedded: 1,
+                total: 1
+            }
+        ));
         let after = manager
             .store
             .read()
             .as_ref()
-            .and_then(|(_, store)| store.content_hash(1))
-            .map(str::to_owned);
-        assert_eq!(
+            .and_then(|(_, store)| store.file_chunk_meta("src/lib.rs").into_iter().next())
+            .map(|meta| meta.content_hash);
+        assert_ne!(
             after, before,
-            "the rejected delta must not mutate the store"
+            "the planned delta must replace the old chunk"
         );
     }
 

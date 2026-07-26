@@ -453,8 +453,11 @@ impl Embedder {
         self.config.dimensions()
     }
 
-    /// Exact immutable FastEmbed-derived budget used by structural planning.
-    pub(crate) fn token_budget(&self) -> Option<&crate::semantic::token_budget::TokenBudget> {
+    /// Configured tokenizer and effective input budget used by this embedder.
+    ///
+    /// Daemon delta planning borrows this to reproduce whole-build structural
+    /// boundaries and composition before invoking the same embedding session.
+    pub fn token_budget(&self) -> Option<&crate::semantic::token_budget::TokenBudget> {
         self.token_budget.as_ref()
     }
 
