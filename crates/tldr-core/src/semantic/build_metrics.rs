@@ -38,9 +38,9 @@ use crate::semantic::index::BuildOptions;
 use crate::util;
 
 /// Metrics report schema version. Bump when the serialized shape of
-/// [`MetricsReport`] changes in a way that breaks consumers. (`4` = concrete
-/// backend plus exact fixed-shape batch telemetry.)
-pub const METRICS_SCHEMA_VERSION: u32 = 4;
+/// [`MetricsReport`] changes in a way that breaks consumers. (`5` = bounded
+/// streaming-stage telemetry.)
+pub const METRICS_SCHEMA_VERSION: u32 = 5;
 
 /// Default RSS sampling interval for the timeline.
 const DEFAULT_RSS_SAMPLE_INTERVAL_MS: u64 = 500;
@@ -99,6 +99,9 @@ pub struct MetricsReport {
     pub rss: RssSummary,
     /// Derived throughput rates.
     pub throughput: Throughput,
+    /// Bounded streaming-stage capacities and observed high-water marks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pipeline: Option<crate::semantic::PipelineTelemetry>,
     /// Explicit, recorded scope limits (see module docs).
     pub limitations: Vec<String>,
 }
@@ -271,6 +274,7 @@ pub struct BuildMetrics {
     embed_latency_ms: u64,
     /// Token-budget outcomes per input (TLDR-9bxa.2), accumulated into the report.
     token_stats: crate::semantic::token_budget::TokenStats,
+    pipeline: Option<crate::semantic::PipelineTelemetry>,
     rss_samples: Arc<Mutex<Vec<RssSample>>>,
     /// Condvar-based shutdown signal so the sampler wakes and exits promptly
     /// (sub-millisecond) on finalize/drop, instead of polling a flag every
@@ -324,6 +328,7 @@ impl BuildMetrics {
             fixed_executions: Vec::new(),
             embed_latency_ms: 0,
             token_stats: crate::semantic::token_budget::TokenStats::default(),
+            pipeline: None,
             rss_samples,
             signal,
             sampler_handle,
@@ -350,8 +355,8 @@ impl BuildMetrics {
 
     /// Record cache hit/miss counts (misses == chunks embedded in Phase 2).
     pub fn record_cache(&mut self, hits: usize, misses: usize) {
-        self.cache_hits = hits;
-        self.cache_misses = misses;
+        self.cache_hits += hits;
+        self.cache_misses += misses;
     }
 
     /// Record whether a dedup cache was actually opened (effective state, not
@@ -364,12 +369,12 @@ impl BuildMetrics {
     /// Record the byte lengths of all Phase-2 embed inputs, in length-sorted
     /// ascending order (matching `embed_batch_indexed`'s internal sort).
     pub fn record_embed_inputs(&mut self, lengths_sorted: Vec<usize>) {
-        self.input_lengths = lengths_sorted;
+        self.input_lengths.extend(lengths_sorted);
     }
 
     /// Record the aggregate ONNX embed latency (Phase 2), millis.
     pub fn record_embed_latency_ms(&mut self, ms: u64) {
-        self.embed_latency_ms = ms;
+        self.embed_latency_ms += ms;
     }
 
     /// Record exact prepared-batch telemetry from the fixed-shape executor.
@@ -377,7 +382,7 @@ impl BuildMetrics {
         &mut self,
         executions: Vec<crate::semantic::FixedShapeExecution>,
     ) {
-        self.fixed_executions = executions;
+        self.fixed_executions.extend(executions);
     }
 
     /// Set the token-budget stats from the Embedder's accumulated checks
@@ -385,6 +390,11 @@ impl BuildMetrics {
     /// the build copies the aggregate into the report.
     pub fn set_token_stats(&mut self, stats: crate::semantic::token_budget::TokenStats) {
         self.token_stats = stats;
+    }
+
+    /// Record bounded streaming-stage high-water marks.
+    pub fn set_pipeline_telemetry(&mut self, telemetry: crate::semantic::PipelineTelemetry) {
+        self.pipeline = Some(telemetry);
     }
 
     /// Stop the sampler, compute aggregates, and produce the final report.
@@ -477,6 +487,7 @@ impl BuildMetrics {
                 timeline,
             },
             throughput,
+            pipeline: self.pipeline.clone(),
             limitations: if self.fixed_executions.is_empty() {
                 fastembed_limitations()
             } else {
@@ -682,8 +693,8 @@ mod tests {
     }
 
     #[test]
-    fn schema_version_is_four_after_fixed_shape_telemetry() {
-        assert_eq!(METRICS_SCHEMA_VERSION, 4);
+    fn schema_version_is_five_after_streaming_telemetry() {
+        assert_eq!(METRICS_SCHEMA_VERSION, 5);
     }
 
     #[test]
@@ -744,6 +755,7 @@ mod tests {
                 chunks_per_second: 5.0,
                 embeddings_per_second: 3.75,
             },
+            pipeline: None,
             limitations: fastembed_limitations(),
         };
         let json = serde_json::to_string(&report).expect("serialize");

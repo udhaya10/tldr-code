@@ -1036,6 +1036,31 @@ pub fn key_chunks_reconciled(
     documents: &[String],
     prior: &[ChunkMeta],
 ) -> TldrResult<Vec<(u64, ChunkMeta)>> {
+    let mut allocator = chunk_id_allocator(root, prior);
+    key_chunks_reconciled_with_allocator(root, chunks, documents, prior, &mut allocator)
+}
+
+fn chunk_id_allocator(root: &Path, prior: &[ChunkMeta]) -> ChunkIdAllocator {
+    let mut nonce_hasher = blake3::Hasher::new();
+    nonce_hasher.update(normalize_sep(root).as_bytes());
+    let mut prior_ids: Vec<u128> = prior.iter().map(|meta| meta.chunk_id.0).collect();
+    prior_ids.sort_unstable();
+    for id in prior_ids {
+        nonce_hasher.update(&id.to_le_bytes());
+    }
+    let nonce_hash = nonce_hasher.finalize();
+    let mut nonce_bytes = [0_u8; 16];
+    nonce_bytes.copy_from_slice(&nonce_hash.as_bytes()[..16]);
+    ChunkIdAllocator::new(u128::from_le_bytes(nonce_bytes))
+}
+
+fn key_chunks_reconciled_with_allocator(
+    root: &Path,
+    chunks: &[CodeChunk],
+    documents: &[String],
+    prior: &[ChunkMeta],
+    allocator: &mut ChunkIdAllocator,
+) -> TldrResult<Vec<(u64, ChunkMeta)>> {
     if chunks.len() != documents.len() {
         return Err(TldrError::Embedding(format!(
             "lineage input mismatch: {} chunks != {} composed documents",
@@ -1059,18 +1084,7 @@ pub fn key_chunks_reconciled(
             revision: meta.revision,
         })
         .collect();
-    let mut nonce_hasher = blake3::Hasher::new();
-    nonce_hasher.update(normalize_sep(root).as_bytes());
-    let mut prior_ids: Vec<u128> = prior.iter().map(|meta| meta.chunk_id.0).collect();
-    prior_ids.sort_unstable();
-    for id in prior_ids {
-        nonce_hasher.update(&id.to_le_bytes());
-    }
-    let nonce_hash = nonce_hasher.finalize();
-    let mut nonce_bytes = [0_u8; 16];
-    nonce_bytes.copy_from_slice(&nonce_hash.as_bytes()[..16]);
-    let mut allocator = ChunkIdAllocator::new(u128::from_le_bytes(nonce_bytes));
-    let reconciled = reconcile_chunks(&prior_chunks, &candidates, &mut allocator);
+    let reconciled = reconcile_chunks(&prior_chunks, &candidates, allocator);
 
     Ok(chunks
         .iter()
@@ -1167,6 +1181,7 @@ fn normalize_sep(p: &Path) -> String {
 
 /// Run the canonical corpus-policy pass without asking the legacy function
 /// extractor to decide whether a file belongs to the structural corpus.
+#[cfg(test)]
 fn structural_source_files(
     root: &Path,
     languages: Option<Vec<crate::Language>>,
@@ -1306,6 +1321,67 @@ impl VectorStore {
         Ok(store)
     }
 
+    /// Incrementally add one complete planned file to a build-local store.
+    ///
+    /// Keeping the complete file together preserves stable lineage allocation;
+    /// the surrounding streaming build drops its source/doc/vector window
+    /// immediately afterward. The store itself is not published until every
+    /// file succeeds.
+    fn insert_embedded_file(
+        &mut self,
+        chunks: &[CodeChunk],
+        vectors: &[Vec<f32>],
+        documents: &[String],
+        root: &Path,
+        lineage_allocator: &mut ChunkIdAllocator,
+    ) -> TldrResult<()> {
+        if chunks.len() != vectors.len() || chunks.len() != documents.len() {
+            return Err(vs_err(
+                "stream_sink",
+                format!(
+                    "unaligned file payloads: chunks={} vectors={} documents={}",
+                    chunks.len(),
+                    vectors.len(),
+                    documents.len()
+                ),
+            ));
+        }
+        if chunks.is_empty() {
+            return Ok(());
+        }
+        if vectors.iter().any(|vector| vector.len() != self.dimensions) {
+            return Err(vs_err(
+                "stream_sink",
+                "embedding dimensions differ from the target store",
+            ));
+        }
+        let keyed =
+            key_chunks_reconciled_with_allocator(root, chunks, documents, &[], lineage_allocator)?;
+        let file_rel = keyed[0].1.file_rel_path.clone();
+        if keyed.iter().any(|(_, meta)| meta.file_rel_path != file_rel) {
+            return Err(vs_err(
+                "stream_sink",
+                "insert_embedded_file received more than one file",
+            ));
+        }
+        let mut keys = std::collections::BTreeSet::new();
+        for ((key, meta), vector) in keyed.iter().zip(vectors) {
+            self.add(*key, vector, meta.clone())?;
+            keys.insert(*key);
+        }
+        let (mtime, size, file_type) = stat_signal(&chunks[0].file_path);
+        self.set_file_record(
+            file_rel,
+            FileRecord {
+                keys,
+                mtime,
+                size,
+                file_type,
+            },
+        );
+        Ok(())
+    }
+
     /// Production build: chunk `root`, embed each chunk (reusing the
     /// content-addressed [`EmbeddingCache`] for dedup), and populate the store.
     ///
@@ -1334,6 +1410,43 @@ impl VectorStore {
     /// staged rollout use this entry point to avoid process-global environment
     /// mutation.
     pub fn build_with_backend(
+        root: &Path,
+        options: &BuildOptions,
+        cache_config: Option<CacheConfig>,
+        document_backend: crate::semantic::DocumentEmbeddingBackend,
+    ) -> TldrResult<Self> {
+        Self::build_with_backend_and_control(
+            root,
+            options,
+            cache_config,
+            document_backend,
+            crate::semantic::StreamingBuildConfig::default(),
+            crate::semantic::BuildCancellation::default(),
+        )
+    }
+
+    /// Bounded streaming build with explicit resource and cancellation control.
+    pub fn build_with_backend_and_control(
+        root: &Path,
+        options: &BuildOptions,
+        cache_config: Option<CacheConfig>,
+        document_backend: crate::semantic::DocumentEmbeddingBackend,
+        pipeline_config: crate::semantic::StreamingBuildConfig,
+        cancellation: crate::semantic::BuildCancellation,
+    ) -> TldrResult<Self> {
+        build_streaming_store(
+            root,
+            options,
+            cache_config,
+            document_backend,
+            pipeline_config,
+            cancellation,
+        )
+    }
+
+    /// Whole-corpus oracle retained only for streaming equivalence tests.
+    #[cfg(test)]
+    fn build_legacy_with_backend(
         root: &Path,
         options: &BuildOptions,
         cache_config: Option<CacheConfig>,
@@ -1666,6 +1779,485 @@ impl VectorStore {
         }
         Ok(store)
     }
+}
+
+struct PendingStreamFile {
+    path: PathBuf,
+    chunks: Vec<CodeChunk>,
+    documents: Vec<String>,
+}
+
+enum StreamingEmbedder {
+    Fast(crate::semantic::Embedder),
+    Fixed(crate::semantic::FixedShapeEmbedder),
+}
+
+impl StreamingEmbedder {
+    fn token_budget(&self) -> &crate::semantic::TokenBudget {
+        match self {
+            Self::Fast(embedder) => embedder
+                .token_budget()
+                .expect("streaming embedder checked tokenizer configuration"),
+            Self::Fixed(embedder) => embedder.token_budget(),
+        }
+    }
+
+    fn check_corpus(&self, texts: &[&str]) -> crate::semantic::token_budget::TokenStats {
+        match self {
+            Self::Fast(embedder) => embedder.check_corpus(texts),
+            Self::Fixed(embedder) => {
+                let mut stats = crate::semantic::token_budget::TokenStats::default();
+                for text in texts {
+                    match embedder.token_budget().check(text) {
+                        Ok(check) => stats.record(check),
+                        Err(_) => stats.mark_unavailable(),
+                    }
+                }
+                stats
+            }
+        }
+    }
+
+    fn embed(&mut self, indexed: Vec<(usize, &str)>) -> TldrResult<Vec<(usize, Vec<f32>)>> {
+        match self {
+            Self::Fast(embedder) => embedder.embed_batch_indexed(indexed, false),
+            Self::Fixed(embedder) => embedder.embed_indexed(indexed),
+        }
+    }
+
+    fn take_fixed_executions(&mut self) -> Vec<crate::semantic::FixedShapeExecution> {
+        match self {
+            Self::Fast(_) => Vec::new(),
+            Self::Fixed(embedder) => embedder.take_executions(),
+        }
+    }
+}
+
+fn build_streaming_store(
+    root: &Path,
+    options: &BuildOptions,
+    cache_config: Option<CacheConfig>,
+    document_backend: crate::semantic::DocumentEmbeddingBackend,
+    pipeline_config: crate::semantic::StreamingBuildConfig,
+    cancellation: crate::semantic::BuildCancellation,
+) -> TldrResult<VectorStore> {
+    use crate::semantic::build_pipeline::{BuildPipelineError, PipelineStage};
+    use crate::semantic::cache::EmbeddingCache;
+    use crate::semantic::enrichment::enrich_chunks;
+    use crate::semantic::index::{BYTES_PER_CHUNK, MAX_INDEX_SIZE, MAX_MEMORY_BYTES};
+    let capacities = pipeline_config.capacities().map_err(pipeline_error)?;
+    let corpus_digest = compute_corpus_digest(root);
+    let enrich = std::env::var("TLDR_ENRICH")
+        .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let mut metrics = options.collect_metrics.then(|| {
+        crate::semantic::build_metrics::BuildMetrics::new(
+            options.model.model_name(),
+            options.model.dimensions(),
+            root.to_string_lossy().into_owned(),
+            corpus_digest,
+            options,
+            enrich,
+            document_backend,
+        )
+    });
+    let mut telemetry = crate::semantic::PipelineTelemetry {
+        capacities: Some(capacities),
+        ..Default::default()
+    };
+
+    if let Some(metrics) = metrics.as_mut() {
+        // Preserve the established report phase name while the implementation
+        // beneath it now enumerates and chunks incrementally.
+        metrics.begin_phase("chunk");
+    }
+    let languages = options.languages.as_ref().map(|languages| {
+        languages
+            .iter()
+            .filter_map(|language| crate::Language::from_extension(language))
+            .collect::<Vec<_>>()
+    });
+    let mut files = crate::semantic::chunker::enumerate_corpus_files(root);
+    if let Some(languages) = languages.as_ref() {
+        files.retain(|file| {
+            crate::Language::from_path(file).is_some_and(|language| languages.contains(&language))
+        });
+    }
+    if let Some(metrics) = metrics.as_mut() {
+        metrics.end_phase();
+    }
+
+    let mut store = VectorStore::new(options.model.dimensions(), VectorStore::MIN_CAPACITY)?;
+    if files.is_empty() {
+        store.corpus_digest = corpus_digest;
+        if let Some(mut metrics) = metrics {
+            metrics.set_pipeline_telemetry(telemetry);
+            store.build_metrics = Some(metrics.finalize(0));
+        }
+        return Ok(store);
+    }
+
+    cancellation.check().map_err(pipeline_error)?;
+    if let Some(metrics) = metrics.as_mut() {
+        metrics.begin_phase("model_load");
+    }
+    let oracle = crate::semantic::Embedder::new(options.model)?;
+    if oracle.token_budget().is_none() {
+        return Err(TldrError::Embedding(
+            "structural planning requires FastEmbed tokenizer configuration".into(),
+        ));
+    }
+    let mut embedder = match document_backend {
+        crate::semantic::DocumentEmbeddingBackend::FastEmbed => StreamingEmbedder::Fast(oracle),
+        crate::semantic::DocumentEmbeddingBackend::FixedShapeOrt => StreamingEmbedder::Fixed(
+            oracle.into_fixed_shape(crate::semantic::OrtBackendConfig::default())?,
+        ),
+    };
+    if let Some(metrics) = metrics.as_mut() {
+        metrics.end_phase();
+    }
+
+    let mut cache = if options.use_cache {
+        cache_config.map(EmbeddingCache::open).transpose()?
+    } else {
+        None
+    };
+    if let Some(cache) = cache.as_mut() {
+        cache.set_key_root(root);
+    }
+    if let Some(metrics) = metrics.as_mut() {
+        metrics.record_cache_opened(cache.is_some());
+        metrics.begin_phase("streaming_pipeline");
+    }
+    let cache_recipe =
+        crate::semantic::EmbeddingRecipeId::for_document(options.model, embed_schema_tag());
+    let producer = crate::semantic::build_pipeline::FileProducer::spawn(
+        files,
+        capacities.files,
+        cancellation.clone(),
+    )
+    .map_err(pipeline_error)?;
+    let mut build_stats = crate::semantic::chunker::ChunkStats::default();
+    // Allocation order remains corpus-global even though payloads are flushed
+    // per window, preserving the whole-corpus stable IDs exactly.
+    let mut lineage_allocator = chunk_id_allocator(root, &[]);
+    let mut total_chunks = 0usize;
+    let mut token_stats = crate::semantic::token_budget::TokenStats::default();
+    let mut window = Vec::<PendingStreamFile>::new();
+    let mut window_items = 0usize;
+    let mut window_bytes = 0usize;
+    // Reserve one quarter of the budget/capacity for the next complete file so
+    // parsing/composition cannot push a full window over its declared bound.
+    let max_file_items = (capacities.chunks / 4).max(1);
+    let max_window_items = capacities.chunks.saturating_sub(max_file_items).max(1);
+    let max_file_bytes = (pipeline_config.memory_budget_bytes / 4).max(1);
+    let max_window_bytes = pipeline_config
+        .memory_budget_bytes
+        .saturating_sub(max_file_bytes)
+        .max(1);
+
+    while let Some(file) = producer.recv() {
+        cancellation.check().map_err(pipeline_error)?;
+        telemetry.files_seen += 1;
+        let result = crate::semantic::chunk_file(
+            &file,
+            &crate::semantic::ChunkOptions {
+                granularity: crate::semantic::ChunkGranularity::File,
+                languages: languages.clone(),
+                ..Default::default()
+            },
+        )
+        .map_err(|error| {
+            pipeline_error(
+                BuildPipelineError::new(PipelineStage::Parse, error.to_string()).at_file(&file),
+            )
+        })?;
+        build_stats.files_indexed += result.stats.files_indexed;
+        build_stats.files_skipped += result.stats.files_skipped;
+        build_stats.files_unsupported += result.stats.files_unsupported;
+        build_stats.files_oversized += result.stats.files_oversized;
+        let mut source_files = result.chunks;
+        for chunk in &mut source_files {
+            chunk.structure.repository_path = root_relative(root, &chunk.file_path);
+        }
+        let chunks = crate::semantic::structural_planner::plan_chunks(
+            &source_files,
+            embedder.token_budget(),
+            options.granularity,
+        )
+        .map_err(|error| {
+            pipeline_error(
+                BuildPipelineError::new(PipelineStage::Parse, error.to_string()).at_file(&file),
+            )
+        })?;
+        if chunks.is_empty() {
+            continue;
+        }
+        if chunks.len() > max_file_items {
+            return Err(pipeline_error(
+                BuildPipelineError::new(
+                    PipelineStage::Parse,
+                    format!(
+                        "one file produced {} chunks; per-file bound is {max_file_items}",
+                        chunks.len()
+                    ),
+                )
+                .at_file(&file),
+            ));
+        }
+        let documents = if enrich {
+            enrich_chunks(&chunks, root)
+                .iter()
+                .map(|unit| {
+                    crate::semantic::structural_planner::compose_enriched(
+                        unit,
+                        embedder.token_budget(),
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()
+        } else {
+            chunks
+                .iter()
+                .map(|chunk| {
+                    crate::semantic::structural_planner::compose_minimal(
+                        chunk,
+                        embedder.token_budget(),
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()
+        }
+        .map_err(|error| {
+            pipeline_error(
+                BuildPipelineError::new(PipelineStage::Compose, error.to_string()).at_file(&file),
+            )
+        })?;
+        let payload_bytes = chunks
+            .iter()
+            .zip(&documents)
+            .map(|(chunk, document)| {
+                chunk.content.len() * 2
+                    + document.len()
+                    + options.model.dimensions() * std::mem::size_of::<f32>()
+            })
+            .sum::<usize>();
+        if payload_bytes > max_file_bytes {
+            return Err(pipeline_error(
+                BuildPipelineError::new(
+                    PipelineStage::Compose,
+                    format!(
+                        "one file needs {payload_bytes} bytes; per-file bound is {max_file_bytes}"
+                    ),
+                )
+                .at_file(&file),
+            ));
+        }
+        if !window.is_empty()
+            && (window_items + chunks.len() > max_window_items
+                || window_bytes + payload_bytes > max_window_bytes)
+        {
+            flush_streaming_window(
+                &mut window,
+                &mut store,
+                root,
+                &mut embedder,
+                &mut cache,
+                &cache_recipe,
+                metrics.as_mut(),
+                &mut token_stats,
+                &mut telemetry,
+                &cancellation,
+                &mut lineage_allocator,
+            )?;
+            window_items = 0;
+            window_bytes = 0;
+        }
+        window_items += chunks.len();
+        window_bytes += payload_bytes;
+        telemetry.observe_window(window_items, window_bytes);
+        window.push(PendingStreamFile {
+            path: file,
+            chunks,
+            documents,
+        });
+        total_chunks += window.last().expect("just pushed").chunks.len();
+        if total_chunks > MAX_INDEX_SIZE {
+            return Err(TldrError::IndexTooLarge {
+                count: total_chunks,
+                max: MAX_INDEX_SIZE,
+            });
+        }
+        let estimated_memory = total_chunks * BYTES_PER_CHUNK;
+        if estimated_memory > MAX_MEMORY_BYTES {
+            return Err(TldrError::MemoryLimitExceeded {
+                estimated_mb: estimated_memory / (1024 * 1024),
+                max_mb: MAX_MEMORY_BYTES / (1024 * 1024),
+            });
+        }
+    }
+    flush_streaming_window(
+        &mut window,
+        &mut store,
+        root,
+        &mut embedder,
+        &mut cache,
+        &cache_recipe,
+        metrics.as_mut(),
+        &mut token_stats,
+        &mut telemetry,
+        &cancellation,
+        &mut lineage_allocator,
+    )?;
+    telemetry.producer_backpressure_events = producer.finish().map_err(pipeline_error)?;
+    build_stats.chunks_created = total_chunks;
+    store.corpus_digest = corpus_digest;
+    store.build_stats = build_stats;
+    if let Some(mut metrics) = metrics {
+        metrics.set_token_stats(token_stats);
+        metrics.set_pipeline_telemetry(telemetry);
+        store.build_metrics = Some(metrics.finalize(total_chunks));
+    }
+    Ok(store)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn flush_streaming_window(
+    window: &mut Vec<PendingStreamFile>,
+    store: &mut VectorStore,
+    root: &Path,
+    embedder: &mut StreamingEmbedder,
+    cache: &mut Option<crate::semantic::cache::EmbeddingCache>,
+    cache_recipe: &crate::semantic::EmbeddingRecipeId,
+    mut metrics: Option<&mut crate::semantic::build_metrics::BuildMetrics>,
+    token_stats: &mut crate::semantic::token_budget::TokenStats,
+    telemetry: &mut crate::semantic::PipelineTelemetry,
+    cancellation: &crate::semantic::BuildCancellation,
+    lineage_allocator: &mut ChunkIdAllocator,
+) -> TldrResult<()> {
+    use crate::semantic::build_pipeline::{BuildPipelineError, PipelineStage};
+    if window.is_empty() {
+        return Ok(());
+    }
+    cancellation.check().map_err(pipeline_error)?;
+    let total = window.iter().map(|file| file.chunks.len()).sum::<usize>();
+    let mut cache_chunks = Vec::with_capacity(total);
+    let mut document_refs = Vec::with_capacity(total);
+    for file in window.iter() {
+        for (chunk, document) in file.chunks.iter().zip(&file.documents) {
+            let mut cache_chunk = chunk.clone();
+            cache_chunk.content_hash = format!("{:x}", md5::compute(document.as_bytes()));
+            cache_chunks.push(cache_chunk);
+            document_refs.push(document.as_str());
+        }
+    }
+    let mut vectors = vec![None; total];
+    let mut misses = Vec::new();
+    for (index, (chunk, document)) in cache_chunks.iter().zip(&document_refs).enumerate() {
+        match cache
+            .as_mut()
+            .and_then(|cache| cache.get_document(chunk, document, cache_recipe))
+        {
+            Some(vector) => vectors[index] = Some(vector),
+            None => misses.push(index),
+        }
+    }
+    if let Some(metrics) = metrics.as_mut() {
+        metrics.record_cache(total - misses.len(), misses.len());
+        let mut lengths = misses
+            .iter()
+            .map(|index| document_refs[*index].len())
+            .collect::<Vec<_>>();
+        lengths.sort_unstable();
+        metrics.record_embed_inputs(lengths);
+    }
+    token_stats.merge(&embedder.check_corpus(&document_refs));
+    if !misses.is_empty() {
+        cancellation.check().map_err(pipeline_error)?;
+        let indexed = misses
+            .iter()
+            .map(|index| (*index, document_refs[*index]))
+            .collect::<Vec<_>>();
+        let started = std::time::Instant::now();
+        let embedded = embedder.embed(indexed).map_err(|error| {
+            pipeline_error(BuildPipelineError::new(
+                PipelineStage::Inference,
+                error.to_string(),
+            ))
+        })?;
+        if let Some(metrics) = metrics.as_mut() {
+            metrics.record_embed_latency_ms(started.elapsed().as_millis() as u64);
+            metrics.record_fixed_executions(embedder.take_fixed_executions());
+        }
+        for (index, vector) in embedded {
+            if !misses.contains(&index) || vectors[index].replace(vector).is_some() {
+                return Err(pipeline_error(
+                    BuildPipelineError::new(
+                        PipelineStage::Inference,
+                        "backend returned an unexpected or duplicate index",
+                    )
+                    .at_chunk(index.to_string()),
+                ));
+            }
+        }
+    }
+    let vectors = vectors
+        .into_iter()
+        .enumerate()
+        .map(|(index, vector)| {
+            vector.ok_or_else(|| {
+                pipeline_error(
+                    BuildPipelineError::new(
+                        PipelineStage::Inference,
+                        "backend omitted an embedding",
+                    )
+                    .at_chunk(index.to_string()),
+                )
+            })
+        })
+        .collect::<TldrResult<Vec<_>>>()?;
+    for (index, vector) in vectors.iter().enumerate() {
+        if let Some(cache) = cache.as_mut() {
+            cache.put_document(
+                &cache_chunks[index],
+                document_refs[index],
+                vector.clone(),
+                cache_recipe,
+            );
+        }
+    }
+    if let Some(cache) = cache.as_mut() {
+        cache.flush().map_err(|error| {
+            pipeline_error(BuildPipelineError::new(
+                PipelineStage::Cache,
+                error.to_string(),
+            ))
+        })?;
+    }
+    let mut offset = 0;
+    for file in window.iter() {
+        let end = offset + file.chunks.len();
+        store
+            .insert_embedded_file(
+                &file.chunks,
+                &vectors[offset..end],
+                &file.documents,
+                root,
+                lineage_allocator,
+            )
+            .map_err(|error| {
+                pipeline_error(
+                    BuildPipelineError::new(PipelineStage::Sink, error.to_string())
+                        .at_file(&file.path),
+                )
+            })?;
+        offset = end;
+    }
+    telemetry.windows_completed += 1;
+    window.clear();
+    Ok(())
+}
+
+fn pipeline_error(error: crate::semantic::BuildPipelineError) -> TldrError {
+    TldrError::Embedding(error.to_string())
 }
 
 impl ManifestId {
@@ -2354,6 +2946,46 @@ mod tests {
     }
 
     #[test]
+    fn windowed_lineage_allocation_matches_whole_corpus_order() {
+        let root = std::path::Path::new("/proj");
+        let chunks = vec![
+            code_chunk("/proj/a.rs", None, Some("a"), "fn a(){}"),
+            code_chunk("/proj/a.rs", None, Some("b"), "fn b(){}"),
+            code_chunk("/proj/b.rs", None, Some("c"), "fn c(){}"),
+        ];
+        let documents = chunks
+            .iter()
+            .map(|chunk| chunk.content.clone())
+            .collect::<Vec<_>>();
+        let whole = key_chunks_reconciled(root, &chunks, &documents, &[]).unwrap();
+
+        let mut allocator = chunk_id_allocator(root, &[]);
+        let mut windowed = Vec::new();
+        windowed.extend(
+            key_chunks_reconciled_with_allocator(
+                root,
+                &chunks[..2],
+                &documents[..2],
+                &[],
+                &mut allocator,
+            )
+            .unwrap(),
+        );
+        windowed.extend(
+            key_chunks_reconciled_with_allocator(
+                root,
+                &chunks[2..],
+                &documents[2..],
+                &[],
+                &mut allocator,
+            )
+            .unwrap(),
+        );
+
+        assert_eq!(windowed, whole);
+    }
+
+    #[test]
     fn reconciled_usearch_delta_replaces_and_removes_exact_lineage() {
         const D: usize = 8;
         let root = std::path::Path::new("/proj");
@@ -2460,6 +3092,124 @@ mod tests {
             .chunks
             .iter()
             .all(|chunk| chunk.function_name.is_none()));
+    }
+
+    #[test]
+    fn streaming_build_rejects_an_invalid_memory_budget_before_model_load() {
+        let root = tempfile::tempdir().unwrap();
+        let result = VectorStore::build_with_backend_and_control(
+            root.path(),
+            &BuildOptions::default(),
+            None,
+            crate::semantic::DocumentEmbeddingBackend::FastEmbed,
+            crate::semantic::StreamingBuildConfig {
+                memory_budget_bytes: 1,
+                estimated_record_bytes: 1,
+            },
+            crate::semantic::BuildCancellation::default(),
+        );
+        let error = match result {
+            Ok(_) => panic!("invalid pipeline budget unexpectedly succeeded"),
+            Err(error) => error,
+        };
+        let rendered = error.to_string();
+        assert!(rendered.contains("Configure"), "{rendered}");
+        assert!(rendered.contains("every payload stage"), "{rendered}");
+    }
+
+    #[test]
+    fn streaming_build_cancellation_prevents_partial_store_publication() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("cancelled.rs"), "fn cancelled() {}\n").unwrap();
+        let cancellation = crate::semantic::BuildCancellation::default();
+        cancellation.cancel();
+
+        let result = VectorStore::build_with_backend_and_control(
+            root.path(),
+            &BuildOptions::default(),
+            None,
+            crate::semantic::DocumentEmbeddingBackend::FastEmbed,
+            crate::semantic::StreamingBuildConfig::default(),
+            cancellation,
+        );
+        let error = match result {
+            Ok(_) => panic!("cancelled streaming build unexpectedly succeeded"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("Cancelled"));
+    }
+
+    #[test]
+    #[ignore = "loads the ONNX embedder; run on demand"]
+    fn streaming_build_matches_whole_corpus_oracle_and_reports_bounds() {
+        use crate::semantic::types::ChunkGranularity;
+
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("alpha.rs"),
+            "fn alpha(x: i32) -> i32 { x + 1 }\nfn helper() -> i32 { 7 }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.path().join("beta.rs"),
+            "fn beta(x: i32) -> i32 { alpha(x) * 2 }\n",
+        )
+        .unwrap();
+        let options = BuildOptions {
+            model: EmbeddingModel::ArcticXS,
+            granularity: ChunkGranularity::Function,
+            show_progress: false,
+            use_cache: false,
+            collect_metrics: true,
+            ..BuildOptions::default()
+        };
+        let config = crate::semantic::StreamingBuildConfig {
+            memory_budget_bytes: 8 * 1024 * 1024,
+            estimated_record_bytes: 8 * 1024,
+        };
+        let oracle = VectorStore::build_legacy_with_backend(
+            root.path(),
+            &options,
+            None,
+            crate::semantic::DocumentEmbeddingBackend::FastEmbed,
+        )
+        .unwrap();
+        let streaming = VectorStore::build_with_backend_and_control(
+            root.path(),
+            &options,
+            None,
+            crate::semantic::DocumentEmbeddingBackend::FastEmbed,
+            config,
+            crate::semantic::BuildCancellation::default(),
+        )
+        .unwrap();
+
+        assert_eq!(streaming.len(), oracle.len());
+        let query = unit(options.model.dimensions(), 3);
+        let oracle_hits = oracle.search(&query, oracle.len()).unwrap();
+        let streaming_hits = streaming.search(&query, streaming.len()).unwrap();
+        assert_eq!(
+            streaming_hits.iter().map(|hit| hit.key).collect::<Vec<_>>(),
+            oracle_hits.iter().map(|hit| hit.key).collect::<Vec<_>>()
+        );
+        for (actual, expected) in streaming_hits.iter().zip(&oracle_hits) {
+            assert_eq!(actual.meta, expected.meta);
+            assert!(
+                (actual.distance - expected.distance).abs() <= f32::EPSILON,
+                "{} != {}",
+                actual.distance,
+                expected.distance
+            );
+        }
+
+        let telemetry = streaming
+            .build_metrics()
+            .and_then(|report| report.pipeline.as_ref())
+            .expect("streaming telemetry");
+        let capacities = telemetry.capacities.expect("stage capacities");
+        assert!(telemetry.peak_window_items <= capacities.chunks);
+        assert!(telemetry.peak_payload_bytes <= config.memory_budget_bytes);
+        assert!(telemetry.windows_completed > 0);
     }
 
     // ---- Integration / equivalence (step 5) -----------------------------------

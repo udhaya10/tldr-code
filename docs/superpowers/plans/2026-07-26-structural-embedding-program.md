@@ -46,10 +46,10 @@
 - Modify: `crates/tldr-core/src/semantic/build_metrics.rs`
 - Test: `crates/tldr-core/src/semantic/build_pipeline.rs`
 
-- [ ] Define explicit memory-budget-derived queue capacities and typed stage errors carrying file/chunk identity.
-- [ ] Stream enumerate -> plan -> compose -> cache -> tokenize -> bucket -> inference -> sink without retaining whole-corpus payloads.
-- [ ] Preserve deterministic output by stable `ChunkId`, implement cancellation, and prevent partial store publication.
-- [ ] Run slow-consumer/backpressure, cancellation, parity, and non-ONNX memory gates once at epic completion.
+- [x] Define explicit memory-budget-derived queue capacities and typed stage errors carrying file/chunk identity.
+- [x] Stream enumerate -> plan -> compose -> cache -> tokenize -> bucket -> inference -> sink without retaining whole-corpus payloads.
+- [x] Preserve deterministic output by stable `ChunkId`, implement cancellation, and prevent partial store publication.
+- [x] Run slow-consumer/backpressure, cancellation, parity, and non-ONNX memory gates once at epic completion.
 
 ### Task 4: Complete `TLDR-9bxa.8` redb cache and job ledger
 

@@ -373,6 +373,27 @@ impl TokenStats {
     pub fn mark_unavailable(&mut self) {
         self.status = TokenCheckStatus::Unavailable;
     }
+
+    /// Merge one bounded window into the build-wide aggregate.
+    pub fn merge(&mut self, other: &Self) {
+        self.status = match (self.status, other.status) {
+            (TokenCheckStatus::Unavailable, _) | (_, TokenCheckStatus::Unavailable) => {
+                TokenCheckStatus::Unavailable
+            }
+            (TokenCheckStatus::Checked, _) | (_, TokenCheckStatus::Checked) => {
+                TokenCheckStatus::Checked
+            }
+            _ => TokenCheckStatus::NotChecked,
+        };
+        self.inputs_checked += other.inputs_checked;
+        self.oversized += other.oversized;
+        self.total_original_tokens += other.total_original_tokens;
+        self.total_embedded_tokens += other.total_embedded_tokens;
+        self.max_original_tokens = self.max_original_tokens.max(other.max_original_tokens);
+        if other.budget != 0 {
+            self.budget = other.budget;
+        }
+    }
 }
 
 /// Errors from loading/using a token budget.
@@ -547,6 +568,31 @@ mod tests {
         assert!(s.had_oversized());
         assert_eq!(s.budget, 512);
         assert_eq!(s.status, TokenCheckStatus::Checked);
+    }
+
+    #[test]
+    fn token_stats_merge_preserves_totals_and_unavailable_status() {
+        let mut left = TokenStats::default();
+        left.record(TokenCheck {
+            original_tokens: 4,
+            budget: 3,
+            truncated: true,
+            embedded_tokens: 3,
+        });
+        let mut right = TokenStats::default();
+        right.record(TokenCheck {
+            original_tokens: 2,
+            budget: 3,
+            truncated: false,
+            embedded_tokens: 2,
+        });
+        left.merge(&right);
+        assert_eq!(left.inputs_checked, 2);
+        assert_eq!(left.total_original_tokens, 6);
+        assert_eq!(left.oversized, 1);
+        right.mark_unavailable();
+        left.merge(&right);
+        assert_eq!(left.status, TokenCheckStatus::Unavailable);
     }
 
     #[test]

@@ -397,8 +397,8 @@ fn main() {
     // scannable, and missed queries are re-listed below the table. Status is a
     // pure function of `rank` — it does NOT feed the recall/MRR counters.
     println!(
-        "\n{:<5}{:<58} {:>5} {:>6}  {}",
-        "stat", "query", "rank", "fn?", "expected"
+        "\n{:<5}{:<58} {:>5} {:>6}  expected",
+        "stat", "query", "rank", "fn?"
     );
     println!("{}", "-".repeat(100));
 

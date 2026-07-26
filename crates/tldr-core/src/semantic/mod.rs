@@ -88,6 +88,12 @@ pub use inference_runners::{
     BulkInferenceRunner, FixedShapeInferenceRunner, InferenceRunnerSnapshot, InferenceWorkload,
 };
 
+pub mod build_pipeline;
+pub use build_pipeline::{
+    BuildCancellation, BuildPipelineError, PipelineStage, PipelineTelemetry, StageCapacities,
+    StreamingBuildConfig,
+};
+
 pub mod fixed_shape_benchmark;
 pub use fixed_shape_benchmark::{
     LatencySummary, ModelPerformanceReport, PerformanceGate, PerformanceMatrixReport,
