@@ -73,7 +73,7 @@ pub struct CodeChunk {
 }
 
 /// How a chunk relates to its extracted semantic root.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum StructuralRole {
     /// Extracted semantic root retained intact.

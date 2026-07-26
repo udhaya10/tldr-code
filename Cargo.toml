@@ -88,6 +88,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Hashing
 md5 = "0.7"
+blake3 = "1.8"
 
 # Session 16: Semantic Search - fastembed embeddings
 # PINNED per premortem P0 - do not use ^5.8 or 5

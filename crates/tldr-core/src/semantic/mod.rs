@@ -141,6 +141,12 @@ pub use token_budget::{TokenBudget, TokenCheck, TokenStats};
 
 pub(crate) mod structural_planner;
 
+pub mod lineage;
+pub use lineage::{
+    ChunkId, ChunkRevision, EmbeddingCacheIdentity, EmbeddingMode, EmbeddingRecipeId,
+    StructuralAnchor,
+};
+
 // TLDR-m01/zxb: store-backed semantic search — the ONLY search path (TLDR-lx7).
 // No SemanticIndex fallback. VectorStore works or the user gets an error.
 pub mod store_search;
