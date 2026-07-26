@@ -486,7 +486,8 @@ impl Default for SearchOptions {
 /// Cache configuration
 #[derive(Debug, Clone)]
 pub struct CacheConfig {
-    /// Platform cache directory containing versioned rkyv embedding snapshots.
+    /// Platform cache directory containing the redb cache and optional legacy
+    /// rkyv generation awaiting one-time migration.
     pub cache_dir: PathBuf,
 
     /// Maximum cache size in MB (default: 500)

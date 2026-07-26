@@ -62,10 +62,10 @@
 - Modify: `Cargo.toml`
 - Test: `crates/tldr-core/src/semantic/redb_store.rs`
 
-- [ ] Add versioned metadata, file, chunk, file-chunk, embedding, and job tables with an explicitly bounded redb cache.
-- [ ] Validate little-endian f32 encoding, dimensions, model/pipeline identity, and corruption/incompatibility rebuild paths.
-- [ ] Make related record/job transitions atomic and support per-record updates without whole-map rewrites.
-- [ ] Retain the old rkyv cache as a tested one-time migration source only, then run crash/cache-hit/memory gates once.
+- [x] Add versioned metadata, file, chunk, file-chunk, embedding, and job tables with an explicitly bounded redb cache.
+- [x] Validate little-endian f32 encoding, dimensions, model/pipeline identity, and corruption/incompatibility rebuild paths.
+- [x] Make related record/job transitions atomic and support per-record updates without whole-map rewrites.
+- [x] Retain the old rkyv cache as a tested one-time migration source only, then run crash/cache-hit/memory gates once.
 
 ### Task 5: Complete `TLDR-9bxa.9` generation publication
 

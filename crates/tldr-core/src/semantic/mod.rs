@@ -150,6 +150,15 @@ pub use chunker::{
 pub mod cache;
 pub use cache::EmbeddingCache;
 
+// TLDR-9bxa.8: authoritative per-record semantic storage and one-time reader
+// for the retired whole-map rkyv cache.
+pub mod redb_migration;
+pub mod redb_store;
+pub use redb_store::{
+    EmbeddingWrite, JobRecord, JobState, RedbStore, RedbStoreStats, StoredChunkRecord,
+    StoredEmbedding, StoredFileRecord, DEFAULT_REDB_CACHE_BYTES,
+};
+
 // Phase 6: shared build/search options + index limits. The `SemanticIndex`
 // type itself was nuked in TLDR-7xz.7 — serving goes through the daemon's
 // resident VectorStore only (store_search/vector_store below).
