@@ -36,9 +36,11 @@
 //! - **1.3**: Shows progress message before model download
 //! - **4.1**: Model integrity validation after load (dimension check)
 
-use fastembed::{EmbeddingModel as FastEmbeddingModel, InitOptions, TextEmbedding};
+use fastembed::{InitOptions, TextEmbedding};
 
 use crate::error::TldrError;
+use crate::semantic::embedding_backend::{EmbeddingBackend, EmbeddingBackendKind, FastEmbedOracle};
+use crate::semantic::model_artifacts::{fastembed_model, ResolvedModelArtifacts};
 use crate::semantic::similarity::normalize;
 use crate::semantic::types::EmbeddingModel;
 use crate::TldrResult;
@@ -82,11 +84,15 @@ pub struct EmbedOptions {
 /// underlying model is mutated during inference), so concurrent embedding still
 /// needs a per-thread instance or a lock.
 pub struct Embedder {
-    /// The underlying fastembed TextEmbedding instance
-    model: TextEmbedding,
+    /// Selected inference executor. FastEmbed remains the default oracle until
+    /// fixed-shape parity and resource gates pass.
+    backend: Box<dyn EmbeddingBackend>,
 
     /// Configuration for this embedder
     config: EmbeddingModel,
+
+    /// Commit-pinned files used by the oracle and future direct ORT executor.
+    model_artifacts: Option<ResolvedModelArtifacts>,
 
     /// Model tokenizer for input-budget checks (TLDR-9bxa.2). `None` if the
     /// tokenizer could not be loaded from fastembed's cache (checks skipped,
@@ -127,7 +133,7 @@ impl Embedder {
     /// ```
     pub fn new(model: EmbeddingModel) -> TldrResult<Self> {
         // Convert our model enum to fastembed's
-        let fast_model = Self::to_fastembed_model(model);
+        let fast_model = fastembed_model(model);
 
         // P0 Mitigation 1.3: Progress message before download.
         //
@@ -217,23 +223,23 @@ impl Embedder {
             token_stats.mark_unavailable();
         }
 
+        let model_artifacts = match ResolvedModelArtifacts::resolve(model, &cache_dir) {
+            Ok(artifacts) => Some(artifacts),
+            Err(error) => {
+                if std::env::var_os("TLDR_QUIET").is_none() {
+                    eprintln!("[tldr-warn] fixed-shape model artifacts unavailable: {error}");
+                }
+                None
+            }
+        };
+
         Ok(Self {
-            model: embedding,
+            backend: Box::new(FastEmbedOracle::new(embedding)),
             config: model,
+            model_artifacts,
             token_budget,
             token_stats,
         })
-    }
-
-    /// Convert our EmbeddingModel to fastembed's enum
-    fn to_fastembed_model(model: EmbeddingModel) -> FastEmbeddingModel {
-        match model {
-            EmbeddingModel::ArcticXS => FastEmbeddingModel::SnowflakeArcticEmbedXS,
-            EmbeddingModel::ArcticS => FastEmbeddingModel::SnowflakeArcticEmbedS,
-            EmbeddingModel::ArcticM => FastEmbeddingModel::SnowflakeArcticEmbedM,
-            EmbeddingModel::ArcticMLong => FastEmbeddingModel::SnowflakeArcticEmbedMLong,
-            EmbeddingModel::ArcticL => FastEmbeddingModel::SnowflakeArcticEmbedL,
-        }
     }
 
     /// Get approximate model size in MB for progress messages
@@ -281,8 +287,8 @@ impl Embedder {
         self.check_token_budget(text);
 
         let result = self
-            .model
-            .embed(vec![text], None)
+            .backend
+            .embed_texts(vec![text], None)
             .map_err(|e| TldrError::Embedding(format!("Failed to embed text: {}", e)))?;
 
         let mut embedding = result
@@ -453,6 +459,19 @@ impl Embedder {
         self.config.dimensions()
     }
 
+    /// Active inference executor.
+    pub fn backend_kind(&self) -> EmbeddingBackendKind {
+        self.backend.kind()
+    }
+
+    /// Commit-pinned model files prepared for the fixed-shape candidate.
+    ///
+    /// `None` leaves the FastEmbed oracle fully operational but prevents direct
+    /// ORT rollout until artifact resolution succeeds.
+    pub fn model_artifacts(&self) -> Option<&ResolvedModelArtifacts> {
+        self.model_artifacts.as_ref()
+    }
+
     /// Configured tokenizer and effective input budget used by this embedder.
     ///
     /// Daemon delta planning borrows this to reproduce whole-build structural
@@ -501,8 +520,8 @@ impl Embedder {
             self.check_token_budget(text);
         }
         let results = self
-            .model
-            .embed(texts, batch_size)
+            .backend
+            .embed_texts(texts, batch_size)
             .map_err(|e| TldrError::Embedding(format!("Failed to embed batch: {e}")))?;
         Ok(results
             .into_iter()
@@ -585,6 +604,16 @@ mod tests {
         let embedder = embedder.unwrap();
         assert_eq!(embedder.config(), model);
         assert_eq!(embedder.dimensions(), 768);
+        assert_eq!(
+            embedder.backend_kind(),
+            EmbeddingBackendKind::FastEmbedOracle
+        );
+        let artifacts = embedder
+            .model_artifacts()
+            .expect("FastEmbed download must resolve to one pinned snapshot");
+        assert_eq!(artifacts.spec.dimensions, embedder.dimensions());
+        assert!(!artifacts.revision.is_empty());
+        assert!(artifacts.model_path.is_file());
     }
 
     #[test]

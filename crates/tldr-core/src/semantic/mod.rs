@@ -69,6 +69,14 @@ pub mod types;
 pub mod fixed_shape;
 pub use fixed_shape::{FixedShapeBatch, FixedShapePlanner, SequenceBucket, TokenizedInput};
 
+pub mod embedding_backend;
+pub use embedding_backend::{EmbeddingBackend, EmbeddingBackendKind};
+
+pub mod model_artifacts;
+pub use model_artifacts::{
+    ModelArtifactError, ModelArtifactSpec, ModelOutput, ModelPooling, ResolvedModelArtifacts,
+};
+
 // Re-export all public types for convenience
 pub use types::{
     store_dir_for,

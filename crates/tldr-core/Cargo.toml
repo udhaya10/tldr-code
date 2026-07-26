@@ -97,6 +97,7 @@ dirs = "5.0"
 # Phase 3: fastembed for embedding generation
 # PINNED per premortem P0 - do not use ^5.8 or 5
 fastembed = { workspace = true, optional = true }
+hf-hub = { workspace = true, optional = true }
 
 # TLDR-l5d: usearch vector store, gated under `semantic` like fastembed.
 usearch = { workspace = true, optional = true }
@@ -118,7 +119,7 @@ which = { workspace = true }
 
 [features]
 default = ["semantic"]
-semantic = ["dep:fastembed", "dep:usearch", "dep:tokenizers"]
+semantic = ["dep:fastembed", "dep:hf-hub", "dep:usearch", "dep:tokenizers"]
 # Experimental V2 call graph builder with parallel processing (Phase 14)
 experimental_callgraph = []
 
