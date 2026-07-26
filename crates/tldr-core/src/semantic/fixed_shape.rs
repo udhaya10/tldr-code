@@ -11,11 +11,11 @@ use crate::TldrResult;
 pub enum SequenceBucket {
     /// 128-token rows, up to 64 rows per batch.
     Tokens128,
-    /// 256-token rows, up to 16 rows per batch.
+    /// 256-token rows, up to 32 rows per batch.
     Tokens256,
-    /// 384-token rows, up to 7 rows per batch.
+    /// 384-token rows, up to 14 rows per batch.
     Tokens384,
-    /// 512-token rows, up to 4 rows per batch.
+    /// 512-token rows, up to 8 rows per batch.
     Tokens512,
 }
 
@@ -47,9 +47,9 @@ impl SequenceBucket {
     pub const fn batch_size(self) -> usize {
         match self {
             Self::Tokens128 => 64,
-            Self::Tokens256 => 16,
-            Self::Tokens384 => 7,
-            Self::Tokens512 => 4,
+            Self::Tokens256 => 32,
+            Self::Tokens384 => 14,
+            Self::Tokens512 => 8,
         }
     }
 }
@@ -348,17 +348,16 @@ mod tests {
     }
 
     #[test]
-    fn candidate_shapes_hold_attention_budget_constant() {
-        for bucket in [
-            SequenceBucket::Tokens128,
-            SequenceBucket::Tokens256,
-            SequenceBucket::Tokens384,
-            SequenceBucket::Tokens512,
+    fn candidate_shapes_use_measured_attention_budgets() {
+        for (bucket, expected_attention) in [
+            (SequenceBucket::Tokens128, 1_048_576),
+            (SequenceBucket::Tokens256, 2_097_152),
+            (SequenceBucket::Tokens384, 2_064_384),
+            (SequenceBucket::Tokens512, 2_097_152),
         ] {
             let attention =
                 bucket.batch_size() * bucket.sequence_length() * bucket.sequence_length();
-            assert!(attention <= 1_048_576);
-            assert!(attention >= 1_032_192);
+            assert_eq!(attention, expected_attention);
         }
     }
 

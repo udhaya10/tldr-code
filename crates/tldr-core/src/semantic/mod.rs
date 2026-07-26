@@ -75,6 +75,9 @@ pub use embedding_backend::{EmbeddingBackend, EmbeddingBackendKind};
 pub mod fixed_shape_ort;
 pub use fixed_shape_ort::{FixedShapeOrtBackend, OrtBackendConfig, ShapeObservation};
 
+pub mod fixed_shape_embedder;
+pub use fixed_shape_embedder::{DocumentEmbeddingBackend, FixedShapeEmbedder, FixedShapeExecution};
+
 pub mod fixed_shape_parity;
 pub use fixed_shape_parity::{
     ModelParityReport, ParityCase, ParityMatrixReport, ParityTolerance, VectorParity,

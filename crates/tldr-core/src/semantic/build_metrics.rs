@@ -38,9 +38,9 @@ use crate::semantic::index::BuildOptions;
 use crate::util;
 
 /// Metrics report schema version. Bump when the serialized shape of
-/// [`MetricsReport`] changes in a way that breaks consumers. (`3` = explicit
-/// token-check status; serde defaults preserve parsing of older reports.)
-pub const METRICS_SCHEMA_VERSION: u32 = 3;
+/// [`MetricsReport`] changes in a way that breaks consumers. (`4` = concrete
+/// backend plus exact fixed-shape batch telemetry.)
+pub const METRICS_SCHEMA_VERSION: u32 = 4;
 
 /// Default RSS sampling interval for the timeline.
 const DEFAULT_RSS_SAMPLE_INTERVAL_MS: u64 = 500;
@@ -126,13 +126,20 @@ pub struct BuildOptionsSummary {
     pub languages: Option<Vec<String>>,
     /// The fixed batch size fastembed forms internally (`EMBED_BATCH_SIZE`).
     pub batch_size: usize,
+    /// Concrete document inference backend.
+    #[serde(default = "default_backend_label")]
+    pub embedding_backend: String,
 }
 
 impl BuildOptionsSummary {
     /// Snapshot a [`BuildOptions`] for the report. `enrich` is the value
     /// [`VectorStore::build`] actually used (read once and shared), so the
     /// report cannot disagree with the embedded recipe.
-    pub fn from_options(options: &BuildOptions, enrich: bool) -> Self {
+    pub fn from_options(
+        options: &BuildOptions,
+        enrich: bool,
+        backend: crate::semantic::DocumentEmbeddingBackend,
+    ) -> Self {
         // Stable string label — NOT the `Debug` repr, which would silently
         // change for every consumer if a `ChunkGranularity` variant were
         // renamed (review n1).
@@ -146,8 +153,13 @@ impl BuildOptionsSummary {
             enrich,
             languages: options.languages.clone(),
             batch_size: EMBED_BATCH_SIZE,
+            embedding_backend: backend.as_str().to_string(),
         }
     }
+}
+
+fn default_backend_label() -> String {
+    "fastembed".to_string()
 }
 
 /// One timed phase of the build (`chunk`, `cache_lookup`, `embed`).
@@ -177,6 +189,18 @@ pub struct BatchShape {
     pub input_bytes_max: usize,
     /// Whether a true token length is available (always `false` under FastEmbed).
     pub token_length_available: bool,
+    /// Exact sequence dimension when the fixed-shape backend is active.
+    #[serde(default)]
+    pub sequence_tokens: Option<usize>,
+    /// Exact tensor batch dimension, including dummy rows.
+    #[serde(default)]
+    pub tensor_batch_size: Option<usize>,
+    /// Fraction of tensor cells masked as padding.
+    #[serde(default)]
+    pub padding_fraction: Option<f64>,
+    /// Prepared-batch inference latency.
+    #[serde(default)]
+    pub latency_ms: Option<f64>,
 }
 
 /// RSS summary: build-scoped peak, process-lifetime peak, final sample, timeline.
@@ -243,6 +267,7 @@ pub struct BuildMetrics {
     /// `embed_batch_indexed` feeds fastembed, so consecutive `EMBED_BATCH_SIZE`
     /// groups match the batches the session actually sees.
     input_lengths: Vec<usize>,
+    fixed_executions: Vec<crate::semantic::FixedShapeExecution>,
     embed_latency_ms: u64,
     /// Token-budget outcomes per input (TLDR-9bxa.2), accumulated into the report.
     token_stats: crate::semantic::token_budget::TokenStats,
@@ -264,6 +289,7 @@ impl BuildMetrics {
         corpus_digest: u64,
         options: &BuildOptions,
         enrich: bool,
+        backend: crate::semantic::DocumentEmbeddingBackend,
     ) -> Self {
         let start = Instant::now();
         let started_at_unix_ms = SystemTime::now()
@@ -286,7 +312,7 @@ impl BuildMetrics {
             },
             root: root.into(),
             corpus_digest,
-            options: BuildOptionsSummary::from_options(options, enrich),
+            options: BuildOptionsSummary::from_options(options, enrich, backend),
             start,
             started_at_unix_ms,
             phases: Vec::new(),
@@ -295,6 +321,7 @@ impl BuildMetrics {
             cache_misses: 0,
             cache_opened: false,
             input_lengths: Vec::new(),
+            fixed_executions: Vec::new(),
             embed_latency_ms: 0,
             token_stats: crate::semantic::token_budget::TokenStats::default(),
             rss_samples,
@@ -345,6 +372,14 @@ impl BuildMetrics {
         self.embed_latency_ms = ms;
     }
 
+    /// Record exact prepared-batch telemetry from the fixed-shape executor.
+    pub fn record_fixed_executions(
+        &mut self,
+        executions: Vec<crate::semantic::FixedShapeExecution>,
+    ) {
+        self.fixed_executions = executions;
+    }
+
     /// Set the token-budget stats from the Embedder's accumulated checks
     /// (TLDR-9bxa.2). The Embedder checks every input across all embed paths;
     /// the build copies the aggregate into the report.
@@ -393,7 +428,26 @@ impl BuildMetrics {
             peak_bytes = max_opt(peak_bytes, p.rss_bytes_at_end);
         }
         let chunks_embedded = self.cache_misses;
-        let batches = compute_batch_shapes(&self.input_lengths, self.options.batch_size);
+        let batches = if self.fixed_executions.is_empty() {
+            compute_batch_shapes(&self.input_lengths, self.options.batch_size)
+        } else {
+            self.fixed_executions
+                .iter()
+                .enumerate()
+                .map(|(index, execution)| BatchShape {
+                    index,
+                    size: execution.real_rows,
+                    input_bytes_min: 0,
+                    input_bytes_mean: 0,
+                    input_bytes_max: 0,
+                    token_length_available: true,
+                    sequence_tokens: Some(execution.sequence),
+                    tensor_batch_size: Some(execution.batch),
+                    padding_fraction: Some(execution.padding_fraction()),
+                    latency_ms: Some(execution.latency_ms),
+                })
+                .collect()
+        };
         let throughput = Throughput {
             chunks_per_second: ms_per_sec(duration_ms, chunks_total),
             embeddings_per_second: ms_per_sec(self.embed_latency_ms, chunks_embedded),
@@ -423,7 +477,11 @@ impl BuildMetrics {
                 timeline,
             },
             throughput,
-            limitations: fastembed_limitations(),
+            limitations: if self.fixed_executions.is_empty() {
+                fastembed_limitations()
+            } else {
+                Vec::new()
+            },
         }
     }
 
@@ -492,6 +550,10 @@ pub fn compute_batch_shapes(sorted_lengths: &[usize], batch_size: usize) -> Vec<
                 input_bytes_mean: mean,
                 input_bytes_max: max,
                 token_length_available: false,
+                sequence_tokens: None,
+                tensor_batch_size: None,
+                padding_fraction: None,
+                latency_ms: None,
             }
         })
         .collect()
@@ -620,8 +682,8 @@ mod tests {
     }
 
     #[test]
-    fn schema_version_is_three_after_9bxa2_review() {
-        assert_eq!(METRICS_SCHEMA_VERSION, 3);
+    fn schema_version_is_four_after_fixed_shape_telemetry() {
+        assert_eq!(METRICS_SCHEMA_VERSION, 4);
     }
 
     #[test]
@@ -641,6 +703,7 @@ mod tests {
                 enrich: false,
                 languages: None,
                 batch_size: 32,
+                embedding_backend: "fastembed".to_string(),
             },
             started_at_unix_ms: 123,
             duration_ms: 1000,
@@ -661,6 +724,10 @@ mod tests {
                 input_bytes_mean: 2,
                 input_bytes_max: 3,
                 token_length_available: false,
+                sequence_tokens: None,
+                tensor_batch_size: None,
+                padding_fraction: None,
+                latency_ms: None,
             }],
             embed_latency_ms: 800,
             rss: RssSummary {
@@ -693,7 +760,15 @@ mod tests {
     fn collector_records_phases_and_stops_sampler() {
         // Constructing a collector spawns a sampler thread; finalize must join it.
         let opts = BuildOptions::default();
-        let mut m = BuildMetrics::new("ArcticM", 768, "/repo", 9, &opts, false);
+        let mut m = BuildMetrics::new(
+            "ArcticM",
+            768,
+            "/repo",
+            9,
+            &opts,
+            false,
+            crate::semantic::DocumentEmbeddingBackend::FastEmbed,
+        );
         m.begin_phase("chunk");
         // Phase duration is >= 0; give the sampler a moment to record a sample.
         std::thread::sleep(Duration::from_millis(60));
@@ -721,7 +796,15 @@ mod tests {
     #[test]
     fn peak_is_build_scoped_max_of_observations() {
         let opts = BuildOptions::default();
-        let mut m = BuildMetrics::new("ArcticM", 768, "/repo", 0, &opts, false);
+        let mut m = BuildMetrics::new(
+            "ArcticM",
+            768,
+            "/repo",
+            0,
+            &opts,
+            false,
+            crate::semantic::DocumentEmbeddingBackend::FastEmbed,
+        );
         m.begin_phase("chunk");
         // Let the sampler capture at least one sample.
         std::thread::sleep(Duration::from_millis(80));
@@ -759,7 +842,15 @@ mod tests {
         // Just exercise Drop without finalize; if the thread weren't joined this
         // would still pass, but it guards the stop-on-drop contract.
         let opts = BuildOptions::default();
-        let m = BuildMetrics::new("ArcticM", 768, "/repo", 0, &opts, false);
+        let m = BuildMetrics::new(
+            "ArcticM",
+            768,
+            "/repo",
+            0,
+            &opts,
+            false,
+            crate::semantic::DocumentEmbeddingBackend::FastEmbed,
+        );
         drop(m);
     }
 }

@@ -104,6 +104,43 @@ impl TokenBudget {
             .tokenizer
             .encode(text, true)
             .map_err(|e| TokenBudgetError::Encode(e.to_string()))?;
+        self.fixed_shape_input(request_index, encoding)
+    }
+
+    /// Encode a document set once using the tokenizer's parallel batch path.
+    ///
+    /// This preserves the exact input order and numeric tensors returned by
+    /// [`Self::tokenize_fixed_shape`] while avoiding one serial tokenizer call
+    /// per document during a cold bulk build.
+    pub fn tokenize_fixed_shape_batch(
+        &self,
+        indexed: &[(usize, &str)],
+    ) -> Result<Vec<TokenizedInput>, TokenBudgetError> {
+        // `encode_batch` parallelizes within each window. Keeping the window
+        // bounded avoids temporarily retaining a second corpus-sized set of
+        // tokenizer encodings before the fixed tensor inputs are constructed.
+        const TOKENIZER_WINDOW: usize = 1_024;
+        let mut tokenized = Vec::with_capacity(indexed.len());
+        for window in indexed.chunks(TOKENIZER_WINDOW) {
+            let encodings = self
+                .tokenizer
+                .encode_batch(
+                    window.iter().map(|(_, text)| *text).collect::<Vec<_>>(),
+                    true,
+                )
+                .map_err(|error| TokenBudgetError::Encode(error.to_string()))?;
+            for (&(request_index, _), encoding) in window.iter().zip(encodings) {
+                tokenized.push(self.fixed_shape_input(request_index, encoding)?);
+            }
+        }
+        Ok(tokenized)
+    }
+
+    fn fixed_shape_input(
+        &self,
+        request_index: usize,
+        encoding: tokenizers::Encoding,
+    ) -> Result<TokenizedInput, TokenBudgetError> {
         let tokens = encoding.get_ids().len();
         if tokens > self.budget {
             return Err(TokenBudgetError::InputExceedsBudget {
@@ -578,6 +615,19 @@ mod tests {
         assert_eq!(input.input_ids, [1, 2]);
         assert_eq!(input.attention_mask, [1, 1]);
         assert_eq!(input.token_type_ids.as_deref(), Some([0, 0].as_slice()));
+    }
+
+    #[test]
+    fn fixed_shape_batch_encoding_matches_single_encoding_and_preserves_order() {
+        let budget = word_budget(3);
+        let indexed = [(9, "alpha beta"), (3, "gamma")];
+        let batch = budget.tokenize_fixed_shape_batch(&indexed).unwrap();
+
+        assert_eq!(
+            batch[0],
+            budget.tokenize_fixed_shape(9, "alpha beta").unwrap()
+        );
+        assert_eq!(batch[1], budget.tokenize_fixed_shape(3, "gamma").unwrap());
     }
 
     #[test]

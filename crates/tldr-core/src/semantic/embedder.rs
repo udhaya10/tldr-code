@@ -40,6 +40,8 @@ use fastembed::{InitOptions, TextEmbedding};
 
 use crate::error::TldrError;
 use crate::semantic::embedding_backend::{EmbeddingBackend, EmbeddingBackendKind, FastEmbedOracle};
+use crate::semantic::fixed_shape_embedder::FixedShapeEmbedder;
+use crate::semantic::fixed_shape_ort::OrtBackendConfig;
 use crate::semantic::model_artifacts::{fastembed_model, ResolvedModelArtifacts};
 use crate::semantic::similarity::normalize;
 use crate::semantic::types::EmbeddingModel;
@@ -478,6 +480,28 @@ impl Embedder {
     /// boundaries and composition before invoking the same embedding session.
     pub fn token_budget(&self) -> Option<&crate::semantic::token_budget::TokenBudget> {
         self.token_budget.as_ref()
+    }
+
+    /// Consume the FastEmbed oracle after structural planning and replace it
+    /// with a direct fixed-shape document executor.
+    ///
+    /// Dropping the oracle backend before the ORT candidate is constructed
+    /// avoids keeping two model sessions resident during a candidate build.
+    pub fn into_fixed_shape(self, config: OrtBackendConfig) -> TldrResult<FixedShapeEmbedder> {
+        let Self {
+            backend,
+            model_artifacts,
+            token_budget,
+            ..
+        } = self;
+        let artifacts = model_artifacts.ok_or_else(|| {
+            TldrError::Embedding("fixed-shape model artifacts are unavailable".to_string())
+        })?;
+        let tokenizer = token_budget.ok_or_else(|| {
+            TldrError::Embedding("fixed-shape tokenizer is unavailable".to_string())
+        })?;
+        drop(backend);
+        FixedShapeEmbedder::new(tokenizer, artifacts, config)
     }
 
     /// Check one input against the model token budget (TLDR-9bxa.2): record the

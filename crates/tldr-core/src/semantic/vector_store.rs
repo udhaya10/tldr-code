@@ -1319,6 +1319,26 @@ impl VectorStore {
         options: &BuildOptions,
         cache_config: Option<CacheConfig>,
     ) -> TldrResult<Self> {
+        Self::build_with_backend(
+            root,
+            options,
+            cache_config,
+            crate::semantic::DocumentEmbeddingBackend::from_env()?,
+        )
+    }
+
+    /// Build with an explicit document backend.
+    ///
+    /// Production callers normally use [`Self::build`], whose default-off
+    /// selector comes from `TLDR_EMBEDDING_BACKEND`. Tests, benchmarks, and
+    /// staged rollout use this entry point to avoid process-global environment
+    /// mutation.
+    pub fn build_with_backend(
+        root: &Path,
+        options: &BuildOptions,
+        cache_config: Option<CacheConfig>,
+        document_backend: crate::semantic::DocumentEmbeddingBackend,
+    ) -> TldrResult<Self> {
         use crate::semantic::cache::EmbeddingCache;
         use crate::semantic::embedder::Embedder;
         use crate::semantic::enrichment::enrich_chunks;
@@ -1346,7 +1366,6 @@ impl VectorStore {
         let enrich = std::env::var("TLDR_ENRICH")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
-
         // TLDR-9bxa.1: instrument this build only when asked. When `None`, every
         // hook below is a skipped branch and the path is byte-identical to the
         // un-instrumented build (vectors unchanged). When `Some`, recording only
@@ -1360,6 +1379,7 @@ impl VectorStore {
                 corpus_digest,
                 options,
                 enrich,
+                document_backend,
             ))
         } else {
             None
@@ -1532,6 +1552,24 @@ impl VectorStore {
             m.set_token_stats(embedder.check_corpus(&corpus_texts));
         }
 
+        let mut fixed_embedder = if !uncached.is_empty()
+            && document_backend == crate::semantic::DocumentEmbeddingBackend::FixedShapeOrt
+        {
+            if let Some(m) = metrics.as_mut() {
+                m.begin_phase("fixed_shape_model_load");
+            }
+            let candidate = embedder
+                .take()
+                .expect("embedder initialized for cache misses")
+                .into_fixed_shape(crate::semantic::OrtBackendConfig::default())?;
+            if let Some(m) = metrics.as_mut() {
+                m.end_phase();
+            }
+            Some(candidate)
+        } else {
+            None
+        };
+
         // Phase 2: embed the misses. Honor TLDR_ENRICH exactly like
         // SemanticIndex::build, so the store embeds the SAME text the index does
         // (else the vectors — and the cache keys' embed_schema tag — diverge).
@@ -1575,15 +1613,24 @@ impl VectorStore {
             } else {
                 None
             };
-            let embeddings = embedder
-                .as_mut()
-                .expect("embedder initialized for cache misses")
-                .embed_batch_indexed(indexed, options.show_progress)?;
+            let embeddings = match document_backend {
+                crate::semantic::DocumentEmbeddingBackend::FastEmbed => embedder
+                    .as_mut()
+                    .expect("FastEmbed initialized for cache misses")
+                    .embed_batch_indexed(indexed, options.show_progress)?,
+                crate::semantic::DocumentEmbeddingBackend::FixedShapeOrt => fixed_embedder
+                    .as_mut()
+                    .expect("fixed-shape embedder initialized for cache misses")
+                    .embed_indexed(indexed)?,
+            };
             // Capture inference latency IMMEDIATELY after the embed call, before
             // the cache-writeback / vector-assignment loop, so `embed_latency_ms`
             // is pure inference (review: it was including writeback).
             if let (Some(m), Some(start)) = (metrics.as_mut(), embed_call_start) {
                 m.record_embed_latency_ms(start.elapsed().as_millis() as u64);
+            }
+            if let (Some(m), Some(candidate)) = (metrics.as_mut(), fixed_embedder.as_mut()) {
+                m.record_fixed_executions(candidate.take_executions());
             }
             for (i, embedding) in embeddings {
                 if let Some(c) = cache.as_mut() {
@@ -3021,5 +3068,75 @@ mod tests {
         store.save(&store_dir, &id).unwrap();
         let loaded = VectorStore::load(&store_dir, &id).unwrap();
         assert_eq!(loaded.len(), store.len());
+    }
+
+    /// Candidate build integration: the real structural build selects direct
+    /// ORT, emits only finite exact shapes, and preserves oracle search order.
+    #[test]
+    #[ignore = "loads the Arctic-XS model twice; run at TLDR-9bxa.5 gate"]
+    fn fixed_shape_build_reports_exact_shapes_and_matches_oracle_ranking() {
+        use crate::semantic::embedder::Embedder;
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("lib.rs"),
+            r#"
+            fn parse_config(path: &str) -> Result<(), String> { Ok(()) }
+            fn cosine_similarity(left: &[f32], right: &[f32]) -> f32 { 0.0 }
+            fn walk_syntax_tree(source: &str) -> usize { source.len() }
+            "#,
+        )
+        .unwrap();
+        let model = EmbeddingModel::ArcticXS;
+        let options = BuildOptions {
+            model,
+            show_progress: false,
+            use_cache: false,
+            collect_metrics: true,
+            ..BuildOptions::default()
+        };
+        let oracle = VectorStore::build_with_backend(
+            dir.path(),
+            &options,
+            None,
+            crate::semantic::DocumentEmbeddingBackend::FastEmbed,
+        )
+        .unwrap();
+        let candidate = VectorStore::build_with_backend(
+            dir.path(),
+            &options,
+            None,
+            crate::semantic::DocumentEmbeddingBackend::FixedShapeOrt,
+        )
+        .unwrap();
+        let report = candidate.build_metrics().unwrap();
+        assert_eq!(report.options.embedding_backend, "fixed_shape_ort");
+        assert!(!report.batches.is_empty());
+        assert!(report.batches.iter().all(|batch| {
+            batch.token_length_available
+                && matches!(batch.sequence_tokens, Some(128 | 256 | 384 | 512))
+                && matches!(batch.tensor_batch_size, Some(64 | 32 | 14 | 8))
+                && batch.padding_fraction.is_some()
+                && batch.latency_ms.is_some()
+        }));
+        assert!(report.limitations.is_empty());
+
+        let mut query_embedder = Embedder::new(model).unwrap();
+        let query = query_embedder
+            .embed_query("function that parses configuration")
+            .unwrap();
+        let oracle_paths = oracle
+            .search(&query, oracle.len())
+            .unwrap()
+            .into_iter()
+            .map(|hit| hit.meta.chunk_id)
+            .collect::<Vec<_>>();
+        let candidate_paths = candidate
+            .search(&query, candidate.len())
+            .unwrap()
+            .into_iter()
+            .map(|hit| hit.meta.chunk_id)
+            .collect::<Vec<_>>();
+        assert_eq!(candidate_paths, oracle_paths);
     }
 }

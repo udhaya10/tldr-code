@@ -223,7 +223,7 @@ pub struct ModelPerformanceReport {
 impl ModelPerformanceReport {
     /// Whether this worker produced a complete passing four-shape report.
     pub fn passed(&self) -> bool {
-        const EXPECTED_SHAPES: [(usize, usize); 4] = [(128, 64), (256, 16), (384, 7), (512, 4)];
+        const EXPECTED_SHAPES: [(usize, usize); 4] = [(128, 64), (256, 32), (384, 14), (512, 8)];
         self.shapes.len() == EXPECTED_SHAPES.len()
             && EXPECTED_SHAPES.iter().all(|&(sequence, batch)| {
                 self.shapes
@@ -332,7 +332,7 @@ mod tests {
     #[test]
     fn aggregate_requires_complete_models_and_shapes() {
         let gate = PerformanceGate::default();
-        let shapes = [(128, 64), (256, 16), (384, 7), (512, 4)]
+        let shapes = [(128, 64), (256, 32), (384, 14), (512, 8)]
             .map(|(sequence, batch)| {
                 ShapePerformanceReport::from_samples(sequence, batch, &[10.0], &[10.0], gate)
                     .unwrap()

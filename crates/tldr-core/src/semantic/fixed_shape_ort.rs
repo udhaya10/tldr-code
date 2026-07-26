@@ -17,12 +17,15 @@ use super::similarity::normalize;
 pub struct OrtBackendConfig {
     /// CPU threads assigned to one inference session.
     pub intra_threads: usize,
+    /// Allow ONNX Runtime to schedule independent graph nodes concurrently.
+    pub parallel_execution: bool,
 }
 
 impl Default for OrtBackendConfig {
     fn default() -> Self {
         Self {
             intra_threads: available_parallelism().map_or(1, std::num::NonZero::get),
+            parallel_execution: false,
         }
     }
 }
@@ -62,6 +65,8 @@ impl FixedShapeOrtBackend {
             .with_optimization_level(GraphOptimizationLevel::Level3)
             .map_err(|error| error.to_string())?
             .with_intra_threads(config.intra_threads)
+            .map_err(|error| error.to_string())?
+            .with_parallel_execution(config.parallel_execution)
             .map_err(|error| error.to_string())?
             .commit_from_file(&artifacts.model_path)
             .map_err(|error| error.to_string())?;
@@ -247,13 +252,21 @@ mod tests {
 
     #[test]
     fn config_rejects_zero_threads_before_loading_a_model() {
-        assert!(validate_config(OrtBackendConfig { intra_threads: 0 }).is_err());
-        assert!(validate_config(OrtBackendConfig { intra_threads: 1 }).is_ok());
+        assert!(validate_config(OrtBackendConfig {
+            intra_threads: 0,
+            parallel_execution: true,
+        })
+        .is_err());
+        assert!(validate_config(OrtBackendConfig {
+            intra_threads: 1,
+            parallel_execution: false,
+        })
+        .is_ok());
     }
 
     #[test]
     fn observations_are_sorted_and_counted() {
-        let observations = BTreeMap::from([((64, 128), 2), ((4, 512), 1)]);
+        let observations = BTreeMap::from([((64, 128), 2), ((8, 512), 1)]);
         let result = observations
             .iter()
             .map(|(&(batch, sequence), &executions)| ShapeObservation {
@@ -262,7 +275,7 @@ mod tests {
                 executions,
             })
             .collect::<Vec<_>>();
-        assert_eq!((result[0].batch, result[0].sequence), (4, 512));
+        assert_eq!((result[0].batch, result[0].sequence), (8, 512));
         assert_eq!((result[1].batch, result[1].sequence), (64, 128));
         assert_eq!(result[1].executions, 2);
     }
@@ -302,7 +315,7 @@ mod tests {
         assert_eq!(batches.len(), 1);
         assert_eq!(batches[0].shape(), (64, 128));
         assert_eq!(single_batch[0].shape(), (64, 128));
-        assert_eq!(padded_batch[0].shape(), (16, 256));
+        assert_eq!(padded_batch[0].shape(), (32, 256));
 
         let expected = oracle.embed_batch(texts.to_vec(), false).unwrap();
         let mut candidate =
@@ -323,7 +336,7 @@ mod tests {
             candidate.shape_observations(),
             [
                 ShapeObservation {
-                    batch: 16,
+                    batch: 32,
                     sequence: 256,
                     executions: 1,
                 },
