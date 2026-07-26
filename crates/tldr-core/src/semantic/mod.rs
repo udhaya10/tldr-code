@@ -155,9 +155,14 @@ pub use cache::EmbeddingCache;
 pub mod redb_migration;
 pub mod redb_store;
 pub use redb_store::{
-    EmbeddingWrite, JobRecord, JobState, RedbStore, RedbStoreStats, StoredChunkRecord,
-    StoredEmbedding, StoredFileRecord, DEFAULT_REDB_CACHE_BYTES,
+    EmbeddingWrite, GenerationState, GenerationVectorWrite, JobRecord, JobState, RedbStore,
+    RedbStoreStats, StoredChunkRecord, StoredEmbedding, StoredFileRecord, StoredGeneration,
+    StoredGenerationVector, DEFAULT_REDB_CACHE_BYTES,
 };
+
+// TLDR-9bxa.9: redb owns the active generation; usearch is a rebuildable artifact.
+pub mod generation;
+pub use generation::GenerationManager;
 
 // Phase 6: shared build/search options + index limits. The `SemanticIndex`
 // type itself was nuked in TLDR-7xz.7 — serving goes through the daemon's

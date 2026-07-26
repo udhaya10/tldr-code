@@ -76,10 +76,10 @@
 - Modify: `crates/tldr-core/src/semantic/store_search.rs`
 - Test: `crates/tldr-core/src/semantic/generation.rs`
 
-- [ ] Stage redb records, build and fsync immutable usearch generation files, then atomically switch `active_generation`.
-- [ ] Verify checksums, counts, dimensions, model, metric, and pipeline version on load.
-- [ ] Rebuild derived usearch deterministically from redb and retain the prior complete generation for rollback.
-- [ ] Inject failure after every publication boundary and run the recovery matrix once before closing `.9`.
+- [x] Stage redb records, build and fsync immutable usearch generation files, then atomically switch `active_generation`.
+- [x] Verify checksums, counts, dimensions, model, metric, and pipeline version on load.
+- [x] Rebuild derived usearch deterministically from redb and retain the prior complete generation for rollback.
+- [x] Inject failure after every publication boundary and run the recovery matrix once before closing `.9`.
 
 ### Task 6: Complete `TLDR-9bxa.10` resumable bulk worker
 

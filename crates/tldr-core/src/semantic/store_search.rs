@@ -144,8 +144,9 @@ pub fn load_or_build_store(
 ) -> TldrResult<VectorStore> {
     let id = manifest_id_for(root, build_options);
     let current_digest = compute_corpus_digest(root);
+    let generations = super::GenerationManager::open(store_dir)?;
 
-    match VectorStore::load(store_dir, &id) {
+    match generations.load(&id) {
         // A fresh persisted store can be reused — UNLESS the caller asked for
         // build instrumentation (TLDR-9bxa.1): a loaded store carries no
         // metrics, so `collect_metrics` must force a rebuild. `collect_metrics`
@@ -167,13 +168,13 @@ pub fn load_or_build_store(
                 );
             }
             let built = VectorStore::build(root, build_options, cache_config)?;
-            built.save(store_dir, &id)?;
+            generations.publish(&built, &id)?;
             Ok(built)
         }
         Err(_) => {
             // No usable persisted store: initial build (not "stale").
             let built = VectorStore::build(root, build_options, cache_config)?;
-            built.save(store_dir, &id)?;
+            generations.publish(&built, &id)?;
             Ok(built)
         }
     }

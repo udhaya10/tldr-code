@@ -22,7 +22,12 @@ const FILE_CHUNKS: MultimapTableDefinition<&str, &str> =
     MultimapTableDefinition::new("file_chunks");
 const EMBEDDINGS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("embeddings");
 const JOBS: TableDefinition<&str, &[u8]> = TableDefinition::new("jobs");
+const GENERATIONS: TableDefinition<u64, &[u8]> = TableDefinition::new("generations");
+const GENERATION_VECTORS: TableDefinition<&[u8], &[u8]> =
+    TableDefinition::new("generation_vectors");
 const SCHEMA_KEY: &str = "schema_version";
+const ACTIVE_GENERATION_KEY: &str = "active_generation";
+const PREVIOUS_GENERATION_KEY: &str = "previous_generation";
 
 /// Default redb page-cache budget. This replaces redb's 1 GiB default.
 pub const DEFAULT_REDB_CACHE_BYTES: usize = 64 * 1024 * 1024;
@@ -145,6 +150,56 @@ pub struct StoredEmbedding {
     pub file_mtime: Option<u64>,
 }
 
+/// Publication state for one immutable semantic generation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GenerationState {
+    /// Authoritative records are being staged and must not be served.
+    Staged,
+    /// Every record and derived artifact has been verified.
+    Complete,
+}
+
+/// Authoritative identity and integrity metadata for one generation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredGeneration {
+    /// Monotonic generation number.
+    pub generation: u64,
+    /// Whether the generation may be served.
+    pub state: GenerationState,
+    /// Expected number of vector records.
+    pub chunk_count: u64,
+    /// Vector width required by every record.
+    pub dimensions: u32,
+    /// Serialized complete vector-store manifest identity.
+    pub manifest_identity: Vec<u8>,
+    /// Source corpus digest captured during construction.
+    pub corpus_digest: u64,
+    /// Serialized per-file records needed for reconstruction.
+    pub files: Vec<u8>,
+}
+
+/// One vector record written into an immutable generation.
+pub struct GenerationVectorWrite<'a> {
+    /// Stable usearch key.
+    pub key: u64,
+    /// Normalized vector values.
+    pub vector: &'a [f32],
+    /// Serialized chunk metadata.
+    pub metadata: &'a [u8],
+}
+
+/// Decoded vector record read from an immutable generation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StoredGenerationVector {
+    /// Stable usearch key.
+    pub key: u64,
+    /// Normalized vector values.
+    pub vector: Vec<f32>,
+    /// Serialized chunk metadata.
+    pub metadata: Vec<u8>,
+}
+
 /// Observable storage counts and configured cache bound.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RedbStoreStats {
@@ -221,6 +276,10 @@ impl RedbStore {
                 .map_err(redb_error)?;
             transaction.open_table(EMBEDDINGS).map_err(redb_error)?;
             transaction.open_table(JOBS).map_err(redb_error)?;
+            transaction.open_table(GENERATIONS).map_err(redb_error)?;
+            transaction
+                .open_table(GENERATION_VECTORS)
+                .map_err(redb_error)?;
         }
         transaction.commit().map_err(redb_error)
     }
@@ -489,6 +548,300 @@ impl RedbStore {
         }
         transaction.commit().map_err(redb_error)
     }
+
+    /// Create an unpublished generation. Reusing an existing generation is rejected.
+    pub fn stage_generation(&self, generation: &StoredGeneration) -> TldrResult<()> {
+        if generation.generation == 0 || generation.state != GenerationState::Staged {
+            return Err(store_error("new generation must be non-zero and staged"));
+        }
+        let bytes = serde_json::to_vec(generation).map_err(serialization_error)?;
+        let mut transaction = self.database.begin_write().map_err(redb_error)?;
+        transaction
+            .set_durability(Durability::Immediate)
+            .map_err(redb_error)?;
+        {
+            let mut table = transaction.open_table(GENERATIONS).map_err(redb_error)?;
+            if table
+                .get(generation.generation)
+                .map_err(redb_error)?
+                .is_some()
+            {
+                return Err(store_error(format!(
+                    "generation {} already exists",
+                    generation.generation
+                )));
+            }
+            table
+                .insert(generation.generation, bytes.as_slice())
+                .map_err(redb_error)?;
+        }
+        transaction.commit().map_err(redb_error)
+    }
+
+    /// Durably append a bounded batch of vectors to a staged generation.
+    pub fn put_generation_vectors(
+        &self,
+        generation: u64,
+        dimensions: usize,
+        writes: &[GenerationVectorWrite<'_>],
+    ) -> TldrResult<()> {
+        let encoded = writes
+            .iter()
+            .map(|write| {
+                encode_generation_vector(write.vector, write.metadata, dimensions)
+                    .map(|value| (generation_vector_key(generation, write.key), value))
+            })
+            .collect::<TldrResult<Vec<_>>>()?;
+        let mut transaction = self.database.begin_write().map_err(redb_error)?;
+        transaction
+            .set_durability(Durability::Immediate)
+            .map_err(redb_error)?;
+        {
+            let generations = transaction.open_table(GENERATIONS).map_err(redb_error)?;
+            let value = generations
+                .get(generation)
+                .map_err(redb_error)?
+                .ok_or_else(|| store_error(format!("generation {generation} is not staged")))?;
+            let record: StoredGeneration =
+                serde_json::from_slice(value.value()).map_err(serialization_error)?;
+            if record.state != GenerationState::Staged || record.dimensions as usize != dimensions {
+                return Err(store_error(format!(
+                    "generation {generation} is not a compatible staged generation"
+                )));
+            }
+        }
+        {
+            let mut table = transaction
+                .open_table(GENERATION_VECTORS)
+                .map_err(redb_error)?;
+            for (key, value) in &encoded {
+                table
+                    .insert(key.as_slice(), value.as_slice())
+                    .map_err(redb_error)?;
+            }
+        }
+        transaction.commit().map_err(redb_error)
+    }
+
+    /// Mark a fully staged generation complete and atomically publish it.
+    pub fn complete_and_activate_generation(&self, generation: u64) -> TldrResult<()> {
+        let mut transaction = self.database.begin_write().map_err(redb_error)?;
+        transaction
+            .set_durability(Durability::Immediate)
+            .map_err(redb_error)?;
+        let mut record = {
+            let generations = transaction.open_table(GENERATIONS).map_err(redb_error)?;
+            let value = generations
+                .get(generation)
+                .map_err(redb_error)?
+                .ok_or_else(|| store_error(format!("generation {generation} is missing")))?;
+            serde_json::from_slice::<StoredGeneration>(value.value())
+                .map_err(serialization_error)?
+        };
+        let prefix = generation.to_be_bytes();
+        let actual = {
+            let vectors = transaction
+                .open_table(GENERATION_VECTORS)
+                .map_err(redb_error)?;
+            vectors
+                .range(prefix.as_slice()..=generation_vector_key(generation, u64::MAX).as_slice())
+                .map_err(redb_error)?
+                .count() as u64
+        };
+        if actual != record.chunk_count {
+            return Err(store_error(format!(
+                "generation {generation} expected {} vectors, found {actual}",
+                record.chunk_count
+            )));
+        }
+        record.state = GenerationState::Complete;
+        let bytes = serde_json::to_vec(&record).map_err(serialization_error)?;
+        {
+            let mut generations = transaction.open_table(GENERATIONS).map_err(redb_error)?;
+            generations
+                .insert(generation, bytes.as_slice())
+                .map_err(redb_error)?;
+        }
+        {
+            let mut metadata = transaction.open_table(METADATA).map_err(redb_error)?;
+            let active = {
+                let value = metadata.get(ACTIVE_GENERATION_KEY).map_err(redb_error)?;
+                value.map(|value| value.value().to_vec())
+            };
+            if let Some(active) = active {
+                metadata
+                    .insert(PREVIOUS_GENERATION_KEY, active.as_slice())
+                    .map_err(redb_error)?;
+            }
+            metadata
+                .insert(ACTIVE_GENERATION_KEY, generation.to_le_bytes().as_slice())
+                .map_err(redb_error)?;
+        }
+        transaction.commit().map_err(redb_error)
+    }
+
+    /// Atomically roll back to the retained previous complete generation.
+    pub fn rollback_generation(&self) -> TldrResult<Option<u64>> {
+        let mut transaction = self.database.begin_write().map_err(redb_error)?;
+        transaction
+            .set_durability(Durability::Immediate)
+            .map_err(redb_error)?;
+        let (active, previous) = {
+            let metadata = transaction.open_table(METADATA).map_err(redb_error)?;
+            let active = {
+                let value = metadata.get(ACTIVE_GENERATION_KEY).map_err(redb_error)?;
+                value.and_then(|value| decode_u64(value.value()))
+            };
+            let previous = {
+                let value = metadata.get(PREVIOUS_GENERATION_KEY).map_err(redb_error)?;
+                value.and_then(|value| decode_u64(value.value()))
+            };
+            (active, previous)
+        };
+        let Some(previous) = previous else {
+            return Ok(None);
+        };
+        {
+            let generations = transaction.open_table(GENERATIONS).map_err(redb_error)?;
+            let value = generations
+                .get(previous)
+                .map_err(redb_error)?
+                .ok_or_else(|| store_error("previous generation metadata is missing"))?;
+            let record: StoredGeneration =
+                serde_json::from_slice(value.value()).map_err(serialization_error)?;
+            if record.state != GenerationState::Complete {
+                return Err(store_error("previous generation is incomplete"));
+            }
+        }
+        {
+            let mut metadata = transaction.open_table(METADATA).map_err(redb_error)?;
+            metadata
+                .insert(ACTIVE_GENERATION_KEY, previous.to_le_bytes().as_slice())
+                .map_err(redb_error)?;
+            if let Some(active) = active {
+                metadata
+                    .insert(PREVIOUS_GENERATION_KEY, active.to_le_bytes().as_slice())
+                    .map_err(redb_error)?;
+            }
+        }
+        transaction.commit().map_err(redb_error)?;
+        Ok(Some(previous))
+    }
+
+    /// Return the generation atomically selected for serving.
+    pub fn active_generation(&self) -> TldrResult<Option<u64>> {
+        let transaction = self.database.begin_read().map_err(redb_error)?;
+        let metadata = transaction.open_table(METADATA).map_err(redb_error)?;
+        Ok(metadata
+            .get(ACTIVE_GENERATION_KEY)
+            .map_err(redb_error)?
+            .and_then(|value| decode_u64(value.value())))
+    }
+
+    /// Read one generation's identity and publication state.
+    pub fn generation(&self, generation: u64) -> TldrResult<Option<StoredGeneration>> {
+        let transaction = self.database.begin_read().map_err(redb_error)?;
+        let table = transaction.open_table(GENERATIONS).map_err(redb_error)?;
+        table
+            .get(generation)
+            .map_err(redb_error)?
+            .map(|value| serde_json::from_slice(value.value()).map_err(serialization_error))
+            .transpose()
+    }
+
+    /// Read one generation's vectors in deterministic key order.
+    pub fn generation_vectors(
+        &self,
+        generation: u64,
+        dimensions: usize,
+    ) -> TldrResult<Vec<StoredGenerationVector>> {
+        let transaction = self.database.begin_read().map_err(redb_error)?;
+        let table = transaction
+            .open_table(GENERATION_VECTORS)
+            .map_err(redb_error)?;
+        let first = generation_vector_key(generation, 0);
+        let last = generation_vector_key(generation, u64::MAX);
+        table
+            .range(first.as_slice()..=last.as_slice())
+            .map_err(redb_error)?
+            .map(|row| {
+                let (key, value) = row.map_err(redb_error)?;
+                let key = decode_generation_vector_key(key.value())?;
+                let (vector, metadata) = decode_generation_vector(value.value(), dimensions)?;
+                Ok(StoredGenerationVector {
+                    key,
+                    vector,
+                    metadata,
+                })
+            })
+            .collect()
+    }
+}
+
+fn generation_vector_key(generation: u64, key: u64) -> [u8; 16] {
+    let mut encoded = [0_u8; 16];
+    encoded[..8].copy_from_slice(&generation.to_be_bytes());
+    encoded[8..].copy_from_slice(&key.to_be_bytes());
+    encoded
+}
+
+fn decode_generation_vector_key(bytes: &[u8]) -> TldrResult<u64> {
+    decode_u64_be(
+        bytes
+            .get(8..16)
+            .ok_or_else(|| store_error("invalid generation vector key"))?,
+    )
+    .ok_or_else(|| store_error("invalid generation vector key"))
+}
+
+fn encode_generation_vector(
+    vector: &[f32],
+    metadata: &[u8],
+    dimensions: usize,
+) -> TldrResult<Vec<u8>> {
+    if vector.len() != dimensions || vector.iter().any(|value| !value.is_finite()) {
+        return Err(store_error(
+            "generation vector dimensions or values are invalid",
+        ));
+    }
+    let metadata_len =
+        u32::try_from(metadata.len()).map_err(|_| store_error("generation metadata too large"))?;
+    let mut bytes = Vec::with_capacity(4 + metadata.len() + vector.len() * 4);
+    bytes.extend_from_slice(&metadata_len.to_le_bytes());
+    bytes.extend_from_slice(metadata);
+    for value in vector {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    Ok(bytes)
+}
+
+fn decode_generation_vector(bytes: &[u8], dimensions: usize) -> TldrResult<(Vec<f32>, Vec<u8>)> {
+    let metadata_len = decode_u32(
+        bytes
+            .get(..4)
+            .ok_or_else(|| store_error("truncated generation vector"))?,
+    )
+    .ok_or_else(|| store_error("invalid generation metadata length"))?
+        as usize;
+    let vector_start = 4_usize
+        .checked_add(metadata_len)
+        .ok_or_else(|| store_error("generation vector length overflow"))?;
+    let expected = vector_start
+        .checked_add(dimensions.saturating_mul(4))
+        .ok_or_else(|| store_error("generation vector length overflow"))?;
+    if bytes.len() != expected {
+        return Err(store_error("generation vector byte length mismatch"));
+    }
+    let metadata = bytes[4..vector_start].to_vec();
+    let mut vector = Vec::with_capacity(dimensions);
+    for encoded in bytes[vector_start..].chunks_exact(4) {
+        let value = f32::from_le_bytes(encoded.try_into().expect("four-byte chunk"));
+        if !value.is_finite() {
+            return Err(store_error("generation vector contains a non-finite value"));
+        }
+        vector.push(value);
+    }
+    Ok((vector, metadata))
 }
 
 fn validate_cache_key(key: &[u8]) -> TldrResult<()> {
@@ -594,6 +947,10 @@ fn decode_u32(bytes: &[u8]) -> Option<u32> {
 
 fn decode_u64(bytes: &[u8]) -> Option<u64> {
     Some(u64::from_le_bytes(bytes.try_into().ok()?))
+}
+
+fn decode_u64_be(bytes: &[u8]) -> Option<u64> {
+    Some(u64::from_be_bytes(bytes.try_into().ok()?))
 }
 
 fn redb_error(error: impl std::fmt::Display) -> TldrError {

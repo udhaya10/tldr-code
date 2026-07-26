@@ -206,6 +206,47 @@ impl VectorStore {
         self.dimensions
     }
 
+    /// Visit every vector in stable key order without materializing the corpus.
+    pub(crate) fn visit_records(
+        &self,
+        mut visitor: impl FnMut(u64, &[f32], &ChunkMeta) -> TldrResult<()>,
+    ) -> TldrResult<()> {
+        let mut keys: Vec<_> = self.meta.keys().copied().collect();
+        keys.sort_unstable();
+        let mut vector = vec![0.0_f32; self.dimensions];
+        for key in keys {
+            let found = self
+                .index
+                .get(key, &mut vector)
+                .map_err(|error| vs_err("get", error))?;
+            if found != 1 {
+                return Err(vs_err("get", format!("key {key} returned {found} vectors")));
+            }
+            visitor(key, &vector, &self.meta[&key])?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn files_snapshot(&self) -> HashMap<String, FileRecord> {
+        self.files.clone()
+    }
+
+    pub(crate) fn from_generation_records(
+        dimensions: usize,
+        records: impl IntoIterator<Item = (u64, Vec<f32>, ChunkMeta)>,
+        files: HashMap<String, FileRecord>,
+        corpus_digest: u64,
+    ) -> TldrResult<Self> {
+        let records: Vec<_> = records.into_iter().collect();
+        let mut store = Self::new(dimensions, records.len())?;
+        for (key, vector, meta) in records {
+            store.add(key, &vector, meta)?;
+        }
+        store.files = files;
+        store.corpus_digest = corpus_digest;
+        Ok(store)
+    }
+
     /// Whether `key` is present in the index.
     pub fn contains(&self, key: u64) -> bool {
         self.index.contains(key)
@@ -595,33 +636,41 @@ impl VectorStore {
         // manifest.<gen> history (Codex review). `checked_add` guards against a
         // stray/adversarial manifest.<u64::MAX> filename overflowing the counter
         // (Codex review): the base is drawn from arbitrary on-disk filenames.
-        let prev_gen = read_current(dir)
-            .map(|c| c.generation)
-            .unwrap_or(0)
-            .max(manifest_gens(dir).into_iter().max().unwrap_or(0));
-        let gen = prev_gen
-            .checked_add(1)
-            .ok_or_else(|| vs_err("save", "generation counter overflow"))?;
+        let gen = next_generation(dir)?;
+        self.write_generation(dir, id, gen)?;
+        activate_current(dir, gen)?;
 
-        // 1. index.<gen>.usearch (immutable; not referenced until CURRENT commits)
+        // 5. GC — retain the last KEEP_GENS generations.
+        gc_old_generations(dir, gen);
+        Ok(())
+    }
+
+    /// Write and verify one immutable generation without publishing it.
+    pub(crate) fn write_generation(&self, dir: &Path, id: &ManifestId, gen: u64) -> TldrResult<()> {
+        if id.dimensions as usize != self.dimensions {
+            return Err(vs_err("save", "manifest dimensions do not match store"));
+        }
+        std::fs::create_dir_all(dir)?;
+        let staged_index = dir.join(format!("index.{gen}.staged"));
         let index_path = dir.join(format!("index.{gen}.usearch"));
-        let index_str = index_path
+        let staged_str = staged_index
             .to_str()
             .ok_or_else(|| vs_err("save", "non-utf8 index path"))?;
-        self.index.save(index_str).map_err(|e| vs_err("save", e))?;
-        sync_path(&index_path)?;
+        self.index
+            .save(staged_str)
+            .map_err(|error| vs_err("save", error))?;
+        sync_path(&staged_index)?;
+        std::fs::rename(&staged_index, &index_path)?;
+        sync_dir(dir)?;
         let index_checksum = digest_bytes(&std::fs::read(&index_path)?);
 
-        // 2. meta.<gen> (sidecar: key->ChunkMeta + per-file records)
         let sidecar = SidecarRef {
             meta: &self.meta,
             files: &self.files,
         };
-        let sidecar_bytes = serde_json::to_vec(&sidecar).map_err(|e| vs_err("save", e))?;
+        let sidecar_bytes = serde_json::to_vec(&sidecar).map_err(|error| vs_err("save", error))?;
         let sidecar_checksum = digest_bytes(&sidecar_bytes);
         write_sync(&dir.join(format!("meta.{gen}")), &sidecar_bytes)?;
-
-        // 3. manifest.<gen>
         let mut keys: Vec<u64> = self.meta.keys().copied().collect();
         keys.sort_unstable();
         let manifest = Manifest {
@@ -634,26 +683,18 @@ impl VectorStore {
             sidecar_checksum,
             corpus_digest: self.corpus_digest,
         };
-        let manifest_bytes = serde_json::to_vec(&manifest).map_err(|e| vs_err("save", e))?;
+        let manifest_bytes =
+            serde_json::to_vec(&manifest).map_err(|error| vs_err("save", error))?;
         write_sync(&dir.join(format!("manifest.{gen}")), &manifest_bytes)?;
+        sync_dir(dir)
+    }
 
-        sync_dir(dir)?;
-
-        // 4. CURRENT — the single atomic commit point (temp + rename).
-        let cur = CurrentPointer {
-            magic: CURRENT_MAGIC,
-            generation: gen,
-            checksum: current_checksum(CURRENT_MAGIC, gen),
-        };
-        let cur_bytes = serde_json::to_vec(&cur).map_err(|e| vs_err("save", e))?;
-        let tmp = dir.join("CURRENT.tmp");
-        write_sync(&tmp, &cur_bytes)?;
-        std::fs::rename(&tmp, dir.join("CURRENT"))?;
-        sync_dir(dir)?;
-
-        // 5. GC — retain the last KEEP_GENS generations.
-        gc_old_generations(dir, gen);
-        Ok(())
+    pub(crate) fn load_specific_generation(
+        dir: &Path,
+        generation: u64,
+        expect: &ManifestId,
+    ) -> TldrResult<Self> {
+        Self::load_generation(dir, generation, expect).map_err(LoadFail::into_err)
     }
 
     /// Load the active generation from `dir`, verifying against the running config
@@ -829,6 +870,29 @@ impl LoadFail {
             LoadFail::Incompatible(e) | LoadFail::Corrupt(e) => e,
         }
     }
+}
+
+pub(crate) fn next_generation(dir: &Path) -> TldrResult<u64> {
+    let previous = read_current(dir)
+        .map(|current| current.generation)
+        .unwrap_or(0)
+        .max(manifest_gens(dir).into_iter().max().unwrap_or(0));
+    previous
+        .checked_add(1)
+        .ok_or_else(|| vs_err("save", "generation counter overflow"))
+}
+
+pub(crate) fn activate_current(dir: &Path, generation: u64) -> TldrResult<()> {
+    let current = CurrentPointer {
+        magic: CURRENT_MAGIC,
+        generation,
+        checksum: current_checksum(CURRENT_MAGIC, generation),
+    };
+    let bytes = serde_json::to_vec(&current).map_err(|error| vs_err("save", error))?;
+    let staged = dir.join("CURRENT.tmp");
+    write_sync(&staged, &bytes)?;
+    std::fs::rename(&staged, dir.join("CURRENT"))?;
+    sync_dir(dir)
 }
 
 /// All generation numbers with an on-disk `manifest.<gen>` (unsorted).
