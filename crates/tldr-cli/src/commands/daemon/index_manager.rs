@@ -601,6 +601,9 @@ mod tests {
                 &vector,
                 ChunkMeta {
                     identity: "src/lib.rs::seed::0".to_string(),
+                    chunk_id: Default::default(),
+                    revision: Default::default(),
+                    anchor: Default::default(),
                     file_rel_path: "src/lib.rs".to_string(),
                     function_name: Some("seed".to_string()),
                     class_name: None,

@@ -8,11 +8,11 @@ use serde::{Deserialize, Serialize};
 use crate::semantic::types::{EmbeddingModel, StructuralRole};
 
 /// Persistent logical identity of a chunk across localized source edits.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ChunkId(pub u128);
 
 /// Hash of the exact composed document passed to the embedding backend.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ChunkRevision(pub [u8; 32]);
 
 impl ChunkRevision {
@@ -23,7 +23,7 @@ impl ChunkRevision {
 }
 
 /// Structural evidence used to reconcile a chunk after its file changes.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct StructuralAnchor {
     /// Stable path relative to the indexed repository.
     pub repository_path: String,

@@ -19,6 +19,10 @@ use usearch::{Index, IndexOptions, MetricKind, ScalarKind};
 
 use crate::error::TldrError;
 use crate::semantic::index::BuildOptions;
+use crate::semantic::lineage::{
+    reconcile_chunks, ChunkCandidate, ChunkId, ChunkIdAllocator, ChunkRevision, PriorChunk,
+    StructuralAnchor,
+};
 use crate::semantic::types::{CacheConfig, CodeChunk, EmbeddingModel};
 use crate::TldrResult;
 
@@ -54,8 +58,14 @@ fn new_f32_index(dimensions: usize, capacity: usize) -> TldrResult<Index> {
 /// result, since the usearch index stores **only** the vector. Design doc §4.2.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChunkMeta {
-    /// `file_rel_path::class::function::ordinal` — the source of the u64 key.
+    /// Hex-encoded [`ChunkId`] used to guard the derived u64 usearch key.
     pub identity: String,
+    /// Stable logical identity preserved across unambiguous localized edits.
+    pub chunk_id: ChunkId,
+    /// Hash of the exact composed document embedded for this chunk.
+    pub revision: ChunkRevision,
+    /// Structural evidence used for future lineage reconciliation.
+    pub anchor: StructuralAnchor,
     /// Root-relative path (CWD/absolute-independent).
     pub file_rel_path: String,
     /// Function/method name (`None` for file-level chunks).
@@ -395,7 +405,9 @@ impl VectorStore {
 /// stable FNV-1a hash (Codex review) — old stores are rejected on load.
 /// v3: added `corpus_digest` to the manifest (TLDR-kkt freshness gate) — old
 /// stores lack it and are rebuilt once.
-const STORE_FORMAT_VERSION: u32 = 3;
+/// v4: replaced positional identities with persisted chunk lineage, exact
+/// document revisions, and structural reconciliation anchors (TLDR-9bxa.4).
+const STORE_FORMAT_VERSION: u32 = 4;
 /// `CURRENT` magic ("TLDR") so a torn/foreign pointer is detectable.
 const CURRENT_MAGIC: u32 = 0x544C_4452;
 /// Generations retained by GC (the active one + rollback headroom). Keeps a
@@ -838,9 +850,8 @@ pub(crate) fn compute_corpus_digest(root: &Path) -> u64 {
 
 /// Stable FNV-1a 64-bit hash. Deterministic across processes, platforms, and
 /// Rust versions — unlike `DefaultHasher` (SipHash), whose output is NOT a
-/// guaranteed-stable on-disk primitive. Used for every persisted checksum AND
-/// for the chunk identity key (`identity_key`), so the on-disk format and the
-/// key scheme don't silently shift under a std change (Codex review).
+/// guaranteed-stable on-disk primitive. Used for persisted checksums and the
+/// u128 [`ChunkId`] to u64 usearch-key projection.
 fn stable_hash(bytes: &[u8]) -> u64 {
     const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
     const PRIME: u64 = 0x0000_0100_0000_01b3;
@@ -951,71 +962,87 @@ fn gc_old_generations(dir: &Path, current_gen: u64) {
 // build; this layer is the deterministic key scheme + store population.
 // =============================================================================
 
-/// Build the stable identity string for a chunk (design doc §4.1):
-/// `file_rel_path::class::function::ordinal`. `ordinal` disambiguates duplicate
-/// `(class, function)` names within one file. File-level and structural chunks
-/// without a symbol also include the ordinal so distinct planned regions cannot
-/// replace one another in the store.
-pub fn chunk_identity(
-    file_rel_path: &str,
-    class_name: Option<&str>,
-    function_name: Option<&str>,
-    ordinal: u32,
-) -> String {
-    match function_name {
-        Some(f) => format!(
-            "{}::{}::{}::{}",
-            file_rel_path,
-            class_name.unwrap_or(""),
-            f,
-            ordinal
-        ),
-        None => format!("{file_rel_path}#file::{ordinal}"),
-    }
+/// Derive the u64 usearch key from the complete logical chunk identity.
+pub fn chunk_id_key(id: ChunkId) -> u64 {
+    stable_hash(&id.0.to_le_bytes())
 }
 
-/// Hash an identity string into the stable u64 usearch key (FNV-1a — stable
-/// across processes/Rust versions, unlike `DefaultHasher`).
-pub fn identity_key(identity: &str) -> u64 {
-    stable_hash(identity.as_bytes())
-}
-
-/// Compute the stable `(key, ChunkMeta)` for each chunk, assigning positional
-/// ordinals per `(file_rel, class, function)`. **Pure** — depends only on the
-/// chunks + `root`.
+/// Compute fresh `(key, ChunkMeta)` pairs when no prior lineage is available.
+/// The chunk source is treated as the exact document for this compatibility
+/// entry point; production structural builds use [`key_chunks_reconciled`].
 ///
 /// Shared by [`VectorStore::from_embedded`] (whole corpus) and the per-file
 /// delta path (TLDR-t8f), so both compute **identical keys**. A divergence here
 /// would make a delta's `remove`/replace miss the old vectors it must update —
-/// hence the single source of truth. Ordinals are positional within `chunks`
-/// (which a delta supplies file-by-file via [`crate::semantic::chunk_file`], and
-/// `from_embedded` supplies for the whole corpus); the per-file `base` key means
-/// the count is naturally scoped to each `(file, class, function)` regardless.
+/// hence the single source of truth.
 pub fn key_chunks(root: &Path, chunks: &[CodeChunk]) -> Vec<(u64, ChunkMeta)> {
-    let mut ordinals: HashMap<String, u32> = HashMap::new();
-    chunks
+    let documents: Vec<String> = chunks.iter().map(|chunk| chunk.content.clone()).collect();
+    key_chunks_reconciled(root, chunks, &documents, &[])
+        .expect("one source document was constructed for every chunk")
+}
+
+/// Assign stable lineage and compute usearch keys for newly planned chunks.
+///
+/// `documents[i]` must be the exact text embedded for `chunks[i]`. Existing
+/// metadata may contain chunks from the whole store; repository paths in the
+/// anchors scope reconciliation to the changed file.
+pub fn key_chunks_reconciled(
+    root: &Path,
+    chunks: &[CodeChunk],
+    documents: &[String],
+    prior: &[ChunkMeta],
+) -> TldrResult<Vec<(u64, ChunkMeta)>> {
+    if chunks.len() != documents.len() {
+        return Err(TldrError::Embedding(format!(
+            "lineage input mismatch: {} chunks != {} composed documents",
+            chunks.len(),
+            documents.len()
+        )));
+    }
+    let candidates: Vec<ChunkCandidate> = chunks
         .iter()
-        .map(|chunk| {
+        .zip(documents)
+        .map(|(chunk, document)| ChunkCandidate {
+            anchor: structural_anchor(root, chunk),
+            revision: ChunkRevision::from_document(document),
+        })
+        .collect();
+    let prior_chunks: Vec<PriorChunk> = prior
+        .iter()
+        .map(|meta| PriorChunk {
+            id: meta.chunk_id,
+            anchor: meta.anchor.clone(),
+            revision: meta.revision,
+        })
+        .collect();
+    let mut nonce_hasher = blake3::Hasher::new();
+    nonce_hasher.update(normalize_sep(root).as_bytes());
+    let mut prior_ids: Vec<u128> = prior.iter().map(|meta| meta.chunk_id.0).collect();
+    prior_ids.sort_unstable();
+    for id in prior_ids {
+        nonce_hasher.update(&id.to_le_bytes());
+    }
+    let nonce_hash = nonce_hasher.finalize();
+    let mut nonce_bytes = [0_u8; 16];
+    nonce_bytes.copy_from_slice(&nonce_hash.as_bytes()[..16]);
+    let mut allocator = ChunkIdAllocator::new(u128::from_le_bytes(nonce_bytes));
+    let reconciled = reconcile_chunks(&prior_chunks, &candidates, &mut allocator);
+
+    Ok(chunks
+        .iter()
+        .zip(candidates)
+        .zip(reconciled)
+        .map(|((chunk, candidate), lineage)| {
             let file_rel = root_relative(root, &chunk.file_path);
-            let base = format!(
-                "{}::{}::{}",
-                file_rel,
-                chunk.class_name.as_deref().unwrap_or(""),
-                chunk.function_name.as_deref().unwrap_or("")
-            );
-            let ordinal = ordinals.entry(base).or_insert(0);
-            let identity = chunk_identity(
-                &file_rel,
-                chunk.class_name.as_deref(),
-                chunk.function_name.as_deref(),
-                *ordinal,
-            );
-            *ordinal += 1;
-            let key = identity_key(&identity);
+            let identity = format!("{:032x}", lineage.id.0);
+            let key = chunk_id_key(lineage.id);
             (
                 key,
                 ChunkMeta {
                     identity,
+                    chunk_id: lineage.id,
+                    revision: candidate.revision,
+                    anchor: candidate.anchor,
                     file_rel_path: file_rel,
                     function_name: chunk.function_name.clone(),
                     class_name: chunk.class_name.clone(),
@@ -1026,7 +1053,33 @@ pub fn key_chunks(root: &Path, chunks: &[CodeChunk]) -> Vec<(u64, ChunkMeta)> {
                 },
             )
         })
-        .collect()
+        .collect())
+}
+
+fn structural_anchor(root: &Path, chunk: &CodeChunk) -> StructuralAnchor {
+    let repository_path = if chunk.structure.repository_path.is_empty() {
+        root_relative(root, &chunk.file_path)
+    } else {
+        chunk.structure.repository_path.clone()
+    };
+    let enclosing_symbol = chunk.class_name.clone();
+    let qualified_symbol = chunk.structure.qualified_symbol.clone().or_else(|| {
+        chunk.function_name.as_ref().map(|function| {
+            chunk
+                .class_name
+                .as_ref()
+                .map(|class| format!("{class}::{function}"))
+                .unwrap_or_else(|| function.clone())
+        })
+    });
+    StructuralAnchor {
+        repository_path,
+        qualified_symbol,
+        enclosing_symbol,
+        signature: chunk.structure.signature.clone(),
+        role: chunk.structure.role,
+        ast_path: chunk.structure.ast_path.clone(),
+    }
 }
 
 /// Path relative to the build `root`, used as part of the stable chunk key.
@@ -1121,6 +1174,16 @@ impl VectorStore {
         vectors: &[Vec<f32>],
         root: &Path,
     ) -> TldrResult<Self> {
+        let documents: Vec<String> = chunks.iter().map(|chunk| chunk.content.clone()).collect();
+        Self::from_embedded_documents(chunks, vectors, &documents, root)
+    }
+
+    fn from_embedded_documents(
+        chunks: &[CodeChunk],
+        vectors: &[Vec<f32>],
+        documents: &[String],
+        root: &Path,
+    ) -> TldrResult<Self> {
         if chunks.len() != vectors.len() {
             return Err(vs_err(
                 "build",
@@ -1135,7 +1198,7 @@ impl VectorStore {
         let mut store = Self::new(dimensions, chunks.len())?;
         // Identical key/meta computation to the delta path (shared `key_chunks`),
         // so a delta's remove/replace lands on the same keys this build wrote.
-        let keyed = key_chunks(root, chunks);
+        let keyed = key_chunks_reconciled(root, chunks, documents, &[])?;
         let mut file_keys: HashMap<String, std::collections::BTreeSet<u64>> = HashMap::new();
         let mut file_abs: HashMap<String, PathBuf> = HashMap::new();
 
@@ -1470,7 +1533,8 @@ impl VectorStore {
         let mut store = if chunks.is_empty() {
             Self::new(options.model.dimensions(), Self::MIN_CAPACITY)?
         } else {
-            Self::from_embedded(&chunks, &vectors, root)?
+            let documents = if enrich { &enriched_texts } else { &raw_texts };
+            Self::from_embedded_documents(&chunks, &vectors, documents, root)?
         };
         // Stamp the digest captured BEFORE chunking (see TOCTOU note above), so the
         // freshness gate compares against the snapshot the vectors describe.
@@ -1592,6 +1656,9 @@ mod tests {
     fn meta(id: &str) -> ChunkMeta {
         ChunkMeta {
             identity: id.to_string(),
+            chunk_id: Default::default(),
+            revision: Default::default(),
+            anchor: Default::default(),
             file_rel_path: format!("src/{id}.rs"),
             function_name: Some(id.to_string()),
             class_name: None,
@@ -1675,6 +1742,9 @@ mod tests {
     fn fmeta(id: &str, hash: &str, line_start: u32) -> ChunkMeta {
         ChunkMeta {
             identity: id.to_string(),
+            chunk_id: Default::default(),
+            revision: Default::default(),
+            anchor: Default::default(),
             file_rel_path: "f.rs".to_string(),
             function_name: Some(id.to_string()),
             class_name: None,
@@ -2041,30 +2111,6 @@ mod tests {
     }
 
     #[test]
-    fn identity_and_key_are_stable_and_ordinal_disambiguates() {
-        let a = chunk_identity("src/a.rs", None, Some("foo"), 0);
-        assert_eq!(a, "src/a.rs::::foo::0");
-        assert_eq!(
-            identity_key(&a),
-            identity_key("src/a.rs::::foo::0"),
-            "stable"
-        );
-        // Duplicate (file, class, fn) name → different ordinal → distinct keys.
-        let k0 = identity_key(&chunk_identity("src/a.rs", Some("S"), Some("new"), 0));
-        let k1 = identity_key(&chunk_identity("src/a.rs", Some("S"), Some("new"), 1));
-        assert_ne!(k0, k1);
-        // File-level chunk identity.
-        assert_eq!(
-            chunk_identity("src/a.rs", None, None, 7),
-            "src/a.rs#file::7"
-        );
-        assert_ne!(
-            identity_key(&chunk_identity("src/a.rs", None, None, 0)),
-            identity_key(&chunk_identity("src/a.rs", None, None, 1))
-        );
-    }
-
-    #[test]
     fn from_embedded_populates_store_and_file_records() {
         const D: usize = 6;
         let root = std::path::Path::new("/proj");
@@ -2080,7 +2126,7 @@ mod tests {
         assert_eq!(
             store.len(),
             4,
-            "same-named fns get distinct keys via ordinal"
+            "same-named functions receive distinct logical lineage"
         );
 
         // Root-relative path + correct metadata joined on search.
@@ -2106,6 +2152,96 @@ mod tests {
             k
         };
         assert_eq!(keys(&store), keys(&store2));
+    }
+
+    #[test]
+    fn reconciled_keys_survive_insertions_and_revision_changes() {
+        let root = std::path::Path::new("/proj");
+        let mut foo = code_chunk("/proj/src/a.rs", None, Some("foo"), "fn foo(){}");
+        foo.structure.qualified_symbol = Some("foo".into());
+        foo.structure.ast_path = vec![0];
+        let mut bar = code_chunk("/proj/src/a.rs", None, Some("bar"), "fn bar(){}");
+        bar.structure.qualified_symbol = Some("bar".into());
+        bar.structure.ast_path = vec![1];
+        let old_chunks = vec![foo.clone(), bar.clone()];
+        let old_documents = vec!["path: src/a.rs\nfn foo(){}".into(), "fn bar(){}".into()];
+        let old = key_chunks_reconciled(root, &old_chunks, &old_documents, &[]).unwrap();
+        let prior: Vec<ChunkMeta> = old.iter().map(|(_, meta)| meta.clone()).collect();
+
+        let mut inserted = code_chunk("/proj/src/a.rs", None, Some("new"), "fn new(){}");
+        inserted.structure.qualified_symbol = Some("new".into());
+        inserted.structure.ast_path = vec![0];
+        foo.structure.ast_path = vec![1];
+        foo.content = "fn foo(){ changed(); }".into();
+        foo.content_hash = format!("{:x}", md5::compute(&foo.content));
+        bar.structure.ast_path = vec![2];
+        let new_chunks = vec![inserted, foo, bar];
+        let new_documents = vec![
+            "fn new(){}".into(),
+            "path: src/a.rs\nfn foo(){ changed(); }".into(),
+            "fn bar(){}".into(),
+        ];
+        let new = key_chunks_reconciled(root, &new_chunks, &new_documents, &prior).unwrap();
+
+        assert_ne!(new[0].0, old[0].0, "inserted function gets new lineage");
+        assert_eq!(new[1].0, old[0].0, "foo keeps its usearch key");
+        assert_eq!(new[2].0, old[1].0, "bar keeps its usearch key");
+        assert_ne!(
+            new[1].1.revision, old[0].1.revision,
+            "changed composed text changes only the revision"
+        );
+        assert_eq!(new[1].1.chunk_id, old[0].1.chunk_id);
+    }
+
+    #[test]
+    fn reconciled_usearch_delta_replaces_and_removes_exact_lineage() {
+        const D: usize = 8;
+        let root = std::path::Path::new("/proj");
+        let old_chunks = vec![
+            code_chunk("/proj/a.rs", None, Some("keep"), "fn keep(){}"),
+            code_chunk("/proj/a.rs", None, Some("remove"), "fn remove(){}"),
+        ];
+        let old_documents: Vec<String> = old_chunks
+            .iter()
+            .map(|chunk| chunk.content.clone())
+            .collect();
+        let old = key_chunks_reconciled(root, &old_chunks, &old_documents, &[]).unwrap();
+        let prior: Vec<ChunkMeta> = old.iter().map(|(_, meta)| meta.clone()).collect();
+        let mut store = VectorStore::new(D, old.len()).unwrap();
+        for (index, (key, meta)) in old.iter().enumerate() {
+            store.add(*key, &unit(D, index), meta.clone()).unwrap();
+        }
+        store.set_file_record(
+            "a.rs".into(),
+            FileRecord {
+                keys: old.iter().map(|(key, _)| *key).collect(),
+                mtime: 1,
+                size: 1,
+                file_type: FileKind::Regular,
+            },
+        );
+
+        let changed = vec![
+            code_chunk("/proj/a.rs", None, Some("keep"), "fn keep(){ changed(); }"),
+            code_chunk("/proj/a.rs", None, Some("added"), "fn added(){}"),
+        ];
+        let changed_documents: Vec<String> =
+            changed.iter().map(|chunk| chunk.content.clone()).collect();
+        let keyed = key_chunks_reconciled(root, &changed, &changed_documents, &prior).unwrap();
+        let embedded: HashMap<u64, Vec<f32>> = keyed
+            .iter()
+            .enumerate()
+            .map(|(index, (key, _))| (*key, unit(D, index + 2)))
+            .collect();
+        store
+            .apply_file_delta("a.rs", &keyed, &embedded, (2, 2, FileKind::Regular))
+            .unwrap();
+
+        assert_eq!(keyed[0].0, old[0].0, "changed chunk keeps lineage");
+        assert!(store.contains(old[0].0), "changed vector was replaced");
+        assert!(!store.contains(old[1].0), "deleted lineage was removed");
+        assert!(store.contains(keyed[1].0), "new lineage was inserted");
+        assert_eq!(store.len(), 2);
     }
 
     #[test]

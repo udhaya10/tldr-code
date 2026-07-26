@@ -353,6 +353,9 @@ mod tests {
             distance,
             meta: ChunkMeta {
                 identity: format!("{file}::{line_start}"),
+                chunk_id: Default::default(),
+                revision: Default::default(),
+                anchor: Default::default(),
                 file_rel_path: file.to_string(),
                 function_name: Some("f".to_string()),
                 class_name: None,
@@ -573,6 +576,9 @@ mod tests {
                 &vector,
                 ChunkMeta {
                     identity: "a.rs::f::0".to_string(),
+                    chunk_id: Default::default(),
+                    revision: Default::default(),
+                    anchor: Default::default(),
                     file_rel_path: "a.rs".to_string(),
                     function_name: Some("f".to_string()),
                     class_name: None,
