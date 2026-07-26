@@ -22,6 +22,11 @@ path = "src/bin/tldr_daemon.rs"
 name = "tldr-mcp"
 path = "src/bin/tldr_mcp.rs"
 
+[[bin]]
+name = "tldr-embed-worker"
+path = "src/bin/tldr_embed_worker.rs"
+required-features = ["semantic"]
+
 [features]
 default = ["semantic"]
 semantic = ["tldr-core/semantic"]

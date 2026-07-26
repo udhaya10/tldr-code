@@ -90,7 +90,7 @@ pub(crate) fn chunk_params_tag(options: &BuildOptions) -> String {
 /// config inputs (resolves the TLDR-7al placeholders): model + chunk params +
 /// walker version. `load()` rejects a store whose identity differs, forcing a
 /// rebuild on any model/recipe/chunking change.
-pub(crate) fn manifest_id_for(root: &Path, options: &BuildOptions) -> ManifestId {
+pub fn manifest_id_for(root: &Path, options: &BuildOptions) -> ManifestId {
     ManifestId::for_build(
         options.model,
         root,

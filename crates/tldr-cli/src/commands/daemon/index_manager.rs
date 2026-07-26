@@ -15,10 +15,12 @@ use tldr_core::semantic::vector_store::{
     VectorStore,
 };
 use tldr_core::semantic::{
-    load_or_build_store, query_store_with_vector, store_dir_for, BuildOptions, BulkInferenceRunner,
-    CacheConfig, ChunkGranularity, EmbeddingModel, FixedShapeInferenceRunner, IndexSearchOptions,
-    InferenceRunnerSnapshot,
+    query_store_with_vector, store_dir_for, BuildCancellation, BuildOptions, BulkInferenceRunner,
+    CacheConfig, ChunkGranularity, EmbeddingModel, FixedShapeInferenceRunner, GenerationManager,
+    IndexSearchOptions, InferenceRunnerSnapshot,
 };
+
+use super::bulk_worker::BulkWorker;
 
 /// Why a semantic query could not be served (TLDR-7xz.1/.2).
 ///
@@ -238,13 +240,18 @@ impl IndexManager {
                 ..Default::default()
             };
             let store_dir = store_dir_for(project);
-            let replacement = load_or_build_store(
+            let worker = BulkWorker::installed()?;
+            worker.build(
                 project,
                 &store_dir,
                 &build_opts,
                 Some(CacheConfig::default()),
-            )
-            .map_err(|error| error.to_string())?;
+                &BuildCancellation::default(),
+            )?;
+            let identity = tldr_core::semantic::store_search::manifest_id_for(project, &build_opts);
+            let replacement = GenerationManager::open(&store_dir)
+                .and_then(|manager| manager.load(&identity))
+                .map_err(|error| error.to_string())?;
             // Publication alone takes the write lock; an existing generation
             // continues serving while the replacement is built.
             *self.store.write() = Some((model, replacement));
@@ -499,6 +506,7 @@ fn deleted_file_rel(project: &Path, file: &Path) -> String {
 mod tests {
     use super::*;
     use std::sync::{Arc, Barrier};
+    use tldr_core::semantic::load_or_build_store;
 
     #[test]
     fn runner_states_start_cold_and_workload_specific() {

@@ -484,7 +484,7 @@ impl Default for SearchOptions {
 }
 
 /// Cache configuration
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CacheConfig {
     /// Platform cache directory containing the redb cache and optional legacy
     /// rkyv generation awaiting one-time migration.

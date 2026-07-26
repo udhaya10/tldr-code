@@ -92,10 +92,10 @@
 - Modify: `crates/tldr-cli/src/commands/daemon/index_manager.rs`
 - Test: `crates/tldr-cli/src/commands/daemon/bulk_worker.rs`
 
-- [ ] Define a bounded versioned local protocol with model/pipeline compatibility negotiation.
-- [ ] Persist each completed batch in redb before acknowledging it; resume pending jobs without gaps or duplicates.
-- [ ] Add cancellation, finite retry accounting, crash detection, and RSS-watermark recycling.
-- [ ] Kill at every batch boundary and run responsiveness, memory-reclamation, IPC-bound, and startup-overhead gates once.
+- [x] Define a bounded versioned local protocol with model/pipeline compatibility negotiation.
+- [x] Persist each completed batch in redb before acknowledging it; resume pending jobs without gaps or duplicates.
+- [x] Add cancellation, finite retry accounting, crash detection, and RSS-watermark recycling.
+- [x] Kill at every batch boundary and run responsiveness, memory-reclamation, IPC-bound, and startup-overhead gates once.
 
 ### Task 7: Complete `TLDR-9bxa.11` quality gates and rollout
 

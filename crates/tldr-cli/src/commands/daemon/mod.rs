@@ -46,6 +46,8 @@
 //! - `cache_clear`: Cache clearing command
 
 pub(crate) mod activity;
+#[cfg(feature = "semantic")]
+pub mod bulk_worker;
 pub mod cache_clear;
 pub mod cache_stats;
 pub mod daemon_active;

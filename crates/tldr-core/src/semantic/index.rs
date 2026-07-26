@@ -17,6 +17,8 @@
 //! - The P0 corpus limits ([`MAX_INDEX_SIZE`], memory bounds)
 //! - [`make_snippet`] — result snippet shaping
 
+use serde::{Deserialize, Serialize};
+
 use crate::semantic::types::{ChunkGranularity, EmbeddingModel};
 
 // =============================================================================
@@ -45,7 +47,7 @@ pub(crate) const MAX_MEMORY_BYTES: usize = 500 * 1024 * 1024;
 ///
 /// Controls how the store is constructed, including model selection,
 /// chunking granularity, and caching behavior.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BuildOptions {
     /// Embedding model to use
     pub model: EmbeddingModel,

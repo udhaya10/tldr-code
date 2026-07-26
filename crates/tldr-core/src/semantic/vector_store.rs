@@ -926,7 +926,7 @@ fn manifest_gens(dir: &Path) -> Vec<u64> {
 /// Residual (documented, design §7.3): an edit with the SAME mtime AND SAME size
 /// AND no set change is not detected; self-heals on the next real edit, escape
 /// hatch = manual rebuild.
-pub(crate) fn compute_corpus_digest(root: &Path) -> u64 {
+pub fn compute_corpus_digest(root: &Path) -> u64 {
     let mut rows: Vec<(String, u64, u64)> = crate::semantic::chunker::enumerate_corpus_files(root)
         .into_iter()
         .map(|path| {

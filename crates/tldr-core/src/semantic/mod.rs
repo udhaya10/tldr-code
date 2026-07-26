@@ -164,6 +164,14 @@ pub use redb_store::{
 pub mod generation;
 pub use generation::GenerationManager;
 
+// TLDR-9bxa.10: bounded local protocol for the disposable bulk worker.
+pub mod worker_protocol;
+pub use worker_protocol::{
+    decode_message as decode_worker_message, encode_message as encode_worker_message,
+    WorkerBuildRequest, WorkerEvent, DEFAULT_WORKER_ATTEMPTS, MAX_WORKER_MESSAGE_BYTES,
+    WORKER_PIPELINE_VERSION, WORKER_PROTOCOL_VERSION,
+};
+
 // Phase 6: shared build/search options + index limits. The `SemanticIndex`
 // type itself was nuked in TLDR-7xz.7 — serving goes through the daemon's
 // resident VectorStore only (store_search/vector_store below).
