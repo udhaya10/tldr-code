@@ -68,6 +68,9 @@ pub struct ChunkMeta {
     pub line_end: u32,
     /// Detects body changes; also anchors the lazy snippet read.
     pub content_hash: String,
+    /// Persisted structural provenance for snippet/source reconstruction.
+    #[serde(default)]
+    pub structure: crate::semantic::types::ChunkStructure,
 }
 
 /// A search result: the matched key, its cosine **distance** (lower = closer;
@@ -950,8 +953,9 @@ fn gc_old_generations(dir: &Path, current_gen: u64) {
 
 /// Build the stable identity string for a chunk (design doc §4.1):
 /// `file_rel_path::class::function::ordinal`. `ordinal` disambiguates duplicate
-/// `(class, function)` names within one file. File-level chunks (no function)
-/// use `file_rel_path#file`.
+/// `(class, function)` names within one file. File-level and structural chunks
+/// without a symbol also include the ordinal so distinct planned regions cannot
+/// replace one another in the store.
 pub fn chunk_identity(
     file_rel_path: &str,
     class_name: Option<&str>,
@@ -966,7 +970,7 @@ pub fn chunk_identity(
             f,
             ordinal
         ),
-        None => format!("{file_rel_path}#file"),
+        None => format!("{file_rel_path}#file::{ordinal}"),
     }
 }
 
@@ -1018,6 +1022,7 @@ pub fn key_chunks(root: &Path, chunks: &[CodeChunk]) -> Vec<(u64, ChunkMeta)> {
                     line_start: chunk.line_start,
                     line_end: chunk.line_end,
                     content_hash: chunk.content_hash.clone(),
+                    structure: chunk.structure.clone(),
                 },
             )
         })
@@ -1061,6 +1066,22 @@ pub fn root_relative(root: &Path, file_path: &Path) -> String {
 /// Normalize path separators to `/` for stable, cross-platform keys.
 fn normalize_sep(p: &Path) -> String {
     p.to_string_lossy().replace('\\', "/")
+}
+
+/// Run the canonical corpus-policy pass without asking the legacy function
+/// extractor to decide whether a file belongs to the structural corpus.
+fn structural_source_files(
+    root: &Path,
+    languages: Option<Vec<crate::Language>>,
+) -> TldrResult<crate::semantic::chunker::ChunkResult> {
+    crate::semantic::chunker::chunk_code(
+        root,
+        &crate::semantic::types::ChunkOptions {
+            granularity: crate::semantic::types::ChunkGranularity::File,
+            languages,
+            ..Default::default()
+        },
+    )
 }
 
 /// `(mtime_secs, size, kind)` for a path — the per-file reconcile signal.
@@ -1162,11 +1183,9 @@ impl VectorStore {
         cache_config: Option<CacheConfig>,
     ) -> TldrResult<Self> {
         use crate::semantic::cache::EmbeddingCache;
-        use crate::semantic::chunker::chunk_code;
         use crate::semantic::embedder::Embedder;
-        use crate::semantic::enrichment::{build_embedding_text, enrich_chunks};
+        use crate::semantic::enrichment::enrich_chunks;
         use crate::semantic::index::{BYTES_PER_CHUNK, MAX_INDEX_SIZE, MAX_MEMORY_BYTES};
-        use crate::semantic::types::ChunkOptions;
         use std::time::Instant;
 
         let languages = options.languages.as_ref().map(|langs| {
@@ -1175,11 +1194,6 @@ impl VectorStore {
                 .filter_map(|s| crate::Language::from_extension(s))
                 .collect()
         });
-        let chunk_opts = ChunkOptions {
-            granularity: options.granularity,
-            languages,
-            ..Default::default()
-        };
         // Snapshot the corpus digest BEFORE chunking so it describes the source
         // state the vectors are built from (Codex review — TOCTOU). Computing it
         // AFTER the embed pass could capture a mid-build edit, persisting a digest
@@ -1217,12 +1231,53 @@ impl VectorStore {
         if let Some(m) = metrics.as_mut() {
             m.begin_phase("chunk");
         }
-        let chunk_result = chunk_code(root, &chunk_opts)?;
+        // File granularity is deliberate: structural planning needs every
+        // eligible file, including files with no legacy-extractor function and
+        // languages unsupported by `extract_function_chunks`.
+        let chunk_result = structural_source_files(root, languages)?;
         if let Some(m) = metrics.as_mut() {
             m.end_phase();
         }
-        let build_stats = chunk_result.stats;
-        let chunks = chunk_result.chunks;
+        let mut build_stats = chunk_result.stats;
+        let mut chunks = chunk_result.chunks;
+        for chunk in &mut chunks {
+            chunk.structure.repository_path = root_relative(root, &chunk.file_path);
+        }
+
+        // Planning needs the exact tokenizer configured by FastEmbed. A
+        // non-empty corpus therefore initializes one embedder before cache
+        // lookup and reuses it for misses; an empty corpus loads no model.
+        let mut embedder = if chunks.is_empty() {
+            None
+        } else {
+            if let Some(m) = metrics.as_mut() {
+                m.begin_phase("model_load");
+            }
+            let embedder = Embedder::new(options.model)?;
+            if embedder.token_budget().is_none() {
+                return Err(TldrError::Embedding(
+                    "structural planning requires FastEmbed tokenizer configuration".into(),
+                ));
+            }
+            if let Some(m) = metrics.as_mut() {
+                m.end_phase();
+            }
+            Some(embedder)
+        };
+        if let Some(embedder) = embedder.as_ref() {
+            if let Some(m) = metrics.as_mut() {
+                m.begin_phase("structural_plan");
+            }
+            chunks = crate::semantic::structural_planner::plan_chunks(
+                &chunks,
+                embedder.token_budget().expect("checked above"),
+                options.granularity,
+            )?;
+            if let Some(m) = metrics.as_mut() {
+                m.end_phase();
+            }
+        }
+        build_stats.chunks_created = chunks.len();
 
         // P0 guards — shared with SemanticIndex::build (same limits, not copies).
         if chunks.len() > MAX_INDEX_SIZE {
@@ -1249,7 +1304,53 @@ impl VectorStore {
             c.set_key_root(root);
         }
 
-        // Phase 1: content-addressed cache hits vs. misses.
+        // Compose every final model input before cache lookup. Cache-only clones
+        // hash the exact composed text; persisted chunks retain source hashes
+        // for source-change classification and snippet provenance.
+        let enriched_texts: Vec<String> = if chunks.is_empty() {
+            Vec::new()
+        } else if enrich {
+            let budget = embedder
+                .as_ref()
+                .and_then(Embedder::token_budget)
+                .expect("non-empty planned corpus has token budget");
+            enrich_chunks(&chunks, root)
+                .iter()
+                .map(|unit| crate::semantic::structural_planner::compose_enriched(unit, budget))
+                .collect::<Result<_, _>>()
+                .map_err(|e| TldrError::Embedding(format!("enriched composition failed: {e}")))?
+        } else {
+            Vec::new()
+        };
+        let raw_texts: Vec<String> = if chunks.is_empty() || enrich {
+            Vec::new()
+        } else {
+            let budget = embedder
+                .as_ref()
+                .and_then(Embedder::token_budget)
+                .expect("non-empty planned corpus has token budget");
+            chunks
+                .iter()
+                .map(|chunk| crate::semantic::structural_planner::compose_minimal(chunk, budget))
+                .collect::<Result<_, _>>()
+                .map_err(|error| TldrError::Embedding(format!("raw composition failed: {error}")))?
+        };
+        let cache_chunks: Vec<crate::semantic::types::CodeChunk> = chunks
+            .iter()
+            .enumerate()
+            .map(|(i, chunk)| {
+                let text = if enrich {
+                    &enriched_texts[i]
+                } else {
+                    &raw_texts[i]
+                };
+                let mut cache_chunk = chunk.clone();
+                cache_chunk.content_hash = format!("{:x}", md5::compute(text.as_bytes()));
+                cache_chunk
+            })
+            .collect();
+
+        // Phase 1: exact-final-input cache hits vs. misses.
         if let Some(m) = metrics.as_mut() {
             // Record the EFFECTIVE cache state (was a cache actually opened?),
             // not just the requested option — `use_cache` + `cache_config: None`
@@ -1259,7 +1360,7 @@ impl VectorStore {
         }
         let mut vectors: Vec<Vec<f32>> = vec![Vec::new(); chunks.len()];
         let mut uncached: Vec<usize> = Vec::new();
-        for (i, chunk) in chunks.iter().enumerate() {
+        for (i, chunk) in cache_chunks.iter().enumerate() {
             match cache.as_mut().and_then(|c| c.get(chunk, options.model)) {
                 Some(v) => vectors[i] = v,
                 None => uncached.push(i),
@@ -1271,45 +1372,18 @@ impl VectorStore {
             m.end_phase();
         }
 
-        // Compose the final corpus inputs independently of cache hit/miss. A
-        // metrics build accounts every one of these texts, including a fully
-        // warm cache; non-metrics warm builds still avoid loading the model.
-        let enriched_texts: Vec<String> = if enrich && (!uncached.is_empty() || metrics.is_some()) {
-            enrich_chunks(&chunks, root)
-                .iter()
-                .map(build_embedding_text)
-                .collect()
-        } else {
-            Vec::new()
-        };
         let corpus_texts: Vec<&str> = if metrics.is_some() {
-            chunks
-                .iter()
-                .enumerate()
-                .map(|(i, chunk)| {
-                    if enrich {
-                        enriched_texts[i].as_str()
-                    } else {
-                        chunk.content.as_str()
-                    }
-                })
-                .collect()
+            if enrich {
+                enriched_texts.iter().map(String::as_str).collect()
+            } else {
+                raw_texts.iter().map(String::as_str).collect()
+            }
         } else {
             Vec::new()
         };
-        let mut embedder = if !uncached.is_empty() || (metrics.is_some() && !chunks.is_empty()) {
-            if let Some(m) = metrics.as_mut() {
-                m.begin_phase("model_load");
-            }
-            let embedder = Embedder::new(options.model)?;
-            if let Some(m) = metrics.as_mut() {
-                m.end_phase();
-                m.set_token_stats(embedder.check_corpus(&corpus_texts));
-            }
-            Some(embedder)
-        } else {
-            None
-        };
+        if let (Some(m), Some(embedder)) = (metrics.as_mut(), embedder.as_ref()) {
+            m.set_token_stats(embedder.check_corpus(&corpus_texts));
+        }
 
         // Phase 2: embed the misses. Honor TLDR_ENRICH exactly like
         // SemanticIndex::build, so the store embeds the SAME text the index does
@@ -1336,7 +1410,7 @@ impl VectorStore {
                     let text = if enrich {
                         enriched_texts[i].as_str()
                     } else {
-                        chunks[i].content.as_str()
+                        raw_texts[i].as_str()
                     };
                     (i, text)
                 })
@@ -1366,7 +1440,7 @@ impl VectorStore {
             }
             for (i, embedding) in embeddings {
                 if let Some(c) = cache.as_mut() {
-                    c.put(&chunks[i], embedding.clone(), options.model);
+                    c.put(&cache_chunks[i], embedding.clone(), options.model);
                 }
                 vectors[i] = embedding;
             }
@@ -1435,9 +1509,9 @@ fn embed_schema_tag() -> String {
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
     if enrich {
-        "enriched-v2".to_string()
+        "enriched-v3-structural".to_string()
     } else {
-        "raw-v2".to_string()
+        "raw-v3-structural".to_string()
     }
 }
 
@@ -1509,6 +1583,7 @@ mod tests {
             line_start: 1,
             line_end: 10,
             content_hash: format!("hash-{id}"),
+            structure: Default::default(),
         }
     }
 
@@ -1591,6 +1666,7 @@ mod tests {
             line_start,
             line_end: line_start + 4,
             content_hash: hash.to_string(),
+            structure: Default::default(),
         }
     }
 
@@ -1945,6 +2021,7 @@ mod tests {
             content: content.to_string(),
             content_hash: format!("{:x}", md5::compute(content)),
             language: crate::Language::Rust,
+            structure: Default::default(),
         }
     }
 
@@ -1962,7 +2039,14 @@ mod tests {
         let k1 = identity_key(&chunk_identity("src/a.rs", Some("S"), Some("new"), 1));
         assert_ne!(k0, k1);
         // File-level chunk identity.
-        assert_eq!(chunk_identity("src/a.rs", None, None, 7), "src/a.rs#file");
+        assert_eq!(
+            chunk_identity("src/a.rs", None, None, 7),
+            "src/a.rs#file::7"
+        );
+        assert_ne!(
+            identity_key(&chunk_identity("src/a.rs", None, None, 0)),
+            identity_key(&chunk_identity("src/a.rs", None, None, 1))
+        );
     }
 
     #[test]
@@ -2035,6 +2119,36 @@ mod tests {
             ),
             "/elsewhere/x.rs"
         );
+    }
+
+    #[test]
+    fn structural_discovery_keeps_functionless_and_nonlegacy_languages() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("constants.rs"),
+            "pub const LIMIT: usize = 8;\n",
+        )
+        .unwrap();
+        std::fs::write(root.path().join("config.rb"), "SETTING = :enabled\n").unwrap();
+        std::fs::write(
+            root.path().join("module.ts"),
+            "export const setting: number = 8;\n",
+        )
+        .unwrap();
+
+        let result = structural_source_files(root.path(), None).unwrap();
+        let mut names = result
+            .chunks
+            .iter()
+            .filter_map(|chunk| chunk.file_path.file_name()?.to_str())
+            .collect::<Vec<_>>();
+        names.sort_unstable();
+
+        assert_eq!(names, ["config.rb", "constants.rs", "module.ts"]);
+        assert!(result
+            .chunks
+            .iter()
+            .all(|chunk| chunk.function_name.is_none()));
     }
 
     // ---- Integration / equivalence (step 5) -----------------------------------
@@ -2322,6 +2436,10 @@ mod tests {
                 crate::semantic::token_budget::TokenCheckStatus::Checked
             );
             assert_eq!(tokens.inputs_checked, report.chunks_total);
+            assert_eq!(
+                tokens.oversized, 0,
+                "structural planning must keep every final document in budget"
+            );
             report
         }
 

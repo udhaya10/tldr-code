@@ -316,6 +316,17 @@ impl IndexManager {
             return Ok(DeltaOutcome::NeedsRebuild);
         }
 
+        // Structural embedding schema v3 plans complete files, composes
+        // repository-relative context, and may split one source edit into
+        // several AST-derived documents.  The legacy delta path below only
+        // chunks this file into raw function bodies, so applying it would mix
+        // incompatible recipes in one store.  Until the delta planner is wired
+        // in TLDR-9bxa.6, every eligible source edit must rebuild.  Deletes are
+        // still safe because they only remove already-planned keys.
+        if !is_delete {
+            return Ok(DeltaOutcome::NeedsRebuild);
+        }
+
         // Deletion: `Notify` can't always distinguish edit from delete (§5). Use
         // the resident store as the source of truth (TLDR-ac0.6): apply_file_delete
         // is a clean no-op (`Ok(0)`, no FileRecord written) for a path it has no
@@ -596,6 +607,7 @@ mod tests {
                     line_start: 1,
                     line_end: 1,
                     content_hash: "seed-hash".to_string(),
+                    structure: Default::default(),
                 },
             )
             .unwrap();
@@ -649,6 +661,42 @@ mod tests {
                 path.display()
             );
         }
+    }
+
+    #[test]
+    fn structural_schema_v3_source_edit_requires_full_rebuild() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = write_file(tmp.path(), "src/lib.rs", b"fn changed() {}\n");
+        let manager = seeded_manager();
+        let before = manager
+            .store
+            .read()
+            .as_ref()
+            .and_then(|(_, store)| store.content_hash(1))
+            .map(str::to_owned);
+
+        let previous_enrich = std::env::var_os("TLDR_ENRICH");
+        std::env::remove_var("TLDR_ENRICH");
+        let outcome = manager.apply_delta(tmp.path(), &file);
+        match previous_enrich {
+            Some(value) => std::env::set_var("TLDR_ENRICH", value),
+            None => std::env::remove_var("TLDR_ENRICH"),
+        }
+        assert_eq!(
+            outcome.unwrap(),
+            DeltaOutcome::NeedsRebuild,
+            "schema v3 must not mix legacy raw delta vectors with planned documents"
+        );
+        let after = manager
+            .store
+            .read()
+            .as_ref()
+            .and_then(|(_, store)| store.content_hash(1))
+            .map(str::to_owned);
+        assert_eq!(
+            after, before,
+            "the rejected delta must not mutate the store"
+        );
     }
 
     #[test]

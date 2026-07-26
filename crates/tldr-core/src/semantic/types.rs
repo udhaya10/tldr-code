@@ -37,6 +37,7 @@ use crate::Language;
 ///     content: "fn process_data() { ... }".to_string(),
 ///     content_hash: "abc123".to_string(),
 ///     language: Language::Rust,
+///     structure: Default::default(),
 /// };
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -64,6 +65,50 @@ pub struct CodeChunk {
 
     /// Language of the code
     pub language: Language,
+
+    /// Structural planning metadata. Defaults preserve compatibility with
+    /// chunks serialized before structural planning was introduced.
+    #[serde(default)]
+    pub structure: ChunkStructure,
+}
+
+/// How a chunk relates to its extracted semantic root.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum StructuralRole {
+    /// Extracted semantic root retained intact.
+    #[default]
+    WholeRoot,
+    /// Signature/header duplicated to preserve parent context.
+    ParentSummary,
+    /// One or more adjacent AST/source segments.
+    AstChild,
+    /// Oversized indivisible region split by tokenizer offsets.
+    TokenizerFallback,
+    /// Malformed or unparseable region split by tokenizer offsets.
+    ParseFallback,
+}
+
+/// Deterministic structural provenance for a planned chunk.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct ChunkStructure {
+    /// Structural role of this chunk.
+    pub role: StructuralRole,
+    /// Named-child ordinals from the semantic root (never source line numbers).
+    pub ast_path: Vec<u32>,
+    /// Half-open byte range relative to the complete source file.
+    pub source_range: (usize, usize),
+    /// Explicit duplicated source range, if tokenizer windows overlap.
+    pub overlap_range: Option<(usize, usize)>,
+    /// Number of bytes intentionally duplicated from the previous chunk.
+    pub overlap_bytes: usize,
+    /// Deterministic repository-relative path used in composed context.
+    pub repository_path: String,
+    /// Qualified semantic symbol, if the AST exposes one.
+    pub qualified_symbol: Option<String>,
+    /// Signature/header retained as ancestor context.
+    pub signature: Option<String>,
 }
 
 /// A CodeChunk with its embedding vector
@@ -517,6 +562,7 @@ mod tests {
             content: content.clone(),
             content_hash: "abc123".to_string(),
             language: Language::Rust,
+            structure: Default::default(),
         };
 
         // THEN: Fields should be set correctly
@@ -539,6 +585,7 @@ mod tests {
             content: "def foo(): pass".to_string(),
             content_hash: "hash123".to_string(),
             language: Language::Python,
+            structure: Default::default(),
         };
 
         // WHEN: We serialize and deserialize

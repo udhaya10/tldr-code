@@ -88,6 +88,118 @@ impl TokenBudget {
             embedded_tokens: original_tokens.min(self.budget),
         })
     }
+
+    /// Return gap-free UTF-8-safe byte windows whose exact encoded count,
+    /// including special tokens, is at most `max_tokens`.
+    pub fn byte_windows(
+        &self,
+        text: &str,
+        max_tokens: usize,
+        overlap_tokens: usize,
+    ) -> Result<Vec<(usize, usize)>, TokenBudgetError> {
+        if text.is_empty() {
+            return Ok(Vec::new());
+        }
+        if max_tokens == 0 {
+            return Err(TokenBudgetError::ImpossibleBudget(max_tokens));
+        }
+        if self.token_count("")? > max_tokens {
+            return Err(TokenBudgetError::ImpossibleBudget(max_tokens));
+        }
+        let mut windows = Vec::new();
+        let boundaries: Vec<usize> = text
+            .char_indices()
+            .map(|(i, _)| i)
+            .chain(std::iter::once(text.len()))
+            .collect();
+        let mut start_index = 0;
+        while boundaries[start_index] < text.len() {
+            let start = boundaries[start_index];
+            let suffix = &text[start..];
+            if self.token_count(suffix)? <= max_tokens {
+                windows.push((start, text.len()));
+                break;
+            }
+
+            // Derive candidates from the tokenizer's own offsets rather than
+            // binary-searching character prefixes. BPE/WordPiece token counts
+            // are not monotonic as a prefix grows, so binary search can reject
+            // a later merged token that fits. Validate candidate prefixes with
+            // an exact re-encode because cutting can retokenize the last token.
+            let encoding = self
+                .tokenizer
+                .encode(suffix, true)
+                .map_err(|error| TokenBudgetError::Encode(error.to_string()))?;
+            let mut candidate_ends: Vec<usize> = encoding
+                .get_offsets()
+                .iter()
+                .filter_map(|&(_, end)| (end > 0).then_some(start + end))
+                .collect();
+            candidate_ends.sort_unstable();
+            candidate_ends.dedup();
+            let content_slots = max_tokens.saturating_sub(self.token_count("")?);
+            candidate_ends.truncate(content_slots.max(1));
+            let mut end_index = candidate_ends
+                .into_iter()
+                .rev()
+                .find(|&end| {
+                    self.token_count(&text[start..end])
+                        .is_ok_and(|n| n <= max_tokens)
+                })
+                .and_then(|end| boundaries.binary_search(&end).ok())
+                .unwrap_or(start_index);
+
+            // A tokenizer may expose no useful offset. Try exactly one UTF-8
+            // scalar as the bounded progress fallback. Any longer tokenizer
+            // merge that can fit is already represented by an encoding offset
+            // above; scanning every remaining scalar here turns giant literals
+            // into quadratic repeated tokenization.
+            if end_index <= start_index {
+                let next = start_index + 1;
+                if next < boundaries.len()
+                    && self.token_count(&text[start..boundaries[next]])? <= max_tokens
+                {
+                    end_index = next;
+                }
+            }
+            if end_index <= start_index {
+                return Err(TokenBudgetError::ImpossibleBudget(max_tokens));
+            }
+            let end = boundaries[end_index];
+            windows.push((start, end));
+            if end == text.len() {
+                break;
+            }
+            // Derive overlap from one exact encoding of the selected prefix.
+            // Re-encoding every preceding character is quadratic for giant
+            // literals that tokenize as one unit. Clamp below the window size
+            // so even pathological callers always advance.
+            let overlap = overlap_tokens.min(max_tokens.saturating_sub(1));
+            let next = if overlap == 0 {
+                end_index
+            } else {
+                let prefix = self
+                    .tokenizer
+                    .encode(&text[start..end], true)
+                    .map_err(|error| TokenBudgetError::Encode(error.to_string()))?;
+                prefix
+                    .get_offsets()
+                    .iter()
+                    .filter(|&&(offset_start, offset_end)| {
+                        offset_end > offset_start && offset_end <= end - start
+                    })
+                    .rev()
+                    .take(overlap)
+                    .last()
+                    .and_then(|&(offset_start, _)| {
+                        boundaries.binary_search(&(start + offset_start)).ok()
+                    })
+                    .unwrap_or(end_index)
+            };
+            start_index = next.max(start_index + 1).min(end_index);
+        }
+        Ok(windows)
+    }
 }
 
 /// Corpus-wide token-budget statistics, accumulated across all inputs an
@@ -166,6 +278,8 @@ pub enum TokenBudgetError {
     TokenizerConfig(String),
     /// Encoding an input failed.
     Encode(String),
+    /// Even one non-empty UTF-8 scalar plus tokenizer special tokens cannot fit.
+    ImpossibleBudget(usize),
 }
 
 impl std::fmt::Display for TokenBudgetError {
@@ -174,6 +288,7 @@ impl std::fmt::Display for TokenBudgetError {
             Self::MissingTruncation => write!(f, "FastEmbed tokenizer has no truncation limit"),
             Self::TokenizerConfig(e) => write!(f, "tokenizer configuration failed: {e}"),
             Self::Encode(e) => write!(f, "tokenizer encode failed: {e}"),
+            Self::ImpossibleBudget(n) => write!(f, "token budget {n} cannot fit one input unit"),
         }
     }
 }
@@ -183,6 +298,99 @@ impl std::error::Error for TokenBudgetError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn word_budget(limit: usize) -> TokenBudget {
+        use tokenizers::models::wordlevel::WordLevel;
+        use tokenizers::pre_tokenizers::whitespace::Whitespace;
+
+        let vocab = ["[UNK]", "alpha", "beta", "世界", "🌍"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, token)| (token.to_string(), index as u32))
+            .collect();
+        let model = WordLevel::builder()
+            .vocab(vocab)
+            .unk_token("[UNK]".to_string())
+            .build()
+            .unwrap();
+        let mut tokenizer = Tokenizer::new(model);
+        tokenizer.with_pre_tokenizer(Some(Whitespace));
+        tokenizer
+            .with_truncation(Some(tokenizers::TruncationParams {
+                max_length: limit,
+                ..Default::default()
+            }))
+            .unwrap();
+        TokenBudget::from_configured_tokenizer(&tokenizer).unwrap()
+    }
+
+    #[test]
+    fn byte_windows_are_exact_gap_free_and_unicode_safe() {
+        let budget = word_budget(3);
+        let text = "alpha   beta 世界 🌍 alpha";
+        let windows = budget.byte_windows(text, 3, 1).unwrap();
+        assert_eq!(windows.first().unwrap().0, 0);
+        assert_eq!(windows.last().unwrap().1, text.len());
+        for (index, &(start, end)) in windows.iter().enumerate() {
+            assert!(text.is_char_boundary(start));
+            assert!(text.is_char_boundary(end));
+            assert!(budget.token_count(&text[start..end]).unwrap() <= 3);
+            if index > 0 {
+                assert!(start <= windows[index - 1].1, "windows left a byte gap");
+            }
+        }
+    }
+
+    #[test]
+    fn byte_windows_clamp_pathological_overlap_and_advance() {
+        let budget = word_budget(3);
+        let text = "alpha beta 世界 🌍 alpha beta 世界 🌍";
+        let windows = budget.byte_windows(text, 3, usize::MAX).unwrap();
+
+        assert!(windows.len() > 1);
+        for pair in windows.windows(2) {
+            assert!(pair[1].0 > pair[0].0, "every window must advance");
+            assert!(pair[1].0 <= pair[0].1, "windows must remain gap-free");
+        }
+    }
+
+    #[test]
+    fn byte_windows_reject_an_impossible_nonempty_budget() {
+        let budget = word_budget(3);
+        assert!(matches!(
+            budget.byte_windows("alpha", 0, 0),
+            Err(TokenBudgetError::ImpossibleBudget(0))
+        ));
+    }
+
+    #[test]
+    fn byte_windows_handle_non_monotonic_wordpiece_prefix_counts() {
+        use tokenizers::models::wordpiece::WordPiece;
+
+        let vocab = [
+            ("[UNK]".to_string(), 0),
+            ("a".to_string(), 1),
+            ("##b".to_string(), 2),
+            ("abc".to_string(), 3),
+        ];
+        let model = WordPiece::builder()
+            .vocab(vocab)
+            .unk_token("[UNK]".to_string())
+            .build()
+            .unwrap();
+        let mut tokenizer = Tokenizer::new(model);
+        tokenizer
+            .with_truncation(Some(tokenizers::TruncationParams {
+                max_length: 1,
+                ..Default::default()
+            }))
+            .unwrap();
+        let budget = TokenBudget::from_configured_tokenizer(&tokenizer).unwrap();
+
+        assert_eq!(budget.token_count("ab").unwrap(), 2);
+        assert_eq!(budget.token_count("abc").unwrap(), 1);
+        assert_eq!(budget.byte_windows("abc", 1, 0).unwrap(), [(0, 3)]);
+    }
 
     #[test]
     fn token_stats_record_accumulates() {

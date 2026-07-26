@@ -20,9 +20,7 @@ fn dataset() -> HashMap<String, BenchEntry> {
             (
                 format!("src/file_{i}.rs:function_{i}:hash:model"),
                 BenchEntry {
-                    embedding: (0..384)
-                        .map(|j| ((i * 384 + j) as f32).sin())
-                        .collect(),
+                    embedding: (0..384).map(|j| ((i * 384 + j) as f32).sin()).collect(),
                     cached_at: 1_700_000_000 + i,
                     file_mtime: Some(1_700_000_000 + i),
                 },
@@ -53,17 +51,13 @@ fn bench_embedding_cache_formats(c: &mut Criterion) {
 
     let mut open = c.benchmark_group("embedding_cache_open");
     open.bench_function("json_owned_deserialize", |b| {
-        b.iter(|| {
-            serde_json::from_slice::<HashMap<String, BenchEntry>>(black_box(&json))
-                .unwrap()
-        })
+        b.iter(|| serde_json::from_slice::<HashMap<String, BenchEntry>>(black_box(&json)).unwrap())
     });
     open.bench_function("rkyv_validate_zero_copy", |b| {
         b.iter(|| {
-            rkyv::access::<
-                rkyv::Archived<HashMap<String, BenchEntry>>,
-                rkyv::rancor::Error,
-            >(black_box(&archived[..]))
+            rkyv::access::<rkyv::Archived<HashMap<String, BenchEntry>>, rkyv::rancor::Error>(
+                black_box(&archived[..]),
+            )
             .unwrap()
         })
     });
@@ -87,15 +81,14 @@ fn bench_embedding_cache_operations(c: &mut Criterion) {
             content: format!("fn function_{i}() {{}}"),
             content_hash: format!("hash-{i}"),
             language: Language::Rust,
+            structure: Default::default(),
         })
         .collect();
     let mut cache = EmbeddingCache::open(config.clone()).unwrap();
     for (i, chunk) in chunks.iter().enumerate() {
         cache.put(
             chunk,
-            (0..384)
-                .map(|j| ((i * 384 + j) as f32).sin())
-                .collect(),
+            (0..384).map(|j| ((i * 384 + j) as f32).sin()).collect(),
             EmbeddingModel::ArcticS,
         );
     }

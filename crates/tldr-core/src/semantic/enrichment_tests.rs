@@ -35,6 +35,7 @@ mod enrichment_tests {
             content: content.to_string(),
             content_hash: format!("{:x}", md5::compute(content)),
             language: Language::Rust,
+            structure: Default::default(),
         }
     }
 
@@ -48,6 +49,7 @@ mod enrichment_tests {
             content: content.to_string(),
             content_hash: format!("{:x}", md5::compute(content)),
             language: Language::Rust,
+            structure: Default::default(),
         }
     }
 
@@ -403,8 +405,7 @@ mod enrichment_tests {
 
         // Put entry and flush
         {
-            let mut cache =
-                crate::semantic::cache::EmbeddingCache::open(config.clone()).unwrap();
+            let mut cache = crate::semantic::cache::EmbeddingCache::open(config.clone()).unwrap();
             cache.put(&chunk, embedding.clone(), EmbeddingModel::ArcticM);
             cache.flush().unwrap();
         }
@@ -439,8 +440,7 @@ mod enrichment_tests {
         let embedding = vec![0.1_f32; 384]; // ArcticS-sized embedding
 
         {
-            let mut cache =
-                crate::semantic::cache::EmbeddingCache::open(config.clone()).unwrap();
+            let mut cache = crate::semantic::cache::EmbeddingCache::open(config.clone()).unwrap();
             cache.put(&chunk, embedding, EmbeddingModel::ArcticS);
             cache.flush().unwrap();
         }
@@ -468,8 +468,7 @@ mod enrichment_tests {
         // The file should NOT be valid JSON
         if cache_bin.exists() {
             let contents = fs::read(&cache_bin).unwrap();
-            let json_result: Result<serde_json::Value, _> =
-                serde_json::from_slice(&contents);
+            let json_result: Result<serde_json::Value, _> = serde_json::from_slice(&contents);
             assert!(
                 json_result.is_err(),
                 "Cache file should be binary (rkyv), not JSON"
@@ -494,8 +493,7 @@ mod enrichment_tests {
         };
 
         {
-            let mut cache =
-                crate::semantic::cache::EmbeddingCache::open(config.clone()).unwrap();
+            let mut cache = crate::semantic::cache::EmbeddingCache::open(config.clone()).unwrap();
 
             for i in 0..100 {
                 let chunk = create_test_chunk(
@@ -503,7 +501,9 @@ mod enrichment_tests {
                     &format!("fn func_{}() {{ /* body {} */ }}", i, i),
                 );
                 // 384-dim embedding (ArcticS size)
-                let embedding: Vec<f32> = (0..384).map(|j| (j as f32) * 0.001 + (i as f32) * 0.01).collect();
+                let embedding: Vec<f32> = (0..384)
+                    .map(|j| (j as f32) * 0.001 + (i as f32) * 0.01)
+                    .collect();
                 cache.put(&chunk, embedding, EmbeddingModel::ArcticS);
             }
 
@@ -563,7 +563,11 @@ mod enrichment_tests {
             result.chunks.len() >= 4,
             "Should have at least 4 chunks (one per function), got {}. Chunks: {:?}",
             result.chunks.len(),
-            result.chunks.iter().map(|c| (&c.file_path, &c.function_name)).collect::<Vec<_>>()
+            result
+                .chunks
+                .iter()
+                .map(|c| (&c.file_path, &c.function_name))
+                .collect::<Vec<_>>()
         );
 
         let func_names: HashSet<String> = result
@@ -666,29 +670,21 @@ mod enrichment_tests {
 
         // Pre-populate cache
         {
-            let mut cache =
-                crate::semantic::cache::EmbeddingCache::open(config.clone()).unwrap();
+            let mut cache = crate::semantic::cache::EmbeddingCache::open(config.clone()).unwrap();
             cache.put(&chunk1, embedding1.clone(), EmbeddingModel::ArcticM);
             cache.put(&chunk2, embedding2.clone(), EmbeddingModel::ArcticM);
             cache.flush().unwrap();
         }
 
         // WHEN: We query the cache for the same (unchanged) chunks
-        let mut cache =
-            crate::semantic::cache::EmbeddingCache::open(config).unwrap();
+        let mut cache = crate::semantic::cache::EmbeddingCache::open(config).unwrap();
 
         let hit1 = cache.get(&chunk1, EmbeddingModel::ArcticM);
         let hit2 = cache.get(&chunk2, EmbeddingModel::ArcticM);
 
         // THEN: Both should be cache hits (100% cache hit rate)
-        assert!(
-            hit1.is_some(),
-            "Unchanged chunk1 should be a cache hit"
-        );
-        assert!(
-            hit2.is_some(),
-            "Unchanged chunk2 should be a cache hit"
-        );
+        assert!(hit1.is_some(), "Unchanged chunk1 should be a cache hit");
+        assert!(hit2.is_some(), "Unchanged chunk2 should be a cache hit");
         assert_eq!(
             hit1.unwrap(),
             embedding1,
@@ -716,8 +712,7 @@ mod enrichment_tests {
 
         // Cache the original version
         {
-            let mut cache =
-                crate::semantic::cache::EmbeddingCache::open(config.clone()).unwrap();
+            let mut cache = crate::semantic::cache::EmbeddingCache::open(config.clone()).unwrap();
             cache.put(&chunk_v1, embedding.clone(), EmbeddingModel::ArcticM);
             cache.flush().unwrap();
         }
@@ -725,8 +720,7 @@ mod enrichment_tests {
         // WHEN: The source code changes (different content_hash)
         let chunk_v2 = create_test_chunk("foo", "fn foo() { return 2; /* modified */ }");
 
-        let mut cache =
-            crate::semantic::cache::EmbeddingCache::open(config).unwrap();
+        let mut cache = crate::semantic::cache::EmbeddingCache::open(config).unwrap();
         let result = cache.get(&chunk_v2, EmbeddingModel::ArcticM);
 
         // THEN: Should be a cache miss (content changed)

@@ -70,6 +70,7 @@ mod types_tests {
             content: content.clone(),
             content_hash: "abc123".to_string(),
             language: Language::Rust,
+            structure: Default::default(),
         };
 
         // THEN: Fields should be set correctly
@@ -92,6 +93,7 @@ mod types_tests {
             content: "def foo(): pass".to_string(),
             content_hash: "hash123".to_string(),
             language: Language::Python,
+            structure: Default::default(),
         };
 
         // WHEN: We serialize and deserialize

@@ -64,6 +64,7 @@ fn create_test_chunk() -> CodeChunk {
         content: "fn process_data() { println!(\"hello\"); }".to_string(),
         content_hash: "abc123".to_string(),
         language: Language::Rust,
+        structure: Default::default(),
     }
 }
 
@@ -184,6 +185,7 @@ fn test_code_chunk_file_level() {
         content: "// Entire file content".to_string(),
         content_hash: "file_hash".to_string(),
         language: Language::Rust,
+        structure: Default::default(),
     };
 
     assert!(chunk.function_name.is_none());
@@ -618,6 +620,7 @@ fn test_semantic_workflow_simulation() {
         content: "def process_data(data):\n    return data".to_string(),
         content_hash: "hash1".to_string(),
         language: Language::Python,
+        structure: Default::default(),
     };
 
     let _chunk2 = CodeChunk {
@@ -629,6 +632,7 @@ fn test_semantic_workflow_simulation() {
         content: "def analyze_data(data):\n    return data * 2".to_string(),
         content_hash: "hash2".to_string(),
         language: Language::Python,
+        structure: Default::default(),
     };
 
     // Create normalized embeddings (simulated)

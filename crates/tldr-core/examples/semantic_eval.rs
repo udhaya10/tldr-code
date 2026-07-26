@@ -301,6 +301,14 @@ const GOLD: &[(&str, &str, Option<&str>)] = &[
         "walker.rs",
         Some("respect_gitignore"),
     ),
+    // TLDR-9bxa.3: this intent occurs late in the oversized VectorStore::build
+    // implementation, beyond the old backend-truncated prefix. Structural child
+    // chunks must make it independently retrievable.
+    (
+        "sort embedding inputs by text length to collapse onnx tensor shapes",
+        "semantic/vector_store.rs",
+        Some("build"),
+    ),
 ];
 
 const TOP_K: usize = 10;

@@ -453,6 +453,11 @@ impl Embedder {
         self.config.dimensions()
     }
 
+    /// Exact immutable FastEmbed-derived budget used by structural planning.
+    pub(crate) fn token_budget(&self) -> Option<&crate::semantic::token_budget::TokenBudget> {
+        self.token_budget.as_ref()
+    }
+
     /// Check one input against the model token budget (TLDR-9bxa.2): record the
     /// outcome and warn on oversized. Report-only — fastembed performs the actual
     /// token-level truncation; this never changes the embedded vector. No-op if

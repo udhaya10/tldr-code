@@ -8,9 +8,7 @@ use std::path::Path;
 use tree_sitter::{Node, Tree};
 
 use crate::fs::tree::{collect_files, get_file_tree};
-use crate::types::{
-    CodeStructure, DefinitionInfo, FileStructure, Language, MethodInfo,
-};
+use crate::types::{CodeStructure, DefinitionInfo, FileStructure, Language, MethodInfo};
 use crate::TldrResult;
 
 use super::extract::is_upper_case_name;
@@ -2636,7 +2634,7 @@ fn classify_definition_node(kind: &str, _language: Language) -> (bool, bool) {
 
 /// Extract the name from a function/class definition node.
 /// Mirrors `search/enriched.rs::get_definition_name`.
-fn get_definition_node_name(node: Node, source: &str) -> Option<String> {
+pub(crate) fn get_definition_node_name(node: Node, source: &str) -> Option<String> {
     // Swift `init_declaration` has no `name` field — the node starts with the
     // literal token `init`. Mirror `extract_swift_methods` which also emits
     // the literal string "init".

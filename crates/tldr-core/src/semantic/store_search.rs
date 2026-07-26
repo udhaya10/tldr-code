@@ -359,6 +359,7 @@ mod tests {
                 line_start,
                 line_end,
                 content_hash: "h".to_string(),
+                structure: Default::default(),
             },
         }
     }
@@ -578,6 +579,7 @@ mod tests {
                     line_start: 1,
                     line_end: 2,
                     content_hash: "h".to_string(),
+                    structure: Default::default(),
                 },
             )
             .unwrap();

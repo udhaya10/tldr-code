@@ -156,9 +156,7 @@ impl ChunkStats {
             .count();
         let files_oversized = skipped
             .iter()
-            .filter(|file| {
-                file.reason.contains("too large") || file.reason.contains("exceeds")
-            })
+            .filter(|file| file.reason.contains("too large") || file.reason.contains("exceeds"))
             .count();
         Self {
             files_indexed,
@@ -347,10 +345,7 @@ pub fn chunk_file<P: AsRef<Path>>(path: P, options: &ChunkOptions) -> TldrResult
         skipped.push(SkippedFile {
             path: path.display().to_string(),
             reason: crate::fs::oversize::format_oversize_warning(
-                path,
-                size_bytes,
-                max_bytes,
-                is_autogen,
+                path, size_bytes, max_bytes, is_autogen,
             ),
         });
         return Ok(ChunkResult::from_parts(chunks, skipped));
@@ -659,11 +654,7 @@ fn is_binary_or_hidden(path: &Path) -> bool {
 }
 
 /// Create a file-level chunk
-fn create_file_chunk(
-    path: &Path,
-    content: &str,
-    language: Language,
-) -> CodeChunk {
+fn create_file_chunk(path: &Path, content: &str, language: Language) -> CodeChunk {
     // TLDR-9bxa.2: no silent character truncation — the chunk keeps its full
     // content; oversized inputs are detected and reported at the embed boundary
     // via the token budget (and left for fastembed's token-level truncation).
@@ -679,6 +670,7 @@ fn create_file_chunk(
         content: content.to_string(),
         content_hash: compute_hash(content),
         language,
+        structure: Default::default(),
     }
 }
 
@@ -739,6 +731,7 @@ fn extract_function_chunks(
                 content: func.content,
                 content_hash,
                 language,
+                structure: Default::default(),
             }
         })
         .collect()
@@ -1517,8 +1510,8 @@ fn bar() {}
 
     #[test]
     fn corpus_policy_accepts_cpp_extractor_fixture() {
-        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/extractor/test_cpp.cpp");
+        let fixture =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/extractor/test_cpp.cpp");
 
         assert!(fixture.is_file(), "missing C++ extractor fixture");
         assert!(CorpusPolicy::accepts_file(&fixture));

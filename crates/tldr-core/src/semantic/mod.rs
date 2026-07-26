@@ -73,6 +73,7 @@ pub use types::{
     CacheStats,
     ChunkGranularity,
     ChunkOptions,
+    ChunkStructure,
     // Core types
     CodeChunk,
     // Option types
@@ -85,6 +86,7 @@ pub use types::{
     // Result types
     SemanticSearchResult,
     SimilarityReport,
+    StructuralRole,
 };
 
 // Phase 2: Similarity
@@ -136,6 +138,8 @@ pub use build_metrics::{BuildMetrics, MetricsReport};
 // truncation with real model-tokenizer accounting.
 pub mod token_budget;
 pub use token_budget::{TokenBudget, TokenCheck, TokenStats};
+
+pub(crate) mod structural_planner;
 
 // TLDR-m01/zxb: store-backed semantic search — the ONLY search path (TLDR-lx7).
 // No SemanticIndex fallback. VectorStore works or the user gets an error.

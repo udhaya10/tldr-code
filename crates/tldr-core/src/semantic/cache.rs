@@ -83,9 +83,9 @@ fn embed_schema_version() -> &'static str {
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
     if enrich {
-        "enriched-v2"
+        "enriched-v3-structural"
     } else {
-        "raw-v2"
+        "raw-v3-structural"
     }
 }
 
@@ -169,7 +169,7 @@ impl CacheKey {
 
 /// Cached embedding entry
 #[derive(
-    Archive, Debug, Clone, PartialEq, RkyvDeserialize, RkyvSerialize, Serialize, Deserialize
+    Archive, Debug, Clone, PartialEq, RkyvDeserialize, RkyvSerialize, Serialize, Deserialize,
 )]
 struct CacheEntry {
     /// The embedding vector
@@ -384,9 +384,7 @@ impl EmbeddingCache {
         self.base.as_ref()?.root().get(key)
     }
 
-    fn deserialize_archived_entry(
-        entry: &rkyv::Archived<CacheEntry>,
-    ) -> TldrResult<CacheEntry> {
+    fn deserialize_archived_entry(entry: &rkyv::Archived<CacheEntry>) -> TldrResult<CacheEntry> {
         rkyv::deserialize::<CacheEntry, rkyv::rancor::Error>(entry).map_err(|e| {
             ValidatedMmap::parse_error(
                 Path::new("<embedding-cache>"),
@@ -395,11 +393,7 @@ impl EmbeddingCache {
         })
     }
 
-    fn entry_is_valid(
-        entry: &CacheEntry,
-        chunk: &CodeChunk,
-        ttl_days: u32,
-    ) -> bool {
+    fn entry_is_valid(entry: &CacheEntry, chunk: &CodeChunk, ttl_days: u32) -> bool {
         let now = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -521,9 +515,7 @@ impl EmbeddingCache {
                 (!self.tombstones.contains_key(&key_str))
                     .then(|| {
                         self.archived_entry(&key_str)
-                            .map(|entry| {
-                                entry.embedding.len() * std::mem::size_of::<f32>()
-                            })
+                            .map(|entry| entry.embedding.len() * std::mem::size_of::<f32>())
                     })
                     .flatten()
             });
@@ -571,13 +563,12 @@ impl EmbeddingCache {
         let mut merged: DiskMap = latest
             .as_ref()
             .map(|snapshot| {
-                rkyv::deserialize::<DiskMap, rkyv::rancor::Error>(snapshot.root())
-                    .map_err(|e| {
-                        ValidatedMmap::parse_error(
-                            Path::new("<embedding-cache>"),
-                            format!("cache snapshot deserialization failed: {e}"),
-                        )
-                    })
+                rkyv::deserialize::<DiskMap, rkyv::rancor::Error>(snapshot.root()).map_err(|e| {
+                    ValidatedMmap::parse_error(
+                        Path::new("<embedding-cache>"),
+                        format!("cache snapshot deserialization failed: {e}"),
+                    )
+                })
             })
             .transpose()?
             .unwrap_or_default();
@@ -619,10 +610,7 @@ impl EmbeddingCache {
 
         let write_result = (|| -> TldrResult<()> {
             let mut bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&merged).map_err(|e| {
-                ValidatedMmap::parse_error(
-                    &temp_file,
-                    format!("failed to serialize cache: {e}"),
-                )
+                ValidatedMmap::parse_error(&temp_file, format!("failed to serialize cache: {e}"))
             })?;
             let max_bytes = self.config.max_size_mb.saturating_mul(1024 * 1024);
             while bytes.len() > max_bytes {
@@ -647,23 +635,19 @@ impl EmbeddingCache {
                 for (key, _) in oldest.into_iter().take(remove_count) {
                     merged.remove(&key);
                 }
-                bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&merged).map_err(
-                    |e| {
-                        ValidatedMmap::parse_error(
-                            &temp_file,
-                            format!("failed to serialize compacted cache: {e}"),
-                        )
-                    },
-                )?;
-            }
-            rkyv::access::<ArchivedDiskMap, rkyv::rancor::Error>(&bytes[..]).map_err(
-                |e| {
+                bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&merged).map_err(|e| {
                     ValidatedMmap::parse_error(
                         &temp_file,
-                        format!("serialized cache validation failed: {e}"),
+                        format!("failed to serialize compacted cache: {e}"),
                     )
-                },
-            )?;
+                })?;
+            }
+            rkyv::access::<ArchivedDiskMap, rkyv::rancor::Error>(&bytes[..]).map_err(|e| {
+                ValidatedMmap::parse_error(
+                    &temp_file,
+                    format!("serialized cache validation failed: {e}"),
+                )
+            })?;
 
             let mut file = OpenOptions::new()
                 .create_new(true)
@@ -831,6 +815,7 @@ mod cache_tests {
             content: content.to_string(),
             content_hash: format!("{:x}", md5::compute(content)),
             language: Language::Rust,
+            structure: Default::default(),
         }
     }
 
@@ -905,6 +890,7 @@ mod cache_tests {
             content: content.to_string(),
             content_hash: format!("{:x}", md5::compute(content)),
             language: Language::Rust,
+            structure: Default::default(),
         };
 
         // Cold CLI: relative root + relative chunk path.
@@ -1105,6 +1091,7 @@ mod cache_tests {
             content: content.to_string(),
             content_hash: format!("{:x}", md5::compute(content)),
             language: Language::Rust,
+            structure: Default::default(),
         };
         let chunk2 = CodeChunk {
             file_path: PathBuf::from("test/bar.rs"),
@@ -1115,6 +1102,7 @@ mod cache_tests {
             content: content.to_string(),
             content_hash: format!("{:x}", md5::compute(content)), // Same hash!
             language: Language::Rust,
+            structure: Default::default(),
         };
 
         let embedding1 = vec![0.1, 0.2, 0.3];
@@ -1394,9 +1382,7 @@ mod cache_tests {
                 (
                     format!("src/file_{i}.rs:function_{i}:hash:model"),
                     CacheEntry {
-                        embedding: (0..384)
-                            .map(|j| ((i * 384 + j) as f32).sin())
-                            .collect(),
+                        embedding: (0..384).map(|j| ((i * 384 + j) as f32).sin()).collect(),
                         cached_at: 1_700_000_000 + i,
                         file_mtime: Some(1_700_000_000 + i),
                     },
@@ -1431,9 +1417,8 @@ mod cache_tests {
         for i in 0..1_000 {
             let chunk = create_test_chunk(&format!("f{i}"), &format!("fn f{i}() {{}}"));
             cache.put(&chunk, vec![i as f32; 384], EmbeddingModel::ArcticS);
-            let key =
-                CacheKey::from_chunk(&chunk, EmbeddingModel::ArcticS, Path::new(""))
-                    .to_key_string();
+            let key = CacheKey::from_chunk(&chunk, EmbeddingModel::ArcticS, Path::new(""))
+                .to_key_string();
             cache.overlay.get_mut(&key).unwrap().cached_at = now + i;
             newest = Some(chunk);
         }
