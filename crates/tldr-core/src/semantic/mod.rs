@@ -66,6 +66,9 @@
 
 pub mod types;
 
+pub mod fixed_shape;
+pub use fixed_shape::{FixedShapeBatch, FixedShapePlanner, SequenceBucket, TokenizedInput};
+
 // Re-export all public types for convenience
 pub use types::{
     store_dir_for,
