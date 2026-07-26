@@ -5,7 +5,7 @@ use std::hash::Hash;
 
 use serde::{Deserialize, Serialize};
 
-use crate::semantic::types::StructuralRole;
+use crate::semantic::types::{EmbeddingModel, StructuralRole};
 
 /// Persistent logical identity of a chunk across localized source edits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -315,6 +315,26 @@ pub struct EmbeddingRecipeId {
 }
 
 impl EmbeddingRecipeId {
+    /// Build the document-side recipe used by the current FastEmbed pipeline.
+    ///
+    /// The revision labels are deliberately explicit even while model and
+    /// tokenizer artifacts share the same registry identifier. A future
+    /// independent tokenizer or weights pin changes only its corresponding
+    /// field and therefore invalidates exactly the affected cache namespace.
+    pub fn for_document(model: EmbeddingModel, pipeline_version: impl Into<String>) -> Self {
+        let model_id = model.model_name().to_string();
+        Self {
+            pipeline_version: pipeline_version.into(),
+            model_id: model_id.clone(),
+            model_revision: format!("{model_id}@fastembed-registry-v1"),
+            tokenizer_id: model_id.clone(),
+            tokenizer_revision: format!("{model_id}@fastembed-tokenizer-v1"),
+            mode: EmbeddingMode::Document,
+            pooling_version: "fastembed-default-pooling-v1".to_string(),
+            normalization_version: "fastembed-l2-normalization-v1".to_string(),
+        }
+    }
+
     /// Hash every length-delimited recipe component into a stable fingerprint.
     pub fn fingerprint(&self) -> [u8; 32] {
         let mut hasher = blake3::Hasher::new();

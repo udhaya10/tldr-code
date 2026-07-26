@@ -1349,6 +1349,8 @@ impl VectorStore {
                 cache_chunk
             })
             .collect();
+        let cache_recipe =
+            crate::semantic::EmbeddingRecipeId::for_document(options.model, embed_schema_tag());
 
         // Phase 1: exact-final-input cache hits vs. misses.
         if let Some(m) = metrics.as_mut() {
@@ -1361,7 +1363,15 @@ impl VectorStore {
         let mut vectors: Vec<Vec<f32>> = vec![Vec::new(); chunks.len()];
         let mut uncached: Vec<usize> = Vec::new();
         for (i, chunk) in cache_chunks.iter().enumerate() {
-            match cache.as_mut().and_then(|c| c.get(chunk, options.model)) {
+            let document = if enrich {
+                enriched_texts[i].as_str()
+            } else {
+                raw_texts[i].as_str()
+            };
+            match cache
+                .as_mut()
+                .and_then(|c| c.get_document(chunk, document, &cache_recipe))
+            {
                 Some(v) => vectors[i] = v,
                 None => uncached.push(i),
             }
@@ -1440,7 +1450,12 @@ impl VectorStore {
             }
             for (i, embedding) in embeddings {
                 if let Some(c) = cache.as_mut() {
-                    c.put(&cache_chunks[i], embedding.clone(), options.model);
+                    let document = if enrich {
+                        enriched_texts[i].as_str()
+                    } else {
+                        raw_texts[i].as_str()
+                    };
+                    c.put_document(&cache_chunks[i], document, embedding.clone(), &cache_recipe);
                 }
                 vectors[i] = embedding;
             }
