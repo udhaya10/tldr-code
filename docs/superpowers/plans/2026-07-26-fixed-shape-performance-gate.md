@@ -41,4 +41,4 @@
 - [x] Run focused unit tests and formatting/lint checks.
 - [x] Run the complete all-model/all-shape benchmark and preserve its measured summary in Beads.
 - [x] Review the resulting diff for correctness and maintainability.
-- [ ] Commit, rebase, push Beads, push Git, and verify the branch is clean and synchronized.
+- [x] Commit, rebase, push Beads, push Git, and verify the branch is clean and synchronized.
