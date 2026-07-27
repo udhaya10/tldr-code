@@ -13,12 +13,12 @@ use super::redb::encode;
 use super::{
     ArtifactBatch, ArtifactEnvelope, ArtifactKey, ArtifactKind, ArtifactStore, ArtifactSubject,
     FileFacts, FileFactsParser, GenerationManifest, IngestionJob, IngestionScope, IngestionStage,
-    ProducerId, ProjectId, RevisionId,
+    ProducerId, ProjectCallEdgeFact, ProjectId, RevisionId,
 };
 
 const BATCH_FILES: usize = 32;
 const FILE_FACTS_PRODUCER: &str = "file-facts";
-const FILE_FACTS_VERSION: u32 = 1;
+const FILE_FACTS_VERSION: u32 = 3;
 
 /// Summary of a completed or resumed ingestion.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -75,6 +75,8 @@ impl IngestionEngine {
                     let revision = revisions.get(&relative);
                     !previous_keys.iter().any(|key| {
                         key.kind == ArtifactKind::FileFacts
+                            && key.producer
+                                == ProducerId::new(FILE_FACTS_PRODUCER, FILE_FACTS_VERSION)
                             && key.revision == *revision.expect("discovered file has revision")
                             && key.subject == ArtifactSubject::File(relative.clone())
                     })
@@ -91,6 +93,8 @@ impl IngestionEngine {
                         wanted.contains(&relative)
                             && !previous_keys.iter().any(|key| {
                                 key.kind == ArtifactKind::FileFacts
+                                    && key.producer
+                                        == ProducerId::new(FILE_FACTS_PRODUCER, FILE_FACTS_VERSION)
                                     && key.revision
                                         == *revision.expect("discovered file has revision")
                                     && key.subject == ArtifactSubject::File(relative.clone())
@@ -184,6 +188,44 @@ impl IngestionEngine {
         manifest_keys.sort_by_key(artifact_order);
         manifest_keys.dedup();
 
+        let call_dependencies = manifest_keys
+            .iter()
+            .filter(|key| key.kind == ArtifactKind::CallEdges)
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut project_calls = Vec::new();
+        for dependency in &call_dependencies {
+            let Some(artifact) = self.store.artifact(dependency)? else {
+                return Err(ingestion_error("call-edge dependency disappeared"));
+            };
+            let path = match &dependency.subject {
+                ArtifactSubject::File(path) => path.clone(),
+                _ => continue,
+            };
+            let calls: Vec<super::CallFact> = super::redb::decode(&artifact.payload)?;
+            project_calls.extend(calls.into_iter().map(|call| ProjectCallEdgeFact {
+                source_file: path.clone(),
+                caller: call.caller,
+                destination_file: path.clone(),
+                callee: call.callee,
+            }));
+        }
+        let graph_key = ArtifactKey {
+            project: self.project,
+            revision: source_revision,
+            subject: ArtifactSubject::Project,
+            kind: ArtifactKind::CallGraph,
+            producer: ProducerId::new("project-call-graph", 1),
+        };
+        let graph = ArtifactEnvelope::new(
+            graph_key.clone(),
+            generation,
+            call_dependencies,
+            encode(&project_calls)?,
+        );
+        manifest_keys.retain(|key| key.kind != ArtifactKind::CallGraph);
+        manifest_keys.push(graph_key);
+
         let validation_job = IngestionJob {
             id: job_id.clone(),
             target_generation: generation,
@@ -196,10 +238,11 @@ impl IngestionEngine {
         self.store.commit_batch(
             &ArtifactBatch {
                 generation,
-                artifacts: Vec::new(),
+                artifacts: vec![graph],
             },
             &validation_job,
         )?;
+        committed_artifacts += 1;
         self.store.publish(&GenerationManifest {
             generation,
             project: self.project,
@@ -245,6 +288,12 @@ impl IngestionEngine {
             vec![facts_key.clone()],
             encode(&facts.definitions)?,
         );
+        let references = ArtifactEnvelope::new(
+            key(ArtifactKind::References),
+            generation,
+            vec![facts_key.clone()],
+            encode(&facts.calls)?,
+        );
         let calls = ArtifactEnvelope::new(
             key(ArtifactKind::CallEdges),
             generation,
@@ -257,7 +306,7 @@ impl IngestionEngine {
             vec![facts_key],
             encode(&facts.semantic_chunks)?,
         );
-        Ok(vec![facts_artifact, symbols, calls, chunks])
+        Ok(vec![facts_artifact, symbols, references, calls, chunks])
     }
 }
 

@@ -374,6 +374,7 @@ mod tests {
     #[test]
     fn test_cache_stats_output_serialization() {
         let output = CacheStatsOutput {
+            artifact_store: None,
             salsa_stats: Some(SalsaCacheStats {
                 hits: 100,
                 misses: 10,
@@ -398,6 +399,7 @@ mod tests {
     #[test]
     fn test_cache_stats_output_empty() {
         let output = CacheStatsOutput {
+            artifact_store: None,
             salsa_stats: None,
             cache_files: None,
             message: Some("No cache statistics found".to_string()),

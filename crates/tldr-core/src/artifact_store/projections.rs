@@ -4,11 +4,12 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::types::{CallEdge, ProjectCallGraph};
-use crate::TldrResult;
+use crate::{CodeStructure, Language, TldrResult};
 
 use super::redb::decode;
 use super::{
-    ArtifactKind, ArtifactStore, CallFact, DefinitionFact, FileFacts, ImportFact, SemanticChunkFact,
+    ArtifactKind, ArtifactStore, DefinitionFact, FileFacts, ImportFact, ProjectCallEdgeFact,
+    SemanticChunkFact,
 };
 
 /// Immutable structural view assembled from one published generation.
@@ -16,6 +17,7 @@ use super::{
 pub struct GenerationSnapshot {
     generation: u64,
     files: HashMap<String, FileFacts>,
+    project_calls: Vec<ProjectCallEdgeFact>,
 }
 
 impl GenerationSnapshot {
@@ -37,7 +39,18 @@ impl GenerationSnapshot {
                 Ok((facts.path.clone(), facts))
             })
             .collect::<TldrResult<HashMap<_, _>>>()?;
-        Ok(Self { generation, files })
+        let project_calls = store
+            .artifacts(generation, ArtifactKind::CallGraph)?
+            .into_iter()
+            .next()
+            .map(|artifact| decode(&artifact.payload))
+            .transpose()?
+            .unwrap_or_default();
+        Ok(Self {
+            generation,
+            files,
+            project_calls,
+        })
     }
 
     /// Generation pinned by this snapshot.
@@ -91,22 +104,83 @@ impl GenerationSnapshot {
         })
     }
 
-    /// Compose the exact intra-file call edges captured by shared ingestion.
-    ///
-    /// Cross-file resolution remains a separate project-level producer; this
-    /// projection deliberately does not invent destination files.
+    /// Build the structure command's exact schema from stored file projections.
+    pub fn code_structure(
+        &self,
+        project: &Path,
+        root: &Path,
+        language: Language,
+        max_results: usize,
+    ) -> CodeStructure {
+        let relative_root = root
+            .strip_prefix(project)
+            .unwrap_or(root)
+            .to_string_lossy()
+            .replace('\\', "/");
+        let single_file = root.is_file();
+        let extensions = language.scan_extensions();
+        let mut files = self
+            .files
+            .values()
+            .filter(|facts| {
+                let under_root = if relative_root.is_empty() {
+                    true
+                } else if single_file {
+                    facts.path == relative_root
+                } else {
+                    facts.path == relative_root
+                        || facts.path.starts_with(&format!("{relative_root}/"))
+                };
+                under_root
+                    && Path::new(&facts.path)
+                        .extension()
+                        .and_then(|extension| extension.to_str())
+                        .is_some_and(|extension| {
+                            extensions
+                                .iter()
+                                .any(|candidate| candidate.trim_start_matches('.') == extension)
+                        })
+            })
+            .map(|facts| {
+                let mut structure = facts.structure.to_file_structure();
+                if !single_file && !relative_root.is_empty() {
+                    structure.path = structure
+                        .path
+                        .strip_prefix(&relative_root)
+                        .unwrap_or(&structure.path)
+                        .to_path_buf();
+                }
+                structure
+            })
+            .collect::<Vec<_>>();
+        files.sort_by(|left, right| left.path.cmp(&right.path));
+        if max_results > 0 {
+            files.truncate(max_results);
+        }
+        let empty = files.is_empty();
+        CodeStructure {
+            root: root.to_path_buf(),
+            language: (!empty).then_some(language),
+            files,
+            files_skipped: 0,
+            warnings: if empty {
+                vec!["No source files found in directory".into()]
+            } else {
+                Vec::new()
+            },
+        }
+    }
+
+    /// Compose the generation's project-level call graph artifact.
     pub fn intra_file_call_graph(&self) -> ProjectCallGraph {
         let mut graph = ProjectCallGraph::new();
-        for facts in self.files.values() {
-            let file = PathBuf::from(&facts.path);
-            for CallFact { caller, callee } in &facts.calls {
-                graph.add_edge(CallEdge {
-                    src_file: file.clone(),
-                    src_func: caller.clone(),
-                    dst_file: file.clone(),
-                    dst_func: callee.clone(),
-                });
-            }
+        for edge in &self.project_calls {
+            graph.add_edge(CallEdge {
+                src_file: PathBuf::from(&edge.source_file),
+                src_func: edge.caller.clone(),
+                dst_file: PathBuf::from(&edge.destination_file),
+                dst_func: edge.callee.clone(),
+            });
         }
         graph
     }

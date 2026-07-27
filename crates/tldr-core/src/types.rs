@@ -23,6 +23,7 @@ pub use arch_rules::*;
 pub use inheritance::*;
 pub use patterns::*;
 
+use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -37,7 +38,19 @@ use std::path::{Path, PathBuf};
 /// - P0: Python, TypeScript, JavaScript, Go (full support)
 /// - P1: Rust, Java (full support)
 /// - P2: C, C++, Ruby, Kotlin, Swift, C#, Scala, PHP, Lua, Luau, Elixir (basic support)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(
+    Archive,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    RkyvDeserialize,
+    RkyvSerialize,
+    Serialize,
+    Deserialize,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum Language {
     /// Python (.py)
@@ -1224,7 +1237,9 @@ pub struct CodeStructure {
 
 /// Definition-level information with line ranges and signatures.
 /// Extracted from tree-sitter AST, suitable for caching.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(
+    Archive, Debug, Clone, PartialEq, RkyvDeserialize, RkyvSerialize, Serialize, Deserialize,
+)]
 pub struct DefinitionInfo {
     /// Symbol name
     pub name: String,
@@ -1302,7 +1317,9 @@ pub struct FileStructure {
 /// schema-unification-v1 BUG-21: parallels each entry of
 /// [`FileStructure::methods`] with line + signature so consumers can
 /// distinguish same-name overloads.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(
+    Archive, Debug, Clone, RkyvDeserialize, RkyvSerialize, Serialize, Deserialize, PartialEq, Eq,
+)]
 pub struct MethodInfo {
     /// Method name (matches the corresponding `methods[i]` entry).
     pub name: String,
@@ -1323,7 +1340,7 @@ pub struct MethodInfo {
 }
 
 /// Import statement information (spec Section 2.1.4)
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Archive, Debug, Clone, RkyvDeserialize, RkyvSerialize, Serialize, Deserialize)]
 pub struct ImportInfo {
     /// Module or package being imported
     pub module: String,
@@ -1375,7 +1392,7 @@ pub struct ModuleInfo {
 /// field is still named `line_number` for source compatibility with
 /// the many call-sites that build it, but JSON output is `line` +
 /// `line_end`.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Archive, Debug, Clone, RkyvDeserialize, RkyvSerialize, Deserialize)]
 pub struct FunctionInfo {
     /// Name of the function
     pub name: String,
@@ -1457,7 +1474,7 @@ impl Serialize for FunctionInfo {
 ///
 /// schema-unification-v1 BUG-17: emits both `line_number` and `line` —
 /// see `FunctionInfo` doc for rationale.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Archive, Debug, Clone, RkyvDeserialize, RkyvSerialize, Deserialize)]
 pub struct ClassInfo {
     /// Name of the class or struct
     pub name: String,
@@ -1541,7 +1558,7 @@ impl Serialize for ClassInfo {
 /// - Static class variables
 ///
 /// schema-unification-v1 BUG-17: emits both `line_number` and `line`.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Archive, Debug, Clone, RkyvDeserialize, RkyvSerialize, Deserialize)]
 pub struct FieldInfo {
     /// Field name
     pub name: String,
@@ -1616,7 +1633,9 @@ impl Serialize for FieldInfo {
 }
 
 /// Intra-file call graph
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(
+    Archive, Debug, Clone, RkyvDeserialize, RkyvSerialize, Serialize, Deserialize, Default,
+)]
 pub struct IntraFileCallGraph {
     /// Map from function name to the list of functions it calls.
     ///
@@ -2634,7 +2653,7 @@ pub struct CfgInfo {
 }
 
 /// Basic block in CFG
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Archive, Debug, Clone, RkyvDeserialize, RkyvSerialize, Serialize, Deserialize)]
 pub struct CfgBlock {
     /// Unique identifier for this basic block
     pub id: usize,
@@ -2648,7 +2667,18 @@ pub struct CfgBlock {
 }
 
 /// Type of basic block
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(
+    Archive,
+    Debug,
+    Clone,
+    Copy,
+    RkyvDeserialize,
+    RkyvSerialize,
+    Serialize,
+    Deserialize,
+    PartialEq,
+    Eq,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum BlockType {
     /// Function entry point
@@ -2668,7 +2698,7 @@ pub enum BlockType {
 }
 
 /// Edge in CFG
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Archive, Debug, Clone, RkyvDeserialize, RkyvSerialize, Serialize, Deserialize)]
 pub struct CfgEdge {
     /// ID of the source basic block
     pub from: usize,
@@ -2682,7 +2712,18 @@ pub struct CfgEdge {
 }
 
 /// Type of CFG edge
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(
+    Archive,
+    Debug,
+    Clone,
+    Copy,
+    RkyvDeserialize,
+    RkyvSerialize,
+    Serialize,
+    Deserialize,
+    PartialEq,
+    Eq,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum EdgeType {
     /// True branch of a conditional
@@ -2725,7 +2766,7 @@ pub struct ComplexityMetrics {
 // =============================================================================
 
 /// Data flow graph information
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Archive, Debug, Clone, RkyvDeserialize, RkyvSerialize, Serialize, Deserialize)]
 pub struct DfgInfo {
     /// Name of the function this data flow graph represents
     pub function: String,
@@ -2738,7 +2779,7 @@ pub struct DfgInfo {
 }
 
 /// Variable reference in DFG
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Archive, Debug, Clone, RkyvDeserialize, RkyvSerialize, Serialize, Deserialize)]
 pub struct VarRef {
     /// Name of the variable being referenced
     pub name: String,
@@ -2757,7 +2798,9 @@ pub struct VarRef {
 }
 
 /// Context for language-specific variable reference patterns
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(
+    Archive, Debug, Clone, RkyvDeserialize, RkyvSerialize, Serialize, Deserialize, PartialEq, Eq,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum VarRefContext {
     // Python-specific
@@ -2804,7 +2847,18 @@ pub enum VarRefContext {
 }
 
 /// Type of variable reference
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(
+    Archive,
+    Debug,
+    Clone,
+    Copy,
+    RkyvDeserialize,
+    RkyvSerialize,
+    Serialize,
+    Deserialize,
+    PartialEq,
+    Eq,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum RefType {
     /// Variable definition (first assignment)
@@ -2816,7 +2870,7 @@ pub enum RefType {
 }
 
 /// Data flow edge (def-use chain)
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Archive, Debug, Clone, RkyvDeserialize, RkyvSerialize, Serialize, Deserialize)]
 pub struct DataflowEdge {
     /// Name of the variable flowing from definition to use
     pub var: String,
@@ -2850,7 +2904,7 @@ pub struct PdgInfo {
 }
 
 /// Node in PDG
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Archive, Debug, Clone, RkyvDeserialize, RkyvSerialize, Serialize, Deserialize)]
 pub struct PdgNode {
     /// Unique identifier for this PDG node
     pub id: usize,
@@ -2865,7 +2919,7 @@ pub struct PdgNode {
 }
 
 /// Edge in PDG
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Archive, Debug, Clone, RkyvDeserialize, RkyvSerialize, Serialize, Deserialize)]
 pub struct PdgEdge {
     /// ID of the source PDG node
     pub source_id: usize,
@@ -2878,7 +2932,18 @@ pub struct PdgEdge {
 }
 
 /// Type of dependence in PDG
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(
+    Archive,
+    Debug,
+    Clone,
+    Copy,
+    RkyvDeserialize,
+    RkyvSerialize,
+    Serialize,
+    Deserialize,
+    PartialEq,
+    Eq,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum DependenceType {
     /// Control dependence (execution of target depends on a branch decision)

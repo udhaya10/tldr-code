@@ -23,6 +23,7 @@ anyhow = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 # M5: Use preserve_order for consistent JSON serialization
 serde_json = { version = "1.0", features = ["preserve_order"] }
+ciborium = "=0.2.2"
 rkyv = "=0.8.17"
 memmap2 = "=0.9.9"
 redb = "=4.1.0"

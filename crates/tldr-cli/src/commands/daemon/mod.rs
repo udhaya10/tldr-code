@@ -33,7 +33,7 @@
 //! - `error`: Error types for daemon operations
 //! - `pid`: PID file locking for daemon singleton enforcement
 //! - `ipc`: IPC client/server for socket communication
-//! - `salsa`: Salsa-style incremental computation cache
+//! - `hot_cache`: Process-local bounded response memo
 //! - `daemon`: Main daemon process and command handlers
 //! - `start`: Daemon start command
 //! - `stop`: Daemon stop command
@@ -56,6 +56,7 @@ pub mod daemon_active;
 pub mod daemon_impl;
 pub mod daemon_registry;
 pub mod error;
+pub mod hot_cache;
 #[cfg(feature = "semantic")]
 pub mod index_manager;
 pub mod ipc;
@@ -65,7 +66,6 @@ pub mod pid;
 pub mod poke;
 pub mod query;
 pub(crate) mod rss;
-pub mod salsa;
 pub mod start;
 pub mod stats;
 pub mod status;
@@ -78,6 +78,7 @@ pub use daemon_impl as daemon;
 
 // Re-export core types for convenience
 pub use error::{DaemonError, DaemonResult};
+pub use hot_cache::{hash_args, hash_path, HotQueryKey, HotResponseCache, DEFAULT_MAX_ENTRIES};
 pub use ipc::{
     check_socket_alive, cleanup_socket, cleanup_socket_at, compute_socket_path, compute_tcp_port,
     read_command, send_command, send_raw_command, send_raw_command_with_read_timeout,
@@ -88,7 +89,6 @@ pub use pid::{
     check_stale_pid, cleanup_stale_pid, compute_hash, compute_pid_path, is_process_running,
     try_acquire_lock, PidGuard,
 };
-pub use salsa::{hash_args, hash_path, CacheEntry, QueryCache, QueryKey, DEFAULT_MAX_ENTRIES};
 pub use types::{
     // Statistics
     AllSessionsSummary,

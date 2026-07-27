@@ -3,9 +3,9 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
+use serde::de::DeserializeOwned;
+use serde::Serialize;
 
-use super::redb::{decode, encode};
 use super::{ArtifactEnvelope, ArtifactKey, ArtifactKind, ArtifactStore};
 use crate::{TldrError, TldrResult};
 
@@ -35,17 +35,7 @@ impl FunctionArtifactCoordinator {
         build: impl FnOnce() -> TldrResult<T>,
     ) -> TldrResult<T>
     where
-        T: Archive
-            + for<'a> RkyvSerialize<
-                rkyv::api::high::HighSerializer<
-                    rkyv::util::AlignedVec,
-                    rkyv::ser::allocator::ArenaHandle<'a>,
-                    rkyv::rancor::Error,
-                >,
-            >,
-        T::Archived: for<'a> rkyv::bytecheck::CheckBytes<
-                rkyv::api::high::HighValidator<'a, rkyv::rancor::Error>,
-            > + RkyvDeserialize<T, rkyv::api::high::HighDeserializer<rkyv::rancor::Error>>,
+        T: Serialize + DeserializeOwned,
     {
         if !matches!(
             key.kind,
@@ -56,7 +46,7 @@ impl FunctionArtifactCoordinator {
             ));
         }
         if let Some(existing) = self.store.artifact(&key)? {
-            return decode(&existing.payload);
+            return decode_cbor(&existing.payload);
         }
 
         let flight = {
@@ -68,7 +58,7 @@ impl FunctionArtifactCoordinator {
         };
         let _guard = flight.lock().expect("function flight poisoned");
         if let Some(existing) = self.store.artifact(&key)? {
-            return decode(&existing.payload);
+            return decode_cbor(&existing.payload);
         }
 
         let value = build()?;
@@ -80,10 +70,22 @@ impl FunctionArtifactCoordinator {
             key,
             generation,
             dependencies,
-            encode(&value)?,
+            encode_cbor(&value)?,
         ))?;
         Ok(value)
     }
+}
+
+fn encode_cbor<T: Serialize>(value: &T) -> TldrResult<Vec<u8>> {
+    let mut bytes = Vec::new();
+    ciborium::into_writer(value, &mut bytes)
+        .map_err(|error| function_error(format!("CBOR encode failed: {error}")))?;
+    Ok(bytes)
+}
+
+fn decode_cbor<T: DeserializeOwned>(bytes: &[u8]) -> TldrResult<T> {
+    ciborium::from_reader(bytes)
+        .map_err(|error| function_error(format!("CBOR decode failed: {error}")))
 }
 
 fn function_error(message: impl Into<String>) -> TldrError {

@@ -9,6 +9,7 @@ use anyhow::Result;
 use clap::Args;
 use serde::{Deserialize, Serialize};
 
+use tldr_core::artifact_store::GenerationSnapshot;
 use tldr_core::callgraph::cross_file_types::CallType;
 use tldr_core::callgraph::{build_project_call_graph_v2, BuildConfig};
 use tldr_core::Language;
@@ -182,6 +183,59 @@ pub(crate) fn build_call_graph_output(
         total_edges,
         shown_edges,
     })
+}
+
+/// Build the canonical output from one pinned artifact generation.
+pub(crate) fn call_graph_output_from_artifacts(
+    path: &Path,
+    detected_language: Option<Language>,
+    max_items: usize,
+    snapshot: &GenerationSnapshot,
+) -> CallGraphOutput {
+    let graph = snapshot.intra_file_call_graph();
+    let mut edges = graph
+        .edges()
+        .map(|edge| EdgeOutput {
+            src_file: edge.src_file.clone(),
+            src_func: edge.src_func.clone(),
+            dst_file: edge.dst_file.clone(),
+            dst_func: edge.dst_func.clone(),
+            call_type: CallType::Intra,
+        })
+        .collect::<Vec<_>>();
+    edges.sort_by(|left, right| {
+        (
+            &left.src_file,
+            &left.src_func,
+            &left.dst_file,
+            &left.dst_func,
+        )
+            .cmp(&(
+                &right.src_file,
+                &right.src_func,
+                &right.dst_file,
+                &right.dst_func,
+            ))
+    });
+    let total_edges = edges.len();
+    let truncated = total_edges > max_items;
+    edges.truncate(max_items);
+    let shown_edges = edges.len();
+    let mut nodes = snapshot
+        .definitions()
+        .map(|(file, definition)| format!("{file}:{}", definition.name))
+        .collect::<Vec<_>>();
+    nodes.sort();
+    nodes.dedup();
+    CallGraphOutput {
+        root: path.to_path_buf(),
+        language: detected_language,
+        nodes,
+        edges,
+        truncated,
+        total_edges,
+        shown_edges,
+    }
 }
 
 /// Render a [`CallGraphOutput`] to the requested format. Single renderer shared

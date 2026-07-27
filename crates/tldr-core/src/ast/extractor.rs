@@ -197,7 +197,17 @@ fn extract_file_structure(
     // node kinds — `class_specifier` is cpp-only, so the cpp extractor
     // returned ~0 classes).
     let (tree, source, _) = crate::ast::parser::parse_file_with_lang(path, Some(language))?;
+    extract_file_structure_from_tree(path, root, language, &tree, &source)
+}
 
+/// Project a file structure from a tree already parsed by shared ingestion.
+pub(crate) fn extract_file_structure_from_tree(
+    path: &Path,
+    root: &Path,
+    language: Language,
+    tree: &Tree,
+    source: &str,
+) -> TldrResult<FileStructure> {
     let relative_path = path.strip_prefix(root).unwrap_or(path).to_path_buf();
 
     // canonical-function-enumerator-v1: derive `functions` and `methods` from
@@ -206,8 +216,7 @@ fn extract_file_structure(
     // `health.summary.functions_analyzed` and `dead.total_functions` on the
     // same input. Class names still come from the legacy AST walk because
     // structure historically emits them as bare strings.
-    let module_info =
-        super::extract::extract_from_tree(&tree, &source, language, path, Some(root))?;
+    let module_info = super::extract::extract_from_tree(tree, source, language, path, Some(root))?;
     let functions: Vec<String> = module_info
         .functions
         .iter()
@@ -219,9 +228,9 @@ fn extract_file_structure(
         .flat_map(|c| c.methods.iter().map(|m| m.name.clone()))
         .collect();
 
-    let classes = extract_classes(&tree, &source, language);
-    let imports = extract_imports_from_tree(&tree, &source, language)?;
-    let definitions = extract_definitions(&tree, &source, language);
+    let classes = extract_classes(tree, source, language);
+    let imports = extract_imports_from_tree(tree, source, language)?;
+    let definitions = extract_definitions(tree, source, language);
 
     // schema-unification-v1 BUG-21: derive `method_infos` from `definitions`
     // (which already carry line + signature for kind="method" entries) so

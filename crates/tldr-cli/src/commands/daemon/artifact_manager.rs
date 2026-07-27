@@ -4,9 +4,11 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 
 use tldr_core::artifact_store::{
-    schema::STORE_FILE, ArtifactStore, GenerationSnapshot, IngestionEngine, IngestionReport,
-    IngestionScope, RedbArtifactStore,
+    schema::STORE_FILE, ArtifactKey, ArtifactKind, ArtifactStore, ArtifactSubject, FileFacts,
+    FunctionArtifactCoordinator, GenerationSnapshot, IngestionEngine, IngestionReport,
+    IngestionScope, ProducerId, ProjectId, RedbArtifactStore,
 };
+use tldr_core::{CfgInfo, DfgInfo, Language, TldrError};
 
 /// Lifecycle of the shared structural/semantic artifact generation.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -50,6 +52,7 @@ pub struct ArtifactManager {
     state: RwLock<ArtifactState>,
     hot: RwLock<Option<Arc<GenerationSnapshot>>>,
     writer: Mutex<()>,
+    functions: FunctionArtifactCoordinator,
 }
 
 impl ArtifactManager {
@@ -59,19 +62,27 @@ impl ArtifactManager {
         let store = Arc::new(RedbArtifactStore::open(
             &project.join(".tldr").join("store").join(STORE_FILE),
         )?);
-        let snapshot = GenerationSnapshot::active(store.as_ref())?.map(Arc::new);
+        // A producer/schema cutover may leave a previously complete generation
+        // whose payload no longer decodes. Treat it as cold and rebuild from
+        // source; never fall back to a legacy cache.
+        let snapshot = GenerationSnapshot::active(store.as_ref())
+            .ok()
+            .flatten()
+            .map(Arc::new);
         let state =
             snapshot
                 .as_ref()
                 .map_or(ArtifactState::Cold, |snapshot| ArtifactState::Ready {
                     generation: snapshot.generation(),
                 });
+        let functions = FunctionArtifactCoordinator::new(store.clone());
         Ok(Self {
             project,
             store,
             state: RwLock::new(state),
             hot: RwLock::new(snapshot),
             writer: Mutex::new(()),
+            functions,
         })
     }
 
@@ -87,6 +98,51 @@ impl ArtifactManager {
             .expect("artifact snapshot poisoned")
             .clone()
             .ok_or_else(|| self.state())
+    }
+
+    /// Read one file's facts from a pinned active generation.
+    pub fn file_facts(&self, file: &Path) -> Result<FileFacts, ArtifactState> {
+        let relative = file
+            .strip_prefix(&self.project)
+            .unwrap_or(file)
+            .to_string_lossy()
+            .replace('\\', "/");
+        self.snapshot()?
+            .file(relative)
+            .cloned()
+            .ok_or_else(|| self.state())
+    }
+
+    /// Load or persist one demand-driven CFG.
+    pub fn cfg(
+        &self,
+        file: &Path,
+        function: &str,
+        language: Language,
+    ) -> tldr_core::TldrResult<CfgInfo> {
+        let (facts_key, cfg_key) =
+            self.function_keys(file, function, ArtifactKind::Cfg, "cfg", 1)?;
+        let source = file.to_string_lossy().into_owned();
+        self.functions.materialize(cfg_key, vec![facts_key], || {
+            tldr_core::get_cfg_context(&source, function, language)
+        })
+    }
+
+    /// Load or persist one demand-driven DFG with an explicit CFG dependency.
+    pub fn dfg(
+        &self,
+        file: &Path,
+        function: &str,
+        language: Language,
+    ) -> tldr_core::TldrResult<DfgInfo> {
+        let (_, cfg_key) = self.function_keys(file, function, ArtifactKind::Cfg, "cfg", 1)?;
+        // Materialize the dependency first; unchanged requests hit redb.
+        let _ = self.cfg(file, function, language)?;
+        let (_, dfg_key) = self.function_keys(file, function, ArtifactKind::Dfg, "dfg", 1)?;
+        let source = file.to_string_lossy().into_owned();
+        self.functions.materialize(dfg_key, vec![cfg_key], || {
+            tldr_core::get_dfg_context(&source, function, language)
+        })
     }
 
     /// Start or resume a full generation, reusing unchanged file artifacts.
@@ -147,5 +203,34 @@ impl ArtifactManager {
                 Err(error)
             }
         }
+    }
+
+    fn function_keys(
+        &self,
+        file: &Path,
+        function: &str,
+        kind: ArtifactKind,
+        producer: &str,
+        version: u32,
+    ) -> tldr_core::TldrResult<(ArtifactKey, ArtifactKey)> {
+        let facts = self.file_facts(file).map_err(|state| {
+            TldrError::DaemonError(format!("artifact generation is not ready: {state:?}"))
+        })?;
+        let project = ProjectId::for_root(&self.project)?;
+        let facts_key = ArtifactKey {
+            project,
+            revision: facts.revision,
+            subject: ArtifactSubject::File(facts.path.clone()),
+            kind: ArtifactKind::FileFacts,
+            producer: ProducerId::new("file-facts", 3),
+        };
+        let key = ArtifactKey {
+            project,
+            revision: facts.revision,
+            subject: ArtifactSubject::Symbol(format!("{}::{function}", facts.path)),
+            kind,
+            producer: ProducerId::new(producer, version),
+        };
+        Ok((facts_key, key))
     }
 }

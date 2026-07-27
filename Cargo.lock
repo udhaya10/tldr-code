@@ -3897,6 +3897,7 @@ dependencies = [
  "bitvec",
  "blake3",
  "chrono",
+ "ciborium",
  "criterion",
  "dirs 5.0.1",
  "dunce",

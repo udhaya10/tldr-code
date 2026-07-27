@@ -14,7 +14,7 @@
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
@@ -25,17 +25,12 @@ use tokio::sync::{watch, RwLock};
 use super::activity::{ActivityTracker, Source};
 use super::artifact_manager::ArtifactManager;
 use super::error::{DaemonError, DaemonResult};
+use super::hot_cache::{hash_path, HotQueryKey, HotResponseCache};
 use super::ipc::{read_command, send_response, IpcListener, IpcStream};
-use super::salsa::{hash_bytes, hash_path, QueryCache, QueryKey};
 use super::types::{
     AllSessionsSummary, DaemonCommand, DaemonConfig, DaemonResponse, DaemonStatus, HookStats,
     SalsaCacheStats, SessionStats, HOOK_FLUSH_THRESHOLD,
 };
-use tldr_core::callgraph::cross_file_types::FileIR;
-use tldr_core::callgraph::{
-    build_indices_parallel, compose_call_graph_v2, scan_project_files, BuildConfig,
-};
-use tldr_core::types::{CallEdge, ProjectCallGraph, WorkspaceConfig};
 
 #[cfg(feature = "semantic")]
 use super::index_manager::IndexManager;
@@ -50,10 +45,9 @@ use tldr_core::{
     detect_smells_with_walker_opts, SmellsWalkerOpts,
 };
 use tldr_core::{
-    architecture_analysis, change_impact, detect_or_parse_language, extract_file_with_lang,
-    find_importers, get_cfg_context, get_code_structure, get_dfg_context, get_file_tree,
-    get_imports, get_relevant_context, get_slice, impact_analysis, search as tldr_search, FileTree,
-    Language, NodeType, SliceDirection,
+    architecture_analysis, change_impact, detect_or_parse_language, find_importers, get_file_tree,
+    get_relevant_context, get_slice, impact_analysis, search as tldr_search, Language,
+    SliceDirection,
 };
 
 // =============================================================================
@@ -84,14 +78,6 @@ pub(crate) fn resolve_language(language: Option<Language>) -> Language {
     language.unwrap_or(Language::Python)
 }
 
-/// Count the number of file nodes in a FileTree recursively.
-fn count_tree_files(tree: &FileTree) -> usize {
-    match tree.node_type {
-        NodeType::File => 1,
-        NodeType::Dir => tree.children.iter().map(count_tree_files).sum(),
-    }
-}
-
 /// Result of applying one changed file via [`TLDRDaemon::process_dirty_file`].
 /// The IPC `Notify` handler turns this into a `NotifyResponse`; the in-daemon
 /// watcher worker (TLDR-ac0.2) discards it (no client to answer).
@@ -115,103 +101,12 @@ impl Drop for ClearFlagOnDrop {
     }
 }
 
-/// TLDR-iqr: per-file FileIR memo — daemon RAM only (ADR-8 stays closed; the
-/// content-hash key means a disk layer could slot beneath later without
-/// interface change). Key = (language, absolute file path); value =
-/// (content_hash, parsed FileIR).
-type FileIrMemo = DashMap<(String, PathBuf), (u64, Arc<FileIR>)>;
-
-/// TLDR-iqr: memoized whole-project graph build. Mirrors
-/// `tldr_core::build_project_call_graph`'s wrapper semantics exactly
-/// (workspace discovery, use_type_resolution=true) but re-parses ONLY files
-/// whose content hash misses the memo; everything else composes from
-/// memoized FileIRs via the parse/compose seam. The content-hash check at
-/// use time is the drift-proof backstop (kkt/1qv lesson); watcher eviction
-/// in `process_dirty_file` is the eager path.
-fn build_project_call_graph_memoized(
-    root: &Path,
-    lang: Language,
-    memo: &FileIrMemo,
-) -> Result<ProjectCallGraph, String> {
-    let mut config = BuildConfig {
-        language: lang.as_str().to_string(),
-        respect_ignore: true,
-        ..Default::default()
-    };
-    config.use_type_resolution = true;
-    let discovered = WorkspaceConfig::discover(root);
-    if let Some(ws) = discovered.as_ref() {
-        if !ws.roots.is_empty() {
-            config.use_workspace_config = true;
-            config.workspace_roots = ws.roots.clone();
-        }
-    }
-
-    let scanned = scan_project_files(root, &config.language, &config).map_err(|e| e.to_string())?;
-
-    let mut file_irs = Vec::with_capacity(scanned.len());
-    for s in &scanned {
-        let memo_key = (config.language.clone(), s.path.clone());
-        let content_hash = std::fs::read(&s.path).ok().map(|b| hash_bytes(&b));
-        match content_hash {
-            Some(h) => {
-                if let Some(entry) = memo.get(&memo_key) {
-                    if entry.0 == h {
-                        file_irs.push(entry.1.as_ref().clone());
-                        continue;
-                    }
-                }
-            }
-            // TLDR-985: unreadable (deleted mid-build / perms) — drop any stale
-            // memo entry so we never retain a FileIR for a file we can't read.
-            None => {
-                memo.remove(&memo_key);
-            }
-        }
-        // Miss / changed / unreadable: parse this ONE file through the
-        // standard parse path (read-error handling identical to full build).
-        let single = std::slice::from_ref(s);
-        let (_f, _c, mut irs) = build_indices_parallel(single, root, &config.language, &config);
-        if let Some(ir1) = irs.pop() {
-            if let Some(h) = content_hash {
-                memo.insert(memo_key, (h, Arc::new(ir1.clone())));
-            }
-            file_irs.push(ir1);
-        }
-    }
-
-    // TLDR-985: reconcile the memo against the live file set. Files of THIS
-    // language that vanished (deleted/renamed without a Notify, or never
-    // notified because the watcher is off) are pruned so the memo stays
-    // O(live files) rather than growing with project churn. Entries for other
-    // languages are left untouched (different builds populate them).
-    let scanned_set: std::collections::HashSet<PathBuf> =
-        scanned.iter().map(|s| s.path.clone()).collect();
-    memo.retain(|k, _| k.0 != config.language || scanned_set.contains(&k.1));
-
-    let ir = compose_call_graph_v2(root, &config, file_irs).map_err(|e| e.to_string())?;
-    let mut graph = ProjectCallGraph::new();
-    for edge in ir.edges {
-        graph.add_edge(CallEdge {
-            src_file: edge.src_file,
-            src_func: edge.src_func,
-            dst_file: edge.dst_file,
-            dst_func: edge.dst_func,
-        });
-    }
-    Ok(graph)
-}
-
 /// The background warm build (TLDR-utj.7). Carries CLONED handles of the
 /// daemon components it needs rather than the daemon itself: the Warm handler
 /// only has `&self`, and the detached task must be `'static`.
 struct WarmJob {
     project: PathBuf,
-    lang: Language,
     artifact_manager: Arc<ArtifactManager>,
-    cache: Arc<QueryCache>,
-    /// TLDR-iqr: FileIR memo handle so the warm build populates it.
-    file_ir_memo: Arc<FileIrMemo>,
     indexed_files: Arc<RwLock<usize>>,
     #[cfg(feature = "semantic")]
     semantic_store: Arc<IndexManager>,
@@ -234,6 +129,7 @@ impl WarmJob {
         let manager = Arc::clone(&self.artifact_manager);
         match tokio::task::spawn_blocking(move || manager.warm()).await {
             Ok(Ok(report)) => {
+                *self.indexed_files.write().await = self.artifact_manager.stats().hot_files;
                 if report.parsed_files == 0 {
                     warmed.push("artifact_store (cached)");
                 } else if report.resumed {
@@ -246,95 +142,7 @@ impl WarmJob {
             Err(error) => errors.push(format!("artifact_store: {error}")),
         }
 
-        // Legacy result memoization remains memory-only during the cutover.
-        // Durable authority is the generation above, never these JSON-shaped
-        // transport values.
-        // 2. Warm call graph
-        let calls_key = QueryKey::new(
-            "calls",
-            hash_str_args(&[&self.project.to_string_lossy()]),
-            self.lang,
-        );
-        if self.cache.get::<serde_json::Value>(&calls_key).is_some() {
-            warmed.push("call_graph (cached)");
-        } else {
-            // TLDR-iqr: memoized build, off the async runtime (Codex r3 Q8 —
-            // the old direct call blocked the runtime for the whole build).
-            let project = self.project.clone();
-            let lang = self.lang;
-            let memo = Arc::clone(&self.file_ir_memo);
-            let built = tokio::task::spawn_blocking(move || {
-                build_project_call_graph_memoized(&project, lang, &memo)
-            })
-            .await
-            .unwrap_or_else(|e| Err(format!("warm build task failed: {e}")));
-            match built {
-                Ok(result) => {
-                    // TLDR-9ae (F1): insert the native result directly — insert()
-                    // serializes once via to_vec. The former to_value() built a
-                    // whole-project JSON DOM (5-15x the JSON text size) that
-                    // coexisted with `result` AND the serialized bytes, a major
-                    // contributor to the measured 22GB warm plateau (TLDR-k8s).
-                    //
-                    // TLDR-iqr freshness: register against the PROJECT ROOT
-                    // hash — process_dirty_file invalidates it on any save, so
-                    // project-level answers can no longer go permanently stale
-                    // (they previously registered vec![] = uninvalidatable).
-                    self.cache
-                        .insert(calls_key, &result, vec![hash_path(&self.project)]);
-                    warmed.push("call_graph");
-                }
-                Err(e) => errors.push(format!("call_graph: {}", e)),
-            }
-        }
-
-        // 2. Warm code structure
-        let struct_key = QueryKey::new(
-            "structure",
-            hash_str_args(&[&self.project.to_string_lossy(), ""]),
-            self.lang,
-        );
-        if self.cache.get::<serde_json::Value>(&struct_key).is_some() {
-            warmed.push("structure (cached)");
-        } else {
-            match get_code_structure(&self.project, self.lang, 0) {
-                Ok(result) => {
-                    // TLDR-9ae (F1): no to_value DOM — see call_graph step above.
-                    // TLDR-iqr freshness: root-hash registration (see call_graph).
-                    self.cache
-                        .insert(struct_key, &result, vec![hash_path(&self.project)]);
-                    warmed.push("structure");
-                }
-                Err(e) => errors.push(format!("structure: {}", e)),
-            }
-        }
-
-        // 3. Warm file tree
-        let tree_key = QueryKey::new(
-            "tree",
-            // Match the Tree handler's default-flags key (TLDR-7pp.1.5):
-            // [root, extensions="", include_hidden="false"], language-agnostic.
-            hash_str_args(&[&self.project.to_string_lossy(), "", "false"]),
-            resolve_language(None),
-        );
-        if self.cache.get::<serde_json::Value>(&tree_key).is_some() {
-            warmed.push("file_tree (cached)");
-        } else {
-            match get_file_tree(&self.project, None, true) {
-                Ok(result) => {
-                    let file_count = count_tree_files(&result);
-                    // TLDR-9ae (F1): no to_value DOM — see call_graph step above.
-                    // TLDR-iqr freshness: root-hash registration (see call_graph).
-                    self.cache
-                        .insert(tree_key, &result, vec![hash_path(&self.project)]);
-                    *self.indexed_files.write().await = file_count;
-                    warmed.push("file_tree");
-                }
-                Err(e) => errors.push(format!("file_tree: {}", e)),
-            }
-        }
-
-        // 4. Warm the vector store: load from disk (near-instant if fresh)
+        // 2. Warm the vector store: load from disk (near-instant if fresh)
         //    or build+save on miss. Uses the project-config model so a later
         //    query with the same model hits the resident store
         //    (TLDR-atc / TLDR-zxb).
@@ -380,7 +188,7 @@ pub struct TLDRDaemon {
     artifact_manager: Arc<ArtifactManager>,
     /// Salsa-style query cache. Behind `Arc` so the detached warm-build task
     /// (TLDR-utj.7) can own a handle without holding the whole daemon.
-    cache: Arc<QueryCache>,
+    cache: Arc<HotResponseCache>,
     /// Per-session statistics
     sessions: DashMap<String, SessionStats>,
     /// Per-hook activity statistics
@@ -401,8 +209,6 @@ pub struct TLDRDaemon {
     warm_in_flight: Arc<AtomicBool>,
     /// Number of indexed files (for status reporting)
     indexed_files: Arc<RwLock<usize>>,
-    /// TLDR-iqr: per-file FileIR memo (content-hash keyed). RAM-only.
-    file_ir_memo: Arc<FileIrMemo>,
     /// Resident vector store with read/write split (TLDR-ac0.1). Concurrent
     /// queries take a shared read lock; build and invalidate take a write lock.
     #[cfg(feature = "semantic")]
@@ -427,7 +233,7 @@ impl TLDRDaemon {
             start_time: Instant::now(),
             status: Arc::new(RwLock::new(DaemonStatus::Initializing)),
             artifact_manager,
-            cache: Arc::new(QueryCache::with_defaults()),
+            cache: Arc::new(HotResponseCache::with_defaults()),
             sessions: DashMap::new(),
             hooks: DashMap::new(),
             dirty_files: Arc::new(RwLock::new(HashSet::new())),
@@ -436,27 +242,8 @@ impl TLDRDaemon {
             activity: Arc::new(ActivityTracker::new()),
             warm_in_flight: Arc::new(AtomicBool::new(false)),
             indexed_files: Arc::new(RwLock::new(0)),
-            file_ir_memo: Arc::new(FileIrMemo::new()),
             #[cfg(feature = "semantic")]
             semantic_store: Arc::new(IndexManager::new()),
-        }
-    }
-
-    /// TLDR-iqr: run the memoized graph build off the async runtime
-    /// (Codex r3 Q8: the old direct calls blocked the runtime per build).
-    async fn build_graph_memoized_blocking(
-        &self,
-        root: PathBuf,
-        lang: Language,
-    ) -> Result<ProjectCallGraph, String> {
-        let memo = Arc::clone(&self.file_ir_memo);
-        match tokio::task::spawn_blocking(move || {
-            build_project_call_graph_memoized(&root, lang, &memo)
-        })
-        .await
-        {
-            Ok(r) => r,
-            Err(e) => Err(format!("graph build task failed: {e}")),
         }
     }
 
@@ -822,9 +609,9 @@ impl TLDRDaemon {
             } => {
                 let max = max_results.unwrap_or(100);
                 // Search is regex-based and language-agnostic; tag with the
-                // resolve_language default so QueryKey is well-formed without
+                // resolve_language default so HotQueryKey is well-formed without
                 // discriminating across languages.
-                let key = QueryKey::new(
+                let key = HotQueryKey::new(
                     "search",
                     hash_str_args(&[&pattern, &max.to_string()]),
                     resolve_language(None),
@@ -852,35 +639,27 @@ impl TLDRDaemon {
                 session: _,
                 language,
             } => {
-                let file_str = file.to_string_lossy().to_string();
-                // Mirror extract.rs compute_local: the resolved language hint
-                // wins; cache key is tagged with the language actually used so
-                // two files with the same name in different language
-                // sub-projects (or the same file with/without --lang) do not
-                // collide.
-                let key_lang = language.unwrap_or_else(|| {
-                    detect_or_parse_language(None, &file).unwrap_or(Language::Python)
-                });
-                let key = QueryKey::new(
-                    "extract",
-                    hash_str_args(&[&file_str, &format!("{language:?}")]),
-                    key_lang,
-                );
-                if let Some(cached) = self.cache.get::<serde_json::Value>(&key) {
-                    return DaemonResponse::Result(cached);
-                }
-                let file_hash = super::salsa::hash_path(&file);
-                // base_path = None to match extract.rs compute_local EXACTLY
-                // (previously the daemon passed Some(self.project), diverging).
-                match extract_file_with_lang(&file, None, language) {
-                    Ok(result) => {
-                        let val = serde_json::to_value(&result).unwrap_or_default();
-                        self.cache.insert(key, &val, vec![file_hash]);
-                        DaemonResponse::Result(val)
+                match self.artifact_manager.file_facts(&file) {
+                    Ok(facts) => {
+                        if language.is_some_and(|requested| requested != facts.module.language) {
+                            return DaemonResponse::Error {
+                                status: "error".to_string(),
+                                error: format!(
+                                    "stored file facts use {}, requested {}",
+                                    facts.module.language,
+                                    language.expect("checked Some")
+                                ),
+                            };
+                        }
+                        let mut module = facts.module.to_module_info();
+                        // Match the one-shot extraction surface, which reports
+                        // the caller's path rather than the store-relative key.
+                        module.file_path = file;
+                        DaemonResponse::Result(serde_json::to_value(module).unwrap_or_default())
                     }
-                    Err(e) => DaemonResponse::Error {
-                        status: "error".to_string(),
-                        error: e.to_string(),
+                    Err(state) => DaemonResponse::Error {
+                        status: "not_ready".to_string(),
+                        error: format!("artifact generation is not ready: {state:?}"),
                     },
                 }
             }
@@ -895,7 +674,7 @@ impl TLDRDaemon {
                 // File tree is language-agnostic; tag with default language.
                 // TLDR-7pp.1.5: extensions + include_hidden are part of the key
                 // so flag-varied requests don't collide.
-                let key = QueryKey::new(
+                let key = HotQueryKey::new(
                     "tree",
                     hash_str_args(&[
                         &root_str,
@@ -941,8 +720,6 @@ impl TLDRDaemon {
                 lang,
                 max_results,
             } => {
-                let path_str = path.to_string_lossy().to_string();
-                let lang_str = lang.as_deref().unwrap_or("");
                 let language = match detect_or_parse_language(lang.as_deref(), &path) {
                     Ok(l) => l,
                     Err(e) => {
@@ -952,36 +729,26 @@ impl TLDRDaemon {
                         }
                     }
                 };
-                // TLDR-7pp.1.5: max_results is part of the key so flag-varied
-                // requests don't collide.
-                let key = QueryKey::new(
-                    "structure",
-                    hash_str_args(&[&path_str, lang_str, &max_results.to_string()]),
-                    language,
-                );
-                if let Some(cached) = self.cache.get::<serde_json::Value>(&key) {
-                    return DaemonResponse::Result(cached);
-                }
-                // Mirror structure.rs compute_local EXACTLY: the user's
-                // --max-results (TLDR-boa.4 retired the caller-supplied
-                // IgnoreSpec; exclusion is on-disk only).
-                match get_code_structure(&path, language, max_results) {
-                    Ok(result) => {
-                        let val = serde_json::to_value(&result).unwrap_or_default();
-                        // TLDR-fct freshness: register the target path + project
-                        // hashes; never cache a path outside this daemon's project.
-                        if path == self.project || path.starts_with(&self.project) {
-                            self.cache.insert(
-                                key,
-                                &val,
-                                vec![hash_path(&path), hash_path(&self.project)],
-                            );
-                        }
-                        DaemonResponse::Result(val)
-                    }
-                    Err(e) => DaemonResponse::Error {
+                if path != self.project && !path.starts_with(&self.project) {
+                    return DaemonResponse::Error {
                         status: "error".to_string(),
-                        error: e.to_string(),
+                        error: "artifact structure query requires a path inside the daemon project"
+                            .to_string(),
+                    };
+                }
+                match self.artifact_manager.snapshot() {
+                    Ok(snapshot) => DaemonResponse::Result(
+                        serde_json::to_value(snapshot.code_structure(
+                            &self.project,
+                            &path,
+                            language,
+                            max_results,
+                        ))
+                        .unwrap_or_default(),
+                    ),
+                    Err(state) => DaemonResponse::Error {
+                        status: "not_ready".to_string(),
+                        error: format!("artifact generation is not ready: {state:?}"),
                     },
                 }
             }
@@ -1004,7 +771,7 @@ impl TLDRDaemon {
                     .unwrap_or_default();
                 // TLDR-7pp.1.5: project path + include_docstrings + file are
                 // part of the key so flag-varied requests don't collide.
-                let key = QueryKey::new(
+                let key = HotQueryKey::new(
                     "context",
                     hash_str_args(&[
                         &entry,
@@ -1064,7 +831,6 @@ impl TLDRDaemon {
             }
 
             DaemonCommand::Cfg { file, function } => {
-                let file_str = file.to_string_lossy().to_string();
                 let language = match detect_or_parse_language(None, &file) {
                     Ok(l) => l,
                     Err(e) => {
@@ -1074,15 +840,9 @@ impl TLDRDaemon {
                         }
                     }
                 };
-                let key = QueryKey::new("cfg", hash_str_args(&[&file_str, &function]), language);
-                if let Some(cached) = self.cache.get::<serde_json::Value>(&key) {
-                    return DaemonResponse::Result(cached);
-                }
-                let file_hash = super::salsa::hash_path(&file);
-                match get_cfg_context(&file_str, &function, language) {
+                match self.artifact_manager.cfg(&file, &function, language) {
                     Ok(result) => {
                         let val = serde_json::to_value(&result).unwrap_or_default();
-                        self.cache.insert(key, &val, vec![file_hash]);
                         DaemonResponse::Result(val)
                     }
                     Err(e) => DaemonResponse::Error {
@@ -1093,7 +853,6 @@ impl TLDRDaemon {
             }
 
             DaemonCommand::Dfg { file, function } => {
-                let file_str = file.to_string_lossy().to_string();
                 let language = match detect_or_parse_language(None, &file) {
                     Ok(l) => l,
                     Err(e) => {
@@ -1103,15 +862,9 @@ impl TLDRDaemon {
                         }
                     }
                 };
-                let key = QueryKey::new("dfg", hash_str_args(&[&file_str, &function]), language);
-                if let Some(cached) = self.cache.get::<serde_json::Value>(&key) {
-                    return DaemonResponse::Result(cached);
-                }
-                let file_hash = super::salsa::hash_path(&file);
-                match get_dfg_context(&file_str, &function, language) {
+                match self.artifact_manager.dfg(&file, &function, language) {
                     Ok(result) => {
                         let val = serde_json::to_value(&result).unwrap_or_default();
-                        self.cache.insert(key, &val, vec![file_hash]);
                         DaemonResponse::Result(val)
                     }
                     Err(e) => DaemonResponse::Error {
@@ -1136,7 +889,7 @@ impl TLDRDaemon {
                         }
                     }
                 };
-                let key = QueryKey::new(
+                let key = HotQueryKey::new(
                     "slice",
                     hash_str_args(&[&file_str, &function, &line.to_string()]),
                     language,
@@ -1144,7 +897,7 @@ impl TLDRDaemon {
                 if let Some(cached) = self.cache.get::<serde_json::Value>(&key) {
                     return DaemonResponse::Result(cached);
                 }
-                let file_hash = super::salsa::hash_path(&file);
+                let file_hash = super::hot_cache::hash_path(&file);
                 match get_slice(
                     &file_str,
                     &function,
@@ -1172,62 +925,29 @@ impl TLDRDaemon {
                 max_items,
             } => {
                 let root = path.unwrap_or_else(|| self.project.clone());
-                // detected_language is the JSON `language` field; building
-                // language falls back to Python (mirrors calls.rs exactly).
                 let detected_language = language;
-                let building_language = resolve_language(detected_language);
-                let root_str = root.to_string_lossy().to_string();
-                // TLDR-7pp.1.5: detected language + respect_ignore + max_items
-                // are part of the key so flag-varied requests don't collide.
-                let key = QueryKey::new(
-                    "calls",
-                    hash_str_args(&[
-                        &root_str,
-                        &format!("{detected_language:?}"),
-                        &respect_ignore.to_string(),
-                        &max_items.to_string(),
-                    ]),
-                    building_language,
-                );
-                if let Some(cached) = self.cache.get::<serde_json::Value>(&key) {
-                    return DaemonResponse::Result(cached);
-                }
-                // Compute the SAME CallGraphOutput the CLI --oneshot path
-                // builds (TLDR-7pp.1.5): the previous handler returned a raw
-                // ProjectCallGraph that never deserialized as CallGraphOutput,
-                // so the daemon route silently always missed. Run off the async
-                // runtime — the build is CPU-heavy.
-                let root_for_build = root.clone();
-                let built = tokio::task::spawn_blocking(move || {
-                    crate::commands::calls::build_call_graph_output(
-                        &root_for_build,
-                        building_language,
-                        detected_language,
-                        respect_ignore,
-                        max_items,
-                    )
-                })
-                .await
-                .unwrap_or_else(|e| Err(anyhow::anyhow!("graph build task failed: {e}")));
-                match built {
-                    Ok(result) => {
-                        let val = serde_json::to_value(&result).unwrap_or_default();
-                        // TLDR-iqr freshness: register BOTH the query-supplied
-                        // root and the daemon project root. A root OUTSIDE this
-                        // daemon's project is beyond the watcher's freshness
-                        // contract — never cache it (always rebuild fresh).
-                        if root == self.project || root.starts_with(&self.project) {
-                            self.cache.insert(
-                                key,
-                                &val,
-                                vec![hash_path(&root), hash_path(&self.project)],
-                            );
-                        }
-                        DaemonResponse::Result(val)
-                    }
-                    Err(e) => DaemonResponse::Error {
+                if root != self.project || !respect_ignore {
+                    return DaemonResponse::Error {
                         status: "error".to_string(),
-                        error: e.to_string(),
+                        error: "artifact call graph requires the daemon project and canonical ignore policy"
+                            .to_string(),
+                    };
+                }
+                match self.artifact_manager.snapshot() {
+                    Ok(snapshot) => DaemonResponse::Result(
+                        serde_json::to_value(
+                            crate::commands::calls::call_graph_output_from_artifacts(
+                                &root,
+                                detected_language,
+                                max_items,
+                                &snapshot,
+                            ),
+                        )
+                        .unwrap_or_default(),
+                    ),
+                    Err(state) => DaemonResponse::Error {
+                        status: "not_ready".to_string(),
+                        error: format!("artifact generation is not ready: {state:?}"),
                     },
                 }
             }
@@ -1235,31 +955,22 @@ impl TLDRDaemon {
             DaemonCommand::Impact {
                 func,
                 depth,
-                language,
+                language: _,
             } => {
                 let d = depth.unwrap_or(3);
-                let lang = resolve_language(language);
-                let key = QueryKey::new("impact", hash_str_args(&[&func, &d.to_string()]), lang);
-                if let Some(cached) = self.cache.get::<serde_json::Value>(&key) {
-                    return DaemonResponse::Result(cached);
-                }
-                let graph = match self
-                    .build_graph_memoized_blocking(self.project.clone(), lang)
-                    .await
-                {
-                    Ok(g) => g,
-                    Err(e) => {
+                let snapshot = match self.artifact_manager.snapshot() {
+                    Ok(snapshot) => snapshot,
+                    Err(state) => {
                         return DaemonResponse::Error {
-                            status: "error".to_string(),
-                            error: e,
+                            status: "not_ready".to_string(),
+                            error: format!("artifact generation is not ready: {state:?}"),
                         }
                     }
                 };
+                let graph = snapshot.intra_file_call_graph();
                 match impact_analysis(&graph, &func, d, None) {
                     Ok(result) => {
                         let val = serde_json::to_value(&result).unwrap_or_default();
-                        // TLDR-iqr freshness: root-hash registration (see Calls).
-                        self.cache.insert(key, &val, vec![hash_path(&self.project)]);
                         DaemonResponse::Result(val)
                     }
                     Err(e) => DaemonResponse::Error {
@@ -1282,7 +993,7 @@ impl TLDRDaemon {
                 let entry_str = entry.as_ref().map(|v| v.join(",")).unwrap_or_default();
                 // TLDR-7pp.1.5: call_graph + no_default_ignore are part of the
                 // key so flag-varied requests don't collide.
-                let key = QueryKey::new(
+                let key = HotQueryKey::new(
                     "dead",
                     hash_str_args(&[
                         &root_str,
@@ -1334,33 +1045,27 @@ impl TLDRDaemon {
 
             DaemonCommand::Arch { path, language } => {
                 let root = path.unwrap_or_else(|| self.project.clone());
-                let lang = resolve_language(language);
-                let root_str = root.to_string_lossy().to_string();
-                let key = QueryKey::new("arch", hash_str_args(&[&root_str]), lang);
-                if let Some(cached) = self.cache.get::<serde_json::Value>(&key) {
-                    return DaemonResponse::Result(cached);
+                let _language = language;
+                if root != self.project {
+                    return DaemonResponse::Error {
+                        status: "error".to_string(),
+                        error: "artifact architecture query requires the daemon project"
+                            .to_string(),
+                    };
                 }
-                let graph = match self.build_graph_memoized_blocking(root.clone(), lang).await {
-                    Ok(g) => g,
-                    Err(e) => {
+                let snapshot = match self.artifact_manager.snapshot() {
+                    Ok(snapshot) => snapshot,
+                    Err(state) => {
                         return DaemonResponse::Error {
-                            status: "error".to_string(),
-                            error: e,
+                            status: "not_ready".to_string(),
+                            error: format!("artifact generation is not ready: {state:?}"),
                         }
                     }
                 };
+                let graph = snapshot.intra_file_call_graph();
                 match architecture_analysis(&graph) {
                     Ok(result) => {
                         let val = serde_json::to_value(&result).unwrap_or_default();
-                        // TLDR-iqr freshness: both hashes; external roots
-                        // never cached (see Calls arm, Codex r4 Q3).
-                        if root == self.project || root.starts_with(&self.project) {
-                            self.cache.insert(
-                                key,
-                                &val,
-                                vec![hash_path(&root), hash_path(&self.project)],
-                            );
-                        }
                         DaemonResponse::Result(val)
                     }
                     Err(e) => DaemonResponse::Error {
@@ -1371,7 +1076,6 @@ impl TLDRDaemon {
             }
 
             DaemonCommand::Imports { file, language } => {
-                let file_str = file.to_string_lossy().to_string();
                 // Mirror imports.rs: explicit --lang wins; otherwise detect.
                 let language =
                     match detect_or_parse_language(language.as_ref().map(|l| l.as_str()), &file) {
@@ -1383,20 +1087,20 @@ impl TLDRDaemon {
                             }
                         }
                     };
-                let key = QueryKey::new("imports", hash_str_args(&[&file_str]), language);
-                if let Some(cached) = self.cache.get::<serde_json::Value>(&key) {
-                    return DaemonResponse::Result(cached);
-                }
-                let file_hash = super::salsa::hash_path(&file);
-                match get_imports(&file, language) {
-                    Ok(result) => {
-                        let val = serde_json::to_value(&result).unwrap_or_default();
-                        self.cache.insert(key, &val, vec![file_hash]);
-                        DaemonResponse::Result(val)
-                    }
-                    Err(e) => DaemonResponse::Error {
+                match self.artifact_manager.file_facts(&file) {
+                    Ok(facts) if facts.module.language == language => DaemonResponse::Result(
+                        serde_json::to_value(facts.module.imports).unwrap_or_default(),
+                    ),
+                    Ok(facts) => DaemonResponse::Error {
                         status: "error".to_string(),
-                        error: e.to_string(),
+                        error: format!(
+                            "stored file facts use {}, requested {language}",
+                            facts.module.language
+                        ),
+                    },
+                    Err(state) => DaemonResponse::Error {
+                        status: "not_ready".to_string(),
+                        error: format!("artifact generation is not ready: {state:?}"),
                     },
                 }
             }
@@ -1409,7 +1113,7 @@ impl TLDRDaemon {
                 let root = path.unwrap_or_else(|| self.project.clone());
                 let lang = resolve_language(language);
                 let root_str = root.to_string_lossy().to_string();
-                let key = QueryKey::new("importers", hash_str_args(&[&module, &root_str]), lang);
+                let key = HotQueryKey::new("importers", hash_str_args(&[&module, &root_str]), lang);
                 if let Some(cached) = self.cache.get::<serde_json::Value>(&key) {
                     return DaemonResponse::Result(cached);
                 }
@@ -1459,7 +1163,7 @@ impl TLDRDaemon {
                             .join(",")
                     })
                     .unwrap_or_default();
-                let key = QueryKey::new("change_impact", hash_str_args(&[&files_str]), lang);
+                let key = HotQueryKey::new("change_impact", hash_str_args(&[&files_str]), lang);
                 if let Some(cached) = self.cache.get::<serde_json::Value>(&key) {
                     return DaemonResponse::Result(cached);
                 }
@@ -1498,7 +1202,8 @@ impl TLDRDaemon {
                         }
                     }
                 };
-                let key = QueryKey::new("complexity", hash_str_args(&[&file_str, &function]), lang);
+                let key =
+                    HotQueryKey::new("complexity", hash_str_args(&[&file_str, &function]), lang);
                 if let Some(cached) = self.cache.get::<serde_json::Value>(&key) {
                     return DaemonResponse::Result(cached);
                 }
@@ -1537,7 +1242,7 @@ impl TLDRDaemon {
                 let st_str = smell_type
                     .map(|s| s.to_string())
                     .unwrap_or_else(|| "all".to_string());
-                let key = QueryKey::new(
+                let key = HotQueryKey::new(
                     "smells",
                     hash_str_args(&[
                         &path_str,
@@ -1664,7 +1369,7 @@ impl TLDRDaemon {
     /// send" while the daemon kept building. Now the ack returns in
     /// microseconds and the client is pointed at `tldr daemon status`
     /// (busy `warm-build` + semantic_index state, TLDR-qzc) for progress.
-    fn start_warm_build(&self, lang: Language) -> DaemonResponse {
+    fn start_warm_build(&self, _lang: Language) -> DaemonResponse {
         // Single-flight: a second Warm during a build is answered honestly
         // instead of stacking a duplicate build behind the store write lock.
         if self
@@ -1692,11 +1397,8 @@ impl TLDRDaemon {
         let model_note = String::new();
 
         let job = WarmJob {
-            file_ir_memo: Arc::clone(&self.file_ir_memo),
             project: self.project.clone(),
-            lang,
             artifact_manager: Arc::clone(&self.artifact_manager),
-            cache: Arc::clone(&self.cache),
             indexed_files: Arc::clone(&self.indexed_files),
             #[cfg(feature = "semantic")]
             semantic_store: Arc::clone(&self.semantic_store),
@@ -1864,13 +1566,8 @@ impl TLDRDaemon {
         };
 
         // Invalidate cache entries for this file
-        let file_hash = super::salsa::hash_path(&file);
+        let file_hash = super::hot_cache::hash_path(&file);
         self.cache.invalidate_by_input(file_hash);
-
-        // TLDR-iqr: evict the single FileIR memo entry for this path (any
-        // lang key). Content-hash verification at build time is the backstop
-        // if this raw-path match misses (e.g. /tmp vs /private/tmp aliasing).
-        self.file_ir_memo.retain(|k, _| k.1 != file);
 
         // TLDR-iqr freshness: project-level answers (calls/structure/tree/
         // dead/arch/impact) register against the project-root hash; any save
@@ -1878,7 +1575,7 @@ impl TLDRDaemon {
         // (a 20-save burst = 20 cheap evictions + ONE recompose). Before this,
         // they registered vec![] and were PERMANENTLY stale (finding on iqr).
         self.cache
-            .invalidate_by_input(super::salsa::hash_path(&self.project));
+            .invalidate_by_input(super::hot_cache::hash_path(&self.project));
 
         // Structural facts and their generation checkpoint take the same
         // resumable path as a bulk warm. Queries retain their old Arc snapshot

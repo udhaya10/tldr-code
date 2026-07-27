@@ -9,7 +9,8 @@ pub mod schema;
 mod types;
 
 pub use file_facts::{
-    CallFact, DefinitionFact, FileFacts, FileFactsParser, ImportFact, SemanticChunkFact,
+    CallFact, DefinitionFact, FileFacts, FileFactsParser, ImportFact, ProjectCallEdgeFact,
+    SemanticChunkFact, StoredFileStructure, StoredModuleInfo,
 };
 pub use function_artifacts::FunctionArtifactCoordinator;
 pub use ingestion::{IngestionEngine, IngestionReport};

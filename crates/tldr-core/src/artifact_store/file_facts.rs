@@ -13,9 +13,7 @@ use crate::{Language, TldrResult};
 use super::RevisionId;
 
 /// One normalized definition.
-#[derive(
-    Archive, Clone, Debug, Deserialize, PartialEq, RkyvDeserialize, RkyvSerialize, Serialize,
-)]
+#[derive(Archive, Clone, Debug, Deserialize, RkyvDeserialize, RkyvSerialize, Serialize)]
 pub struct DefinitionFact {
     /// Symbol name.
     pub name: String,
@@ -30,9 +28,7 @@ pub struct DefinitionFact {
 }
 
 /// One normalized import.
-#[derive(
-    Archive, Clone, Debug, Deserialize, PartialEq, RkyvDeserialize, RkyvSerialize, Serialize,
-)]
+#[derive(Archive, Clone, Debug, Deserialize, RkyvDeserialize, RkyvSerialize, Serialize)]
 pub struct ImportFact {
     /// Imported module.
     pub module: String,
@@ -49,6 +45,21 @@ pub struct ImportFact {
 pub struct CallFact {
     /// Calling symbol.
     pub caller: String,
+    /// Called symbol.
+    pub callee: String,
+}
+
+/// Project-level stored call edge with stable file identities.
+#[derive(
+    Archive, Clone, Debug, Deserialize, PartialEq, RkyvDeserialize, RkyvSerialize, Serialize,
+)]
+pub struct ProjectCallEdgeFact {
+    /// Root-relative caller file.
+    pub source_file: String,
+    /// Calling symbol.
+    pub caller: String,
+    /// Root-relative destination file when resolved.
+    pub destination_file: String,
     /// Called symbol.
     pub callee: String,
 }
@@ -72,10 +83,79 @@ pub struct SemanticChunkFact {
     pub content_hash: String,
 }
 
+/// Lossless path-normalized form of [`crate::ModuleInfo`].
+#[derive(Archive, Clone, Debug, Deserialize, RkyvDeserialize, RkyvSerialize, Serialize)]
+pub struct StoredModuleInfo {
+    /// Root-relative source path.
+    pub file_path: String,
+    /// Parser language.
+    pub language: Language,
+    /// Module-level documentation.
+    pub docstring: Option<String>,
+    /// Exact import records.
+    pub imports: Vec<crate::ImportInfo>,
+    /// Top-level functions.
+    pub functions: Vec<crate::FunctionInfo>,
+    /// Classes and their methods/fields.
+    pub classes: Vec<crate::ClassInfo>,
+    /// Module constants.
+    pub constants: Vec<crate::FieldInfo>,
+    /// Exact intra-file call maps.
+    pub call_graph: crate::IntraFileCallGraph,
+}
+
+/// Lossless path-normalized form of [`crate::FileStructure`].
+#[derive(Archive, Clone, Debug, Deserialize, RkyvDeserialize, RkyvSerialize, Serialize)]
+pub struct StoredFileStructure {
+    /// Root-relative source path.
+    pub path: String,
+    /// Top-level function names.
+    pub functions: Vec<String>,
+    /// Class/struct names.
+    pub classes: Vec<String>,
+    /// Method names.
+    pub methods: Vec<String>,
+    /// Overload-preserving method details.
+    pub method_infos: Vec<crate::MethodInfo>,
+    /// Exact imports.
+    pub imports: Vec<crate::ImportInfo>,
+    /// Exact definitions with ranges and signatures.
+    pub definitions: Vec<crate::DefinitionInfo>,
+}
+
+impl StoredFileStructure {
+    /// Restore the public structural file result.
+    pub fn to_file_structure(&self) -> crate::FileStructure {
+        crate::FileStructure {
+            path: PathBuf::from(&self.path),
+            functions: self.functions.clone(),
+            classes: self.classes.clone(),
+            methods: self.methods.clone(),
+            method_infos: self.method_infos.clone(),
+            imports: self.imports.clone(),
+            definitions: self.definitions.clone(),
+        }
+    }
+}
+
+impl StoredModuleInfo {
+    /// Restore the public exact-extraction result without parsing source.
+    pub fn to_module_info(&self) -> crate::ModuleInfo {
+        crate::ModuleInfo {
+            file_path: PathBuf::from(&self.file_path),
+            language: self.language,
+            docstring: self.docstring.clone(),
+            imports: self.imports.clone(),
+            functions: self.functions.clone(),
+            classes: self.classes.clone(),
+            constants: self.constants.clone(),
+            call_graph: self.call_graph.clone(),
+        }
+    }
+}
+
 /// Complete normalized representation of one source-file revision.
-#[derive(
-    Archive, Clone, Debug, Deserialize, PartialEq, RkyvDeserialize, RkyvSerialize, Serialize,
-)]
+#[derive(Archive, Clone, Debug, Deserialize, RkyvDeserialize, RkyvSerialize, Serialize)]
 pub struct FileFacts {
     /// Root-relative source path.
     pub path: String,
@@ -83,6 +163,10 @@ pub struct FileFacts {
     pub revision: RevisionId,
     /// Stable lowercase language label.
     pub language: String,
+    /// Lossless extracted module used by exact structural projections.
+    pub module: StoredModuleInfo,
+    /// Lossless structure-command projection from the same syntax tree.
+    pub structure: StoredFileStructure,
     /// Definitions, including class methods.
     pub definitions: Vec<DefinitionFact>,
     /// Imports.
@@ -110,6 +194,9 @@ impl FileFactsParser {
         let (tree, source, language) = parse_file_with_lang(path, Some(language))?;
         self.invocations.fetch_add(1, Ordering::Relaxed);
         let module = extract_from_tree(&tree, &source, language, path, Some(root))?;
+        let structure = crate::ast::extractor::extract_file_structure_from_tree(
+            path, root, language, &tree, &source,
+        )?;
 
         let mut definitions = Vec::new();
         for function in &module.functions {
@@ -179,13 +266,32 @@ impl FileFactsParser {
             revision: RevisionId::for_bytes(source.as_bytes()),
             language: language.to_string(),
             definitions,
+            module: StoredModuleInfo {
+                file_path: module.file_path.to_string_lossy().into_owned(),
+                language: module.language,
+                docstring: module.docstring.clone(),
+                imports: module.imports.clone(),
+                functions: module.functions.clone(),
+                classes: module.classes.clone(),
+                constants: module.constants.clone(),
+                call_graph: module.call_graph.clone(),
+            },
+            structure: StoredFileStructure {
+                path: structure.path.to_string_lossy().into_owned(),
+                functions: structure.functions,
+                classes: structure.classes,
+                methods: structure.methods,
+                method_infos: structure.method_infos,
+                imports: structure.imports,
+                definitions: structure.definitions,
+            },
             imports: module
                 .imports
-                .into_iter()
+                .iter()
                 .map(|import| ImportFact {
-                    module: import.module,
-                    names: import.names,
-                    alias: import.alias,
+                    module: import.module.clone(),
+                    names: import.names.clone(),
+                    alias: import.alias.clone(),
                 })
                 .collect(),
             calls,
