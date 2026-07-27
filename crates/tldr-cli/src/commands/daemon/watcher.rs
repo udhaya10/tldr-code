@@ -34,7 +34,7 @@ use notify_debouncer_full::notify::{
 use tokio::sync::mpsc;
 
 use tldr_core::semantic::{is_corpus_file, store_dir_for};
-use tldr_core::walker::{build_path_ignore_matcher, PathIgnoreMatcher};
+use tldr_core::walker::{build_path_ignore_matcher, PathIgnoreMatcher, TLDRIGNORE_FILE};
 
 use super::activity::{ActivityTracker, Source};
 use super::daemon::TLDRDaemon;
@@ -153,11 +153,49 @@ impl WatchPipeline {
     }
 }
 
+struct LiveIgnoreMatcher {
+    project: PathBuf,
+    matcher: parking_lot::RwLock<Option<PathIgnoreMatcher>>,
+}
+
+impl LiveIgnoreMatcher {
+    fn new(project: &Path) -> Self {
+        Self {
+            project: project.to_path_buf(),
+            matcher: parking_lot::RwLock::new(build_path_ignore_matcher(project, true)),
+        }
+    }
+
+    fn reload_for_paths(&self, paths: &[PathBuf]) -> bool {
+        let tldrignore = self.project.join(TLDRIGNORE_FILE);
+        let gitignore = self.project.join(".gitignore");
+        let reload = paths
+            .iter()
+            .any(|path| path == &tldrignore || path == &gitignore);
+        if reload {
+            *self.matcher.write() = build_path_ignore_matcher(&self.project, true);
+        }
+        reload
+    }
+
+    fn snapshot(&self) -> Option<PathIgnoreMatcher> {
+        self.matcher.read().clone()
+    }
+
+    #[cfg(test)]
+    fn is_ignored(&self, path: &Path, is_dir: bool) -> bool {
+        self.matcher
+            .read()
+            .as_ref()
+            .is_some_and(|matcher| matcher.is_ignored(path, is_dir))
+    }
+}
+
 struct WatchHandler {
     project: PathBuf,
     cache_excl: PathBuf,
     store_dir: PathBuf,
-    ignore: Option<PathIgnoreMatcher>,
+    ignore: LiveIgnoreMatcher,
     activity: Arc<ActivityTracker>,
     tx: mpsc::Sender<PathBuf>,
     overflowed: Arc<AtomicBool>,
@@ -172,6 +210,10 @@ impl WatchHandler {
     }
 
     fn handle_event(&self, event: Event) {
+        if self.ignore.reload_for_paths(&event.paths) {
+            eprintln!("[TLDR-1m4] reloaded .tldrignore/.gitignore policy");
+        }
+        let ignore = self.ignore.snapshot();
         for path in &event.paths {
             if presence_decision(&self.cache_excl, &self.store_dir, path, &event.kind) {
                 self.activity.touch(Source::Watcher);
@@ -180,7 +222,7 @@ impl WatchHandler {
                 &self.project,
                 &self.cache_excl,
                 &self.store_dir,
-                self.ignore.as_ref(),
+                ignore.as_ref(),
                 path,
                 &event.kind,
             ) {
@@ -305,13 +347,13 @@ pub(crate) fn spawn_watcher(daemon: Arc<TLDRDaemon>) -> Option<WatcherGuard> {
     // The in-tree cache subtree (`<root>/.tldr`) IS inside the watched root.
     let cache_excl = project.join(".tldr");
 
-    // Root-level `.tldrignore` (+ `.gitignore`) matcher for the reindex filter
-    // (TLDR-1j2). Loaded ONCE here; editing either file mid-session needs a
-    // daemon restart (documented v1 limitation). `presence_decision` is
-    // deliberately NOT gated on this — an ignored-dir write still counts as
-    // project presence (the TLDR-3w5 `cargo build` → `target/` liveness rule).
-    let handler_ignore = build_path_ignore_matcher(&project, true);
-    if handler_ignore.is_some() {
+    // Root-level `.tldrignore` (+ `.gitignore`) matcher for the reindex filter.
+    // Policy-file events atomically replace this snapshot during the daemon
+    // session (TLDR-1m4). `presence_decision` is deliberately NOT gated on
+    // this — an ignored-dir write still counts as project presence (the
+    // TLDR-3w5 `cargo build` → `target/` liveness rule).
+    let handler_ignore = LiveIgnoreMatcher::new(&project);
+    if handler_ignore.snapshot().is_some() {
         eprintln!("[ac0.2] reindex filter honoring .tldrignore/.gitignore");
     }
 
@@ -436,7 +478,7 @@ async fn dispatch_flush(daemon: &TLDRDaemon, flush: Flush) {
 
 #[cfg(test)]
 mod tests {
-    use super::{Flush, WatchPipeline, WatchPipelineConfig};
+    use super::{Flush, LiveIgnoreMatcher, WatchPipeline, WatchPipelineConfig};
     use std::path::PathBuf;
     use std::time::{Duration, Instant};
 
@@ -448,6 +490,42 @@ mod tests {
             burst_event_cap: 1_000,
             burst_window: Duration::from_secs(2),
         }
+    }
+
+    #[test]
+    fn ignore_policy_reloads_during_a_live_session() {
+        let project = tempfile::tempdir().expect("project");
+        let ignored = project.path().join("generated/file.rs");
+        let policy = project.path().join(".tldrignore");
+        let live = LiveIgnoreMatcher::new(project.path());
+        assert!(!live.is_ignored(&ignored, false));
+
+        std::fs::write(&policy, "generated/\n").expect("write");
+        assert!(live.reload_for_paths(std::slice::from_ref(&policy)));
+        assert!(live.is_ignored(&ignored, false));
+
+        std::fs::remove_file(&policy).expect("remove");
+        assert!(live.reload_for_paths(&[policy]));
+        assert!(!live.is_ignored(&ignored, false));
+
+        let git_policy = project.path().join(".gitignore");
+        std::fs::write(&git_policy, "generated/\n").expect("write gitignore");
+        assert!(live.reload_for_paths(std::slice::from_ref(&git_policy)));
+        assert!(live.is_ignored(&ignored, false));
+
+        std::fs::remove_file(&git_policy).expect("remove gitignore");
+        assert!(live.reload_for_paths(&[git_policy]));
+        assert!(!live.is_ignored(&ignored, false));
+    }
+
+    #[test]
+    fn ignore_policy_ordinary_source_event_does_not_reload() {
+        let project = tempfile::tempdir().expect("project");
+        let live = LiveIgnoreMatcher::new(project.path());
+        std::fs::write(project.path().join(".tldrignore"), "generated/\n").expect("write");
+
+        assert!(!live.reload_for_paths(&[project.path().join("src/lib.rs")]));
+        assert!(!live.is_ignored(&project.path().join("generated/file.rs"), false));
     }
 
     #[test]

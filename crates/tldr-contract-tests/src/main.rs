@@ -68,6 +68,11 @@ const SCENARIOS: &[Scenario] = &[
         run: full_project_deletion,
     },
     Scenario {
+        name: "ignore_matcher_unification",
+        smoke: false,
+        run: ignore_matcher_unification,
+    },
+    Scenario {
         name: "language_matrix",
         smoke: false,
         run: language_matrix,
@@ -491,6 +496,32 @@ fn full_project_deletion() -> Result<(), String> {
             ArtifactSubject::Project => false,
         }),
         "deleted file or symbol subject remained in the manifest",
+    )
+}
+
+fn ignore_matcher_unification() -> Result<(), String> {
+    use tldr_core::callgraph::filter_tldrignored;
+
+    let project = tempfile::tempdir().map_err(display)?;
+    let root_ignored = project.path().join("corpus/root.py");
+    let nested_kept = project.path().join("nested/corpus/kept.py");
+    fs::create_dir_all(root_ignored.parent().ok_or("root parent missing")?).map_err(display)?;
+    fs::create_dir_all(nested_kept.parent().ok_or("nested parent missing")?).map_err(display)?;
+    fs::write(&root_ignored, "def root(): pass\n").map_err(display)?;
+    fs::write(&nested_kept, "def nested(): pass\n").map_err(display)?;
+    fs::write(project.path().join(".tldrignore"), "/corpus/\n").map_err(display)?;
+
+    let filtered = filter_tldrignored(
+        project.path(),
+        vec![root_ignored.clone(), nested_kept.clone()],
+    );
+    ensure(
+        !filtered.contains(&root_ignored),
+        "root-anchored ignore was not honored",
+    )?;
+    ensure(
+        filtered.contains(&nested_kept),
+        "root-anchored ignore matched a nested directory",
     )
 }
 

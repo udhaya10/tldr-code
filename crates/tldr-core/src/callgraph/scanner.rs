@@ -13,11 +13,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use ignore::WalkBuilder;
 
 use super::types::{BuildConfig, BuildError};
 use crate::types::Language;
+use crate::walker::build_path_ignore_matcher;
 
 // =============================================================================
 // Language Support
@@ -507,44 +507,21 @@ fn has_matching_extension(path: &Path, extensions: &[&str]) -> bool {
         .unwrap_or(false)
 }
 
-/// Load .tldrignore patterns from project root.
-fn load_tldrignore(root: &Path) -> Option<Gitignore> {
-    let tldrignore_path = root.join(".tldrignore");
-
-    if !tldrignore_path.exists() {
-        return None;
-    }
-
-    let mut builder = GitignoreBuilder::new(root);
-
-    // Add patterns from .tldrignore
-    if builder.add(&tldrignore_path).is_some() {
-        // Error adding file, return None
-        return None;
-    }
-
-    builder.build().ok()
-}
-
 /// Filter a list of paths through `.tldrignore` patterns.
 ///
-/// Loads `.tldrignore` from `root` and removes any paths that match its
+/// Uses the shared tldr-core matcher and removes any paths that match its
 /// patterns. If no `.tldrignore` file exists, returns the input unchanged.
 ///
 /// Uses `matched_path_or_any_parents` so that directory patterns like
 /// `corpus/` correctly filter files nested under that directory.
 pub fn filter_tldrignored(root: &Path, paths: Vec<PathBuf>) -> Vec<PathBuf> {
-    let ignore = match load_tldrignore(root) {
-        Some(ig) => ig,
-        None => return paths,
+    let Some(ignore) = build_path_ignore_matcher(root, false) else {
+        return paths;
     };
 
     paths
         .into_iter()
-        .filter(|p| {
-            let is_dir = p.is_dir();
-            !ignore.matched_path_or_any_parents(p, is_dir).is_ignore()
-        })
+        .filter(|path| !ignore.is_ignored(path, path.is_dir()))
         .collect()
 }
 
