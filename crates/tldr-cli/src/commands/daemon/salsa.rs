@@ -25,6 +25,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
 use std::time::SystemTime;
 
+use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use tldr_core::Language;
@@ -195,31 +196,46 @@ impl QueryCache {
     /// - The key doesn't exist in cache
     /// - Deserialization fails
     pub fn get<T: DeserializeOwned>(&self, key: &QueryKey) -> Option<T> {
-        if let Some(mut entry) = self.entries.get_mut(key) {
-            // Update last accessed time
-            entry.last_accessed = SystemTime::now();
+        match self.entries.entry(key.clone()) {
+            Entry::Occupied(mut occupied) => {
+                // Update last accessed time
+                occupied.get_mut().last_accessed = SystemTime::now();
 
-            // Record hit
-            if let Ok(mut stats) = self.stats.write() {
-                stats.hits += 1;
-            }
-
-            // Try to deserialize the value
-            match serde_json::from_slice(&entry.value) {
-                Ok(value) => Some(value),
-                Err(_) => {
-                    // Corrupted entry - remove it
-                    drop(entry);
-                    self.entries.remove(key);
-                    None
+                // Try to deserialize the value
+                match serde_json::from_slice(&occupied.get().value) {
+                    Ok(value) => {
+                        if let Ok(mut stats) = self.stats.write() {
+                            stats.hits += 1;
+                        }
+                        Some(value)
+                    }
+                    Err(_) => {
+                        // Remove the exact entry we failed to deserialize while
+                        // its shard is still locked. A concurrent insert cannot
+                        // replace it between observation and removal.
+                        let entry = occupied.remove();
+                        self.current_bytes
+                            .fetch_sub(entry.estimated_bytes() as u64, Ordering::Relaxed);
+                        for hash in entry.input_hashes {
+                            if let Some(mut deps) = self.dependents.get_mut(&hash) {
+                                deps.remove(key);
+                            }
+                        }
+                        if let Ok(mut stats) = self.stats.write() {
+                            stats.misses += 1;
+                            stats.invalidations += 1;
+                        }
+                        None
+                    }
                 }
             }
-        } else {
-            // Record miss
-            if let Ok(mut stats) = self.stats.write() {
-                stats.misses += 1;
+            Entry::Vacant(_) => {
+                // Record miss
+                if let Ok(mut stats) = self.stats.write() {
+                    stats.misses += 1;
+                }
+                None
             }
-            None
         }
     }
 
@@ -713,6 +729,33 @@ mod tests {
 
         let stats = cache.stats();
         assert_eq!(stats.hits, 2);
+    }
+
+    #[test]
+    fn test_corrupt_entry_is_fully_invalidated_and_counted_as_miss() {
+        let cache = QueryCache::new(100);
+        let key = QueryKey::new("test", 12345, Language::Python);
+        let input_hash = 42;
+        cache.insert(key.clone(), &"value", vec![input_hash]);
+
+        // Keep the serialized length unchanged so the cache's byte counter
+        // still describes the entry before the failed read.
+        cache.entries.get_mut(&key).unwrap().value = b"xxxxxxx".to_vec();
+        assert!(cache.total_bytes() > 0);
+
+        let result: Option<String> = cache.get(&key);
+
+        assert!(result.is_none());
+        assert!(cache.is_empty());
+        assert_eq!(cache.total_bytes(), 0);
+        assert!(cache
+            .dependents
+            .get(&input_hash)
+            .is_none_or(|keys| !keys.contains(&key)));
+        let stats = cache.stats();
+        assert_eq!(stats.hits, 0);
+        assert_eq!(stats.misses, 1);
+        assert_eq!(stats.invalidations, 1);
     }
 
     #[test]
