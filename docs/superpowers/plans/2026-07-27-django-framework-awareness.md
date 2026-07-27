@@ -71,6 +71,6 @@
 
 ### Task 6: Validate and deliver
 
-- [ ] Run formatting, warnings-denied workspace Clippy, all-target tests, smoke, certification, and corpus gates.
-- [ ] Close TLDR-6rt.1, TLDR-6rt.2, TLDR-6rt.3, TLDR-6rt.4, and TLDR-6rt with evidence.
-- [ ] Commit, pull/rebase, push Beads, push code to `fork/main`, and verify a clean synchronized branch.
+- [x] Run formatting, warnings-denied workspace Clippy, all-target tests, smoke, certification, and corpus gates.
+- [x] Close TLDR-6rt.1, TLDR-6rt.2, TLDR-6rt.3, TLDR-6rt.4, and TLDR-6rt with evidence.
+- [x] Commit, pull/rebase, push Beads, push code to `fork/main`, and verify a clean synchronized branch.
