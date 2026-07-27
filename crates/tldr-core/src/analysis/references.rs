@@ -35,7 +35,7 @@
 use crate::walker::walk_project;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use tree_sitter::Node;
 
@@ -380,6 +380,10 @@ pub enum ReferenceKind {
     /// Definition site itself
     Definition,
 
+    /// Framework/configuration reference encoded as a resolved dotted string.
+    #[serde(rename = "string-ref")]
+    StringRef,
+
     /// Unknown or other kind
     #[default]
     Other,
@@ -395,6 +399,7 @@ impl ReferenceKind {
             ReferenceKind::Import => "import",
             ReferenceKind::Type => "type",
             ReferenceKind::Definition => "definition",
+            ReferenceKind::StringRef => "string-ref",
             ReferenceKind::Other => "other",
         }
     }
@@ -408,6 +413,7 @@ impl ReferenceKind {
             "import" => Some(ReferenceKind::Import),
             "type" => Some(ReferenceKind::Type),
             "definition" => Some(ReferenceKind::Definition),
+            "string-ref" | "string_ref" | "stringref" => Some(ReferenceKind::StringRef),
             "other" => Some(ReferenceKind::Other),
             _ => None,
         }
@@ -858,6 +864,163 @@ pub fn verify_candidates_with_ast(
     }
 
     verified
+}
+
+/// Count Python dotted-string references that resolve to known module symbols.
+///
+/// Callers provide fully-qualified definitions such as
+/// `observability.logging.build_console_formatter`. Dynamic/interpolated
+/// strings and unresolved lookalikes are deliberately ignored.
+pub fn count_resolved_python_string_refs(
+    tree: &tree_sitter::Tree,
+    source: &str,
+    known_dotted_symbols: &HashSet<String>,
+) -> HashMap<String, usize> {
+    let mut counts = HashMap::new();
+    for (value, _, _) in python_dotted_string_literals(tree, source) {
+        if !known_dotted_symbols.contains(&value) {
+            continue;
+        }
+        if let Some(symbol) = value.rsplit('.').next() {
+            *counts.entry(symbol.to_string()).or_insert(0) += 1;
+        }
+    }
+    counts
+}
+
+/// Extract static dotted Python string values without resolving them.
+///
+/// Consumers that already own a project definition index can filter this
+/// one-pass extraction against that index without reparsing source files.
+pub fn python_dotted_string_paths(tree: &tree_sitter::Tree, source: &str) -> Vec<String> {
+    python_dotted_string_literals(tree, source)
+        .into_iter()
+        .map(|(value, _, _)| value)
+        .collect()
+}
+
+fn python_dotted_string_literals(
+    tree: &tree_sitter::Tree,
+    source: &str,
+) -> Vec<(String, usize, usize)> {
+    let dotted =
+        Regex::new(r"^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+$").expect("static dotted-path regex");
+    let mut values = Vec::new();
+    let mut pending = vec![tree.root_node()];
+    while let Some(node) = pending.pop() {
+        if node.kind() == "string" {
+            if let Ok(text) = node.utf8_text(source.as_bytes()) {
+                if let Some(value) = python_static_string_body(text) {
+                    if dotted.is_match(value) {
+                        values.push((
+                            value.to_string(),
+                            node.start_position().row + 1,
+                            node.start_position().column + 1,
+                        ));
+                    }
+                }
+            }
+            continue;
+        }
+        for index in 0..node.child_count() {
+            if let Some(child) = node.child(index) {
+                pending.push(child);
+            }
+        }
+    }
+    values
+}
+
+fn python_static_string_body(text: &str) -> Option<&str> {
+    let quote_start = text.find(['\'', '"'])?;
+    let prefix = &text[..quote_start];
+    if prefix.chars().any(|ch| matches!(ch, 'f' | 'F')) {
+        return None;
+    }
+    let quoted = &text[quote_start..];
+    let quote = quoted.as_bytes()[0] as char;
+    let delimiter_len = if quoted.starts_with(&format!("{quote}{quote}{quote}")) {
+        3
+    } else {
+        1
+    };
+    if quoted.len() < delimiter_len * 2 {
+        return None;
+    }
+    let closing = &quoted[quoted.len() - delimiter_len..];
+    if !closing.chars().all(|ch| ch == quote) {
+        return None;
+    }
+    Some(&quoted[delimiter_len..quoted.len() - delimiter_len])
+}
+
+fn python_string_references(
+    candidates: &[TextCandidate],
+    symbol: &str,
+    root: &Path,
+    definitions: &[Definition],
+) -> Vec<Reference> {
+    let expected = definitions
+        .iter()
+        .filter_map(|definition| python_module_path(root, &definition.file))
+        .map(|module| format!("{module}.{symbol}"))
+        .collect::<HashSet<_>>();
+    if expected.is_empty() {
+        return Vec::new();
+    }
+
+    let mut by_file: HashMap<PathBuf, Vec<&TextCandidate>> = HashMap::new();
+    for candidate in candidates {
+        by_file
+            .entry(candidate.file.clone())
+            .or_default()
+            .push(candidate);
+    }
+
+    let mut references = Vec::new();
+    for (path, file_candidates) in by_file {
+        let Ok((tree, source, Language::Python)) = parse_file(&path) else {
+            continue;
+        };
+        let values = python_dotted_string_literals(&tree, &source)
+            .into_iter()
+            .filter(|(value, _, _)| expected.contains(value))
+            .collect::<Vec<_>>();
+        for candidate in file_candidates {
+            if values
+                .iter()
+                .any(|(value, line, _)| *line == candidate.line && value.ends_with(symbol))
+            {
+                references.push(Reference::with_details(
+                    candidate.file.clone(),
+                    candidate.line,
+                    candidate.column,
+                    candidate.end_column,
+                    ReferenceKind::StringRef,
+                    candidate.line_text.clone(),
+                    0.9,
+                ));
+            }
+        }
+    }
+    references
+}
+
+fn python_module_path(root: &Path, definition_file: &Path) -> Option<String> {
+    let relative = definition_file
+        .strip_prefix(root)
+        .unwrap_or(definition_file);
+    let mut components = relative
+        .components()
+        .filter_map(|component| component.as_os_str().to_str())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    let file = components.pop()?;
+    let stem = Path::new(&file).file_stem()?.to_str()?;
+    if stem != "__init__" {
+        components.push(stem.to_string());
+    }
+    (!components.is_empty()).then(|| components.join("."))
 }
 
 /// Verify a single candidate against the AST
@@ -3261,6 +3424,10 @@ pub fn find_references(
         options.definition_file.as_deref(),
     );
 
+    // Find definitions before verification so Python dotted strings can be
+    // accepted only when their complete module path resolves to this symbol.
+    let mut definitions = find_definitions(symbol, root, language)?;
+
     // Step 2: AST verification and kind classification (Phase 10)
     let verified = verify_candidates_with_ast(&scoped_candidates, symbol, language);
 
@@ -3278,12 +3445,17 @@ pub fn find_references(
         })
         .collect();
 
+    references.extend(python_string_references(
+        &scoped_candidates,
+        symbol,
+        root,
+        &definitions,
+    ));
+
     // Step 4: Find definitions (Phase 11)
     // M3 detection-accuracy-v1 BUG-20: collect ALL definitions, not just the
     // first one. `definition` (singular) is preserved for back-compat as the
     // first entry; `definitions` (plural) carries the full set.
-    let mut definitions = find_definitions(symbol, root, language)?;
-
     // AGG13-14 (quality-metrics-and-schema-v1): `find_definitions` only
     // implements per-language definition detection for python/ts/js/go/rust.
     // For java, csharp, ocaml (and other unimplemented languages),
@@ -3667,7 +3839,3 @@ fn extract_calls_recursive(
         extract_calls_recursive(&child, source, language, calls);
     }
 }
-
-// =============================================================================
-// Unit Tests
-// =============================================================================

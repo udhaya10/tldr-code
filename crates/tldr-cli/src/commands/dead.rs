@@ -3,7 +3,7 @@
 //! Identifies functions that are never called (unreachable code).
 //! Auto-routes through daemon when available for ~35x speedup.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
@@ -18,7 +18,7 @@ use tldr_core::walker::ProjectWalker;
 const MAX_FILES: usize = 10_000;
 
 use tldr_core::analysis::dead::dead_code_analysis_refcount;
-use tldr_core::analysis::refcount::count_identifiers_in_tree;
+use tldr_core::analysis::refcount::count_identifiers_and_python_dotted_strings;
 use tldr_core::ast::parser::parse_file;
 use tldr_core::ast::{extract_file, extract_from_tree};
 use tldr_core::types::{DeadCodeReport, ModuleInfo};
@@ -355,6 +355,7 @@ pub(crate) fn collect_module_infos_with_refcounts(
 ) -> (Vec<(PathBuf, ModuleInfo)>, HashMap<String, usize>) {
     let mut module_infos = Vec::new();
     let mut merged_counts: HashMap<String, usize> = HashMap::new();
+    let mut dotted_string_counts: HashMap<String, usize> = HashMap::new();
 
     if path.is_file() {
         // M6: skip .d.ts declaration-only files (still produce empty
@@ -373,9 +374,13 @@ pub(crate) fn collect_module_infos_with_refcounts(
                 module_infos.push((rel_path, info));
             }
             // Count identifiers from the same parsed tree
-            let file_counts = count_identifiers_in_tree(&tree, source.as_bytes(), lang);
+            let (file_counts, dotted_strings) =
+                count_identifiers_and_python_dotted_strings(&tree, source.as_bytes(), lang);
             for (name, count) in file_counts {
                 *merged_counts.entry(name).or_insert(0) += count;
+            }
+            for dotted in dotted_strings {
+                *dotted_string_counts.entry(dotted).or_insert(0) += 1;
             }
         }
     } else {
@@ -429,10 +434,17 @@ pub(crate) fn collect_module_infos_with_refcounts(
                                 module_infos.push((rel_path, info));
                             }
                             // Count identifiers from the same parsed tree
-                            let file_counts =
-                                count_identifiers_in_tree(&tree, source.as_bytes(), lang);
+                            let (file_counts, dotted_strings) =
+                                count_identifiers_and_python_dotted_strings(
+                                    &tree,
+                                    source.as_bytes(),
+                                    lang,
+                                );
                             for (name, count) in file_counts {
                                 *merged_counts.entry(name).or_insert(0) += count;
+                            }
+                            for dotted in dotted_strings {
+                                *dotted_string_counts.entry(dotted).or_insert(0) += 1;
                             }
                         }
                     }
@@ -441,7 +453,51 @@ pub(crate) fn collect_module_infos_with_refcounts(
         }
     }
 
+    let known_dotted_symbols = indexed_dotted_symbols(&module_infos);
+    for (dotted, count) in dotted_string_counts {
+        if !known_dotted_symbols.contains(&dotted) {
+            continue;
+        }
+        if let Some(symbol) = dotted.rsplit('.').next() {
+            *merged_counts.entry(symbol.to_string()).or_insert(0) += count;
+        }
+    }
+
     (module_infos, merged_counts)
+}
+
+fn indexed_dotted_symbols(module_infos: &[(PathBuf, ModuleInfo)]) -> HashSet<String> {
+    let mut symbols = HashSet::new();
+    for (path, info) in module_infos {
+        let mut components = path
+            .components()
+            .filter_map(|component| component.as_os_str().to_str())
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        let Some(file) = components.pop() else {
+            continue;
+        };
+        let Some(stem) = Path::new(&file).file_stem().and_then(|stem| stem.to_str()) else {
+            continue;
+        };
+        if stem != "__init__" {
+            components.push(stem.to_string());
+        }
+        if components.is_empty() {
+            continue;
+        }
+        let module = components.join(".");
+        for function in &info.functions {
+            symbols.insert(format!("{module}.{}", function.name));
+        }
+        for class in &info.classes {
+            symbols.insert(format!("{module}.{}", class.name));
+            for method in &class.methods {
+                symbols.insert(format!("{module}.{}.{}", class.name, method.name));
+            }
+        }
+    }
+    symbols
 }
 
 /// Wrapper struct for JSON output with truncation metadata.
@@ -541,4 +597,37 @@ fn format_dead_code_text_truncated(
     }
 
     output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::compute_dead_report;
+    use tldr_core::Language;
+
+    #[test]
+    fn resolved_django_factory_string_keeps_function_alive() {
+        let project = tempfile::tempdir().expect("temp project");
+        let module = project.path().join("observability");
+        let config = project.path().join("config");
+        std::fs::create_dir_all(&module).expect("module");
+        std::fs::create_dir_all(&config).expect("config");
+        std::fs::write(
+            module.join("logging.py"),
+            "def build_console_formatter():\n    return object()\n",
+        )
+        .expect("definition");
+        std::fs::write(
+            config.join("settings.py"),
+            "LOGGING = {'()': 'observability.logging.build_console_formatter'}\n",
+        )
+        .expect("settings");
+
+        let report = compute_dead_report(project.path(), Language::Python, None, false, false)
+            .expect("dead report");
+        assert!(!report
+            .dead_functions
+            .iter()
+            .chain(&report.possibly_dead)
+            .any(|function| function.name == "build_console_formatter"));
+    }
 }

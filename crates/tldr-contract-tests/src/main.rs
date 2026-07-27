@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use tldr_cli::commands::daemon::artifact_manager::ArtifactManager;
+use tldr_core::analysis::references::{find_references, ReferenceKind, ReferencesOptions};
 use tldr_core::artifact_store::{
     schema::STORE_FILE, ArtifactKey, ArtifactKind, ArtifactStore, ArtifactSubject, FileFactsParser,
     FunctionArtifactCoordinator, GenerationManifest, GenerationSnapshot, IngestionEngine,
@@ -76,6 +77,11 @@ const SCENARIOS: &[Scenario] = &[
         name: "parse_error_visibility",
         smoke: false,
         run: parse_error_visibility,
+    },
+    Scenario {
+        name: "django_string_references",
+        smoke: false,
+        run: django_string_references,
     },
     Scenario {
         name: "language_matrix",
@@ -550,6 +556,39 @@ fn parse_error_visibility() -> Result<(), String> {
     ensure(
         recovered_structure.files[0].parse_errors > 0,
         "recovered syntax was not surfaced",
+    )
+}
+
+fn django_string_references() -> Result<(), String> {
+    let project = tempfile::tempdir().map_err(display)?;
+    let package = project.path().join("pkg");
+    let config = project.path().join("config");
+    fs::create_dir_all(&package).map_err(display)?;
+    fs::create_dir_all(&config).map_err(display)?;
+    fs::write(package.join("mod.py"), "def live():\n    return 1\n").map_err(display)?;
+    fs::write(
+        config.join("settings.py"),
+        "FACTORY = 'pkg.mod.live'\nLOOKALIKE = 'other.mod.live'\nPLAIN = 'live'\n",
+    )
+    .map_err(display)?;
+
+    let mut options = ReferencesOptions::new().with_language("python".into());
+    options.limit = None;
+    options.kinds = Some(vec![ReferenceKind::StringRef]);
+    let report = find_references("live", project.path(), &options).map_err(display)?;
+
+    ensure(
+        report.total_references == 1,
+        "expected one resolved string-ref",
+    )?;
+    let reference = report.references.first().ok_or("missing string-ref")?;
+    ensure(
+        reference.kind == ReferenceKind::StringRef,
+        "resolved reference has wrong kind",
+    )?;
+    ensure(
+        reference.file.ends_with("config/settings.py") && reference.line == 1,
+        "resolved string-ref has wrong location",
     )
 }
 

@@ -68,7 +68,7 @@ pub struct ReferencesArgs {
     #[arg(long)]
     pub include_definition: bool,
 
-    /// Filter by reference kinds (comma-separated: call,read,write,import,type)
+    /// Filter by reference kinds (call,read,write,import,type,string-ref)
     #[arg(long, short = 't')]
     pub kinds: Option<String>,
 
@@ -249,16 +249,7 @@ fn enrich_lua_alias_callers(
 /// Parse comma-separated reference kinds
 fn parse_kinds(s: &str) -> Vec<ReferenceKind> {
     s.split(',')
-        .filter_map(|k| match k.trim().to_lowercase().as_str() {
-            "call" => Some(ReferenceKind::Call),
-            "read" => Some(ReferenceKind::Read),
-            "write" => Some(ReferenceKind::Write),
-            "import" => Some(ReferenceKind::Import),
-            "type" => Some(ReferenceKind::Type),
-            "definition" => Some(ReferenceKind::Definition),
-            "other" => Some(ReferenceKind::Other),
-            _ => None,
-        })
+        .filter_map(|kind| ReferenceKind::parse(kind.trim()))
         .collect()
 }
 

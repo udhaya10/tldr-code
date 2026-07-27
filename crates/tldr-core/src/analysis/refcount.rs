@@ -60,8 +60,21 @@ pub fn count_identifiers_in_tree(
     source: &[u8],
     language: Language,
 ) -> HashMap<String, usize> {
+    count_identifiers_and_python_dotted_strings(tree, source, language).0
+}
+
+/// Count identifiers and collect static Python dotted strings in one AST walk.
+///
+/// Dead-code analysis uses this combined path so framework string resolution
+/// does not add a second project-wide traversal.
+pub fn count_identifiers_and_python_dotted_strings(
+    tree: &Tree,
+    source: &[u8],
+    language: Language,
+) -> (HashMap<String, usize>, Vec<String>) {
     let id_types = identifier_node_types(language);
     let mut counts: HashMap<String, usize> = HashMap::new();
+    let mut dotted_strings = Vec::new();
 
     // Use TreeCursor for efficient depth-first traversal
     let mut cursor = tree.walk();
@@ -79,6 +92,17 @@ pub fn count_identifiers_in_tree(
                 if let Ok(text) = std::str::from_utf8(&source[start..end]) {
                     if !text.is_empty() {
                         *counts.entry(text.to_string()).or_insert(0) += 1;
+                    }
+                }
+            }
+        }
+        if language == Language::Python && node.kind() == "string" {
+            let start = node.start_byte();
+            let end = node.end_byte();
+            if start <= end && end <= source.len() {
+                if let Ok(text) = std::str::from_utf8(&source[start..end]) {
+                    if let Some(value) = static_python_dotted_path(text) {
+                        dotted_strings.push(value.to_string());
                     }
                 }
             }
@@ -109,7 +133,54 @@ pub fn count_identifiers_in_tree(
         }
     }
 
-    counts
+    (counts, dotted_strings)
+}
+
+fn static_python_dotted_path(text: &str) -> Option<&str> {
+    let quote_start = text.find(['\'', '"'])?;
+    if text[..quote_start]
+        .chars()
+        .any(|character| matches!(character, 'f' | 'F'))
+    {
+        return None;
+    }
+    let quoted = &text[quote_start..];
+    let quote = quoted.as_bytes()[0] as char;
+    let delimiter_len =
+        if quoted.as_bytes().get(..3) == Some(&[quote as u8, quote as u8, quote as u8]) {
+            3
+        } else {
+            1
+        };
+    if quoted.len() < delimiter_len * 2
+        || !quoted[quoted.len() - delimiter_len..]
+            .chars()
+            .all(|character| character == quote)
+    {
+        return None;
+    }
+    let value = &quoted[delimiter_len..quoted.len() - delimiter_len];
+    let mut segments = value.split('.');
+    let first = segments.next()?;
+    if !valid_python_path_segment(first) {
+        return None;
+    }
+    let mut segment_count = 1;
+    for segment in segments {
+        if !valid_python_path_segment(segment) {
+            return None;
+        }
+        segment_count += 1;
+    }
+    (segment_count >= 2).then_some(value)
+}
+
+fn valid_python_path_segment(segment: &str) -> bool {
+    let mut characters = segment.chars();
+    characters
+        .next()
+        .is_some_and(|first| first == '_' || first.is_ascii_alphabetic())
+        && characters.all(|character| character == '_' || character.is_ascii_alphanumeric())
 }
 
 /// Check if a function name is "rescued" by reference counting.
