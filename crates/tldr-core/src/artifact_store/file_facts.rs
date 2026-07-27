@@ -54,6 +54,8 @@ pub struct CallFact {
     Archive, Clone, Debug, Deserialize, PartialEq, RkyvDeserialize, RkyvSerialize, Serialize,
 )]
 pub struct ProjectCallEdgeFact {
+    /// Language whose resolver produced the edge.
+    pub language: String,
     /// Root-relative caller file.
     pub source_file: String,
     /// Calling symbol.
@@ -62,6 +64,8 @@ pub struct ProjectCallEdgeFact {
     pub destination_file: String,
     /// Called symbol.
     pub callee: String,
+    /// Stable lowercase V2 call classification.
+    pub call_type: String,
 }
 
 /// Semantic text unit derived from the same syntax tree as structural facts.
@@ -175,6 +179,9 @@ pub struct FileFacts {
     pub calls: Vec<CallFact>,
     /// Semantic chunks derived without another parse.
     pub semantic_chunks: Vec<SemanticChunkFact>,
+    /// Canonical cross-file call-graph FileIR encoded as CBOR. Keeping it in
+    /// FileFacts lets project graph composition reuse the shared parse.
+    pub callgraph_ir: Vec<u8>,
     /// Non-fatal extraction diagnostics.
     pub diagnostics: Vec<String>,
 }
@@ -197,6 +204,21 @@ impl FileFactsParser {
         let structure = crate::ast::extractor::extract_file_structure_from_tree(
             path, root, language, &tree, &source,
         )?;
+        let callgraph_ir = crate::callgraph::builder_v2::file_ir_from_tree(
+            root,
+            path,
+            language.as_str(),
+            &source,
+            &tree,
+        );
+        let mut callgraph_ir_bytes = Vec::new();
+        ciborium::ser::into_writer(&callgraph_ir, &mut callgraph_ir_bytes).map_err(|error| {
+            crate::TldrError::ParseError {
+                file: path.to_path_buf(),
+                line: None,
+                message: format!("call-graph artifact encoding failed: {error}"),
+            }
+        })?;
 
         let mut definitions = Vec::new();
         for function in &module.functions {
@@ -296,6 +318,7 @@ impl FileFactsParser {
                 .collect(),
             calls,
             semantic_chunks,
+            callgraph_ir: callgraph_ir_bytes,
             diagnostics: Vec::new(),
         })
     }

@@ -172,9 +172,13 @@ impl GenerationSnapshot {
     }
 
     /// Compose the generation's project-level call graph artifact.
-    pub fn intra_file_call_graph(&self) -> ProjectCallGraph {
+    pub fn call_graph(&self, language: Option<Language>) -> ProjectCallGraph {
         let mut graph = ProjectCallGraph::new();
-        for edge in &self.project_calls {
+        for edge in self
+            .project_calls
+            .iter()
+            .filter(|edge| language.is_none_or(|language| edge.language == language.as_str()))
+        {
             graph.add_edge(CallEdge {
                 src_file: PathBuf::from(&edge.source_file),
                 src_func: edge.caller.clone(),
@@ -183,5 +187,20 @@ impl GenerationSnapshot {
             });
         }
         graph
+    }
+
+    /// Compose all languages for language-agnostic relationship queries.
+    pub fn intra_file_call_graph(&self) -> ProjectCallGraph {
+        self.call_graph(None)
+    }
+
+    /// Stored V2 edge facts, pinned to this generation.
+    pub fn call_edges(
+        &self,
+        language: Option<Language>,
+    ) -> impl Iterator<Item = &ProjectCallEdgeFact> {
+        self.project_calls
+            .iter()
+            .filter(move |edge| language.is_none_or(|language| edge.language == language.as_str()))
     }
 }

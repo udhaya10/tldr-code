@@ -41,17 +41,23 @@ pub(crate) struct FileParseResult {
 
 /// Extract functions, classes, imports, and calls from a Python source file.
 pub(crate) fn extract_python_definitions(source: &str, _file_path: &Path) -> FileParseResult {
-    let mut result = FileParseResult::default();
-
-    // Parse the source
     let tree = match parse_source(source, "python") {
         Ok(t) => t,
         Err(e) => {
+            let mut result = FileParseResult::default();
             result.error = Some(e.to_string());
             return result;
         }
     };
+    extract_python_definitions_from_tree(source, &tree)
+}
 
+/// Python extraction over a syntax tree owned by the shared ingestion pass.
+pub(crate) fn extract_python_definitions_from_tree(
+    source: &str,
+    tree: &tree_sitter::Tree,
+) -> FileParseResult {
+    let mut result = FileParseResult::default();
     let source_bytes = source.as_bytes();
     let root = tree.root_node();
 
@@ -228,11 +234,7 @@ pub(crate) fn extract_python_definitions(source: &str, _file_path: &Path) -> Fil
         }
     }
 
-    // Extract VarType information from the tree before dropping it
-    result.var_types = extract_python_var_types(&tree, source_bytes);
-
-    // Explicitly drop the tree to free memory (per spec)
-    drop(tree);
+    result.var_types = extract_python_var_types(tree, source_bytes);
 
     result
 }

@@ -113,7 +113,7 @@ impl CacheStatsArgs {
         format: OutputFormat,
         quiet: bool,
     ) -> anyhow::Result<()> {
-        let cache_dir = project.join(".tldr").join("cache");
+        let cache_dir = project.join(".tldr").join("store");
 
         // Check if cache directory exists
         if !cache_dir.exists() {
@@ -121,7 +121,7 @@ impl CacheStatsArgs {
                 artifact_store: None,
                 salsa_stats: None,
                 cache_files: None,
-                message: Some("No cache directory found".to_string()),
+                message: Some("No artifact store found".to_string()),
             };
             return self.print_output(&output, format, quiet);
         }
@@ -188,7 +188,7 @@ impl CacheStatsArgs {
 
                 if let Some(ref stats) = output.salsa_stats {
                     println!();
-                    println!("Salsa Cache:");
+                    println!("Hot Response Cache:");
                     println!("  Hits:          {}", format_number(stats.hits));
                     println!("  Misses:        {}", format_number(stats.misses));
                     println!("  Hit Rate:      {:.2}%", stats.hit_rate());
@@ -213,7 +213,7 @@ impl CacheStatsArgs {
 // Helper Functions
 // =============================================================================
 
-/// Scan cache files in the project's .tldr/cache/ directory.
+/// Scan durable files in the project's `.tldr/store/` directory.
 fn scan_cache_files(project: &Path) -> DaemonResult<CacheFileInfo> {
     let cache_dir = project.join(".tldr").join("store");
 

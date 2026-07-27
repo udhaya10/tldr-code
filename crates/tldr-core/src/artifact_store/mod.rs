@@ -135,5 +135,41 @@ mod tests {
         assert!(snapshot
             .definitions()
             .any(|(_, definition)| definition.name == "first_changed"));
+        store.set_vector_generation(3, 17).unwrap();
+        assert_eq!(
+            store.generation(3).unwrap().unwrap().vector_generation,
+            Some(17)
+        );
+    }
+
+    #[test]
+    fn project_graph_composes_cross_file_edges_from_stored_file_ir() {
+        let project = tempfile::tempdir().unwrap();
+        let database = tempfile::tempdir().unwrap();
+        std::fs::write(
+            project.path().join("main.py"),
+            "from helper import work\n\ndef run():\n    work()\n",
+        )
+        .unwrap();
+        std::fs::write(
+            project.path().join("helper.py"),
+            "def work():\n    return 1\n",
+        )
+        .unwrap();
+        let store: Arc<dyn ArtifactStore> =
+            Arc::new(RedbArtifactStore::open(&database.path().join(schema::STORE_FILE)).unwrap());
+        IngestionEngine::new(project.path(), store.clone())
+            .unwrap()
+            .ingest(IngestionScope::Project)
+            .unwrap();
+        let snapshot = GenerationSnapshot::active(store.as_ref()).unwrap().unwrap();
+        assert!(snapshot
+            .call_edges(Some(crate::Language::Python))
+            .any(|edge| {
+                edge.source_file == "main.py"
+                    && edge.caller == "run"
+                    && edge.destination_file == "helper.py"
+                    && edge.callee == "work"
+            }));
     }
 }

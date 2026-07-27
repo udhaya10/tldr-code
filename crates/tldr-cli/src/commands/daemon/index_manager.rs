@@ -274,6 +274,13 @@ impl IndexManager {
         })
     }
 
+    /// Published semantic generation for joining the project manifest.
+    pub fn active_generation(&self, project: &Path) -> Result<Option<u64>, String> {
+        GenerationManager::open(&store_dir_for(project))
+            .and_then(|manager| manager.active_generation())
+            .map_err(|error| error.to_string())
+    }
+
     /// Incremental per-file re-index (TLDR-t8f, design doc §5). On a file change,
     /// re-chunk **only** that file, re-embed only the chunks whose body changed,
     /// remove vanished keys, and apply the delta to the resident store in place —

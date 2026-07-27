@@ -53,6 +53,11 @@ impl GenerationManager {
         })
     }
 
+    /// Active complete semantic generation, if one has published.
+    pub fn active_generation(&self) -> TldrResult<Option<u64>> {
+        self.ledger.active_generation()
+    }
+
     /// Stage, verify, and atomically publish a new generation.
     pub fn publish(&self, store: &VectorStore, identity: &ManifestId) -> TldrResult<u64> {
         self.publish_with_fault(store, identity, None)

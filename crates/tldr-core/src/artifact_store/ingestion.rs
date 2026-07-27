@@ -190,24 +190,37 @@ impl IngestionEngine {
 
         let call_dependencies = manifest_keys
             .iter()
-            .filter(|key| key.kind == ArtifactKind::CallEdges)
+            .filter(|key| key.kind == ArtifactKind::FileFacts)
             .cloned()
             .collect::<Vec<_>>();
-        let mut project_calls = Vec::new();
+        let mut file_irs = HashMap::<String, Vec<crate::callgraph::FileIR>>::new();
         for dependency in &call_dependencies {
             let Some(artifact) = self.store.artifact(dependency)? else {
-                return Err(ingestion_error("call-edge dependency disappeared"));
+                return Err(ingestion_error("file-facts dependency disappeared"));
             };
-            let path = match &dependency.subject {
-                ArtifactSubject::File(path) => path.clone(),
-                _ => continue,
+            let facts: FileFacts = super::redb::decode(&artifact.payload)?;
+            let ir: crate::callgraph::FileIR =
+                ciborium::de::from_reader(facts.callgraph_ir.as_slice()).map_err(|error| {
+                    ingestion_error(format!("call-graph artifact decoding failed: {error}"))
+                })?;
+            file_irs.entry(facts.language).or_default().push(ir);
+        }
+        let mut project_calls = Vec::new();
+        for (language, irs) in file_irs {
+            let config = crate::callgraph::BuildConfig {
+                language: language.clone(),
+                use_type_resolution: true,
+                ..Default::default()
             };
-            let calls: Vec<super::CallFact> = super::redb::decode(&artifact.payload)?;
-            project_calls.extend(calls.into_iter().map(|call| ProjectCallEdgeFact {
-                source_file: path.clone(),
-                caller: call.caller,
-                destination_file: path.clone(),
-                callee: call.callee,
+            let graph = crate::callgraph::compose_call_graph_v2(&self.root, &config, irs)
+                .map_err(|error| ingestion_error(error.to_string()))?;
+            project_calls.extend(graph.edges.into_iter().map(|edge| ProjectCallEdgeFact {
+                language: language.clone(),
+                source_file: relative(&self.root, &edge.src_file),
+                caller: edge.src_func,
+                destination_file: relative(&self.root, &edge.dst_file),
+                callee: edge.dst_func,
+                call_type: call_type_name(edge.call_type).into(),
             }));
         }
         let graph_key = ArtifactKey {
@@ -215,7 +228,7 @@ impl IngestionEngine {
             revision: source_revision,
             subject: ArtifactSubject::Project,
             kind: ArtifactKind::CallGraph,
-            producer: ProducerId::new("project-call-graph", 1),
+            producer: ProducerId::new("project-call-graph", 2),
         };
         let graph = ArtifactEnvelope::new(
             graph_key.clone(),
@@ -364,6 +377,18 @@ fn subject_changed(subject: &ArtifactSubject, changed: &HashSet<String>) -> bool
 
 fn artifact_order(key: &ArtifactKey) -> String {
     format!("{:?}:{:?}", key.subject, key.kind)
+}
+
+fn call_type_name(call_type: crate::callgraph::CallType) -> &'static str {
+    use crate::callgraph::CallType;
+    match call_type {
+        CallType::Intra => "intra",
+        CallType::Direct => "direct",
+        CallType::Method => "method",
+        CallType::Attr => "attr",
+        CallType::Ref => "ref",
+        CallType::Static => "static",
+    }
 }
 
 #[allow(dead_code)]

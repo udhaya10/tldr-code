@@ -1,5 +1,31 @@
 # Changelog
 
+## Unreleased — unified project artifact store (TLDR-eda5)
+
+### Changed
+
+- Structural ingestion now discovers each project revision once, parses every
+  changed file once, derives normalized `FileFacts`, symbols, references,
+  semantic source chunks, and canonical call-graph `FileIR`, then commits
+  bounded batches to `.tldr/store/project.redb`.
+- Full builds and watcher deltas use the same resumable job/checkpoint engine.
+  Unchanged file revisions are carried forward without reparsing, and only a
+  validated generation becomes visible to queries.
+- Exact extraction, imports, structure, calls, impact, architecture, CFG, and
+  DFG daemon paths reuse generation-pinned artifacts. Cross-file calls retain
+  the V2 resolver and call classifications; CFG/DFG are demand-built once and
+  persisted with explicit dependencies.
+- The usearch generation is joined to the active project manifest after
+  semantic publication. Queries continue serving the prior complete
+  generation while a replacement is built.
+- Durable derived state no longer uses JSON caches. Artifact records,
+  manifests, dependencies, and checkpoints use redb+rkyv; vectors retain the
+  usearch binary format. JSON remains only at configuration, IPC, report, and
+  other transport boundaries.
+- Legacy `QueryCache`, Salsa persistence, `call_graph.json`, and daemon
+  statistics cache files were removed. The remaining bounded hot response
+  cache is process-local and non-durable.
+
 ## Unreleased — semantic search: one warm path (TLDR-7xz)
 
 **Philosophy: the tool has exactly two modes — it works beautifully (warm,

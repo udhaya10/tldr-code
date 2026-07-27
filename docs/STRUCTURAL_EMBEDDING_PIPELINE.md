@@ -511,3 +511,83 @@ Primary sources:
 Saved Firecrawl evidence is under `.firecrawl/onnx-*`,
 `.firecrawl/embedding-batching-*`, `.firecrawl/tei-*`,
 `.firecrawl/cast-*`, and `.firecrawl/fastembed-*`.
+
+## 11. Unified Artifact-Store Cutover (TLDR-eda5)
+
+The later TLDR-eda5 redesign generalizes the redb generation machinery from
+semantic-only persistence into the authoritative project artifact store. It is
+a one-shot storage cutover: the runtime does not consult a legacy cache when
+the new store is cold.
+
+```text
+bulk scan / watcher delta
+          |
+          v
+canonical file revision
+          |
+          v
+read + parse changed file once
+          |
+          v
+FileFacts ──> symbols / references / imports / structure
+    |       └> canonical per-file call-graph IR
+    └────────> semantic source chunks
+          |
+          v
+bounded artifact batches + durable checkpoint
+          |
+          v
+.tldr/store/project.redb
+          |
+          v
+validate and atomically publish generation
+          |
+          +──> immutable structural query snapshot
+          └──> joined usearch vector generation
+```
+
+### Improvements over the previous command-cache design
+
+- Full and incremental ingestion are one engine. A delta is a file-scoped
+  generation, not a separate cache-update implementation.
+- An interrupted ingestion resumes after its last committed batch. A failed
+  replacement never exposes a mixture of old and new artifacts.
+- Unchanged file revisions carry their immutable artifacts forward and incur
+  zero parser invocations.
+- Cross-file calls are composed from stored V2 `FileIR` facts, so calls,
+  impact, dead-code, hubs, and coupling consumers share the same graph rather
+  than caching independent final JSON answers.
+- CFG and DFG are reusable function artifacts. A DFG records its CFG
+  dependency; repeated commands and different renderers reuse the same
+  underlying analysis.
+- The daemon serves a pinned in-memory generation snapshot and writes through
+  one coordinator. redb transactions are not held across query rendering.
+- Semantic and structural publication are explicitly joined in the project
+  manifest, preventing a query from accidentally combining unrelated source
+  and vector generations.
+
+### Persistence contract
+
+Long-lived derived state is binary:
+
+- redb+rkyv: file facts, analyzer artifacts, dependencies, jobs, checkpoints,
+  and generation manifests;
+- usearch: vector index generations;
+- bounded in-process memory: short-lived rendered response reuse.
+
+JSON remains valid for CLI/MCP/daemon transport, user-requested reports,
+configuration, and other short-lived interchange. It is not a persistent
+artifact or cache format.
+
+### Construction invariants
+
+- One unchanged file revision causes at most one ingestion parse.
+- One published generation contains no mixed artifact revisions.
+- One interrupted job resumes from its last committed batch.
+- One file edit reparses no unrelated source file.
+- One query pins one immutable generation for its complete execution.
+- A vector generation is attached only to the currently active project
+  manifest.
+
+The permanent lifecycle and retrieval certification suite is owned by
+TLDR-dpbc and replaces the pre-cutover tests rather than porting them.

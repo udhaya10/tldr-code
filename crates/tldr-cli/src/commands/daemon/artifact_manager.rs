@@ -174,6 +174,17 @@ impl ArtifactManager {
         }
     }
 
+    /// Atomically join the current usearch generation to the pinned project
+    /// manifest after semantic publication succeeds.
+    pub fn attach_vector_generation(&self, vector_generation: u64) -> tldr_core::TldrResult<()> {
+        let generation = self
+            .store
+            .active_generation()?
+            .ok_or_else(|| TldrError::DaemonError("artifact store is not ready".into()))?;
+        self.store
+            .set_vector_generation(generation, vector_generation)
+    }
+
     fn ingest(&self, scope: IngestionScope) -> tldr_core::TldrResult<IngestionReport> {
         let _writer = self.writer.lock().expect("artifact writer poisoned");
         let target_generation = self.store.active_generation()?.unwrap_or(0) + 1;

@@ -11,7 +11,8 @@ use super::languages::LanguageRegistry;
 use super::types::parse_source;
 use super::var_types::{
     extract_go_var_types, extract_java_var_types, extract_kotlin_var_types, extract_php_var_types,
-    extract_python_definitions, extract_rust_var_types, extract_ts_var_types, FileParseResult,
+    extract_python_definitions, extract_python_definitions_from_tree, extract_rust_var_types,
+    extract_ts_var_types, FileParseResult,
 };
 
 /// Extract functions, classes, imports, and calls from a source file based on language.
@@ -86,6 +87,49 @@ pub(crate) fn extract_definitions(
     } else {
         // Fallback for truly unknown languages not in the registry
         FileParseResult::default()
+    }
+}
+
+/// Extract the call-graph file facts from a syntax tree produced by the shared
+/// parser. This is the ingestion entry point; it deliberately never parses the
+/// source again.
+pub(crate) fn extract_definitions_from_tree(
+    source: &str,
+    file_path: &Path,
+    language: &str,
+    tree: &tree_sitter::Tree,
+) -> FileParseResult {
+    if language.eq_ignore_ascii_case("python") {
+        return extract_python_definitions_from_tree(source, tree);
+    }
+
+    let registry = LanguageRegistry::with_defaults();
+    let Some(handler) = registry.get(language) else {
+        return FileParseResult::default();
+    };
+    let imports = handler.parse_imports(source, file_path).unwrap_or_default();
+    let calls = handler
+        .extract_calls(file_path, source, tree)
+        .unwrap_or_default();
+    let (funcs, classes) = handler
+        .extract_definitions(source, file_path, tree)
+        .unwrap_or_default();
+    let var_types = match language.to_lowercase().as_str() {
+        "go" => extract_go_var_types(tree, source.as_bytes()),
+        "typescript" | "javascript" => extract_ts_var_types(tree, source.as_bytes()),
+        "java" => extract_java_var_types(tree, source.as_bytes()),
+        "rust" => extract_rust_var_types(tree, source.as_bytes()),
+        "kotlin" => extract_kotlin_var_types(tree, source.as_bytes()),
+        "php" => extract_php_var_types(tree, source.as_bytes()),
+        _ => Vec::new(),
+    };
+    FileParseResult {
+        funcs,
+        classes,
+        imports,
+        calls,
+        var_types,
+        error: None,
     }
 }
 

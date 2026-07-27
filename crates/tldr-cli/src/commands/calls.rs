@@ -192,15 +192,14 @@ pub(crate) fn call_graph_output_from_artifacts(
     max_items: usize,
     snapshot: &GenerationSnapshot,
 ) -> CallGraphOutput {
-    let graph = snapshot.intra_file_call_graph();
-    let mut edges = graph
-        .edges()
+    let mut edges = snapshot
+        .call_edges(detected_language)
         .map(|edge| EdgeOutput {
-            src_file: edge.src_file.clone(),
-            src_func: edge.src_func.clone(),
-            dst_file: edge.dst_file.clone(),
-            dst_func: edge.dst_func.clone(),
-            call_type: CallType::Intra,
+            src_file: PathBuf::from(&edge.source_file),
+            src_func: edge.caller.clone(),
+            dst_file: PathBuf::from(&edge.destination_file),
+            dst_func: edge.callee.clone(),
+            call_type: artifact_call_type(&edge.call_type),
         })
         .collect::<Vec<_>>();
     edges.sort_by(|left, right| {
@@ -235,6 +234,17 @@ pub(crate) fn call_graph_output_from_artifacts(
         truncated,
         total_edges,
         shown_edges,
+    }
+}
+
+fn artifact_call_type(value: &str) -> CallType {
+    match value {
+        "direct" => CallType::Direct,
+        "method" => CallType::Method,
+        "attr" => CallType::Attr,
+        "ref" => CallType::Ref,
+        "static" => CallType::Static,
+        _ => CallType::Intra,
     }
 }
 

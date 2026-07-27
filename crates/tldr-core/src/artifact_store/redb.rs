@@ -29,6 +29,8 @@ pub trait ArtifactStore: Send + Sync {
     fn commit_batch(&self, batch: &ArtifactBatch, job: &IngestionJob) -> TldrResult<()>;
     /// Atomically attach a demand-driven artifact to the active generation.
     fn commit_optional(&self, artifact: &ArtifactEnvelope) -> TldrResult<()>;
+    /// Join the derived usearch generation to the active project manifest.
+    fn set_vector_generation(&self, generation: u64, vector_generation: u64) -> TldrResult<()>;
     /// Atomically publish a validated generation.
     fn publish(&self, manifest: &GenerationManifest) -> TldrResult<()>;
     /// Read a durable generation manifest.
@@ -318,6 +320,37 @@ impl ArtifactStore for RedbArtifactStore {
             let bytes = encode(&manifest)?;
             generations
                 .insert(active, bytes.as_slice())
+                .map_err(redb_error)?;
+        }
+        tx.commit().map_err(redb_error)
+    }
+
+    fn set_vector_generation(&self, generation: u64, vector_generation: u64) -> TldrResult<()> {
+        let mut tx = self.database.begin_write().map_err(redb_error)?;
+        tx.set_durability(Durability::Immediate)
+            .map_err(redb_error)?;
+        {
+            let metadata = tx.open_table(METADATA).map_err(redb_error)?;
+            let active = metadata
+                .get(ACTIVE_GENERATION_KEY)
+                .map_err(redb_error)?
+                .and_then(|value| value.value().try_into().ok().map(u64::from_le_bytes));
+            if active != Some(generation) {
+                return Err(store_error("vector generation targets a stale manifest"));
+            }
+        }
+        {
+            let mut generations = tx.open_table(GENERATIONS).map_err(redb_error)?;
+            let bytes = generations
+                .get(generation)
+                .map_err(redb_error)?
+                .map(|value| value.value().to_vec())
+                .ok_or_else(|| store_error("active generation manifest is missing"))?;
+            let mut manifest: GenerationManifest = decode(&bytes)?;
+            manifest.vector_generation = Some(vector_generation);
+            let bytes = encode(&manifest)?;
+            generations
+                .insert(generation, bytes.as_slice())
                 .map_err(redb_error)?;
         }
         tx.commit().map_err(redb_error)

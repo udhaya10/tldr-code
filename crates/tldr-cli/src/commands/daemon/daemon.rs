@@ -150,10 +150,23 @@ impl WarmJob {
         if let Some(model) = self.model {
             let mgr = Arc::clone(&self.semantic_store);
             let project = self.project.clone();
-            let res = tokio::task::spawn_blocking(move || mgr.warm(&project, model)).await;
+            let res = tokio::task::spawn_blocking(move || {
+                let built = mgr.warm(&project, model)?;
+                let generation = mgr.active_generation(&project)?;
+                Ok::<_, String>((built, generation))
+            })
+            .await;
             match res {
-                Ok(Ok(true)) => warmed.push("semantic_store"),
-                Ok(Ok(false)) => warmed.push("semantic_store (cached)"),
+                Ok(Ok((built, Some(generation)))) => {
+                    if let Err(error) = self.artifact_manager.attach_vector_generation(generation) {
+                        errors.push(format!("semantic_generation_join: {error}"));
+                    } else if built {
+                        warmed.push("semantic_store");
+                    } else {
+                        warmed.push("semantic_store (cached)");
+                    }
+                }
+                Ok(Ok((_, None))) => errors.push("semantic_store: no published generation".into()),
                 Ok(Err(e)) => errors.push(format!("semantic_store: {}", e)),
                 Err(e) => errors.push(format!("semantic_store: {}", e)),
             }
@@ -1605,6 +1618,7 @@ impl TLDRDaemon {
         #[cfg(feature = "semantic")]
         {
             let mgr = Arc::clone(&self.semantic_store);
+            let artifacts = Arc::clone(&self.artifact_manager);
             let project = self.project.clone();
             let changed = file.clone();
             // Busy guard owned by the closure (see Warm handler note): the
@@ -1616,7 +1630,19 @@ impl TLDRDaemon {
                 use super::index_manager::DeltaOutcome;
                 match mgr.apply_delta(&project, &changed) {
                     Ok(DeltaOutcome::NeedsRebuild) => mgr.invalidate(),
-                    Ok(_) => {}
+                    Ok(_) => match mgr.active_generation(&project) {
+                        Ok(Some(generation)) => {
+                            if let Err(error) = artifacts.attach_vector_generation(generation) {
+                                eprintln!(
+                                    "[artifact-store] semantic generation join failed: {error}"
+                                );
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(error) => {
+                            eprintln!("[artifact-store] semantic generation read failed: {error}")
+                        }
+                    },
                     Err(e) => {
                         eprintln!(
                             "[t8f] delta failed for {}: {e}; rebuilding",

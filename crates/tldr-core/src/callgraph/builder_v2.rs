@@ -64,6 +64,28 @@ use super::scanner::{is_supported_language, normalize_language_string};
 use super::types::PYTHON_BUILTINS;
 use super::var_types::FileParseResult;
 
+/// Build the exact V2 per-file IR from the syntax tree already produced by
+/// unified ingestion.
+pub(crate) fn file_ir_from_tree(
+    root: &Path,
+    path: &Path,
+    language: &str,
+    source: &str,
+    tree: &tree_sitter::Tree,
+) -> FileIR {
+    let canonical_root = root.canonicalize().ok();
+    let relative_path = normalize_path_relative_to_root(path, root, canonical_root.as_deref());
+    let parsed = super::module_path::extract_definitions_from_tree(source, path, language, tree);
+    FileIR {
+        path: relative_path,
+        funcs: parsed.funcs,
+        classes: parsed.classes,
+        imports: parsed.imports,
+        var_types: parsed.var_types,
+        calls: parsed.calls,
+    }
+}
+
 // =============================================================================
 // Parallel Index Building (Spec Section 14.5)
 // =============================================================================
