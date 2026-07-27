@@ -308,7 +308,7 @@ Expected: both profiles report zero failures.
 
 Record direct evidence on `TLDR-wa2g.2` and `TLDR-ac0.7`, close both, then close `TLDR-wa2g`. CodeRabbit is omitted by explicit user direction.
 
-- [ ] **Step 5: Commit and push**
+- [x] **Step 5: Commit and push**
 
 Run:
 
