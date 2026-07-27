@@ -261,6 +261,6 @@ Expected: smoke and certification report zero failures.
 
 Record gate evidence and close `TLDR-9w8`, `TLDR-1m4`, then `TLDR-bpf`.
 
-- [ ] **Step 5: Commit and push**
+- [x] **Step 5: Commit and push**
 
 Commit the matcher unification and reload implementation, pull/rebase from `fork/main`, run `bd dolt push`, push `main` to `fork`, and verify a clean worktree synchronized with `fork/main`.
