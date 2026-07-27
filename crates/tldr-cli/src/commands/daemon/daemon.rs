@@ -61,6 +61,83 @@ fn hash_str_args(parts: &[&str]) -> u64 {
     hasher.finish()
 }
 
+fn apply_artifact_delta_batch(artifacts: &ArtifactManager, files: Vec<PathBuf>) -> Vec<PathBuf> {
+    files
+        .into_iter()
+        .filter_map(|changed| match artifacts.apply_delta(&changed) {
+            Ok(_) => Some(changed),
+            Err(error) => {
+                eprintln!(
+                    "[artifact-store] delta failed for {}: {error}",
+                    changed.display()
+                );
+                None
+            }
+        })
+        .collect()
+}
+
+#[cfg(feature = "semantic")]
+fn apply_semantic_delta_batch(
+    artifacts: &ArtifactManager,
+    mgr: &IndexManager,
+    project: &std::path::Path,
+    applied: Vec<PathBuf>,
+) {
+    use super::index_manager::DeltaOutcome;
+
+    if applied.is_empty() {
+        return;
+    }
+    let snapshot = match artifacts.snapshot() {
+        Ok(snapshot) => snapshot,
+        Err(state) => {
+            eprintln!(
+                "[artifact-store] semantic delta batch skipped: generation is not ready: {state:?}"
+            );
+            mgr.invalidate();
+            return;
+        }
+    };
+    let artifact_generation = snapshot.generation();
+    let mut source_chunks: HashMap<_, _> = snapshot
+        .semantic_source_chunks(project)
+        .into_iter()
+        .map(|chunk| (chunk.file_path.clone(), chunk))
+        .collect();
+
+    for changed in applied {
+        let source_chunk = source_chunks.remove(&changed);
+        match mgr.apply_delta(project, &changed, source_chunk) {
+            Ok(DeltaOutcome::NeedsRebuild) => {
+                mgr.invalidate();
+                return;
+            }
+            Ok(_) => {}
+            Err(error) => {
+                eprintln!(
+                    "[t8f] delta failed for {}: {error}; rebuilding",
+                    changed.display()
+                );
+                mgr.invalidate();
+                return;
+            }
+        }
+    }
+
+    match mgr.active_generation(project) {
+        Ok(Some(generation)) => {
+            if let Err(error) = artifacts.attach_vector_generation(artifact_generation, generation)
+            {
+                mgr.invalidate();
+                eprintln!("[artifact-store] semantic generation join failed: {error}");
+            }
+        }
+        Ok(None) => {}
+        Err(error) => eprintln!("[artifact-store] semantic generation read failed: {error}"),
+    }
+}
+
 /// Resolve the effective `Language` for a daemon-handler invocation.
 ///
 /// v031-cluster-M2: M1 added `language: Option<Language>` to seven
@@ -297,6 +374,11 @@ impl TLDRDaemon {
     /// Get the project path.
     pub fn project(&self) -> &PathBuf {
         &self.project
+    }
+
+    /// Effective daemon configuration, including project watcher overrides.
+    pub(crate) fn config(&self) -> &DaemonConfig {
+        &self.config
     }
 
     /// Presence tracker (TLDR-3w5). The watcher taps it for file-event
@@ -1573,16 +1655,42 @@ impl TLDRDaemon {
     ///   be canonicalized — so canonicalizing before `apply_delta` would break
     ///   the delete path. Pass the path through as-is.
     pub(crate) async fn process_dirty_file(&self, file: PathBuf) -> ReindexOutcome {
-        // Add file to dirty set
+        self.process_dirty_files(vec![file]).await
+    }
+
+    /// Apply a deduplicated watcher batch through one blocking job.
+    ///
+    /// Cache bookkeeping stays on the async side and contains no blocking I/O.
+    /// Authoritative artifact ingestion and resident semantic deltas execute
+    /// serially inside one `spawn_blocking` closure, so an N-file flush pays
+    /// one scheduler crossing and cannot reorder generations.
+    pub(crate) async fn process_dirty_files(&self, files: Vec<PathBuf>) -> ReindexOutcome {
+        let mut files: Vec<_> = files
+            .into_iter()
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        files.sort();
+
+        if files.is_empty() {
+            return ReindexOutcome {
+                dirty_count: self.dirty_files.read().await.len(),
+                threshold: self.config.auto_reindex_threshold,
+                reindex_triggered: false,
+            };
+        }
+
+        // Add the whole batch to dirty accounting in one write-lock hold.
         let dirty_count = {
             let mut dirty = self.dirty_files.write().await;
-            dirty.insert(file.clone());
+            dirty.extend(files.iter().cloned());
             dirty.len()
         };
 
-        // Invalidate cache entries for this file
-        let file_hash = super::hot_cache::hash_path(&file);
-        self.cache.invalidate_by_input(file_hash);
+        for file in &files {
+            self.cache
+                .invalidate_by_input(super::hot_cache::hash_path(file));
+        }
 
         // TLDR-iqr freshness: project-level answers (calls/structure/tree/
         // dead/arch/impact) register against the project-root hash; any save
@@ -1592,100 +1700,29 @@ impl TLDRDaemon {
         self.cache
             .invalidate_by_input(super::hot_cache::hash_path(&self.project));
 
-        // Structural facts and their generation checkpoint take the same
-        // resumable path as a bulk warm. Queries retain their old Arc snapshot
-        // until this delta publishes atomically.
-        {
-            let manager = Arc::clone(&self.artifact_manager);
-            let changed = file.clone();
-            let busy = self.activity.begin("artifact-delta");
-            let _ = tokio::task::spawn_blocking(move || {
-                let _busy = busy;
-                if let Err(error) = manager.apply_delta(&changed) {
-                    eprintln!(
-                        "[artifact-store] delta failed for {}: {error}",
-                        changed.display()
-                    );
-                }
-            })
-            .await;
-        }
-
-        // Incrementally re-index the changed file in the resident store instead
-        // of dropping it (TLDR-t8f). A warm store applies a per-file delta —
-        // re-embedding only that file's changed chunks — so query results
-        // reflect the edit without a full corpus rebuild. A cold store no-ops
-        // (the next query's cold build already sees the change). Any failure
-        // falls back to invalidate() → full rebuild on the next query.
+        let artifacts = Arc::clone(&self.artifact_manager);
         #[cfg(feature = "semantic")]
-        {
-            let mgr = Arc::clone(&self.semantic_store);
-            let artifacts = Arc::clone(&self.artifact_manager);
-            let project = self.project.clone();
-            let changed = file.clone();
-            // Busy guard owned by the closure (see Warm handler note): the
-            // delta must defer idle shutdown for exactly as long as it runs,
-            // regardless of what happens to this awaiting task.
-            let busy = self.activity.begin("delta");
-            let _ = tokio::task::spawn_blocking(move || {
-                let _busy = busy;
-                use super::index_manager::DeltaOutcome;
-                let snapshot = match artifacts.snapshot() {
-                    Ok(snapshot) => snapshot,
-                    Err(state) => {
-                        eprintln!(
-                            "[artifact-store] semantic delta skipped: generation is not ready: {state:?}"
-                        );
-                        mgr.invalidate();
-                        return;
-                    }
-                };
-                let artifact_generation = snapshot.generation();
-                let source_chunk = snapshot
-                    .semantic_source_chunks(&project)
-                    .into_iter()
-                    .find(|chunk| chunk.file_path == changed);
-                match mgr.apply_delta(&project, &changed, source_chunk) {
-                    Ok(DeltaOutcome::NeedsRebuild) => mgr.invalidate(),
-                    Ok(_) => match mgr.active_generation(&project) {
-                        Ok(Some(generation)) => {
-                            if let Err(error) = artifacts
-                                .attach_vector_generation(artifact_generation, generation)
-                            {
-                                mgr.invalidate();
-                                eprintln!(
-                                    "[artifact-store] semantic generation join failed: {error}"
-                                );
-                            }
-                        }
-                        Ok(None) => {}
-                        Err(error) => {
-                            eprintln!("[artifact-store] semantic generation read failed: {error}")
-                        }
-                    },
-                    Err(e) => {
-                        eprintln!(
-                            "[t8f] delta failed for {}: {e}; rebuilding",
-                            changed.display()
-                        );
-                        mgr.invalidate();
-                    }
-                }
-            })
-            .await;
-        }
+        let mgr = Arc::clone(&self.semantic_store);
+        #[cfg(feature = "semantic")]
+        let project = self.project.clone();
+        let busy = self.activity.begin("delta-batch");
+        let _ = tokio::task::spawn_blocking(move || {
+            let _busy = busy;
+            let applied = apply_artifact_delta_batch(&artifacts, files);
+
+            #[cfg(feature = "semantic")]
+            apply_semantic_delta_batch(&artifacts, &mgr, &project, applied);
+
+            #[cfg(not(feature = "semantic"))]
+            {
+                let _ = applied;
+            }
+        })
+        .await;
 
         let threshold = self.config.auto_reindex_threshold;
         let reindex_triggered = dirty_count >= threshold;
 
-        // TLDR-7dd: freshness is ALREADY applied per-save above — this file's
-        // salsa entries and all project-level answers are invalidated (lines
-        // ~1574/1587) and the semantic store took a per-file delta. The next
-        // query lazily recomposes from the FileIR memo. So there is no separate
-        // rebuild to defer: when the dirty set reaches the threshold we simply
-        // flush the accounting set. `reindex_triggered` reports that the
-        // threshold was reached and the set was flushed — not a pending async
-        // rebuild (which would be redundant given the per-save invalidation).
         if reindex_triggered {
             let mut dirty = self.dirty_files.write().await;
             dirty.clear();
@@ -1695,6 +1732,26 @@ impl TLDRDaemon {
             dirty_count,
             threshold,
             reindex_triggered,
+        }
+    }
+
+    /// Supersede queued watcher deltas with the existing single-flight warm.
+    pub(crate) async fn schedule_full_rebuild(&self) {
+        self.dirty_files.write().await.clear();
+        #[cfg(feature = "semantic")]
+        self.semantic_store.invalidate();
+
+        match self.start_warm_build(resolve_language(None)) {
+            DaemonResponse::Status {
+                status,
+                message: Some(message),
+            } => eprintln!("[ac0.7] burst rebuild {status}: {message}"),
+            DaemonResponse::Status { status, .. } => {
+                eprintln!("[ac0.7] burst rebuild {status}")
+            }
+            response => {
+                eprintln!("[ac0.7] unexpected burst rebuild response: {response:?}")
+            }
         }
     }
 
@@ -1845,3 +1902,59 @@ pub async fn wait_for_daemon(project: &std::path::Path, timeout_secs: u64) -> Da
 // =============================================================================
 // Tests
 // =============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::{DaemonConfig, TLDRDaemon};
+
+    #[tokio::test]
+    async fn dirty_file_batch_publishes_each_final_revision() {
+        let project = tempfile::tempdir().expect("temp project");
+        let root = project.path().canonicalize().expect("canonical root");
+        let first = root.join("first.py");
+        let second = root.join("second.py");
+        std::fs::write(&first, "def first():\n    return 1\n").expect("write first");
+        std::fs::write(&second, "def second():\n    return 1\n").expect("write second");
+
+        let daemon = TLDRDaemon::new(root.clone(), DaemonConfig::default()).expect("create daemon");
+        daemon
+            .artifact_manager
+            .warm()
+            .expect("publish baseline generation");
+        let baseline = daemon
+            .artifact_manager
+            .snapshot()
+            .expect("baseline snapshot");
+        let first_revision = baseline
+            .file("first.py")
+            .expect("baseline first.py")
+            .revision;
+        let second_revision = baseline
+            .file("second.py")
+            .expect("baseline second.py")
+            .revision;
+
+        std::fs::write(&first, "def first():\n    return 2\n").expect("edit first");
+        std::fs::write(&second, "def second():\n    return 2\n").expect("edit second");
+        let outcome = daemon
+            .process_dirty_files(vec![first.clone(), second.clone(), first])
+            .await;
+
+        let current = daemon
+            .artifact_manager
+            .snapshot()
+            .expect("current snapshot");
+        assert_eq!(outcome.dirty_count, 2);
+        assert_ne!(
+            current.file("first.py").expect("current first.py").revision,
+            first_revision
+        );
+        assert_ne!(
+            current
+                .file("second.py")
+                .expect("current second.py")
+                .revision,
+            second_revision
+        );
+    }
+}

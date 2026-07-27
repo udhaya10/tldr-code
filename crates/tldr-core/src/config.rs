@@ -18,6 +18,10 @@ pub struct TldrConfig {
     /// Semantic-search settings (enabled, language filter).
     #[serde(default)]
     pub semantic: SemanticConfig,
+
+    /// In-daemon filesystem watcher batching and burst-control settings.
+    #[serde(default)]
+    pub watcher: WatcherConfig,
 }
 
 fn default_version() -> u32 {
@@ -30,6 +34,7 @@ impl Default for TldrConfig {
             version: default_version(),
             embedding: EmbeddingConfig::default(),
             semantic: SemanticConfig::default(),
+            watcher: WatcherConfig::default(),
         }
     }
 }
@@ -99,6 +104,38 @@ impl Default for SemanticConfig {
     }
 }
 
+/// In-daemon filesystem watcher configuration.
+///
+/// Optional fields preserve deep-merge semantics: a project config only
+/// overrides the global values it explicitly sets. Runtime defaults live in
+/// `DaemonConfig`, where these values become concrete durations and caps.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct WatcherConfig {
+    /// Enable the in-daemon recursive watcher.
+    #[serde(default)]
+    pub enabled: Option<bool>,
+
+    /// Quiet period after the most recent accepted event.
+    #[serde(default)]
+    pub debounce_ms: Option<u64>,
+
+    /// Maximum time from the first event before a batch must flush.
+    #[serde(default)]
+    pub max_wait_ms: Option<u64>,
+
+    /// Pending unique-file count above which deltas become a full rebuild.
+    #[serde(default)]
+    pub burst_file_cap: Option<usize>,
+
+    /// Accepted-event count above which deltas become a full rebuild.
+    #[serde(default)]
+    pub burst_event_cap: Option<usize>,
+
+    /// Rolling window used by `burst_event_cap`.
+    #[serde(default)]
+    pub burst_window_ms: Option<u64>,
+}
+
 impl TldrConfig {
     /// Parse a config from a JSON string.
     // Intentionally named `from_str` for the JSON-parsing API; not the
@@ -124,6 +161,7 @@ impl TldrConfig {
         }
         self.embedding.merge(&other.embedding);
         self.semantic.merge(&other.semantic);
+        self.watcher.merge(&other.watcher);
     }
 
     /// Resolve config: global (~/.tldr/config.json) then project (.tldr/config.json).
@@ -176,6 +214,17 @@ impl SemanticConfig {
     }
 }
 
+impl WatcherConfig {
+    fn merge(&mut self, other: &WatcherConfig) {
+        self.enabled = other.enabled.or(self.enabled);
+        self.debounce_ms = other.debounce_ms.or(self.debounce_ms);
+        self.max_wait_ms = other.max_wait_ms.or(self.max_wait_ms);
+        self.burst_file_cap = other.burst_file_cap.or(self.burst_file_cap);
+        self.burst_event_cap = other.burst_event_cap.or(self.burst_event_cap);
+        self.burst_window_ms = other.burst_window_ms.or(self.burst_window_ms);
+    }
+}
+
 /// Walk up from `start` looking for a directory containing `.tldr/` or `.git/`.
 pub fn find_project_root(start: &Path) -> Option<PathBuf> {
     let start = start.canonicalize().unwrap_or_else(|_| start.to_path_buf());
@@ -197,4 +246,62 @@ pub fn find_project_root(start: &Path) -> Option<PathBuf> {
 
 fn global_config_path() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".tldr").join("config.json"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TldrConfig;
+
+    #[test]
+    fn watcher_config_parses_all_pipeline_knobs() {
+        let config = TldrConfig::from_str(
+            r#"{
+                "watcher": {
+                    "debounce_ms": 125,
+                    "max_wait_ms": 900,
+                    "burst_file_cap": 7,
+                    "burst_event_cap": 11,
+                    "burst_window_ms": 250
+                }
+            }"#,
+        )
+        .expect("watcher config should parse");
+
+        assert_eq!(config.watcher.debounce_ms, Some(125));
+        assert_eq!(config.watcher.max_wait_ms, Some(900));
+        assert_eq!(config.watcher.burst_file_cap, Some(7));
+        assert_eq!(config.watcher.burst_event_cap, Some(11));
+        assert_eq!(config.watcher.burst_window_ms, Some(250));
+    }
+
+    #[test]
+    fn watcher_config_merge_only_replaces_explicit_values() {
+        let mut base = TldrConfig::from_str(
+            r#"{
+                "watcher": {
+                    "debounce_ms": 125,
+                    "max_wait_ms": 900,
+                    "burst_file_cap": 7
+                }
+            }"#,
+        )
+        .expect("base config should parse");
+        let overlay = TldrConfig::from_str(
+            r#"{
+                "watcher": {
+                    "max_wait_ms": 1200,
+                    "burst_event_cap": 11
+                }
+            }"#,
+        )
+        .expect("overlay config should parse");
+
+        base.merge(&overlay);
+
+        assert_eq!(base.watcher.debounce_ms, Some(125));
+        assert_eq!(base.watcher.max_wait_ms, Some(1200));
+        assert_eq!(base.watcher.burst_file_cap, Some(7));
+        assert_eq!(base.watcher.burst_event_cap, Some(11));
+        assert_eq!(base.watcher.burst_window_ms, None);
+    }
 }

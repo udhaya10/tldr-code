@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use tldr_core::{Language, SmellType, ThresholdPreset};
+use tldr_core::{config::TldrConfig, Language, SmellType, ThresholdPreset};
 
 // =============================================================================
 // Constants
@@ -22,6 +22,21 @@ pub const IDLE_TIMEOUT_SECS: u64 = 30 * 60;
 
 /// Default threshold for triggering semantic re-index
 pub const DEFAULT_REINDEX_THRESHOLD: usize = 20;
+
+/// Watcher quiet period after the most recent accepted event.
+pub const DEFAULT_WATCHER_DEBOUNCE_MS: u64 = 750;
+
+/// Maximum batch lifetime measured from its first accepted event.
+pub const DEFAULT_WATCHER_MAX_WAIT_MS: u64 = 5_000;
+
+/// Pending unique-file count above which a full rebuild supersedes deltas.
+pub const DEFAULT_WATCHER_BURST_FILE_CAP: usize = 200;
+
+/// Accepted-event count above which a full rebuild supersedes deltas.
+pub const DEFAULT_WATCHER_BURST_EVENT_CAP: usize = 1_000;
+
+/// Rolling window for the watcher event cap.
+pub const DEFAULT_WATCHER_BURST_WINDOW_MS: u64 = 2_000;
 
 /// Default flush interval for hook stats (every N invocations)
 pub const HOOK_FLUSH_THRESHOLD: usize = 5;
@@ -76,6 +91,26 @@ pub struct DaemonConfig {
     /// configs (which lack the field) defaulting to the ON behavior.
     #[serde(default = "default_enable_watcher")]
     pub enable_watcher: bool,
+
+    /// Quiet period after the most recent accepted watcher event.
+    #[serde(default = "default_watcher_debounce_ms")]
+    pub watcher_debounce_ms: u64,
+
+    /// Hard batch deadline measured from its first accepted event.
+    #[serde(default = "default_watcher_max_wait_ms")]
+    pub watcher_max_wait_ms: u64,
+
+    /// Unique pending-file cap before escalating to a full rebuild.
+    #[serde(default = "default_watcher_burst_file_cap")]
+    pub watcher_burst_file_cap: usize,
+
+    /// Accepted-event cap inside `watcher_burst_window_ms`.
+    #[serde(default = "default_watcher_burst_event_cap")]
+    pub watcher_burst_event_cap: usize,
+
+    /// Rolling window used by `watcher_burst_event_cap`.
+    #[serde(default = "default_watcher_burst_window_ms")]
+    pub watcher_burst_window_ms: u64,
 }
 
 impl Default for DaemonConfig {
@@ -86,8 +121,72 @@ impl Default for DaemonConfig {
             semantic_model: "snowflake-arctic-embed-m".to_string(),
             idle_timeout_secs: IDLE_TIMEOUT_SECS,
             enable_watcher: default_enable_watcher(),
+            watcher_debounce_ms: default_watcher_debounce_ms(),
+            watcher_max_wait_ms: default_watcher_max_wait_ms(),
+            watcher_burst_file_cap: default_watcher_burst_file_cap(),
+            watcher_burst_event_cap: default_watcher_burst_event_cap(),
+            watcher_burst_window_ms: default_watcher_burst_window_ms(),
         }
     }
+}
+
+impl DaemonConfig {
+    /// Resolve global + project `.tldr/config.json` watcher overrides.
+    pub fn resolve(project: &std::path::Path) -> Self {
+        let resolved = TldrConfig::resolve(Some(project));
+        Self {
+            semantic_enabled: resolved.semantic.enabled,
+            semantic_model: resolved
+                .embedding
+                .model
+                .unwrap_or_else(|| "snowflake-arctic-embed-m".to_string()),
+            enable_watcher: resolved
+                .watcher
+                .enabled
+                .unwrap_or_else(default_enable_watcher),
+            watcher_debounce_ms: resolved
+                .watcher
+                .debounce_ms
+                .unwrap_or_else(default_watcher_debounce_ms),
+            watcher_max_wait_ms: resolved
+                .watcher
+                .max_wait_ms
+                .unwrap_or_else(default_watcher_max_wait_ms),
+            watcher_burst_file_cap: resolved
+                .watcher
+                .burst_file_cap
+                .unwrap_or_else(default_watcher_burst_file_cap),
+            watcher_burst_event_cap: resolved
+                .watcher
+                .burst_event_cap
+                .unwrap_or_else(default_watcher_burst_event_cap),
+            watcher_burst_window_ms: resolved
+                .watcher
+                .burst_window_ms
+                .unwrap_or_else(default_watcher_burst_window_ms),
+            ..Self::default()
+        }
+    }
+}
+
+fn default_watcher_debounce_ms() -> u64 {
+    DEFAULT_WATCHER_DEBOUNCE_MS
+}
+
+fn default_watcher_max_wait_ms() -> u64 {
+    DEFAULT_WATCHER_MAX_WAIT_MS
+}
+
+fn default_watcher_burst_file_cap() -> usize {
+    DEFAULT_WATCHER_BURST_FILE_CAP
+}
+
+fn default_watcher_burst_event_cap() -> usize {
+    DEFAULT_WATCHER_BURST_EVENT_CAP
+}
+
+fn default_watcher_burst_window_ms() -> u64 {
+    DEFAULT_WATCHER_BURST_WINDOW_MS
 }
 
 // =============================================================================
@@ -806,4 +905,39 @@ pub enum DaemonResponse {
 
     /// Generic JSON result (for analysis commands) - MUST be last (catch-all)
     Result(serde_json::Value),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DaemonConfig;
+
+    #[test]
+    fn daemon_resolves_project_watcher_overrides() {
+        let project = tempfile::tempdir().expect("temp project");
+        let config_dir = project.path().join(".tldr");
+        std::fs::create_dir_all(&config_dir).expect("create .tldr");
+        std::fs::write(
+            config_dir.join("config.json"),
+            r#"{
+                "watcher": {
+                    "enabled": false,
+                    "debounce_ms": 125,
+                    "max_wait_ms": 900,
+                    "burst_file_cap": 7,
+                    "burst_event_cap": 11,
+                    "burst_window_ms": 250
+                }
+            }"#,
+        )
+        .expect("write project config");
+
+        let config = DaemonConfig::resolve(project.path());
+
+        assert!(!config.enable_watcher);
+        assert_eq!(config.watcher_debounce_ms, 125);
+        assert_eq!(config.watcher_max_wait_ms, 900);
+        assert_eq!(config.watcher_burst_file_cap, 7);
+        assert_eq!(config.watcher_burst_event_cap, 11);
+        assert_eq!(config.watcher_burst_window_ms, 250);
+    }
 }

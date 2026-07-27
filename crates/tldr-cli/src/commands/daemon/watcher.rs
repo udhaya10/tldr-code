@@ -5,15 +5,15 @@
 //! `Notify` hop. The shape is:
 //!
 //! ```text
-//!   notify-debouncer-full (OS watcher + debounce, own thread)
+//!   notify OS watcher (own thread, raw accepted events)
 //!        │  watch_decision() filter (cheap excludes + corpus membership)
 //!        ▼
-//!   bounded mpsc<PathBuf>   ── drop-on-full (never block the watch thread)
+//!   bounded mpsc<PathBuf>   ── overflow flag (never block the watch thread)
 //!        ▼
-//!   single serialized worker task
-//!        │  coalesce: drain everything queued into a dedup set
+//!   single serialized debounce/coalesce worker
+//!        │  quiet timer + max-wait + rolling burst cap
 //!        ▼
-//!   TLDRDaemon::process_dirty_file()  (salsa invalidate + in-place delta)
+//!   batch delta OR one single-flight full rebuild
 //! ```
 //!
 //! The watcher and worker share NO lock — invalidation flows over the channel,
@@ -22,36 +22,180 @@
 //! is consolidation into one process and making the t8f delta an in-process
 //! call rather than an IPC contract.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use notify_debouncer_full::notify::{EventKind, RecommendedWatcher, RecursiveMode};
-use notify_debouncer_full::{new_debouncer, DebounceEventResult, Debouncer, RecommendedCache};
+use notify_debouncer_full::notify::{
+    recommended_watcher, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher,
+};
 use tokio::sync::mpsc;
 
 use tldr_core::semantic::{is_corpus_file, store_dir_for};
 use tldr_core::walker::{build_path_ignore_matcher, PathIgnoreMatcher};
 
-use super::activity::Source;
+use super::activity::{ActivityTracker, Source};
 use super::daemon::TLDRDaemon;
 
-/// Debounce window: editor save-storms and `git checkout` bursts collapse to a
-/// single emission per file within this window. notify auto-selects a tick rate
-/// of 1/4 of this when `tick_rate` is `None`.
-const DEBOUNCE: Duration = Duration::from_millis(500);
-
-/// Bounded channel depth. On overflow the watch-thread handler DROPS the event
-/// (drop-before-persist) rather than blocking — a coarse burst cap. The
-/// advanced burst-cap lives in TLDR-ac0.7; here a drop is safe because the next
-/// edit (or a manual reindex) re-enqueues, and `apply_delta` re-reads disk
-/// state, so a missed intermediate event never corrupts the index.
-const CHANNEL_CAP: usize = 1024;
+/// Safety bound for the callback-to-worker queue and rolling event history.
+/// Configured caps above this still behave correctly, but overflow escalates
+/// conservatively before an untrusted config can request an enormous channel.
+const MAX_EVENT_CAP: usize = 65_535;
 
 /// The live watcher. Holding this value keeps the OS watcher and worker alive;
 /// dropping it stops the watcher, closes the channel, and ends the worker.
-pub(crate) type WatcherGuard = Debouncer<RecommendedWatcher, RecommendedCache>;
+pub(crate) type WatcherGuard = RecommendedWatcher;
+
+#[derive(Debug, Clone, Copy)]
+struct WatchPipelineConfig {
+    debounce: Duration,
+    max_wait: Duration,
+    burst_file_cap: usize,
+    burst_event_cap: usize,
+    burst_window: Duration,
+}
+
+impl WatchPipelineConfig {
+    fn from_daemon(daemon: &TLDRDaemon) -> Self {
+        let config = daemon.config();
+        Self {
+            debounce: Duration::from_millis(config.watcher_debounce_ms),
+            max_wait: Duration::from_millis(config.watcher_max_wait_ms),
+            burst_file_cap: config.watcher_burst_file_cap,
+            burst_event_cap: config.watcher_burst_event_cap.min(MAX_EVENT_CAP),
+            burst_window: Duration::from_millis(config.watcher_burst_window_ms),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Flush {
+    Delta(Vec<PathBuf>),
+    FullRebuild,
+}
+
+/// Deterministic worker-owned debounce and rolling-burst state.
+///
+/// The notify thread only enqueues accepted paths. Keeping all timing state in
+/// one serialized owner makes quiet/max-wait ordering explicit and prevents a
+/// mutex from leaking onto notify's synchronous callback thread.
+struct WatchPipeline {
+    config: WatchPipelineConfig,
+    pending: HashMap<PathBuf, Instant>,
+    first_event: Option<Instant>,
+    accepted_events: VecDeque<Instant>,
+}
+
+impl WatchPipeline {
+    fn new(config: WatchPipelineConfig) -> Self {
+        Self {
+            config,
+            pending: HashMap::new(),
+            first_event: None,
+            accepted_events: VecDeque::new(),
+        }
+    }
+
+    fn accept(&mut self, path: PathBuf, now: Instant) -> Option<Flush> {
+        while self
+            .accepted_events
+            .front()
+            .is_some_and(|first| now.saturating_duration_since(*first) > self.config.burst_window)
+        {
+            self.accepted_events.pop_front();
+        }
+        self.accepted_events.push_back(now);
+        self.pending.insert(path, now);
+        self.first_event.get_or_insert(now);
+
+        if self.pending.len() > self.config.burst_file_cap
+            || self.accepted_events.len() > self.config.burst_event_cap
+        {
+            self.reset_all();
+            return Some(Flush::FullRebuild);
+        }
+        None
+    }
+
+    fn deadline(&self) -> Option<Instant> {
+        let quiet = self
+            .pending
+            .values()
+            .map(|last_event| {
+                last_event
+                    .checked_add(self.config.debounce)
+                    .unwrap_or(*last_event)
+            })
+            .min()?;
+        let first_event = self.first_event?;
+        let max_wait = first_event
+            .checked_add(self.config.max_wait)
+            .unwrap_or(first_event);
+        Some(quiet.min(max_wait))
+    }
+
+    fn flush_due(&mut self, now: Instant) -> Option<Flush> {
+        if now < self.deadline()? {
+            return None;
+        }
+        let mut files: Vec<_> = self.pending.drain().map(|(path, _)| path).collect();
+        files.sort();
+        self.first_event = None;
+        (!files.is_empty()).then_some(Flush::Delta(files))
+    }
+
+    fn reset_all(&mut self) {
+        self.pending.clear();
+        self.first_event = None;
+        self.accepted_events.clear();
+    }
+}
+
+struct WatchHandler {
+    project: PathBuf,
+    cache_excl: PathBuf,
+    store_dir: PathBuf,
+    ignore: Option<PathIgnoreMatcher>,
+    activity: Arc<ActivityTracker>,
+    tx: mpsc::Sender<PathBuf>,
+    overflowed: Arc<AtomicBool>,
+}
+
+impl WatchHandler {
+    fn handle(&self, result: notify_debouncer_full::notify::Result<Event>) {
+        match result {
+            Ok(event) => self.handle_event(event),
+            Err(error) => eprintln!("[ac0.7] watch error: {error:?}"),
+        }
+    }
+
+    fn handle_event(&self, event: Event) {
+        for path in &event.paths {
+            if presence_decision(&self.cache_excl, &self.store_dir, path, &event.kind) {
+                self.activity.touch(Source::Watcher);
+            }
+            if !watch_decision(
+                &self.project,
+                &self.cache_excl,
+                &self.store_dir,
+                self.ignore.as_ref(),
+                path,
+                &event.kind,
+            ) {
+                continue;
+            }
+            match self.tx.try_send(path.clone()) {
+                Ok(()) => {}
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    self.overflowed.store(true, Ordering::SeqCst);
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => return,
+            }
+        }
+    }
+}
 
 /// Decide whether a single event path should be enqueued for reindexing.
 ///
@@ -171,80 +315,49 @@ pub(crate) fn spawn_watcher(daemon: Arc<TLDRDaemon>) -> Option<WatcherGuard> {
         eprintln!("[ac0.2] reindex filter honoring .tldrignore/.gitignore");
     }
 
-    let (tx, mut rx) = mpsc::channel::<PathBuf>(CHANNEL_CAP);
+    let pipeline_config = WatchPipelineConfig::from_daemon(&daemon);
+    // Hold enough events to observe the configured strict `> cap` threshold.
+    // If the worker is temporarily inside its blocking batch and this still
+    // fills, the callback sets `overflowed`; the next worker turn rebuilds.
+    let channel_cap = pipeline_config.burst_event_cap.saturating_add(1).max(1);
+    let (tx, rx) = mpsc::channel::<PathBuf>(channel_cap);
+    let overflowed = Arc::new(AtomicBool::new(false));
 
-    // Serialized reindex worker: one file at a time (`process_dirty_file` awaits
-    // its `spawn_blocking` delta, so deltas never overlap and never contend on
-    // the store write lock), with newest-wins coalescing. Draining everything
-    // currently queued into a dedup set collapses an editor save-storm on one
-    // file to a single reindex. Ordering is intentionally discarded: it doesn't
-    // matter because `apply_delta` re-reads current disk state rather than
-    // trusting the event kind, so modify-then-delete and delete-then-recreate
-    // both resolve to the final on-disk state.
-    let worker_daemon = Arc::clone(&daemon);
-    tokio::spawn(async move {
-        while let Some(first) = rx.recv().await {
-            let mut batch: HashSet<PathBuf> = HashSet::new();
-            batch.insert(first);
-            while let Ok(more) = rx.try_recv() {
-                batch.insert(more);
-            }
-            for path in batch {
-                let _ = worker_daemon.process_dirty_file(path).await;
-            }
-        }
-        // Channel closed (guard dropped) → worker exits cleanly.
+    // Serialized worker: it alone owns all debounce/burst state. A quiet or
+    // max-wait flush crosses into blocking work ONCE for the whole batch.
+    // A file/event cap (or bounded-channel overflow) clears queued deltas and
+    // schedules the daemon's existing single-flight full warm.
+    tokio::spawn(run_pipeline_worker(
+        Arc::clone(&daemon),
+        rx,
+        Arc::clone(&overflowed),
+        pipeline_config,
+    ));
+
+    // The raw notify handler runs on notify's OWN thread (sync). It never
+    // blocks: `try_send` either enqueues or flips the overflow escalation flag.
+    let handler = WatchHandler {
+        project: project.clone(),
+        cache_excl,
+        store_dir,
+        ignore: handler_ignore,
+        activity: Arc::clone(daemon.activity()),
+        tx,
+        overflowed,
+    };
+    let result = recommended_watcher(move |res: notify_debouncer_full::notify::Result<Event>| {
+        handler.handle(res);
     });
 
-    // The debouncer handler runs on notify's OWN thread (sync). It must never
-    // block — `try_send` drops on a full channel (drop-before-persist), and
-    // the presence tap is a relaxed atomic store. The filters are pure, so
-    // the handler needs no daemon handle beyond the activity Arc.
-    let handler_project = project.clone();
-    let handler_store_dir = store_dir.clone();
-    let handler_activity = Arc::clone(daemon.activity());
-    let result = new_debouncer(DEBOUNCE, None, move |res: DebounceEventResult| {
-        let events = match res {
-            Ok(events) => events,
-            Err(errors) => {
-                for e in errors {
-                    eprintln!("[ac0.2] watch error: {e:?}");
-                }
-                return;
-            }
-        };
-        for event in events {
-            for path in &event.paths {
-                // Presence tap (TLDR-3w5): post-debounce, PRE-corpus-filter —
-                // any non-self, non-read project event defers idle shutdown,
-                // even if it never reaches the index (e.g. target/ writes).
-                if presence_decision(&cache_excl, &handler_store_dir, path, &event.kind) {
-                    handler_activity.touch(Source::Watcher);
-                }
-                if watch_decision(
-                    &handler_project,
-                    &cache_excl,
-                    &handler_store_dir,
-                    handler_ignore.as_ref(),
-                    path,
-                    &event.kind,
-                ) {
-                    // Drop-on-full: never block the watch thread.
-                    let _ = tx.try_send(path.clone());
-                }
-            }
-        }
-    });
-
-    let mut debouncer = match result {
-        Ok(d) => d,
+    let mut watcher = match result {
+        Ok(watcher) => watcher,
         Err(e) => {
             eprintln!("[ac0.2] failed to create filesystem watcher: {e}");
             return None;
         }
     };
 
-    if let Err(e) = debouncer.watch(&project, RecursiveMode::Recursive) {
+    if let Err(e) = watcher.watch(&project, RecursiveMode::Recursive) {
         eprintln!(
             "[ac0.2] failed to watch {}: {e}; watcher disabled, IPC Notify still served",
             project.display()
@@ -253,5 +366,194 @@ pub(crate) fn spawn_watcher(daemon: Arc<TLDRDaemon>) -> Option<WatcherGuard> {
     }
 
     eprintln!("[ac0.2] watching {} recursively", project.display());
-    Some(debouncer)
+    Some(watcher)
+}
+
+async fn run_pipeline_worker(
+    daemon: Arc<TLDRDaemon>,
+    mut rx: mpsc::Receiver<PathBuf>,
+    overflowed: Arc<AtomicBool>,
+    config: WatchPipelineConfig,
+) {
+    let mut pipeline = WatchPipeline::new(config);
+    loop {
+        if overflowed.swap(false, Ordering::SeqCst) {
+            drain_receiver(&mut rx);
+            pipeline.reset_all();
+            daemon.schedule_full_rebuild().await;
+            continue;
+        }
+
+        if let Some(deadline) = pipeline.deadline() {
+            tokio::select! {
+                maybe_path = rx.recv() => {
+                    let Some(path) = maybe_path else {
+                        break;
+                    };
+                    accept_path(&daemon, &mut pipeline, &mut rx, path).await;
+                }
+                () = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
+                    if let Some(flush) = pipeline.flush_due(Instant::now()) {
+                        dispatch_flush(&daemon, flush).await;
+                    }
+                }
+            }
+        } else {
+            let Some(path) = rx.recv().await else {
+                break;
+            };
+            accept_path(&daemon, &mut pipeline, &mut rx, path).await;
+        }
+    }
+}
+
+async fn accept_path(
+    daemon: &TLDRDaemon,
+    pipeline: &mut WatchPipeline,
+    rx: &mut mpsc::Receiver<PathBuf>,
+    path: PathBuf,
+) {
+    if let Some(flush) = pipeline.accept(path, Instant::now()) {
+        if matches!(flush, Flush::FullRebuild) {
+            drain_receiver(rx);
+        }
+        dispatch_flush(daemon, flush).await;
+    }
+}
+
+fn drain_receiver(rx: &mut mpsc::Receiver<PathBuf>) {
+    while rx.try_recv().is_ok() {}
+}
+
+async fn dispatch_flush(daemon: &TLDRDaemon, flush: Flush) {
+    match flush {
+        Flush::Delta(files) => {
+            let _ = daemon.process_dirty_files(files).await;
+        }
+        Flush::FullRebuild => daemon.schedule_full_rebuild().await,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Flush, WatchPipeline, WatchPipelineConfig};
+    use std::path::PathBuf;
+    use std::time::{Duration, Instant};
+
+    fn config() -> WatchPipelineConfig {
+        WatchPipelineConfig {
+            debounce: Duration::from_millis(750),
+            max_wait: Duration::from_secs(5),
+            burst_file_cap: 200,
+            burst_event_cap: 1_000,
+            burst_window: Duration::from_secs(2),
+        }
+    }
+
+    #[test]
+    fn repeated_saves_to_one_file_coalesce_to_one_delta() {
+        let started = Instant::now();
+        let mut pipeline = WatchPipeline::new(config());
+        let file = PathBuf::from("/project/src/lib.rs");
+
+        assert_eq!(pipeline.accept(file.clone(), started), None);
+        assert_eq!(
+            pipeline.accept(file.clone(), started + Duration::from_millis(100)),
+            None
+        );
+        assert_eq!(
+            pipeline.accept(file.clone(), started + Duration::from_millis(200)),
+            None
+        );
+        assert_eq!(
+            pipeline.flush_due(started + Duration::from_millis(949)),
+            None
+        );
+        assert_eq!(
+            pipeline.flush_due(started + Duration::from_millis(950)),
+            Some(Flush::Delta(vec![file]))
+        );
+    }
+
+    #[test]
+    fn steady_stream_flushes_at_first_event_max_wait() {
+        let started = Instant::now();
+        let mut pipeline = WatchPipeline::new(config());
+        let file = PathBuf::from("/project/src/lib.rs");
+
+        for second in 0..5 {
+            assert_eq!(
+                pipeline.accept(file.clone(), started + Duration::from_secs(second)),
+                None
+            );
+        }
+        assert_eq!(
+            pipeline.flush_due(started + Duration::from_secs(5)),
+            Some(Flush::Delta(vec![file]))
+        );
+    }
+
+    #[test]
+    fn noisy_file_does_not_rearm_another_files_quiet_timer() {
+        let started = Instant::now();
+        let mut pipeline = WatchPipeline::new(config());
+        let quiet = PathBuf::from("/project/src/quiet.rs");
+        let noisy = PathBuf::from("/project/src/noisy.rs");
+
+        assert_eq!(pipeline.accept(quiet.clone(), started), None);
+        assert_eq!(pipeline.accept(noisy.clone(), started), None);
+        assert_eq!(
+            pipeline.accept(noisy.clone(), started + Duration::from_millis(700)),
+            None
+        );
+        assert_eq!(
+            pipeline.flush_due(started + Duration::from_millis(750)),
+            Some(Flush::Delta(vec![noisy, quiet]))
+        );
+    }
+
+    #[test]
+    fn file_cap_escalates_and_clears_pending_deltas() {
+        let started = Instant::now();
+        let mut pipeline = WatchPipeline::new(config());
+
+        for index in 0..200 {
+            assert_eq!(
+                pipeline.accept(
+                    PathBuf::from(format!("/project/src/file_{index}.rs")),
+                    started
+                ),
+                None
+            );
+        }
+        assert_eq!(
+            pipeline.accept(PathBuf::from("/project/src/overflow.rs"), started),
+            Some(Flush::FullRebuild)
+        );
+        assert_eq!(pipeline.flush_due(started + Duration::from_secs(10)), None);
+    }
+
+    #[test]
+    fn rolling_event_cap_spans_quiet_flushes() {
+        let started = Instant::now();
+        let mut cfg = config();
+        cfg.debounce = Duration::from_micros(1);
+        let mut pipeline = WatchPipeline::new(cfg);
+        let file = PathBuf::from("/project/src/lib.rs");
+
+        for index in 0..1_000 {
+            let now = started + Duration::from_micros(index * 1_500);
+            assert_eq!(pipeline.accept(file.clone(), now), None);
+            if index % 100 == 99 {
+                assert!(matches!(
+                    pipeline.flush_due(now + Duration::from_micros(1)),
+                    Some(Flush::Delta(_))
+                ));
+            }
+        }
+        assert_eq!(
+            pipeline.accept(file, started + Duration::from_millis(1_500)),
+            Some(Flush::FullRebuild)
+        );
+    }
 }
