@@ -28,8 +28,8 @@ use super::error::{DaemonError, DaemonResult};
 use super::hot_cache::{hash_path, HotQueryKey, HotResponseCache};
 use super::ipc::{read_command, send_response, IpcListener, IpcStream};
 use super::types::{
-    AllSessionsSummary, DaemonCommand, DaemonConfig, DaemonResponse, DaemonStatus, HookStats,
-    SalsaCacheStats, SessionStats, HOOK_FLUSH_THRESHOLD,
+    AllSessionsSummary, ContextPack, DaemonCommand, DaemonConfig, DaemonResponse, DaemonStatus,
+    HookStats, SalsaCacheStats, SessionStats, HOOK_FLUSH_THRESHOLD,
 };
 
 #[cfg(feature = "semantic")]
@@ -326,6 +326,10 @@ impl TLDRDaemon {
                 .map_err(|error| DaemonError::ArtifactStore(error.to_string()))?,
         );
 
+        let sessions = DashMap::new();
+        for session in super::session_context::load_sessions(&project) {
+            sessions.insert(session.session_id.clone(), session);
+        }
         Ok(Self {
             project,
             config,
@@ -333,7 +337,7 @@ impl TLDRDaemon {
             status: Arc::new(RwLock::new(DaemonStatus::Initializing)),
             artifact_manager,
             cache: Arc::new(HotResponseCache::with_defaults()),
-            sessions: DashMap::new(),
+            sessions,
             hooks: DashMap::new(),
             dirty_files: Arc::new(RwLock::new(HashSet::new())),
             shutdown_tx,
@@ -403,6 +407,10 @@ impl TLDRDaemon {
             summary.total_raw_tokens += stats.raw_tokens;
             summary.total_tldr_tokens += stats.tldr_tokens;
             summary.total_requests += stats.requests;
+            summary.total_input_tokens += stats.input_tokens;
+            summary.total_output_tokens += stats.output_tokens;
+            summary.total_injected_tokens += stats.injected_tokens;
+            summary.total_cost_usd += stats.cost_usd;
         }
 
         summary
@@ -631,6 +639,30 @@ impl TLDRDaemon {
                 success,
                 metrics,
             } => self.handle_track(hook, success, metrics).await,
+
+            DaemonCommand::Inject {
+                session,
+                event,
+                prompt,
+                source,
+                files,
+                symbols,
+                max_tokens,
+                input_tokens,
+                output_tokens,
+                cost_usd,
+            } => self.handle_inject(
+                session,
+                event,
+                prompt,
+                source,
+                files,
+                symbols,
+                max_tokens,
+                input_tokens,
+                output_tokens,
+                cost_usd,
+            ),
 
             DaemonCommand::Warm { language } => {
                 let parsed = language.as_deref().and_then(|l| l.parse::<Language>().ok());
@@ -1733,6 +1765,33 @@ impl TLDRDaemon {
             };
         }
 
+        // Filesystem edits are session context too: every active conversation
+        // should prefer recently changed code on its next turn even when the
+        // editor, rather than a Read/Edit hook, produced the write.
+        let relative_files = files
+            .iter()
+            .map(|file| {
+                file.strip_prefix(&self.project)
+                    .unwrap_or(file)
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            })
+            .collect::<Vec<_>>();
+        for mut session in self.sessions.iter_mut() {
+            session.touch_context(
+                relative_files.iter().map(String::as_str),
+                std::iter::empty(),
+            );
+        }
+        if !self.sessions.is_empty() {
+            let persisted = self
+                .sessions
+                .iter()
+                .map(|entry| entry.value().clone())
+                .collect::<Vec<_>>();
+            let _ = super::session_context::persist_sessions(&self.project, &persisted);
+        }
+
         // Add the whole batch to dirty accounting in one write-lock hold.
         let dirty_count = {
             let mut dirty = self.dirty_files.write().await;
@@ -1846,11 +1905,103 @@ impl TLDRDaemon {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn handle_inject(
+        &self,
+        session_id: String,
+        event: String,
+        prompt: String,
+        source: Option<String>,
+        files: Vec<String>,
+        symbols: Vec<String>,
+        max_tokens: usize,
+        input_tokens: u64,
+        output_tokens: u64,
+        cost_usd: f64,
+    ) -> DaemonResponse {
+        let event_label = source
+            .as_deref()
+            .map_or_else(|| event.clone(), |source| format!("{event}:{source}"));
+        {
+            let mut session = self
+                .sessions
+                .entry(session_id.clone())
+                .or_insert_with(|| SessionStats::new(session_id.clone()));
+            session.record_lifecycle(&event_label, input_tokens, output_tokens, cost_usd);
+            session.touch_context(
+                files.iter().map(String::as_str),
+                symbols.iter().map(String::as_str),
+            );
+        }
+
+        let produces_context = event.eq_ignore_ascii_case("UserPromptSubmit")
+            || event.eq_ignore_ascii_case("SessionStart")
+            || event.eq_ignore_ascii_case("PreCompact")
+            || event.eq_ignore_ascii_case("PostCompact");
+        let mut pack = ContextPack {
+            content: String::new(),
+            tokens: 0,
+            files: Vec::new(),
+            symbols: Vec::new(),
+            generation: 0,
+            elapsed_ms: 0.0,
+            truncated: false,
+            source: "project".into(),
+        };
+        if produces_context {
+            if let Ok(snapshot) = self.artifact_manager.snapshot() {
+                let sessions = self
+                    .sessions
+                    .iter()
+                    .map(|entry| entry.value().clone())
+                    .collect::<Vec<_>>();
+                let hot = super::session_context::aggregate_hot_files(sessions.iter());
+                let current = self
+                    .sessions
+                    .get(&session_id)
+                    .map(|entry| entry.value().clone())
+                    .unwrap_or_else(|| SessionStats::new(session_id.clone()));
+                pack = super::session_context::build_context_pack(
+                    &snapshot,
+                    &current,
+                    &hot,
+                    &prompt,
+                    &event,
+                    source.as_deref(),
+                    max_tokens,
+                );
+                if let Some(mut current) = self.sessions.get_mut(&session_id) {
+                    current.record_injection(pack.tokens as u64);
+                    current.touch_context(
+                        pack.files.iter().map(String::as_str),
+                        pack.symbols.iter().map(String::as_str),
+                    );
+                }
+            }
+        }
+
+        let persisted = self
+            .sessions
+            .iter()
+            .map(|entry| entry.value().clone())
+            .collect::<Vec<_>>();
+        let _ = super::session_context::persist_sessions(&self.project, &persisted);
+        let mut hook = self
+            .hooks
+            .entry(event.clone())
+            .or_insert_with(|| HookStats::new(event));
+        let mut metrics = HashMap::new();
+        metrics.insert("context_tokens".into(), pack.tokens as f64);
+        metrics.insert("latency_ms".into(), pack.elapsed_ms);
+        hook.record_invocation(true, Some(metrics));
+        DaemonResponse::Result(serde_json::to_value(pack).unwrap_or_default())
+    }
+
     /// Persist statistics to disk.
     async fn persist_stats(&self) -> DaemonResult<()> {
         // Long-lived derived state is committed transactionally by
-        // ArtifactManager. Session/result-cache telemetry is intentionally
-        // process-local; JSON is a transport format, never a durable cache.
+        // ArtifactManager. Hook session continuity has its own small,
+        // atomically replaced JSON ledger; derived analysis never does.
         Ok(())
     }
 }

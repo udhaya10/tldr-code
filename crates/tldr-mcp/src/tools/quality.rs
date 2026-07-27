@@ -10,6 +10,75 @@ use super::{
     get_required_string, to_path,
 };
 
+/// Read the atomically persisted hook ledger. The hook writes on every event,
+/// so this remains useful even when the MCP server is a separate process.
+pub fn handle_session_stats(args: Value) -> ToolsCallResult {
+    let path = match get_required_string(&args, "path") {
+        Ok(path) => to_path(&path),
+        Err(error) => return ToolsCallResult::error(error),
+    };
+    let requested = get_optional_string(&args, "session");
+    let ledger_path = path.join(".tldr").join("session-context.json");
+    let bytes = match std::fs::read(&ledger_path) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            return ToolsCallResult::error(format!(
+                "Session ledger unavailable at {}: {}",
+                ledger_path.display(),
+                error
+            ))
+        }
+    };
+    let sessions: Vec<Value> = match serde_json::from_slice(&bytes) {
+        Ok(sessions) => sessions,
+        Err(error) => return ToolsCallResult::error(format!("Invalid session ledger: {}", error)),
+    };
+    let selected = requested.as_deref().map_or_else(
+        || Value::Array(sessions.clone()),
+        |session| {
+            sessions
+                .iter()
+                .find(|entry| entry.get("session_id").and_then(Value::as_str) == Some(session))
+                .cloned()
+                .unwrap_or(Value::Null)
+        },
+    );
+    let output = serde_json::json!({
+        "source": "agent_hooks",
+        "session": requested,
+        "stats": selected,
+        "caveat": "provider token/cost fields are exact only when the agent host includes usage telemetry; tldr injected_tokens are measured locally"
+    });
+    ToolsCallResult::text(
+        serde_json::to_string_pretty(&output).unwrap_or_else(|_| output.to_string()),
+    )
+}
+
+#[cfg(test)]
+mod session_tests {
+    use super::*;
+
+    #[test]
+    fn session_stats_selects_requested_persisted_session() {
+        let project = tempfile::tempdir().expect("project");
+        let directory = project.path().join(".tldr");
+        std::fs::create_dir_all(&directory).expect("ledger directory");
+        std::fs::write(
+            directory.join("session-context.json"),
+            r#"[{"session_id":"wanted","input_tokens":12},{"session_id":"other","input_tokens":99}]"#,
+        )
+        .expect("ledger");
+        let result = handle_session_stats(serde_json::json!({
+            "path": project.path(),
+            "session": "wanted"
+        }));
+        assert_ne!(result.is_error, Some(true));
+        let text = &result.content[0].text;
+        assert!(text.contains("\"session_id\": \"wanted\""));
+        assert!(!text.contains("\"session_id\": \"other\""));
+    }
+}
+
 /// Handle tldr_context tool call
 pub fn handle_context(args: Value) -> ToolsCallResult {
     let path = match get_required_string(&args, "path") {

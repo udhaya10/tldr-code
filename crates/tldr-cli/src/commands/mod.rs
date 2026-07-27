@@ -60,7 +60,10 @@ pub mod similar;
 pub mod daemon;
 
 // Project lifecycle: tldr init / tldr init --remove
+pub mod hooks;
 pub mod init;
+pub mod session;
+pub mod setup;
 
 // Daemon router for auto-routing commands through daemon cache
 pub mod daemon_router;
@@ -258,4 +261,7 @@ pub use fix::FixArgs;
 pub use bugbot::BugbotCheckArgs;
 
 // Lifecycle
+pub use hooks::HookArgs;
 pub use init::InitArgs;
+pub use session::SessionArgs;
+pub use setup::SetupArgs;

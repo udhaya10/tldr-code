@@ -69,6 +69,7 @@ impl ToolRegistry {
         registry.register_quality_tools();
         registry.register_security_tools();
         registry.register_composite_tools();
+        registry.register_session_tools();
 
         registry
     }
@@ -103,7 +104,13 @@ impl ToolRegistry {
         // Project-wide tools excluded from L1 cache (large results, rarely repeated)
         let skip_cache = matches!(
             name,
-            "tldr_calls" | "tldr_dead" | "tldr_health" | "tldr_todo" | "tldr_secure" | "tldr_arch"
+            "tldr_calls"
+                | "tldr_dead"
+                | "tldr_health"
+                | "tldr_todo"
+                | "tldr_secure"
+                | "tldr_arch"
+                | "tldr_session_stats"
         );
 
         // Check L1 cache for a fresh hit
@@ -875,6 +882,30 @@ impl ToolRegistry {
                 }),
             },
             quality::handle_debt,
+        );
+    }
+
+    fn register_session_tools(&mut self) {
+        self.register(
+            ToolDefinition {
+                name: "tldr_session_stats".to_string(),
+                description: "Report agent-session input/output tokens, tldr context injection, hot code context, and provider-reported cost. Provider fields are present only when the host supplies usage telemetry.".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Project root directory"
+                        },
+                        "session": {
+                            "type": "string",
+                            "description": "Optional agent session identifier"
+                        }
+                    },
+                    "required": ["path"]
+                }),
+            },
+            quality::handle_session_stats,
         );
     }
 

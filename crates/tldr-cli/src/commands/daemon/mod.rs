@@ -66,6 +66,7 @@ pub mod pid;
 pub mod poke;
 pub mod query;
 pub(crate) mod rss;
+mod session_context;
 pub mod start;
 pub mod stats;
 pub mod status;
@@ -93,6 +94,7 @@ pub use types::{
     // Statistics
     AllSessionsSummary,
     CacheFileInfo,
+    ContextPack,
     // IPC Messages
     DaemonCommand,
     // Configuration

@@ -65,6 +65,7 @@ regex = "1"
 dirs = "5"
 which = "6"
 tempfile = { workspace = true }
+toml_edit = "0.22"
 
 # Tree-sitter for AST parsing in contracts/patterns commands
 tree-sitter = { workspace = true }

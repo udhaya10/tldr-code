@@ -10,6 +10,8 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use tldr_core::{config::TldrConfig, Language, SmellType, ThresholdPreset};
 
+const MAX_SESSION_HOT_ITEMS: usize = 64;
+
 // =============================================================================
 // Constants
 // =============================================================================
@@ -268,6 +270,38 @@ pub struct SessionStats {
     /// Number of requests in this session
     pub requests: u64,
 
+    /// Model input tokens reported by lifecycle hooks, when available.
+    #[serde(default)]
+    pub input_tokens: u64,
+
+    /// Model output tokens reported by lifecycle hooks, when available.
+    #[serde(default)]
+    pub output_tokens: u64,
+
+    /// Context tokens injected by tldr.
+    #[serde(default)]
+    pub injected_tokens: u64,
+
+    /// Provider-reported session cost, when available.
+    #[serde(default)]
+    pub cost_usd: f64,
+
+    /// Files served/read/edited in this conversation, weighted by frequency.
+    #[serde(default)]
+    pub hot_files: std::collections::BTreeMap<String, u64>,
+
+    /// Symbols served in this conversation, weighted by frequency.
+    #[serde(default)]
+    pub hot_symbols: std::collections::BTreeMap<String, u64>,
+
+    /// Most recent lifecycle event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_event: Option<String>,
+
+    /// Last update timestamp.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<chrono::DateTime<chrono::Utc>>,
+
     /// When session started (ISO 8601 timestamp)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -281,6 +315,14 @@ impl SessionStats {
             raw_tokens: 0,
             tldr_tokens: 0,
             requests: 0,
+            input_tokens: 0,
+            output_tokens: 0,
+            injected_tokens: 0,
+            cost_usd: 0.0,
+            hot_files: Default::default(),
+            hot_symbols: Default::default(),
+            last_event: None,
+            updated_at: Some(chrono::Utc::now()),
             started_at: Some(chrono::Utc::now()),
         }
     }
@@ -290,6 +332,47 @@ impl SessionStats {
         self.raw_tokens += raw_tokens;
         self.tldr_tokens += tldr_tokens;
         self.requests += 1;
+        self.updated_at = Some(chrono::Utc::now());
+    }
+
+    /// Record one pushed hook context without mixing it into pull-query token
+    /// savings (`raw_tokens`/`tldr_tokens` have a different baseline).
+    pub fn record_injection(&mut self, tokens: u64) {
+        self.requests = self.requests.saturating_add(1);
+        self.injected_tokens = self.injected_tokens.saturating_add(tokens);
+        self.updated_at = Some(chrono::Utc::now());
+    }
+
+    /// Record a lifecycle event and its optional provider usage.
+    pub fn record_lifecycle(
+        &mut self,
+        event: &str,
+        input_tokens: u64,
+        output_tokens: u64,
+        cost_usd: f64,
+    ) {
+        self.last_event = Some(event.to_string());
+        self.input_tokens = self.input_tokens.saturating_add(input_tokens);
+        self.output_tokens = self.output_tokens.saturating_add(output_tokens);
+        self.cost_usd += cost_usd.max(0.0);
+        self.updated_at = Some(chrono::Utc::now());
+    }
+
+    /// Increase recency/frequency weight for touched files and symbols.
+    pub fn touch_context<'a>(
+        &mut self,
+        files: impl IntoIterator<Item = &'a str>,
+        symbols: impl IntoIterator<Item = &'a str>,
+    ) {
+        for file in files {
+            *self.hot_files.entry(file.to_string()).or_default() += 1;
+        }
+        for symbol in symbols {
+            *self.hot_symbols.entry(symbol.to_string()).or_default() += 1;
+        }
+        trim_hot_items(&mut self.hot_files);
+        trim_hot_items(&mut self.hot_symbols);
+        self.updated_at = Some(chrono::Utc::now());
     }
 
     /// Tokens saved
@@ -304,6 +387,19 @@ impl SessionStats {
         }
         (self.savings_tokens() as f64 / self.raw_tokens as f64) * 100.0
     }
+}
+
+fn trim_hot_items(items: &mut std::collections::BTreeMap<String, u64>) {
+    if items.len() <= MAX_SESSION_HOT_ITEMS {
+        return;
+    }
+    let mut ranked = items
+        .iter()
+        .map(|(key, weight)| (key.clone(), *weight))
+        .collect::<Vec<_>>();
+    ranked.sort_unstable_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+    ranked.truncate(MAX_SESSION_HOT_ITEMS);
+    *items = ranked.into_iter().collect();
 }
 
 /// Per-hook activity statistics
@@ -413,6 +509,22 @@ pub struct AllSessionsSummary {
 
     /// Total requests across all sessions
     pub total_requests: u64,
+
+    /// Provider-reported input tokens.
+    #[serde(default)]
+    pub total_input_tokens: u64,
+
+    /// Provider-reported output tokens.
+    #[serde(default)]
+    pub total_output_tokens: u64,
+
+    /// Context tokens injected by tldr.
+    #[serde(default)]
+    pub total_injected_tokens: u64,
+
+    /// Provider-reported cost.
+    #[serde(default)]
+    pub total_cost_usd: f64,
 }
 
 // =============================================================================
@@ -457,6 +569,37 @@ pub enum DaemonCommand {
         /// Hook-specific metrics
         #[serde(default)]
         metrics: HashMap<String, f64>,
+    },
+
+    /// Build a bounded context pack for an agent lifecycle hook.
+    Inject {
+        /// Stable agent conversation identifier.
+        session: String,
+        /// Lifecycle event (`UserPromptSubmit`, `SessionStart`, `PostCompact`,
+        /// `PostToolUse`, or `SessionEnd`).
+        event: String,
+        /// User prompt for prompt-time relevance ranking.
+        #[serde(default)]
+        prompt: String,
+        /// Session-start/compaction source (`startup`, `resume`, `compact`, ...).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source: Option<String>,
+        /// Files observed in tool input or external hook telemetry.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        files: Vec<String>,
+        /// Symbols observed in hook telemetry.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        symbols: Vec<String>,
+        /// Maximum context tokens, estimated conservatively at four chars/token.
+        #[serde(default = "default_context_tokens")]
+        max_tokens: usize,
+        /// Provider usage fields, when the host exposes them.
+        #[serde(default)]
+        input_tokens: u64,
+        #[serde(default)]
+        output_tokens: u64,
+        #[serde(default)]
+        cost_usd: f64,
     },
 
     /// Warm call graph cache
@@ -745,6 +888,31 @@ fn default_top_k() -> usize {
     10
 }
 
+fn default_context_tokens() -> usize {
+    2_000
+}
+
+/// Bounded context returned to an agent lifecycle hook.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContextPack {
+    /// Hook-ready factual context. Empty means graceful no-op.
+    pub content: String,
+    /// Conservative token estimate.
+    pub tokens: usize,
+    /// Files represented in the pack.
+    pub files: Vec<String>,
+    /// Symbols represented in the pack.
+    pub symbols: Vec<String>,
+    /// Artifact generation pinned for the request.
+    pub generation: u64,
+    /// Context construction latency.
+    pub elapsed_ms: f64,
+    /// Whether the token/character boundary elided candidates.
+    pub truncated: bool,
+    /// `prompt`, `session`, `compaction`, or `project`.
+    pub source: String,
+}
+
 /// Serde default for [`DaemonCommand::Calls::max_items`] — mirrors the CLI
 /// `--max-items` default so clients that omit it get identical truncation.
 fn default_max_items() -> usize {
@@ -927,7 +1095,7 @@ pub enum DaemonResponse {
 
 #[cfg(test)]
 mod tests {
-    use super::DaemonConfig;
+    use super::{DaemonConfig, SessionStats, MAX_SESSION_HOT_ITEMS};
 
     #[test]
     fn daemon_resolves_project_watcher_overrides() {
@@ -957,5 +1125,15 @@ mod tests {
         assert_eq!(config.watcher_burst_file_cap, 7);
         assert_eq!(config.watcher_burst_event_cap, 11);
         assert_eq!(config.watcher_burst_window_ms, 250);
+    }
+
+    #[test]
+    fn session_hot_sets_remain_bounded() {
+        let mut session = SessionStats::new("bounded".into());
+        let files = (0..MAX_SESSION_HOT_ITEMS * 2)
+            .map(|index| format!("src/{index}.rs"))
+            .collect::<Vec<_>>();
+        session.touch_context(files.iter().map(String::as_str), std::iter::empty());
+        assert_eq!(session.hot_files.len(), MAX_SESSION_HOT_ITEMS);
     }
 }
