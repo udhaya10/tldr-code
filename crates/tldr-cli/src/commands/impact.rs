@@ -20,7 +20,9 @@ use tldr_core::{
     Language,
 };
 
-use crate::output::{format_impact_dot, format_impact_text, OutputFormat, OutputWriter};
+use crate::output::{
+    format_impact_compact, format_impact_dot, format_impact_text, OutputFormat, OutputWriter,
+};
 use crate::path_validation::require_directory;
 
 /// Analyze impact of changing a function
@@ -129,7 +131,9 @@ impl ImpactArgs {
         }
 
         // Output based on format
-        if writer.is_text() {
+        if writer.is_compact() {
+            writer.write_text(format_impact_compact(&report).trim_end())?;
+        } else if writer.is_text() {
             let text = format_impact_text(&report, self.type_aware);
             writer.write_text(&text)?;
         } else if writer.is_dot() {

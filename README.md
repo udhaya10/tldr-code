@@ -57,13 +57,13 @@ tldr init --remove        # stop daemon + remove LaunchAgent; keeps config/cache
 tldr init                 # once per project (daemon + indexes)
 
 # What's in this codebase?
-tldr structure src/
+tldr -f compact structure src/
 
 # Who calls this function?
-tldr impact parse_config src/
+tldr -f compact impact parse_config src/
 
 # Find dead code
-tldr dead src/
+tldr -f compact dead src/
 
 # Security scan
 tldr secure src/
@@ -71,6 +71,10 @@ tldr secure src/
 # Full health dashboard
 tldr health src/
 ```
+
+`-f compact` is the recommended LLM/MCP-facing format for `calls`, `impact`,
+`dead`, `hubs`, and `structure`; it uses versioned, escaped TSV rows instead of
+repeating JSON keys. See [Compact output for agents](docs/COMPACT_OUTPUT.md).
 
 ## Commands
 

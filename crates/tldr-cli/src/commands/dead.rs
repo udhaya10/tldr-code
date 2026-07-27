@@ -27,7 +27,7 @@ use tldr_core::{
 };
 
 use crate::commands::daemon_router::{is_oneshot, route_for_path};
-use crate::output::{OutputFormat, OutputWriter};
+use crate::output::{format_dead_code_compact, OutputFormat, OutputWriter};
 
 /// Find dead (unreachable) code
 #[derive(Debug, Args)]
@@ -107,7 +107,10 @@ impl DeadArgs {
             apply_truncation(report, self.max_items);
 
         // Single renderer for both paths.
-        if writer.is_text() {
+        if writer.is_compact() {
+            let text = format_dead_code_compact(&truncated_report, truncated, total_count);
+            writer.write_text(text.trim_end())?;
+        } else if writer.is_text() {
             let text = format_dead_code_text_truncated(
                 &truncated_report,
                 truncated,

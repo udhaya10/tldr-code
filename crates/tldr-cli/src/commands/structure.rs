@@ -12,7 +12,7 @@ use tldr_core::types::CodeStructure;
 use tldr_core::{get_code_structure, Language};
 
 use crate::commands::daemon_router::{is_oneshot, route_for_path};
-use crate::output::{format_structure_text, OutputFormat, OutputWriter};
+use crate::output::{format_structure_compact, format_structure_text, OutputFormat, OutputWriter};
 
 /// Extract code structure (functions, classes, imports)
 #[derive(Debug, Args)]
@@ -68,7 +68,9 @@ impl StructureArgs {
         };
 
         // Single renderer for both paths.
-        if writer.is_text() {
+        if writer.is_compact() {
+            writer.write_text(format_structure_compact(&structure).trim_end())?;
+        } else if writer.is_text() {
             let text = format_structure_text(&structure);
             writer.write_text(&text)?;
         } else {

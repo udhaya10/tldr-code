@@ -241,6 +241,234 @@ impl OutputWriter {
     pub fn is_dot(&self) -> bool {
         matches!(self.format, OutputFormat::Dot)
     }
+
+    /// Check if the token-lean, line-oriented agent format was requested.
+    pub fn is_compact(&self) -> bool {
+        matches!(self.format, OutputFormat::Compact)
+    }
+}
+
+/// Escape a value for the versioned compact TSV format.
+pub fn compact_cell(value: impl AsRef<str>) -> String {
+    value
+        .as_ref()
+        .replace('\\', "\\\\")
+        .replace('\t', "\\t")
+        .replace('\r', "\\r")
+        .replace('\n', "\\n")
+}
+
+/// Render project structure as compact-v1 typed TSV rows.
+pub fn format_structure_compact(structure: &tldr_core::CodeStructure) -> String {
+    let language = structure
+        .language
+        .map(|lang| lang.as_str())
+        .unwrap_or("unknown");
+    let mut output = format!(
+        "@structure\t1\troot={}\tlanguage={}\tfiles={}\tskipped={}\n",
+        compact_cell(structure.root.to_string_lossy()),
+        language,
+        structure.files.len(),
+        structure.files_skipped,
+    );
+    output.push_str("@columns\tkind\tfile\tstart\tend\tname\tsignature\n");
+
+    for file in &structure.files {
+        let path = compact_cell(file.path.to_string_lossy());
+        output.push_str(&format!(
+            "file\t{}\t0\t0\tparse_errors={}\t\n",
+            path, file.parse_errors
+        ));
+        for class in &file.classes {
+            output.push_str(&format!(
+                "class\t{}\t0\t0\t{}\t\n",
+                path,
+                compact_cell(class)
+            ));
+        }
+        for definition in &file.definitions {
+            output.push_str(&format!(
+                "{}\t{}\t{}\t{}\t{}\t{}\n",
+                compact_cell(&definition.kind),
+                path,
+                definition.line_start,
+                definition.line_end,
+                compact_cell(&definition.name),
+                compact_cell(&definition.signature),
+            ));
+        }
+        // Some adapters populate method_infos without a matching definition.
+        for method in &file.method_infos {
+            if !file.definitions.iter().any(|definition| {
+                definition.line_start == method.line && definition.name == method.name
+            }) {
+                output.push_str(&format!(
+                    "method\t{}\t{}\t{}\t{}\t{}\n",
+                    path,
+                    method.line,
+                    method.line,
+                    compact_cell(&method.name),
+                    compact_cell(&method.signature),
+                ));
+            }
+        }
+    }
+    for warning in &structure.warnings {
+        output.push_str(&format!("warning\t\t0\t0\t{}\t\n", compact_cell(warning)));
+    }
+    output
+}
+
+fn format_compact_caller_rows(
+    output: &mut String,
+    tree: &tldr_core::CallerTree,
+    depth: usize,
+    prefix: &Path,
+) {
+    let normalized_file: std::path::PathBuf = tree
+        .file
+        .components()
+        .filter(|component| !matches!(component, std::path::Component::CurDir))
+        .collect();
+    output.push_str(&format!(
+        "caller\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+        depth,
+        compact_cell(strip_prefix_display(&normalized_file, prefix)),
+        compact_cell(&tree.function),
+        tree.caller_count,
+        tree.truncated,
+        compact_cell(tree.note.as_deref().unwrap_or("")),
+        compact_cell(tree.receiver_type.as_deref().unwrap_or("")),
+    ));
+    for caller in &tree.callers {
+        format_compact_caller_rows(output, caller, depth + 1, prefix);
+    }
+}
+
+/// Render impact analysis as compact-v1 flattened caller-tree rows.
+pub fn format_impact_compact(report: &tldr_core::ImpactReport) -> String {
+    fn collect_normalized_paths(tree: &tldr_core::CallerTree, paths: &mut Vec<std::path::PathBuf>) {
+        paths.push(
+            tree.file
+                .components()
+                .filter(|component| !matches!(component, std::path::Component::CurDir))
+                .collect(),
+        );
+        for caller in &tree.callers {
+            collect_normalized_paths(caller, paths);
+        }
+    }
+
+    let mut normalized_paths = Vec::new();
+    for tree in report.targets.values() {
+        collect_normalized_paths(tree, &mut normalized_paths);
+    }
+    let path_refs: Vec<&Path> = normalized_paths.iter().map(|path| path.as_path()).collect();
+    let prefix = common_path_prefix(&path_refs);
+    let mut output = format!(
+        "@impact\t1\ttargets={}\tprefix={}\n",
+        report.total_targets,
+        compact_cell(prefix.to_string_lossy())
+    );
+    output.push_str("@columns\tkind\tdepth\tfile\tfunction\tcallers\ttruncated\tnote\treceiver\n");
+    let mut targets: Vec<_> = report.targets.iter().collect();
+    targets.sort_by(|(left, _), (right, _)| left.cmp(right));
+    for (target, tree) in targets {
+        output.push_str(&format!(
+            "target\t0\t\t{}\t0\tfalse\t\t\n",
+            compact_cell(target)
+        ));
+        format_compact_caller_rows(&mut output, tree, 0, &prefix);
+    }
+    output
+}
+
+/// Render dead-code analysis as compact-v1 function rows.
+pub fn format_dead_code_compact(
+    report: &tldr_core::DeadCodeReport,
+    truncated: bool,
+    total_count: usize,
+) -> String {
+    let shown = report.dead_functions.len();
+    let mut output = format!(
+        "@dead\t1\tfunctions={}\tdead={}\tpossible={}\tshown={}\ttotal={}\ttruncated={}\tdead_pct={:.2}\n",
+        report.total_functions,
+        report.total_dead,
+        report.total_possibly_dead,
+        shown,
+        total_count,
+        truncated,
+        report.dead_percentage,
+    );
+    output.push_str("@columns\tkind\tfile\tline\tname\trefs\tpublic\ttest\ttrait\n");
+    for (kind, functions) in [
+        ("dead", report.dead_functions.as_slice()),
+        ("possible", report.possibly_dead.as_slice()),
+    ] {
+        for function in functions {
+            output.push_str(&format!(
+                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+                kind,
+                compact_cell(function.file.to_string_lossy()),
+                function.line,
+                compact_cell(&function.name),
+                function.ref_count,
+                function.is_public,
+                function.is_test,
+                function.is_trait_method,
+            ));
+        }
+    }
+    output
+}
+
+fn format_compact_hub_group(
+    output: &mut String,
+    group: &str,
+    hubs: &[tldr_core::analysis::hubs::HubScore],
+) {
+    for (rank, hub) in hubs.iter().enumerate() {
+        output.push_str(&format!(
+            "hub\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.6}\t{:.6}\t{:.6}\t{}\t{}\n",
+            group,
+            rank + 1,
+            compact_cell(hub.file.to_string_lossy()),
+            hub.function_ref.line,
+            compact_cell(&hub.name),
+            hub.callers_count,
+            hub.callees_count,
+            hub.composite_score,
+            hub.pagerank.unwrap_or(0.0),
+            hub.betweenness.unwrap_or(0.0),
+            hub.risk_level,
+            compact_cell(&hub.function_ref.signature),
+        ));
+    }
+}
+
+/// Render hub analysis as compact-v1 ranked TSV groups.
+pub fn format_hubs_compact(report: &tldr_core::analysis::hubs::HubReport) -> String {
+    let mut output = format!(
+        "@hubs\t1\tnodes={}\thubs={}\tmeasures={}\n",
+        report.total_nodes,
+        report.hub_count,
+        compact_cell(report.measures_used.join(",")),
+    );
+    output.push_str(
+        "@columns\tkind\tgroup\trank\tfile\tline\tfunction\tin\tout\tscore\tpagerank\tbetweenness\trisk\tsignature\n",
+    );
+    format_compact_hub_group(&mut output, "all", &report.hubs);
+    format_compact_hub_group(&mut output, "in", &report.by_in_degree);
+    format_compact_hub_group(&mut output, "out", &report.by_out_degree);
+    format_compact_hub_group(&mut output, "pagerank", &report.by_pagerank);
+    format_compact_hub_group(&mut output, "betweenness", &report.by_betweenness);
+    if let Some(explanation) = &report.explanation {
+        output.push_str(&format!(
+            "note\tall\t0\t\t0\t{}\t0\t0\t0\t0\t0\tlow\t\n",
+            compact_cell(explanation)
+        ));
+    }
+    output
 }
 
 // =============================================================================
@@ -2720,3 +2948,137 @@ pub fn format_clones_sarif(report: &tldr_core::analysis::ClonesReport) -> String
 // =============================================================================
 // Tests
 // =============================================================================
+
+#[cfg(test)]
+mod compact_tests {
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    use tldr_core::analysis::hubs::{HubReport, HubScore};
+    use tldr_core::types::{CallerTree, CodeStructure, DeadCodeReport, FunctionRef, ImpactReport};
+
+    use super::{
+        compact_cell, format_dead_code_compact, format_hubs_compact, format_impact_compact,
+        format_structure_compact,
+    };
+
+    #[test]
+    fn compact_cell_preserves_tsv_framing() {
+        assert_eq!(compact_cell("a\\b\tc\r\nd"), "a\\\\b\\tc\\r\\nd");
+    }
+
+    #[test]
+    fn structure_compact_golden() {
+        let structure: CodeStructure = serde_json::from_value(serde_json::json!({
+            "root": "/repo",
+            "language": "python",
+            "files": [{
+                "path": "/repo/app.py",
+                "parse_errors": 0,
+                "classes": ["App"],
+                "method_infos": [],
+                "imports": [],
+                "definitions": [{
+                    "name": "run",
+                    "kind": "function",
+                    "line_start": 3,
+                    "line_end": 4,
+                    "signature": "def run()"
+                }]
+            }]
+        }))
+        .unwrap();
+        assert_eq!(
+            format_structure_compact(&structure),
+            "@structure\t1\troot=/repo\tlanguage=python\tfiles=1\tskipped=0\n\
+             @columns\tkind\tfile\tstart\tend\tname\tsignature\n\
+             file\t/repo/app.py\t0\t0\tparse_errors=0\t\n\
+             class\t/repo/app.py\t0\t0\tApp\t\n\
+             function\t/repo/app.py\t3\t4\trun\tdef run()\n"
+        );
+    }
+
+    #[test]
+    fn impact_compact_golden_and_sorted_targets() {
+        let leaf = CallerTree {
+            function: "caller".into(),
+            file: "/repo/caller.py".into(),
+            caller_count: 0,
+            callers: vec![],
+            truncated: false,
+            note: Some("via ref".into()),
+            confidence: None,
+            receiver_type: None,
+        };
+        let root = CallerTree {
+            function: "target".into(),
+            file: "/repo/target.py".into(),
+            caller_count: 1,
+            callers: vec![leaf],
+            truncated: false,
+            note: None,
+            confidence: None,
+            receiver_type: None,
+        };
+        let report = ImpactReport {
+            targets: HashMap::from([("target".into(), root)]),
+            total_targets: 1,
+            type_resolution: None,
+        };
+        assert_eq!(
+            format_impact_compact(&report),
+            "@impact\t1\ttargets=1\tprefix=/repo\n\
+             @columns\tkind\tdepth\tfile\tfunction\tcallers\ttruncated\tnote\treceiver\n\
+             target\t0\t\ttarget\t0\tfalse\t\t\n\
+             caller\t0\ttarget.py\ttarget\t1\tfalse\t\t\n\
+             caller\t1\tcaller.py\tcaller\t0\tfalse\tvia ref\t\n"
+        );
+    }
+
+    #[test]
+    fn dead_compact_golden() {
+        let mut function = FunctionRef::new(PathBuf::from("/repo/dead.py"), "unused");
+        function.line = 7;
+        function.ref_count = 1;
+        let report = DeadCodeReport {
+            dead_functions: vec![function],
+            possibly_dead: vec![],
+            by_file: HashMap::new(),
+            total_dead: 1,
+            total_possibly_dead: 0,
+            total_functions: 4,
+            dead_percentage: 25.0,
+        };
+        assert_eq!(
+            format_dead_code_compact(&report, false, 1),
+            "@dead\t1\tfunctions=4\tdead=1\tpossible=0\tshown=1\ttotal=1\ttruncated=false\tdead_pct=25.00\n\
+             @columns\tkind\tfile\tline\tname\trefs\tpublic\ttest\ttrait\n\
+             dead\t/repo/dead.py\t7\tunused\t1\tfalse\tfalse\tfalse\n"
+        );
+    }
+
+    #[test]
+    fn hubs_compact_golden() {
+        let mut function = FunctionRef::new(PathBuf::from("/repo/hub.py"), "dispatch");
+        function.line = 11;
+        let hub = HubScore::new(function, 0.5, 0.25, 4, 2);
+        let report = HubReport {
+            hubs: vec![hub],
+            total_nodes: 8,
+            hub_count: 1,
+            measures_used: vec!["in_degree".into(), "out_degree".into()],
+            by_in_degree: vec![],
+            by_out_degree: vec![],
+            by_pagerank: vec![],
+            by_betweenness: vec![],
+            pagerank_info: None,
+            explanation: None,
+        };
+        assert_eq!(
+            format_hubs_compact(&report),
+            "@hubs\t1\tnodes=8\thubs=1\tmeasures=in_degree,out_degree\n\
+             @columns\tkind\tgroup\trank\tfile\tline\tfunction\tin\tout\tscore\tpagerank\tbetweenness\trisk\tsignature\n\
+             hub\tall\t1\t/repo/hub.py\t11\tdispatch\t4\t2\t0.375000\t0.000000\t0.000000\tlow\t\n"
+        );
+    }
+}

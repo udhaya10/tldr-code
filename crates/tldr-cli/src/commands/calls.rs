@@ -15,7 +15,8 @@ use tldr_core::callgraph::{build_project_call_graph_v2, BuildConfig};
 use tldr_core::Language;
 
 use crate::commands::daemon_router::{is_oneshot, route_for_path};
-use crate::output::{format_calls_dot, DotCallEdge, OutputFormat, OutputWriter};
+use crate::output::strip_prefix_display;
+use crate::output::{compact_cell, format_calls_dot, DotCallEdge, OutputFormat, OutputWriter};
 
 /// Build and display cross-file call graph
 #[derive(Debug, Args)]
@@ -248,6 +249,18 @@ fn artifact_call_type(value: &str) -> CallType {
     }
 }
 
+fn compact_call_type(value: CallType) -> &'static str {
+    match value {
+        CallType::Intra => "intra",
+        CallType::Direct => "direct",
+        CallType::LocalImport => "local-import",
+        CallType::Method => "method",
+        CallType::Attr => "attr",
+        CallType::Ref => "ref",
+        CallType::Static => "static",
+    }
+}
+
 /// Render a [`CallGraphOutput`] to the requested format. Single renderer shared
 /// by both the daemon and `--oneshot` paths.
 fn render(writer: &OutputWriter, output: &CallGraphOutput) -> Result<()> {
@@ -277,6 +290,34 @@ fn render(writer: &OutputWriter, output: &CallGraphOutput) -> Result<()> {
             .collect();
         let dot = format_calls_dot(&dot_edges);
         writer.write_text(&dot)?;
+        return Ok(());
+    }
+    if writer.is_compact() {
+        let language = output
+            .language
+            .map(|lang| lang.as_str())
+            .unwrap_or("unknown");
+        let mut compact = format!(
+            "@calls\t1\troot={}\tlanguage={}\tnodes={}\tedges={}\tshown={}\ttruncated={}\n",
+            compact_cell(output.root.to_string_lossy()),
+            language,
+            output.nodes.len(),
+            output.total_edges,
+            output.shown_edges,
+            output.truncated,
+        );
+        compact.push_str("@columns\tkind\tsrc_file\tsrc_func\tdst_file\tdst_func\tcall_type\n");
+        for edge in &output.edges {
+            compact.push_str(&format!(
+                "edge\t{}\t{}\t{}\t{}\t{}\n",
+                compact_cell(strip_prefix_display(&edge.src_file, &output.root)),
+                compact_cell(&edge.src_func),
+                compact_cell(strip_prefix_display(&edge.dst_file, &output.root)),
+                compact_cell(&edge.dst_func),
+                compact_call_type(edge.call_type),
+            ));
+        }
+        writer.write_text(compact.trim_end())?;
         return Ok(());
     }
     if writer.is_text() {
@@ -371,5 +412,21 @@ impl CallsArgs {
             self.respect_ignore,
             self.max_items,
         )
+    }
+}
+
+#[cfg(test)]
+mod compact_tests {
+    use super::*;
+
+    #[test]
+    fn calls_compact_type_names_match_json_contract() {
+        assert_eq!(compact_call_type(CallType::Intra), "intra");
+        assert_eq!(compact_call_type(CallType::Direct), "direct");
+        assert_eq!(compact_call_type(CallType::LocalImport), "local-import");
+        assert_eq!(compact_call_type(CallType::Method), "method");
+        assert_eq!(compact_call_type(CallType::Attr), "attr");
+        assert_eq!(compact_call_type(CallType::Ref), "ref");
+        assert_eq!(compact_call_type(CallType::Static), "static");
     }
 }

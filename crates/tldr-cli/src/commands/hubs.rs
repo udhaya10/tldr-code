@@ -27,7 +27,9 @@ use tldr_core::analysis::hubs::{
 use tldr_core::callgraph::{build_forward_graph, build_reverse_graph, collect_nodes};
 use tldr_core::{build_project_call_graph, Language};
 
-use crate::output::{format_hubs_dot, format_hubs_text, OutputFormat, OutputWriter};
+use crate::output::{
+    format_hubs_compact, format_hubs_dot, format_hubs_text, OutputFormat, OutputWriter,
+};
 use crate::path_validation::require_directory;
 
 /// Algorithm selection for CLI (mirrors HubAlgorithm)
@@ -140,7 +142,9 @@ impl HubsArgs {
         );
 
         // Output based on format
-        if writer.is_text() {
+        if writer.is_compact() {
+            writer.write_text(format_hubs_compact(&report).trim_end())?;
+        } else if writer.is_text() {
             let text = format_hubs_text(&report);
             writer.write_text(&text)?;
         } else if writer.is_dot() {
