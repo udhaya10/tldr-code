@@ -1,0 +1,41 @@
+name: Django compatibility
+
+on:
+  pull_request:
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "crates/tldr-core/src/analysis/dead.rs"
+      - "crates/tldr-core/src/analysis/impact.rs"
+      - "crates/tldr-core/src/analysis/refcount.rs"
+      - "crates/tldr-core/src/analysis/references.rs"
+      - "crates/tldr-core/src/callgraph/**"
+      - "crates/tldr-cli/src/commands/calls.rs"
+      - "crates/tldr-cli/src/commands/dead.rs"
+      - "crates/tldr-cli/src/commands/impact.rs"
+      - "crates/tldr-cli/src/commands/references.rs"
+      - "scripts/django_compat_corpus.py"
+      - ".github/workflows/django-compat.yml"
+  workflow_dispatch:
+
+jobs:
+  pinned-corpus:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build compatibility CLI
+        run: cargo build -p tldr-cli --bin tldr --no-default-features
+      - name: Check out pinned Django corpus
+        run: |
+          git clone https://github.com/udhaya10/Stock-Monitor-Django.git /tmp/stock-monitor-django
+          git -C /tmp/stock-monitor-django checkout 1e56243d5258e0b310a45ca3cfae60c455328b76
+      - name: Assert Django compatibility contract
+        run: >-
+          python3 scripts/django_compat_corpus.py
+          /tmp/stock-monitor-django
+          --tldr target/debug/tldr
+          --expected-commit 1e56243d5258e0b310a45ca3cfae60c455328b76

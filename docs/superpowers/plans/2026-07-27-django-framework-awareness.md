@@ -63,11 +63,11 @@
 - Create or modify: `.github/workflows/django-compat.yml`
 - Modify: Django compatibility documentation
 
-- [ ] Pin Stock-Monitor-Django commit `1e56243d5258e0b310a45ca3cfae60c455328b76`.
-- [ ] Assert reference-kind ground truth for `upsert_ohlcv_bars` and `SymbolMap`.
-- [ ] Assert dead-code ground truth plus dotted-string and Django-preset suppression.
-- [ ] Assert the `sweep_intraday_bars` local-import edge and depth-two Python impact.
-- [ ] Run the corpus adapter locally and in CI.
+- [x] Pin Stock-Monitor-Django commit `1e56243d5258e0b310a45ca3cfae60c455328b76`.
+- [x] Assert reference-kind ground truth for `upsert_ohlcv_bars` and `SymbolMap`.
+- [x] Assert dead-code ground truth plus dotted-string and Django-preset suppression.
+- [x] Assert the `sweep_intraday_bars` local-import edge and depth-two Python impact.
+- [x] Run the corpus adapter locally and in CI.
 
 ### Task 6: Validate and deliver
 
