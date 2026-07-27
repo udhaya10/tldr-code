@@ -821,6 +821,9 @@ pub struct ArtifactStoreStats {
     pub target_generation: Option<u64>,
     /// Normalized files in the resident generation snapshot.
     pub files: usize,
+    /// Aggregate tree-sitter recovery nodes in the resident generation.
+    #[serde(default)]
+    pub parse_errors: usize,
     /// Authoritative redb bytes on disk.
     pub redb_bytes: u64,
     /// Last ingestion failure, if any.

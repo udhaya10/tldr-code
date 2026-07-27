@@ -1,0 +1,40 @@
+name: Grammar assurance
+
+on:
+  pull_request:
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "crates/tldr-core/src/ast/**"
+      - "crates/tldr-core/src/types.rs"
+      - "crates/tldr-cli/src/commands/doctor.rs"
+      - "scripts/grammar_differential.py"
+      - ".github/workflows/grammar-assurance.yml"
+  workflow_dispatch:
+
+jobs:
+  python-differential:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build structural CLI
+        run: cargo build -p tldr-cli --bin tldr --no-default-features
+      - name: Run bundled grammar frontiers
+        run: |
+          target/debug/tldr doctor --grammar-frontier python -f json
+          target/debug/tldr doctor --grammar-frontier typescript -f json
+          target/debug/tldr doctor --grammar-frontier rust -f json
+      - name: Check out pinned Django corpus
+        run: |
+          git clone https://github.com/udhaya10/Stock-Monitor-Django.git /tmp/stock-monitor-django
+          git -C /tmp/stock-monitor-django checkout 1e56243d5258e0b310a45ca3cfae60c455328b76
+      - name: Compare CPython AST with tldr
+        run: >-
+          python3 scripts/grammar_differential.py
+          /tmp/stock-monitor-django
+          --tldr target/debug/tldr
+          --expected-commit 1e56243d5258e0b310a45ca3cfae60c455328b76

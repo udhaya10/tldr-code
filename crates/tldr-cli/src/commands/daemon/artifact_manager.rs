@@ -41,6 +41,8 @@ pub struct ArtifactStats {
     pub active_generation: Option<u64>,
     /// Number of normalized files in the resident snapshot.
     pub hot_files: usize,
+    /// Aggregate tree-sitter recovery nodes in the resident snapshot.
+    pub parse_errors: usize,
     /// redb file size.
     pub redb_bytes: u64,
 }
@@ -172,6 +174,12 @@ impl ArtifactManager {
             hot_files: snapshot
                 .as_ref()
                 .map_or(0, |snapshot| snapshot.file_count()),
+            parse_errors: snapshot.as_ref().map_or(0, |snapshot| {
+                snapshot
+                    .files()
+                    .map(|facts| facts.structure.parse_errors)
+                    .sum()
+            }),
             redb_bytes: std::fs::metadata(self.store.path())
                 .map(|metadata| metadata.len())
                 .unwrap_or(0),
@@ -243,7 +251,7 @@ impl ArtifactManager {
             revision: facts.revision,
             subject: ArtifactSubject::File(facts.path.clone()),
             kind: ArtifactKind::FileFacts,
-            producer: ProducerId::new("file-facts", 4),
+            producer: ProducerId::new("file-facts", 5),
         };
         let key = ArtifactKey {
             project,
@@ -302,4 +310,26 @@ fn delta_relative(project: &Path, file: &Path) -> tldr_core::TldrResult<String> 
 
 fn not_ready(state: ArtifactState) -> TldrError {
     TldrError::DaemonError(format!("artifact generation is not ready: {state:?}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ArtifactManager;
+
+    #[test]
+    fn stats_aggregate_parse_recovery_nodes() {
+        let project = tempfile::tempdir().expect("temp project");
+        std::fs::write(
+            project.path().join("recovered.py"),
+            "def recovered(:\n    return 1\n",
+        )
+        .expect("write recovered source");
+
+        let manager = ArtifactManager::open(project.path()).expect("open artifact manager");
+        manager.warm().expect("warm artifacts");
+
+        let stats = manager.stats();
+        assert_eq!(stats.hot_files, 1);
+        assert!(stats.parse_errors > 0);
+    }
 }

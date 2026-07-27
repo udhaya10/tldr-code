@@ -113,6 +113,8 @@ pub struct StoredModuleInfo {
 pub struct StoredFileStructure {
     /// Root-relative source path.
     pub path: String,
+    /// Number of tree-sitter `ERROR` or missing recovery nodes.
+    pub parse_errors: usize,
     /// Top-level function names.
     pub functions: Vec<String>,
     /// Class/struct names.
@@ -132,6 +134,7 @@ impl StoredFileStructure {
     pub fn to_file_structure(&self) -> crate::FileStructure {
         crate::FileStructure {
             path: PathBuf::from(&self.path),
+            parse_errors: self.parse_errors,
             functions: self.functions.clone(),
             classes: self.classes.clone(),
             methods: self.methods.clone(),
@@ -306,6 +309,7 @@ impl FileFactsParser {
             },
             structure: StoredFileStructure {
                 path: structure.path.to_string_lossy().into_owned(),
+                parse_errors: structure.parse_errors,
                 functions: structure.functions,
                 classes: structure.classes,
                 methods: structure.methods,

@@ -396,6 +396,30 @@ pub fn parse_with_path(source: &str, lang: TldrLanguage, path: Option<&Path>) ->
     PARSER_POOL.parse_with_path(source, lang, path)
 }
 
+/// Count tree-sitter `ERROR` and missing recovery nodes in a parsed tree.
+///
+/// Tree-sitter deliberately recovers from unsupported or malformed syntax.
+/// Extraction can therefore succeed while parts of the tree are degraded.
+/// This iterative walk makes that recovery visible without risking recursion
+/// depth on generated source files.
+pub fn count_error_nodes(tree: &Tree) -> usize {
+    let root = tree.root_node();
+    if !root.has_error() {
+        return 0;
+    }
+    let mut errors = 0;
+    let mut pending = vec![root];
+    while let Some(node) = pending.pop() {
+        errors += usize::from(node.is_error() || node.is_missing());
+        for index in 0..node.child_count() {
+            if let Some(child) = node.child(index) {
+                pending.push(child);
+            }
+        }
+    }
+    errors
+}
+
 /// Parse a file using the global parser pool.
 pub fn parse_file(path: &std::path::Path) -> TldrResult<(Tree, String, TldrLanguage)> {
     PARSER_POOL.parse_file(path)

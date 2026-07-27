@@ -24,6 +24,7 @@ use std::process::Command;
 use anyhow::{bail, Result};
 use clap::Args;
 use serde::Serialize;
+use tldr_core::types::Language;
 
 use crate::output::{OutputFormat, OutputWriter};
 
@@ -215,6 +216,32 @@ struct LangStatus {
     linter: Option<ToolStatus>,
 }
 
+#[derive(Clone, Copy)]
+struct GrammarProbe {
+    feature: &'static str,
+    source: &'static str,
+    expected_definitions: &'static [&'static str],
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum GrammarVerdict {
+    Pass,
+    Recovered,
+    Fail,
+}
+
+#[derive(Debug, Serialize)]
+struct GrammarFrontierRow {
+    language: String,
+    grammar: String,
+    feature: String,
+    expected_definitions: Vec<String>,
+    found_definitions: Vec<String>,
+    parse_errors: usize,
+    verdict: GrammarVerdict,
+}
+
 /// Check and install diagnostic tools for supported languages
 ///
 /// Unlike most tldr commands, doctor defaults to text output for better UX.
@@ -224,6 +251,10 @@ pub struct DoctorArgs {
     /// Install diagnostic tools for a specific language
     #[arg(long)]
     pub install: Option<String>,
+
+    /// Probe newest supported syntax and report parser recovery.
+    #[arg(long, value_name = "LANG", conflicts_with = "install")]
+    pub grammar_frontier: Option<String>,
 }
 
 impl DoctorArgs {
@@ -232,11 +263,32 @@ impl DoctorArgs {
     /// Note: Doctor defaults to text format for better UX (diagnostic output is meant to be
     /// human-readable). Use `-f json -q` to get JSON output.
     pub fn run(&self, format: OutputFormat, quiet: bool) -> Result<()> {
-        if let Some(lang) = &self.install {
+        if let Some(lang) = &self.grammar_frontier {
+            self.run_grammar_frontier(lang, format, quiet)
+        } else if let Some(lang) = &self.install {
             self.run_install(lang)
         } else {
             self.run_check(format, quiet)
         }
+    }
+
+    fn run_grammar_frontier(
+        &self,
+        language: &str,
+        format: OutputFormat,
+        quiet: bool,
+    ) -> Result<()> {
+        let rows = grammar_frontier(language)?;
+        let writer = OutputWriter::new(format, quiet);
+        if writer.is_text() {
+            writer.write_text(&format_grammar_frontier_text(&rows))?;
+        } else {
+            writer.write(&rows)?;
+        }
+        if rows.iter().any(|row| row.verdict == GrammarVerdict::Fail) {
+            bail!("grammar frontier contains failed feature probes");
+        }
+        Ok(())
     }
 
     /// Run install mode - install tools for a specific language
@@ -336,6 +388,112 @@ impl DoctorArgs {
     }
 }
 
+fn grammar_frontier(language: &str) -> Result<Vec<GrammarFrontierRow>> {
+    let normalized = language.to_ascii_lowercase();
+    let (language, grammar, probes): (Language, &str, &[GrammarProbe]) = match normalized.as_str() {
+        "python" | "py" => (
+            Language::Python,
+            "tree-sitter-python=0.23.6",
+            &[
+                GrammarProbe {
+                    feature: "pep_695_type_alias",
+                    source: "type SymbolList = list[str]\n",
+                    expected_definitions: &["SymbolList"],
+                },
+                GrammarProbe {
+                    feature: "pep_695_generic_function",
+                    source: "def first[T](items: list[T]) -> T:\n    return items[0]\n",
+                    expected_definitions: &["first"],
+                },
+                GrammarProbe {
+                    feature: "match_statement",
+                    source: "def kind(value):\n    match value:\n        case []: return 'empty'\n        case _: return 'other'\n",
+                    expected_definitions: &["kind"],
+                },
+                GrammarProbe {
+                    feature: "pep_750_template_string",
+                    source: "def template(name: str):\n    return t\"hello {name}\"\n\ndef after_tstring() -> int:\n    return 42\n",
+                    expected_definitions: &["template", "after_tstring"],
+                },
+            ],
+        ),
+        "typescript" | "ts" => (
+            Language::TypeScript,
+            "tree-sitter-typescript=0.23.2",
+            &[GrammarProbe {
+                feature: "satisfies_operator",
+                source: "const config = {} satisfies Record<string, unknown>;\nfunction after(): number { return 42; }\n",
+                expected_definitions: &["after"],
+            }],
+        ),
+        "rust" | "rs" => (
+            Language::Rust,
+            "tree-sitter-rust=0.23.3",
+            &[GrammarProbe {
+                feature: "let_else",
+                source: "fn newest() { let Some(value) = Some(1) else { return; }; let _ = value; }\n",
+                expected_definitions: &["newest"],
+            }],
+        ),
+        _ => bail!(
+            "grammar frontier is available for python, typescript, and rust; got '{language}'"
+        ),
+    };
+
+    probes
+        .iter()
+        .map(|probe| {
+            let tree = tldr_core::ast::parser::parse(probe.source, language)?;
+            let parse_errors = tldr_core::ast::parser::count_error_nodes(&tree);
+            let definitions =
+                tldr_core::ast::extractor::extract_definitions(&tree, probe.source, language);
+            let found_definitions = definitions
+                .into_iter()
+                .map(|definition| definition.name)
+                .collect::<Vec<_>>();
+            let complete = probe
+                .expected_definitions
+                .iter()
+                .all(|expected| found_definitions.iter().any(|found| found == expected));
+            let verdict = if !complete {
+                GrammarVerdict::Fail
+            } else if parse_errors > 0 {
+                GrammarVerdict::Recovered
+            } else {
+                GrammarVerdict::Pass
+            };
+            Ok(GrammarFrontierRow {
+                language: language.to_string(),
+                grammar: grammar.to_string(),
+                feature: probe.feature.to_string(),
+                expected_definitions: probe
+                    .expected_definitions
+                    .iter()
+                    .map(|value| (*value).to_string())
+                    .collect(),
+                found_definitions,
+                parse_errors,
+                verdict,
+            })
+        })
+        .collect()
+}
+
+fn format_grammar_frontier_text(rows: &[GrammarFrontierRow]) -> String {
+    let mut output = String::from("Grammar frontier\n");
+    for row in rows {
+        output.push_str(&format!(
+            "{}\t{}\t{:?}\terrors={}\tfound={}\n",
+            row.language,
+            row.feature,
+            row.verdict,
+            row.parse_errors,
+            row.found_definitions.join(",")
+        ));
+    }
+    output
+}
+
 /// Format doctor results for human-readable text output
 fn format_doctor_text(results: &BTreeMap<String, LangStatus>) -> String {
     use colored::Colorize;
@@ -412,4 +570,33 @@ fn format_doctor_text(results: &BTreeMap<String, LangStatus>) -> String {
     }
 
     output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{grammar_frontier, GrammarVerdict};
+
+    #[test]
+    fn grammar_frontier_valid_typescript_and_rust_pass() {
+        for language in ["typescript", "rust"] {
+            let rows = grammar_frontier(language).expect("frontier");
+            assert!(!rows.is_empty());
+            assert!(rows.iter().all(|row| row.verdict == GrammarVerdict::Pass));
+        }
+    }
+
+    #[test]
+    fn grammar_frontier_python_t_string_is_recovered_on_pinned_grammar() {
+        let rows = grammar_frontier("python").expect("frontier");
+        let template = rows
+            .iter()
+            .find(|row| row.feature == "pep_750_template_string")
+            .expect("template probe");
+        assert_eq!(template.verdict, GrammarVerdict::Recovered);
+        assert!(template.parse_errors > 0);
+        assert!(template
+            .found_definitions
+            .iter()
+            .any(|name| name == "after_tstring"));
+    }
 }

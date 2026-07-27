@@ -254,10 +254,14 @@ fn load_artifact_stats(project: &Path) -> Option<ArtifactStoreStats> {
     }
     let store = RedbArtifactStore::open(&path).ok()?;
     let active_generation = store.active_generation().ok().flatten();
-    let files = GenerationSnapshot::active(&store)
-        .ok()
-        .flatten()
-        .map_or(0, |snapshot| snapshot.file_count());
+    let snapshot = GenerationSnapshot::active(&store).ok().flatten();
+    let files = snapshot.as_ref().map_or(0, GenerationSnapshot::file_count);
+    let parse_errors = snapshot.as_ref().map_or(0, |snapshot| {
+        snapshot
+            .files()
+            .map(|facts| facts.structure.parse_errors)
+            .sum()
+    });
     Some(ArtifactStoreStats {
         state: if active_generation.is_some() {
             "ready".into()
@@ -267,6 +271,7 @@ fn load_artifact_stats(project: &Path) -> Option<ArtifactStoreStats> {
         active_generation,
         target_generation: None,
         files,
+        parse_errors,
         redb_bytes: std::fs::metadata(path)
             .map(|value| value.len())
             .unwrap_or(0),

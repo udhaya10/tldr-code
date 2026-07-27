@@ -209,6 +209,13 @@ pub(crate) fn extract_file_structure_from_tree(
     source: &str,
 ) -> TldrResult<FileStructure> {
     let relative_path = path.strip_prefix(root).unwrap_or(path).to_path_buf();
+    let parse_errors = crate::ast::parser::count_error_nodes(tree);
+    if parse_errors > 0 {
+        eprintln!(
+            "warning: {} parsed with {parse_errors} tree-sitter ERROR node(s); extraction may be partial",
+            path.display()
+        );
+    }
 
     // canonical-function-enumerator-v1: derive `functions` and `methods` from
     // the canonical `extract_file` enumerator so that
@@ -251,6 +258,7 @@ pub(crate) fn extract_file_structure_from_tree(
 
     Ok(FileStructure {
         path: relative_path,
+        parse_errors,
         functions,
         classes,
         methods,
@@ -1841,7 +1849,7 @@ fn extract_luau_functions(node: &Node, source: &str, functions: &mut Vec<String>
 ///
 /// This walks the tree-sitter AST recursively and classifies nodes as function-like
 /// or class-like, mirroring the logic in `search/enriched.rs::classify_node`.
-fn extract_definitions(tree: &Tree, source: &str, language: Language) -> Vec<DefinitionInfo> {
+pub fn extract_definitions(tree: &Tree, source: &str, language: Language) -> Vec<DefinitionInfo> {
     let mut definitions = Vec::new();
     let root = tree.root_node();
     collect_definitions(root, source, language, &mut definitions);

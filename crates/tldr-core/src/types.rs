@@ -1258,6 +1258,9 @@ pub struct DefinitionInfo {
 pub struct FileStructure {
     /// Path to the source file
     pub path: PathBuf,
+    /// Number of tree-sitter `ERROR` or missing recovery nodes.
+    #[serde(default)]
+    pub parse_errors: usize,
     /// Names of top-level functions defined in this file.
     ///
     /// schema-cleanup-v1 BUG-13: kept on the in-memory struct for

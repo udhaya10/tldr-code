@@ -73,6 +73,11 @@ const SCENARIOS: &[Scenario] = &[
         run: ignore_matcher_unification,
     },
     Scenario {
+        name: "parse_error_visibility",
+        smoke: false,
+        run: parse_error_visibility,
+    },
+    Scenario {
         name: "language_matrix",
         smoke: false,
         run: language_matrix,
@@ -154,7 +159,7 @@ fn artifact_lifecycle() -> Result<(), String> {
         revision: facts.revision,
         subject: ArtifactSubject::File("helper.py".into()),
         kind: ArtifactKind::FileFacts,
-        producer: ProducerId::new("file-facts", 4),
+        producer: ProducerId::new("file-facts", 5),
     };
     let optional = ArtifactKey {
         project: project_id,
@@ -522,6 +527,29 @@ fn ignore_matcher_unification() -> Result<(), String> {
     ensure(
         filtered.contains(&nested_kept),
         "root-anchored ignore matched a nested directory",
+    )
+}
+
+fn parse_error_visibility() -> Result<(), String> {
+    let project = tempfile::tempdir().map_err(display)?;
+    let valid = project.path().join("valid.py");
+    let recovered = project.path().join("recovered.py");
+    fs::write(&valid, "def valid():\n    return 1\n").map_err(display)?;
+    fs::write(&recovered, "def recovered(:\n    return 2\n").map_err(display)?;
+
+    let valid_structure =
+        tldr_core::ast::extractor::get_code_structure(&valid, Language::Python, usize::MAX)
+            .map_err(display)?;
+    let recovered_structure =
+        tldr_core::ast::extractor::get_code_structure(&recovered, Language::Python, usize::MAX)
+            .map_err(display)?;
+    ensure(
+        valid_structure.files[0].parse_errors == 0,
+        "valid source reported parse errors",
+    )?;
+    ensure(
+        recovered_structure.files[0].parse_errors > 0,
+        "recovered syntax was not surfaced",
     )
 }
 

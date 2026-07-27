@@ -230,8 +230,12 @@ impl DaemonStatusArgs {
                         println!("Files:   {}", files);
                         if let Some(store) = &artifact_store {
                             println!(
-                                "Artifacts: {} generation {:?}, {} bytes",
-                                store.state, store.active_generation, store.redb_bytes
+                                "Artifacts: {} generation {:?}, {} files, {} parse recovery nodes, {} bytes",
+                                store.state,
+                                store.active_generation,
+                                store.files,
+                                store.parse_errors,
+                                store.redb_bytes
                             );
                         }
                         if let Some(idx) = &semantic_index {

@@ -1453,6 +1453,7 @@ impl TLDRDaemon {
                 active_generation: artifact_stats.active_generation,
                 target_generation,
                 files: artifact_stats.hot_files,
+                parse_errors: artifact_stats.parse_errors,
                 redb_bytes: artifact_stats.redb_bytes,
                 last_error,
             }),

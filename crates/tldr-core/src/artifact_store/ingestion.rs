@@ -18,7 +18,7 @@ use super::{
 
 const BATCH_FILES: usize = 32;
 const FILE_FACTS_PRODUCER: &str = "file-facts";
-const FILE_FACTS_VERSION: u32 = 4;
+const FILE_FACTS_VERSION: u32 = 5;
 
 /// Summary of a completed or resumed ingestion.
 #[derive(Clone, Debug, PartialEq, Eq)]
