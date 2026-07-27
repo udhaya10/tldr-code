@@ -1,12 +1,16 @@
 //! Typed, generation-pinned projections over normalized artifacts.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use crate::types::{CallEdge, ProjectCallGraph};
-use crate::{CodeStructure, Language, TldrError, TldrResult};
+use crate::analysis::dead::dead_code_analysis_refcount;
+use crate::types::{CallEdge, DeadCodeReport, ModuleInfo, ProjectCallGraph};
+use crate::{
+    collect_all_functions, dead_code_analysis, CodeStructure, Language, TldrError, TldrResult,
+};
 
 use super::redb::decode;
+use super::GraphSnapshot;
 use super::{
     ArtifactKind, ArtifactStore, DefinitionFact, FileFacts, ImportFact, ProjectCallEdgeFact,
     SemanticChunkFact,
@@ -18,6 +22,8 @@ pub struct GenerationSnapshot {
     generation: u64,
     files: HashMap<String, FileFacts>,
     project_calls: Vec<ProjectCallEdgeFact>,
+    call_nodes: HashMap<String, Vec<String>>,
+    graph: GraphSnapshot,
 }
 
 impl GenerationSnapshot {
@@ -48,7 +54,7 @@ impl GenerationSnapshot {
                 Ok((facts.path.clone(), facts))
             })
             .collect::<TldrResult<HashMap<_, _>>>()?;
-        let project_calls = manifest
+        let project_calls: Vec<ProjectCallEdgeFact> = manifest
             .artifacts
             .iter()
             .find(|key| key.kind == ArtifactKind::CallGraph)
@@ -62,10 +68,31 @@ impl GenerationSnapshot {
             })
             .transpose()?
             .unwrap_or_default();
+        let mut call_nodes = HashMap::<String, Vec<String>>::new();
+        for facts in files.values() {
+            if let Ok(ir) = ciborium::de::from_reader::<crate::callgraph::FileIR, _>(
+                facts.callgraph_ir.as_slice(),
+            ) {
+                let nodes = call_nodes.entry(facts.language.clone()).or_default();
+                for function in ir.funcs {
+                    let qualified = function.class_name.map_or(function.name.clone(), |class| {
+                        format!("{class}.{}", function.name)
+                    });
+                    nodes.push(format!("{}:{qualified}", facts.path));
+                }
+            }
+        }
+        for nodes in call_nodes.values_mut() {
+            nodes.sort();
+            nodes.dedup();
+        }
+        let graph = GraphSnapshot::build(&files, &project_calls);
         Ok(Self {
             generation,
             files,
             project_calls,
+            call_nodes,
+            graph,
         })
     }
 
@@ -77,6 +104,11 @@ impl GenerationSnapshot {
     /// Number of normalized source-file revisions in the snapshot.
     pub fn file_count(&self) -> usize {
         self.files.len()
+    }
+
+    /// Resident CSR and symbol indexes derived from this exact generation.
+    pub fn graph(&self) -> &GraphSnapshot {
+        &self.graph
     }
 
     /// Read normalized facts for a root-relative path.
@@ -221,6 +253,83 @@ impl GenerationSnapshot {
         }
     }
 
+    /// Answer dead-code analysis from generation-resident module and identifier
+    /// facts. No source walk, parse, or materialized whole-project answer cache
+    /// is involved.
+    pub fn dead_report(
+        &self,
+        project: &Path,
+        root: &Path,
+        language: Language,
+        entry_points: Option<&[String]>,
+        use_call_graph: bool,
+    ) -> TldrResult<DeadCodeReport> {
+        let relative_root = root
+            .strip_prefix(project)
+            .unwrap_or(root)
+            .to_string_lossy()
+            .replace('\\', "/");
+        let single_file = root.is_file();
+        let mut selected = self
+            .files
+            .values()
+            .filter_map(|facts| {
+                if facts.language != language.as_str()
+                    || facts.path.to_ascii_lowercase().ends_with(".d.ts")
+                {
+                    return None;
+                }
+                scope_path(&facts.path, &relative_root, single_file)
+                    .map(|path| (path, facts.module.to_module_info(), facts))
+            })
+            .collect::<Vec<_>>();
+        selected.sort_by(|left, right| left.0.cmp(&right.0));
+        let module_infos = selected
+            .iter()
+            .map(|(path, module, _)| (path.clone(), module.clone()))
+            .collect::<Vec<(PathBuf, ModuleInfo)>>();
+        let all_functions = collect_all_functions(&module_infos);
+
+        if use_call_graph {
+            let mut graph = ProjectCallGraph::new();
+            for edge in self.project_calls.iter().filter(|edge| {
+                edge.language == language.as_str()
+                    && scope_path(&edge.source_file, &relative_root, single_file).is_some()
+                    && scope_path(&edge.destination_file, &relative_root, single_file).is_some()
+            }) {
+                graph.add_edge(CallEdge {
+                    src_file: scope_path(&edge.source_file, &relative_root, single_file)
+                        .expect("edge scope checked"),
+                    src_func: edge.caller.clone(),
+                    dst_file: scope_path(&edge.destination_file, &relative_root, single_file)
+                        .expect("edge scope checked"),
+                    dst_func: edge.callee.clone(),
+                });
+            }
+            return dead_code_analysis(&graph, &all_functions, entry_points);
+        }
+
+        let mut counts = HashMap::<String, usize>::new();
+        let mut dotted = HashMap::<String, usize>::new();
+        for (_, _, facts) in &selected {
+            for (name, count) in &facts.identifier_counts {
+                *counts.entry(name.clone()).or_default() += *count as usize;
+            }
+            for path in &facts.python_dotted_strings {
+                *dotted.entry(path.clone()).or_default() += 1;
+            }
+        }
+        let known_dotted = indexed_dotted_symbols(&module_infos);
+        for (path, count) in dotted {
+            if known_dotted.contains(&path) {
+                if let Some(symbol) = path.rsplit('.').next() {
+                    *counts.entry(symbol.to_string()).or_default() += count;
+                }
+            }
+        }
+        dead_code_analysis_refcount(&all_functions, &counts, entry_points)
+    }
+
     /// Compose the generation's project-level call graph artifact.
     pub fn call_graph(&self, language: Option<Language>) -> ProjectCallGraph {
         let mut graph = ProjectCallGraph::new();
@@ -266,4 +375,66 @@ impl GenerationSnapshot {
             .iter()
             .filter(move |edge| language.is_none_or(|language| edge.language == language.as_str()))
     }
+
+    /// Canonical FileIR function inventory, grouped by resolver language.
+    pub fn call_nodes(&self, language: Option<Language>) -> impl Iterator<Item = &str> {
+        self.call_nodes
+            .iter()
+            .filter(move |(label, _)| {
+                language.is_none_or(|language| label.as_str() == language.as_str())
+            })
+            .flat_map(|(_, nodes)| nodes.iter().map(String::as_str))
+    }
+}
+
+fn scope_path(path: &str, relative_root: &str, single_file: bool) -> Option<PathBuf> {
+    if relative_root.is_empty() {
+        return Some(PathBuf::from(path));
+    }
+    if single_file {
+        return (path == relative_root).then(|| {
+            Path::new(path)
+                .file_name()
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from(path))
+        });
+    }
+    Path::new(path)
+        .strip_prefix(relative_root)
+        .ok()
+        .map(Path::to_path_buf)
+}
+
+fn indexed_dotted_symbols(module_infos: &[(PathBuf, ModuleInfo)]) -> HashSet<String> {
+    let mut symbols = HashSet::new();
+    for (path, info) in module_infos {
+        let mut components = path
+            .components()
+            .filter_map(|component| component.as_os_str().to_str())
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        let Some(file) = components.pop() else {
+            continue;
+        };
+        let Some(stem) = Path::new(&file).file_stem().and_then(|stem| stem.to_str()) else {
+            continue;
+        };
+        if stem != "__init__" {
+            components.push(stem.to_string());
+        }
+        if components.is_empty() {
+            continue;
+        }
+        let module = components.join(".");
+        for function in &info.functions {
+            symbols.insert(format!("{module}.{}", function.name));
+        }
+        for class in &info.classes {
+            symbols.insert(format!("{module}.{}", class.name));
+            for method in &class.methods {
+                symbols.insert(format!("{module}.{}.{}", class.name, method.name));
+            }
+        }
+    }
+    symbols
 }

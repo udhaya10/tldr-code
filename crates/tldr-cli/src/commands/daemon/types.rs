@@ -598,10 +598,25 @@ pub enum DaemonCommand {
         max_items: usize,
     },
 
+    /// Detect graph hubs from the resident generation.
+    Hubs {
+        /// `all`, `indegree`, `outdegree`, `pagerank`, or `betweenness`.
+        algorithm: String,
+        /// Language projection selected by the CLI.
+        language: Language,
+        #[serde(default = "default_top_k")]
+        top: usize,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        threshold: Option<f64>,
+    },
+
     /// Get impact analysis
     Impact {
         func: String,
         depth: Option<usize>,
+        /// Optional root-relative or suffix file discriminator.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        file: Option<PathBuf>,
         /// Optional language override. Falls back to auto-detection when
         /// `None`. Accepts the legacy `lang` key for v0.2.x clients.
         #[serde(default, alias = "lang", skip_serializing_if = "Option::is_none")]

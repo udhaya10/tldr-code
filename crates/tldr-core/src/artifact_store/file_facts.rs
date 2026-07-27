@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 
+use crate::analysis::refcount::count_identifiers_and_python_dotted_strings;
 use crate::ast::extract::extract_from_tree;
 use crate::ast::parser::parse_file_with_lang;
 use crate::{Language, TldrResult};
@@ -180,6 +181,13 @@ pub struct FileFacts {
     pub imports: Vec<ImportFact>,
     /// Intra-file call edges.
     pub calls: Vec<CallFact>,
+    /// Identifier occurrence counts used by generation-resident dead-code
+    /// analysis. Counts are file-local and folded only for the requested
+    /// language/scope.
+    pub identifier_counts: Vec<(String, u32)>,
+    /// Static Python dotted paths discovered during the identifier AST walk.
+    /// These are joined against known symbols before contributing liveness.
+    pub python_dotted_strings: Vec<String>,
     /// Semantic chunks derived without another parse.
     pub semantic_chunks: Vec<SemanticChunkFact>,
     /// Canonical cross-file call-graph FileIR encoded as CBOR. Keeping it in
@@ -206,7 +214,15 @@ impl FileFactsParser {
             .ok_or_else(|| crate::TldrError::UnsupportedLanguage(path.display().to_string()))?;
         let (tree, source, language) = parse_file_with_lang(&path, Some(language))?;
         self.invocations.fetch_add(1, Ordering::Relaxed);
-        let module = extract_from_tree(&tree, &source, language, &path, Some(&root))?;
+        let mut module = extract_from_tree(&tree, &source, language, &path, Some(&root))?;
+        tag_framework_directive_functions(&mut module, &source, &path);
+        let (identifier_counts, python_dotted_strings) =
+            count_identifiers_and_python_dotted_strings(&tree, source.as_bytes(), language);
+        let mut identifier_counts = identifier_counts
+            .into_iter()
+            .map(|(name, count)| (name, u32::try_from(count).unwrap_or(u32::MAX)))
+            .collect::<Vec<_>>();
+        identifier_counts.sort_by(|left, right| left.0.cmp(&right.0));
         let structure = crate::ast::extractor::extract_file_structure_from_tree(
             &path, &root, language, &tree, &source,
         )?;
@@ -327,6 +343,8 @@ impl FileFactsParser {
                 })
                 .collect(),
             calls,
+            identifier_counts,
+            python_dotted_strings,
             semantic_chunks,
             callgraph_ir: callgraph_ir_bytes,
             diagnostics: Vec::new(),
@@ -336,6 +354,50 @@ impl FileFactsParser {
     /// Number of source parses performed by this parser.
     pub fn invocations(&self) -> u64 {
         self.invocations.load(Ordering::Relaxed)
+    }
+}
+
+fn tag_framework_directive_functions(module: &mut crate::ModuleInfo, source: &str, path: &Path) {
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("");
+    if !matches!(extension, "ts" | "tsx" | "js" | "jsx" | "mjs")
+        || !source.lines().take(5).any(|line| {
+            matches!(
+                line.trim(),
+                r#""use server""#
+                    | r#"'use server'"#
+                    | r#""use server";"#
+                    | r#"'use server';"#
+                    | r#""use client""#
+                    | r#"'use client'"#
+                    | r#""use client";"#
+                    | r#"'use client';"#
+            )
+        })
+    {
+        return;
+    }
+    for function in &mut module.functions {
+        if !function
+            .decorators
+            .iter()
+            .any(|decorator| decorator == "use_server_directive")
+        {
+            function.decorators.push("use_server_directive".into());
+        }
+    }
+    for class in &mut module.classes {
+        for method in &mut class.methods {
+            if !method
+                .decorators
+                .iter()
+                .any(|decorator| decorator == "use_server_directive")
+            {
+                method.decorators.push("use_server_directive".into());
+            }
+        }
     }
 }
 

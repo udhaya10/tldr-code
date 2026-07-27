@@ -44,8 +44,7 @@ use tldr_core::{
 };
 use tldr_core::{
     architecture_analysis, change_impact, detect_or_parse_language, find_importers, get_file_tree,
-    get_relevant_context, get_slice, impact_analysis, search as tldr_search, Language,
-    SliceDirection,
+    get_relevant_context, get_slice, search as tldr_search, Language, SliceDirection,
 };
 
 // =============================================================================
@@ -817,6 +816,9 @@ impl TLDRDaemon {
                 lang,
                 max_results,
             } => {
+                let requested_path = path;
+                let path =
+                    dunce::canonicalize(&requested_path).unwrap_or_else(|_| requested_path.clone());
                 let language = match detect_or_parse_language(lang.as_deref(), &path) {
                     Ok(l) => l,
                     Err(e) => {
@@ -834,15 +836,12 @@ impl TLDRDaemon {
                     };
                 }
                 match self.artifact_manager.snapshot() {
-                    Ok(snapshot) => DaemonResponse::Result(
-                        serde_json::to_value(snapshot.code_structure(
-                            &self.project,
-                            &path,
-                            language,
-                            max_results,
-                        ))
-                        .unwrap_or_default(),
-                    ),
+                    Ok(snapshot) => {
+                        let mut structure =
+                            snapshot.code_structure(&self.project, &path, language, max_results);
+                        structure.root = requested_path;
+                        DaemonResponse::Result(serde_json::to_value(structure).unwrap_or_default())
+                    }
                     Err(state) => DaemonResponse::Error {
                         status: "not_ready".to_string(),
                         error: format!("artifact generation is not ready: {state:?}"),
@@ -1021,7 +1020,9 @@ impl TLDRDaemon {
                 respect_ignore,
                 max_items,
             } => {
-                let root = path.unwrap_or_else(|| self.project.clone());
+                let requested_root = path.unwrap_or_else(|| self.project.clone());
+                let root =
+                    dunce::canonicalize(&requested_root).unwrap_or_else(|_| requested_root.clone());
                 let detected_language = language;
                 if root != self.project || !respect_ignore {
                     return DaemonResponse::Error {
@@ -1034,7 +1035,7 @@ impl TLDRDaemon {
                     Ok(snapshot) => DaemonResponse::Result(
                         serde_json::to_value(
                             crate::commands::calls::call_graph_output_from_artifacts(
-                                &root,
+                                &requested_root,
                                 detected_language,
                                 max_items,
                                 &snapshot,
@@ -1049,10 +1050,71 @@ impl TLDRDaemon {
                 }
             }
 
+            DaemonCommand::Hubs {
+                algorithm,
+                language,
+                top,
+                threshold,
+            } => {
+                let algorithm = match algorithm.parse::<tldr_core::analysis::hubs::HubAlgorithm>() {
+                    Ok(algorithm) => algorithm,
+                    Err(error) => {
+                        return DaemonResponse::Error {
+                            status: "error".into(),
+                            error,
+                        }
+                    }
+                };
+                match self.artifact_manager.snapshot() {
+                    Ok(snapshot) => {
+                        let graph = snapshot.call_graph(Some(language));
+                        let forward = tldr_core::callgraph::build_forward_graph(&graph);
+                        let reverse = tldr_core::callgraph::build_reverse_graph(&graph);
+                        let nodes = tldr_core::callgraph::collect_nodes(&graph);
+                        let mut lines = HashMap::new();
+                        for facts in snapshot.files() {
+                            let file = PathBuf::from(&facts.path);
+                            for function in &facts.module.functions {
+                                lines.insert(
+                                    (file.clone(), function.name.clone()),
+                                    function.line_number,
+                                );
+                            }
+                            for class in &facts.module.classes {
+                                for method in &class.methods {
+                                    lines.insert(
+                                        (file.clone(), format!("{}.{}", class.name, method.name)),
+                                        method.line_number,
+                                    );
+                                    lines
+                                        .entry((file.clone(), method.name.clone()))
+                                        .or_insert(method.line_number);
+                                }
+                            }
+                        }
+                        let report = tldr_core::analysis::hubs::compute_hub_report_with_lines(
+                            &nodes,
+                            &forward,
+                            &reverse,
+                            algorithm,
+                            top,
+                            threshold,
+                            Some(&lines),
+                        );
+                        DaemonResponse::Result(serde_json::to_value(report).unwrap_or_default())
+                    }
+                    Err(state) => DaemonResponse::Error {
+                        status: "not_ready".to_string(),
+                        error: format!("artifact generation is not ready: {state:?}"),
+                    },
+                }
+            }
+
             DaemonCommand::Impact {
                 func,
                 depth,
                 language: _,
+                file,
             } => {
                 let d = depth.unwrap_or(3);
                 let snapshot = match self.artifact_manager.snapshot() {
@@ -1064,8 +1126,13 @@ impl TLDRDaemon {
                         }
                     }
                 };
-                let graph = snapshot.intra_file_call_graph();
-                match impact_analysis(&graph, &func, d, None) {
+                let file_filter = file
+                    .as_deref()
+                    .map(|path| path.to_string_lossy().replace('\\', "/"));
+                match snapshot
+                    .graph()
+                    .impact_report(&func, d, file_filter.as_deref())
+                {
                     Ok(result) => {
                         let val = serde_json::to_value(&result).unwrap_or_default();
                         DaemonResponse::Result(val)
@@ -1084,53 +1151,38 @@ impl TLDRDaemon {
                 call_graph,
                 no_default_ignore,
             } => {
-                let root = path.unwrap_or_else(|| self.project.clone());
+                let requested_root = path.unwrap_or_else(|| self.project.clone());
+                let root =
+                    dunce::canonicalize(&requested_root).unwrap_or_else(|_| requested_root.clone());
                 let lang = resolve_language(language);
-                let root_str = root.to_string_lossy().to_string();
-                let entry_str = entry.as_ref().map(|v| v.join(",")).unwrap_or_default();
-                // TLDR-7pp.1.5: call_graph + no_default_ignore are part of the
-                // key so flag-varied requests don't collide.
-                let key = HotQueryKey::new(
-                    "dead",
-                    hash_str_args(&[
-                        &root_str,
-                        &entry_str,
-                        &call_graph.to_string(),
-                        &no_default_ignore.to_string(),
-                    ]),
-                    lang,
-                );
-                if let Some(cached) = self.cache.get::<serde_json::Value>(&key) {
-                    return DaemonResponse::Result(cached);
+                if no_default_ignore {
+                    return DaemonResponse::Error {
+                        status: "error".to_string(),
+                        error: "resident dead-code analysis uses the canonical ignore policy; use --oneshot with --no-default-ignore"
+                            .to_string(),
+                    };
                 }
-                // Compute the SAME DeadCodeReport the CLI --oneshot path builds
-                // (TLDR-7pp.1.5): mirrors --call-graph and --no-default-ignore.
-                // Run off the async runtime — the analysis is CPU-heavy.
-                let root_for_build = root.clone();
-                let entry_owned = entry.clone();
-                let built = tokio::task::spawn_blocking(move || {
-                    crate::commands::dead::compute_dead_report(
-                        &root_for_build,
-                        lang,
-                        entry_owned.as_deref(),
-                        call_graph,
-                        no_default_ignore,
-                    )
-                })
-                .await
-                .unwrap_or_else(|e| Err(anyhow::anyhow!("dead-code task failed: {e}")));
-                match built {
+                if !root.starts_with(&self.project) {
+                    return DaemonResponse::Error {
+                        status: "error".to_string(),
+                        error:
+                            "resident dead-code analysis requires a path inside the daemon project"
+                                .to_string(),
+                    };
+                }
+                let snapshot = match self.artifact_manager.snapshot() {
+                    Ok(snapshot) => snapshot,
+                    Err(state) => {
+                        return DaemonResponse::Error {
+                            status: "not_ready".to_string(),
+                            error: format!("artifact generation is not ready: {state:?}"),
+                        }
+                    }
+                };
+                match snapshot.dead_report(&self.project, &root, lang, entry.as_deref(), call_graph)
+                {
                     Ok(result) => {
                         let val = serde_json::to_value(&result).unwrap_or_default();
-                        // TLDR-iqr freshness: both hashes; external roots
-                        // never cached (see Calls arm, Codex r4 Q3).
-                        if root == self.project || root.starts_with(&self.project) {
-                            self.cache.insert(
-                                key,
-                                &val,
-                                vec![hash_path(&root), hash_path(&self.project)],
-                            );
-                        }
                         DaemonResponse::Result(val)
                     }
                     Err(e) => DaemonResponse::Error {

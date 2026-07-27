@@ -2,6 +2,7 @@
 
 mod file_facts;
 mod function_artifacts;
+mod graph_snapshot;
 mod ingestion;
 mod projections;
 mod redb;
@@ -13,6 +14,7 @@ pub use file_facts::{
     SemanticChunkFact, StoredFileStructure, StoredModuleInfo,
 };
 pub use function_artifacts::FunctionArtifactCoordinator;
+pub use graph_snapshot::{FuncId, FunctionNode, GraphSnapshot};
 pub use ingestion::{IngestionEngine, IngestionReport};
 pub use projections::GenerationSnapshot;
 pub use redb::{ArtifactStore, RedbArtifactStore};

@@ -27,6 +27,7 @@ use tldr_core::analysis::hubs::{
 use tldr_core::callgraph::{build_forward_graph, build_reverse_graph, collect_nodes};
 use tldr_core::{build_project_call_graph, Language};
 
+use crate::commands::daemon_router::{is_oneshot, route_for_path};
 use crate::output::{
     format_hubs_compact, format_hubs_dot, format_hubs_text, OutputFormat, OutputWriter,
 };
@@ -106,6 +107,27 @@ impl HubsArgs {
         let language = self
             .lang
             .unwrap_or_else(|| Language::from_directory(&self.path).unwrap_or(Language::Python));
+
+        if !is_oneshot() {
+            let algorithm: HubAlgorithm = self.algorithm.into();
+            let params = serde_json::json!({
+                "algorithm": algorithm.to_string(),
+                "language": language,
+                "top": self.top,
+                "threshold": self.threshold,
+            });
+            let report = route_for_path(&self.path, "hubs", params).into_hit_or_bail("hubs")?;
+            if writer.is_compact() {
+                writer.write_text(format_hubs_compact(&report).trim_end())?;
+            } else if writer.is_text() {
+                writer.write_text(&format_hubs_text(&report))?;
+            } else if writer.is_dot() {
+                writer.write_text(&format_hubs_dot(&report))?;
+            } else {
+                writer.write(&report)?;
+            }
+            return Ok(());
+        }
 
         writer.progress(&format!(
             "Building call graph for {} ({:?})...",

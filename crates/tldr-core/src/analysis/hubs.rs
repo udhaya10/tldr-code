@@ -251,8 +251,10 @@ impl HubScore {
         callers_count: usize,
         callees_count: usize,
     ) -> Self {
+        let in_degree = stable_score(in_degree);
+        let out_degree = stable_score(out_degree);
         // Simple composite: average of in_degree and out_degree (when no pagerank/betweenness)
-        let composite_score = (in_degree + out_degree) / 2.0;
+        let composite_score = stable_score((in_degree + out_degree) / 2.0);
         let risk_level = RiskLevel::from_score(composite_score);
 
         Self {
@@ -286,8 +288,16 @@ impl HubScore {
         callers_count: usize,
         callees_count: usize,
     ) -> Self {
-        let composite_score =
-            compute_composite_score(in_degree, out_degree, Some(pagerank), Some(betweenness));
+        let in_degree = stable_score(in_degree);
+        let out_degree = stable_score(out_degree);
+        let pagerank = stable_score(pagerank);
+        let betweenness = stable_score(betweenness);
+        let composite_score = stable_score(compute_composite_score(
+            in_degree,
+            out_degree,
+            Some(pagerank),
+            Some(betweenness),
+        ));
         let risk_level = RiskLevel::from_score(composite_score);
 
         Self {
@@ -316,6 +326,9 @@ impl HubScore {
         callees_count: usize,
         composite_score: f64,
     ) -> Self {
+        let in_degree = stable_score(in_degree);
+        let out_degree = stable_score(out_degree);
+        let composite_score = stable_score(composite_score);
         let risk_level = RiskLevel::from_score(composite_score);
 
         Self {
@@ -343,7 +356,16 @@ impl HubScore {
         callers_count: usize,
         callees_count: usize,
     ) -> Self {
-        let composite_score = compute_composite_score(in_degree, out_degree, pagerank, betweenness);
+        let in_degree = stable_score(in_degree);
+        let out_degree = stable_score(out_degree);
+        let pagerank = pagerank.map(stable_score);
+        let betweenness = betweenness.map(stable_score);
+        let composite_score = stable_score(compute_composite_score(
+            in_degree,
+            out_degree,
+            pagerank,
+            betweenness,
+        ));
         let risk_level = RiskLevel::from_score(composite_score);
 
         Self {
@@ -360,6 +382,10 @@ impl HubScore {
             risk_level,
         }
     }
+}
+
+fn stable_score(value: f64) -> f64 {
+    (value * 1_000_000_000_000.0).round() / 1_000_000_000_000.0
 }
 
 /// Compute composite score from available measures
@@ -1028,16 +1054,16 @@ pub struct HubReport {
     /// Measures used in this analysis
     pub measures_used: Vec<String>,
     /// Top K by in-degree (for by_measure breakdown)
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub by_in_degree: Vec<HubScore>,
     /// Top K by out-degree (for by_measure breakdown)
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub by_out_degree: Vec<HubScore>,
     /// Top K by pagerank (for by_measure breakdown)
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub by_pagerank: Vec<HubScore>,
     /// Top K by betweenness (for by_measure breakdown)
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub by_betweenness: Vec<HubScore>,
     /// PageRank convergence info (if computed)
     #[serde(skip_serializing_if = "Option::is_none")]

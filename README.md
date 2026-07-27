@@ -75,6 +75,8 @@ tldr health src/
 `-f compact` is the recommended LLM/MCP-facing format for `calls`, `impact`,
 `dead`, `hubs`, and `structure`; it uses versioned, escaped TSV rows instead of
 repeating JSON keys. See [Compact output for agents](docs/COMPACT_OUTPUT.md).
+The daemon serves these project-wide graph queries from one immutable,
+generation-pinned [resident graph snapshot](docs/RESIDENT_GRAPH_SNAPSHOT.md).
 
 ## Commands
 

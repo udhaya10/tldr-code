@@ -3,23 +3,17 @@
 //! Finds all callers of a function (reverse call graph traversal).
 //! Supports `--type-aware` flag for Python type resolution (Phase 7-8).
 //!
-//! ALWAYS computes locally — daemon routing deliberately removed (TLDR-94j):
-//! the daemon Impact arm uses plain `impact_analysis` (no AST fallback for
-//! isolated functions, no reference enrichment), defaults depth to 3 vs the
-//! CLI's 5, and drops the file disambiguation filter — strictly weaker
-//! answers than the local path. Correctness > speed until the n74 CSR
-//! rebuild restores daemon routing with full flag parity (TLDR-n74).
+//! The default path is served from the daemon's generation-pinned resident
+//! CSR. `--oneshot` retains the source-compute escape for CI and diagnostics.
 
 use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::Args;
 
-use tldr_core::{
-    build_project_call_graph, enrich_impact_with_references, impact_analysis_with_ast_fallback,
-    Language,
-};
+use tldr_core::{build_project_call_graph, Language};
 
+use crate::commands::daemon_router::{is_oneshot, route_for_path};
 use crate::output::{
     format_impact_compact, format_impact_dot, format_impact_text, OutputFormat, OutputWriter,
 };
@@ -71,52 +65,17 @@ impl ImpactArgs {
 
         let type_aware_msg = if self.type_aware { " (type-aware)" } else { "" };
 
-        // Direct local compute (TLDR-94j: only correct path until n74 flag parity)
-        writer.progress(&format!(
-            "Building call graph for {} ({:?}){}...",
-            self.path.display(),
-            language,
-            type_aware_msg
-        ));
-
-        // Build call graph first
-        let graph = build_project_call_graph(&self.path, language, None, true)?;
-
-        writer.progress(&format!(
-            "Analyzing impact of {}{}...",
-            self.function, type_aware_msg
-        ));
-
-        // Run impact analysis with AST fallback for isolated functions
-        // TODO: When type_aware is true, use type-aware call graph building
-        // For now, this flag is registered but type resolution is pending full implementation
-        let mut report = impact_analysis_with_ast_fallback(
-            &graph,
-            &self.function,
-            self.depth,
-            self.file.as_deref(),
-            &self.path,
-            language,
-        )?;
-
-        // language-adapter-fixes-v1 (P13.AGG13-4): for languages whose call
-        // graph builder under-reports cross-file edges (notably C# field-typed
-        // method calls, Kotlin/Scala/OCaml functor wrappers), the call graph
-        // alone leaves `caller_count = 0` even when `tldr explain` and
-        // `tldr references` find call sites. Mirror the same fallback explain
-        // uses (P12.AGG12-1) so `impact` agrees with `explain`/`references`.
-        //
-        // sibling-resolver-gaps-v1 (P14.AGG14-1, P14.AGG14-4): the helper
-        // moved into `tldr-core::analysis::impact` so the same enrichment
-        // also runs inside `whatbreaks`. The same-fix-different-shape
-        // dedup (last-segment aware) lives in the core helper.
-        enrich_impact_with_references(
-            &mut report,
-            &self.path,
-            &self.function,
-            language,
-            self.depth,
-        );
+        let mut report = if is_oneshot() {
+            self.compute_local(language, &writer, type_aware_msg)?
+        } else {
+            let params = serde_json::json!({
+                "func": self.function,
+                "depth": self.depth,
+                "file": self.file,
+                "language": language,
+            });
+            route_for_path(&self.path, "impact", params).into_hit_or_bail("impact")?
+        };
 
         // If type-aware was requested, add placeholder stats to indicate it's enabled
         // (actual type resolution is integrated in callgraph builder - Phase 8 full implementation)
@@ -137,7 +96,6 @@ impl ImpactArgs {
             let text = format_impact_text(&report, self.type_aware);
             writer.write_text(&text)?;
         } else if writer.is_dot() {
-            // surface-gaps-v1 (BUG-19): direct-compute DOT impact path.
             let dot = format_impact_dot(&report);
             writer.write_text(&dot)?;
         } else {
@@ -145,5 +103,35 @@ impl ImpactArgs {
         }
 
         Ok(())
+    }
+
+    fn compute_local(
+        &self,
+        language: Language,
+        writer: &OutputWriter,
+        type_aware_msg: &str,
+    ) -> Result<tldr_core::ImpactReport> {
+        writer.progress(&format!(
+            "Building call graph for {} ({:?}){}...",
+            self.path.display(),
+            language,
+            type_aware_msg
+        ));
+
+        // Build call graph first
+        let graph = build_project_call_graph(&self.path, language, None, true)?;
+
+        writer.progress(&format!(
+            "Analyzing impact of {}{}...",
+            self.function, type_aware_msg
+        ));
+
+        let resident =
+            tldr_core::artifact_store::GraphSnapshot::from_project_call_graph(&graph, language);
+        let file_filter = self
+            .file
+            .as_deref()
+            .map(|path| path.to_string_lossy().replace('\\', "/"));
+        Ok(resident.impact_report(&self.function, self.depth, file_filter.as_deref())?)
     }
 }

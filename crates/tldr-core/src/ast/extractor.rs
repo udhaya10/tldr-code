@@ -114,7 +114,9 @@ pub fn get_code_structure(
         .collect();
 
     let tree = get_file_tree(root, Some(&extensions), true)?;
-    let files = collect_files(&tree, root);
+    let mut files = collect_files(&tree, root);
+    files.sort();
+    let total_candidates = files.len();
 
     let mut file_structures = Vec::new();
 
@@ -158,6 +160,12 @@ pub fn get_code_structure(
             }
         }
     }
+    if max_results > 0 && file_structures.len() == max_results {
+        files_skipped = files_skipped.saturating_add(
+            u32::try_from(total_candidates.saturating_sub(max_results)).unwrap_or(u32::MAX),
+        );
+    }
+    file_structures.sort_by(|left, right| left.path.cmp(&right.path));
 
     // med-low-schema-cleanup-v1 (N7): when a directory walk yielded zero
     // source files, emit `language: null` and a warning instead of

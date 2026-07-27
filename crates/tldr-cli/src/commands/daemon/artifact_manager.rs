@@ -3,6 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 
+use arc_swap::ArcSwapOption;
 use tldr_core::artifact_store::{
     schema::STORE_FILE, ArtifactKey, ArtifactKind, ArtifactStore, ArtifactSubject, FileFacts,
     FunctionArtifactCoordinator, GenerationSnapshot, IngestionEngine, IngestionReport,
@@ -52,7 +53,7 @@ pub struct ArtifactManager {
     project: PathBuf,
     store: Arc<RedbArtifactStore>,
     state: RwLock<ArtifactState>,
-    hot: RwLock<Option<Arc<GenerationSnapshot>>>,
+    hot: ArcSwapOption<GenerationSnapshot>,
     writer: Mutex<()>,
     functions: FunctionArtifactCoordinator,
 }
@@ -82,7 +83,7 @@ impl ArtifactManager {
             project,
             store,
             state: RwLock::new(state),
-            hot: RwLock::new(snapshot),
+            hot: ArcSwapOption::from(snapshot),
             writer: Mutex::new(()),
             functions,
         })
@@ -95,11 +96,7 @@ impl ArtifactManager {
 
     /// Pin the current immutable generation for an entire request.
     pub fn snapshot(&self) -> Result<Arc<GenerationSnapshot>, ArtifactState> {
-        self.hot
-            .read()
-            .expect("artifact snapshot poisoned")
-            .clone()
-            .ok_or_else(|| self.state())
+        self.hot.load_full().ok_or_else(|| self.state())
     }
 
     /// Read one file's facts from a pinned active generation.
@@ -168,7 +165,7 @@ impl ArtifactManager {
 
     /// Current storage and resident-view footprint.
     pub fn stats(&self) -> ArtifactStats {
-        let snapshot = self.hot.read().expect("artifact snapshot poisoned").clone();
+        let snapshot = self.hot.load_full();
         ArtifactStats {
             active_generation: snapshot.as_ref().map(|snapshot| snapshot.generation()),
             hot_files: snapshot
@@ -220,7 +217,7 @@ impl ArtifactManager {
                     self.store.as_ref(),
                     report.generation,
                 )?);
-                *self.hot.write().expect("artifact snapshot poisoned") = Some(snapshot);
+                self.hot.store(Some(snapshot));
                 *self.state.write().expect("artifact state poisoned") = ArtifactState::Ready {
                     generation: report.generation,
                 };
@@ -251,7 +248,7 @@ impl ArtifactManager {
             revision: facts.revision,
             subject: ArtifactSubject::File(facts.path.clone()),
             kind: ArtifactKind::FileFacts,
-            producer: ProducerId::new("file-facts", 5),
+            producer: ProducerId::new("file-facts", 6),
         };
         let key = ArtifactKey {
             project,
@@ -315,6 +312,7 @@ fn not_ready(state: ArtifactState) -> TldrError {
 #[cfg(test)]
 mod tests {
     use super::ArtifactManager;
+    use tldr_core::Language;
 
     #[test]
     fn stats_aggregate_parse_recovery_nodes() {
@@ -331,5 +329,45 @@ mod tests {
         let stats = manager.stats();
         assert_eq!(stats.hot_files, 1);
         assert!(stats.parse_errors > 0);
+    }
+
+    #[test]
+    fn resident_dead_report_matches_source_analysis() {
+        let project = tempfile::tempdir().expect("temp project");
+        std::fs::create_dir_all(project.path().join("observability")).expect("module");
+        std::fs::create_dir_all(project.path().join("config")).expect("config");
+        std::fs::write(
+            project.path().join("observability/logging.py"),
+            "def build_formatter():\n    return object()\n\ndef unused_private():\n    return 1\n",
+        )
+        .expect("definitions");
+        std::fs::write(
+            project.path().join("config/settings.py"),
+            "LOGGING = {'()': 'observability.logging.build_formatter'}\n",
+        )
+        .expect("static reference");
+
+        let manager = ArtifactManager::open(project.path()).expect("open artifact manager");
+        manager.warm().expect("warm artifacts");
+        let root = dunce::canonicalize(project.path()).expect("canonical project");
+        let snapshot = manager.snapshot().expect("resident snapshot");
+
+        for use_call_graph in [false, true] {
+            let resident = snapshot
+                .dead_report(&root, &root, Language::Python, None, use_call_graph)
+                .expect("resident report");
+            let source = crate::commands::dead::compute_dead_report(
+                &root,
+                Language::Python,
+                None,
+                use_call_graph,
+                false,
+            )
+            .expect("source report");
+            assert_eq!(
+                serde_json::to_value(resident).expect("resident json"),
+                serde_json::to_value(source).expect("source json")
+            );
+        }
     }
 }

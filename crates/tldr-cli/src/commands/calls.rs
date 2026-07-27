@@ -221,12 +221,15 @@ pub(crate) fn call_graph_output_from_artifacts(
     let truncated = total_edges > max_items;
     edges.truncate(max_items);
     let shown_edges = edges.len();
-    let mut nodes = snapshot
-        .definitions()
-        .map(|(file, definition)| format!("{file}:{}", definition.name))
-        .collect::<Vec<_>>();
-    nodes.sort();
-    nodes.dedup();
+    let mut node_set = std::collections::BTreeSet::new();
+    for edge in &edges {
+        node_set.insert(format!("{}:{}", edge.src_file.display(), edge.src_func));
+        node_set.insert(format!("{}:{}", edge.dst_file.display(), edge.dst_func));
+    }
+    for node in snapshot.call_nodes(detected_language) {
+        node_set.insert(node.to_string());
+    }
+    let nodes = node_set.into_iter().collect();
     CallGraphOutput {
         root: path.to_path_buf(),
         language: detected_language,

@@ -58,6 +58,7 @@ dunce = { workspace = true }
 notify-debouncer-full = { workspace = true }
 tokio = { version = "1", features = ["net", "io-util", "sync", "rt-multi-thread", "macros", "time", "signal"] }
 dashmap = "5"
+arc-swap = "1.7"
 parking_lot = "0.12"
 walkdir = "2"
 regex = "1"
