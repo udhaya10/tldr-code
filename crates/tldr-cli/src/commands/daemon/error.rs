@@ -65,6 +65,10 @@ pub enum DaemonError {
     /// JSON serialization/deserialization error
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
+
+    /// Authoritative artifact store could not be opened.
+    #[error("artifact store initialization failed: {0}")]
+    ArtifactStore(String),
 }
 
 /// Result type for daemon operations

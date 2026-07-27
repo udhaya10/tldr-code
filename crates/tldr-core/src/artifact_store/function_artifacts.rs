@@ -50,29 +50,50 @@ impl FunctionArtifactCoordinator {
         }
 
         let flight = {
-            let mut flights = self.flights.lock().expect("function flights poisoned");
+            let mut flights = self
+                .flights
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             flights
                 .entry(key.clone())
                 .or_insert_with(|| Arc::new(Mutex::new(())))
                 .clone()
         };
-        let _guard = flight.lock().expect("function flight poisoned");
-        if let Some(existing) = self.store.artifact(&key)? {
-            return decode_cbor(&existing.payload);
-        }
+        let result = {
+            let _guard = flight
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            (|| {
+                if let Some(existing) = self.store.artifact(&key)? {
+                    return decode_cbor(&existing.payload);
+                }
 
-        let value = build()?;
-        let generation = self
-            .store
-            .active_generation()?
-            .ok_or_else(|| function_error("artifact store is not ready"))?;
-        self.store.commit_optional(&ArtifactEnvelope::new(
-            key,
-            generation,
-            dependencies,
-            encode_cbor(&value)?,
-        ))?;
-        Ok(value)
+                let value = build()?;
+                let generation = self
+                    .store
+                    .active_generation()?
+                    .ok_or_else(|| function_error("artifact store is not ready"))?;
+                self.store.commit_optional(&ArtifactEnvelope::new(
+                    key.clone(),
+                    generation,
+                    dependencies,
+                    encode_cbor(&value)?,
+                ))?;
+                Ok(value)
+            })()
+        };
+        let mut flights = self
+            .flights
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if flights
+            .get(&key)
+            .is_some_and(|current| Arc::ptr_eq(current, &flight))
+            && Arc::strong_count(&flight) == 2
+        {
+            flights.remove(&key);
+        }
+        result
     }
 }
 

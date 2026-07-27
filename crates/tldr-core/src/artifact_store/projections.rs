@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::types::{CallEdge, ProjectCallGraph};
-use crate::{CodeStructure, Language, TldrResult};
+use crate::{CodeStructure, Language, TldrError, TldrResult};
 
 use super::redb::decode;
 use super::{
@@ -31,19 +31,35 @@ impl GenerationSnapshot {
 
     /// Pin and decode a specific published generation.
     pub fn load(store: &dyn ArtifactStore, generation: u64) -> TldrResult<Self> {
-        let files = store
-            .artifacts(generation, ArtifactKind::FileFacts)?
-            .into_iter()
-            .map(|artifact| {
+        let manifest = store.generation(generation)?.ok_or_else(|| {
+            TldrError::DaemonError(format!("published generation {generation} is missing"))
+        })?;
+        let files = manifest
+            .artifacts
+            .iter()
+            .filter(|key| key.kind == ArtifactKind::FileFacts)
+            .map(|key| {
+                let artifact = store.artifact(key)?.ok_or_else(|| {
+                    TldrError::DaemonError(format!(
+                        "published generation {generation} references a missing file artifact"
+                    ))
+                })?;
                 let facts: FileFacts = decode(&artifact.payload)?;
                 Ok((facts.path.clone(), facts))
             })
             .collect::<TldrResult<HashMap<_, _>>>()?;
-        let project_calls = store
-            .artifacts(generation, ArtifactKind::CallGraph)?
-            .into_iter()
-            .next()
-            .map(|artifact| decode(&artifact.payload))
+        let project_calls = manifest
+            .artifacts
+            .iter()
+            .find(|key| key.kind == ArtifactKind::CallGraph)
+            .map(|key| {
+                let artifact = store.artifact(key)?.ok_or_else(|| {
+                    TldrError::DaemonError(format!(
+                        "published generation {generation} references a missing call graph"
+                    ))
+                })?;
+                decode(&artifact.payload)
+            })
             .transpose()?
             .unwrap_or_default();
         Ok(Self {
@@ -183,6 +199,11 @@ impl GenerationSnapshot {
             })
             .collect::<Vec<_>>();
         files.sort_by(|left, right| left.path.cmp(&right.path));
+        let files_skipped = if max_results > 0 {
+            u32::try_from(files.len().saturating_sub(max_results)).unwrap_or(u32::MAX)
+        } else {
+            0
+        };
         if max_results > 0 {
             files.truncate(max_results);
         }
@@ -191,7 +212,7 @@ impl GenerationSnapshot {
             root: root.to_path_buf(),
             language: (!empty).then_some(language),
             files,
-            files_skipped: 0,
+            files_skipped,
             warnings: if empty {
                 vec!["No source files found in directory".into()]
             } else {
@@ -220,7 +241,20 @@ impl GenerationSnapshot {
 
     /// Compose all languages for language-agnostic relationship queries.
     pub fn intra_file_call_graph(&self) -> ProjectCallGraph {
-        self.call_graph(None)
+        let mut graph = ProjectCallGraph::new();
+        for edge in self
+            .project_calls
+            .iter()
+            .filter(|edge| edge.source_file == edge.destination_file)
+        {
+            graph.add_edge(CallEdge {
+                src_file: PathBuf::from(&edge.source_file),
+                src_func: edge.caller.clone(),
+                dst_file: PathBuf::from(&edge.destination_file),
+                dst_func: edge.callee.clone(),
+            });
+        }
+        graph
     }
 
     /// Stored V2 edge facts, pinned to this generation.

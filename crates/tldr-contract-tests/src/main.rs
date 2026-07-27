@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 use tldr_core::artifact_store::{
     schema::STORE_FILE, ArtifactKey, ArtifactKind, ArtifactStore, ArtifactSubject,
-    FunctionArtifactCoordinator, GenerationSnapshot, IngestionEngine, IngestionScope, ProducerId,
-    ProjectId, RedbArtifactStore,
+    FunctionArtifactCoordinator, GenerationManifest, GenerationSnapshot, IngestionEngine,
+    IngestionScope, ProducerId, ProjectId, RedbArtifactStore,
 };
 use tldr_core::semantic::vector_store::{ChunkMeta, VectorStore};
 use tldr_core::semantic::{ChunkId, ChunkRevision, StructuralAnchor};
@@ -40,6 +40,21 @@ const SCENARIOS: &[Scenario] = &[
         name: "resume_after_checkpoint",
         smoke: false,
         run: resume_after_checkpoint,
+    },
+    Scenario {
+        name: "generation_monotonicity",
+        smoke: false,
+        run: generation_monotonicity,
+    },
+    Scenario {
+        name: "checkpoint_scope_isolation",
+        smoke: false,
+        run: checkpoint_scope_isolation,
+    },
+    Scenario {
+        name: "cache_clear_symlink_containment",
+        smoke: false,
+        run: cache_clear_symlink_containment,
     },
     Scenario {
         name: "language_matrix",
@@ -254,6 +269,121 @@ fn resume_after_checkpoint() -> Result<(), String> {
         .map_err(display)?
         .ok_or("resume did not publish")?;
     ensure(snapshot.file_count() == 40, "resumed manifest coverage")
+}
+
+fn generation_monotonicity() -> Result<(), String> {
+    let project = tempfile::tempdir().map_err(display)?;
+    copy_fixture(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/lifecycle"),
+        project.path(),
+    )?;
+    let store = Arc::new(
+        RedbArtifactStore::open(&project.path().join(".tldr/store").join(STORE_FILE))
+            .map_err(display)?,
+    );
+    let engine = IngestionEngine::new(project.path(), store.clone()).map_err(display)?;
+    engine.ingest(IngestionScope::Project).map_err(display)?;
+    let first = store
+        .generation(1)
+        .map_err(display)?
+        .ok_or("first generation missing")?;
+    store
+        .publish(&GenerationManifest {
+            generation: 3,
+            ..first.clone()
+        })
+        .map_err(display)?;
+    ensure(
+        store
+            .publish(&GenerationManifest {
+                generation: 2,
+                ..first
+            })
+            .is_err(),
+        "store accepted a generation older than active",
+    )?;
+    ensure(
+        store.active_generation().map_err(display)? == Some(3),
+        "failed publication changed the active generation",
+    )
+}
+
+fn checkpoint_scope_isolation() -> Result<(), String> {
+    let project = tempfile::tempdir().map_err(display)?;
+    fs::write(project.path().join("a.py"), "def a():\n    return 1\n").map_err(display)?;
+    fs::write(project.path().join("b.py"), "def b():\n    return 1\n").map_err(display)?;
+    let store = Arc::new(
+        RedbArtifactStore::open(&project.path().join(".tldr/store").join(STORE_FILE))
+            .map_err(display)?,
+    );
+    let engine = IngestionEngine::new(project.path(), store.clone()).map_err(display)?;
+    engine.ingest(IngestionScope::Project).map_err(display)?;
+    let baseline = GenerationSnapshot::active(store.as_ref())
+        .map_err(display)?
+        .ok_or("baseline generation missing")?;
+    let old_a = baseline
+        .file("a.py")
+        .ok_or("baseline a.py missing")?
+        .revision;
+    let old_b = baseline
+        .file("b.py")
+        .ok_or("baseline b.py missing")?
+        .revision;
+
+    fs::write(project.path().join("a.py"), "def a():\n    return 2\n").map_err(display)?;
+    fs::write(project.path().join("b.py"), "def b():\n    return 2\n").map_err(display)?;
+    ensure(
+        engine
+            .ingest_interrupted_after(IngestionScope::Files(vec!["a.py".into()]), 1)
+            .is_err(),
+        "file-a interruption hook did not stop",
+    )?;
+    let b_report = engine
+        .ingest(IngestionScope::Files(vec!["b.py".into()]))
+        .map_err(display)?;
+    ensure(!b_report.resumed, "file-b delta resumed file-a checkpoint")?;
+    let current = GenerationSnapshot::active(store.as_ref())
+        .map_err(display)?
+        .ok_or("file-b delta did not publish")?;
+    ensure(
+        current.file("a.py").ok_or("a.py missing")?.revision == old_a,
+        "file-b delta leaked the interrupted file-a artifact",
+    )?;
+    ensure(
+        current.file("b.py").ok_or("b.py missing")?.revision != old_b,
+        "file-b delta did not publish its own revision",
+    )
+}
+
+#[cfg(unix)]
+fn cache_clear_symlink_containment() -> Result<(), String> {
+    use std::os::unix::fs::symlink;
+
+    use tldr_cli::commands::daemon::CacheClearArgs;
+    use tldr_cli::output::OutputFormat;
+
+    let project = tempfile::tempdir().map_err(display)?;
+    let external = tempfile::tempdir().map_err(display)?;
+    let sentinel = external.path().join("must-survive.txt");
+    fs::write(&sentinel, "outside cache root").map_err(display)?;
+    let cache = project.path().join(".tldr/cache");
+    fs::create_dir_all(&cache).map_err(display)?;
+    symlink(external.path(), cache.join("external-link")).map_err(display)?;
+
+    CacheClearArgs {
+        project: project.path().to_path_buf(),
+    }
+    .run(OutputFormat::Text, true)
+    .map_err(display)?;
+    ensure(
+        sentinel.exists(),
+        "cache clear followed a directory symlink outside the cache root",
+    )
+}
+
+#[cfg(not(unix))]
+fn cache_clear_symlink_containment() -> Result<(), String> {
+    Ok(())
 }
 
 fn language_matrix() -> Result<(), String> {

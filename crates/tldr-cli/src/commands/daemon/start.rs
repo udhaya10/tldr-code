@@ -222,7 +222,7 @@ impl DaemonStartArgs {
 
         // Create and run daemon
         let config = DaemonConfig::default();
-        let daemon = Arc::new(TLDRDaemon::new(project.to_path_buf(), config));
+        let daemon = Arc::new(TLDRDaemon::new(project.to_path_buf(), config)?);
         daemon.run(listener).await?;
 
         // Cleanup socket and registry entry on exit.

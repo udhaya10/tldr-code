@@ -120,8 +120,9 @@ impl ArtifactManager {
         function: &str,
         language: Language,
     ) -> tldr_core::TldrResult<CfgInfo> {
+        let facts = self.file_facts(file).map_err(not_ready)?;
         let (facts_key, cfg_key) =
-            self.function_keys(file, function, ArtifactKind::Cfg, "cfg", 1)?;
+            self.function_keys_for_facts(&facts, function, ArtifactKind::Cfg, "cfg", 1)?;
         let source = file.to_string_lossy().into_owned();
         self.functions.materialize(cfg_key, vec![facts_key], || {
             tldr_core::get_cfg_context(&source, function, language)
@@ -135,11 +136,18 @@ impl ArtifactManager {
         function: &str,
         language: Language,
     ) -> tldr_core::TldrResult<DfgInfo> {
-        let (_, cfg_key) = self.function_keys(file, function, ArtifactKind::Cfg, "cfg", 1)?;
-        // Materialize the dependency first; unchanged requests hit redb.
-        let _ = self.cfg(file, function, language)?;
-        let (_, dfg_key) = self.function_keys(file, function, ArtifactKind::Dfg, "dfg", 1)?;
+        let facts = self.file_facts(file).map_err(not_ready)?;
+        let (facts_key, cfg_key) =
+            self.function_keys_for_facts(&facts, function, ArtifactKind::Cfg, "cfg", 1)?;
+        let (_, dfg_key) =
+            self.function_keys_for_facts(&facts, function, ArtifactKind::Dfg, "dfg", 1)?;
         let source = file.to_string_lossy().into_owned();
+        // Materialize both artifacts from one pinned FileFacts revision.
+        let cfg_source = source.clone();
+        self.functions
+            .materialize(cfg_key.clone(), vec![facts_key], || {
+                tldr_core::get_cfg_context(&cfg_source, function, language)
+            })?;
         self.functions.materialize(dfg_key, vec![cfg_key], || {
             tldr_core::get_dfg_context(&source, function, language)
         })
@@ -154,8 +162,15 @@ impl ArtifactManager {
     pub fn apply_delta(&self, file: &Path) -> tldr_core::TldrResult<IngestionReport> {
         let relative = file
             .strip_prefix(&self.project)
-            .unwrap_or(file)
-            .to_string_lossy()
+            .map_err(|_| {
+                TldrError::DaemonError(format!(
+                    "delta path {} is outside project root {}",
+                    file.display(),
+                    self.project.display()
+                ))
+            })?
+            .to_str()
+            .ok_or_else(|| TldrError::DaemonError("delta path is not valid UTF-8".into()))?
             .replace('\\', "/");
         self.ingest(IngestionScope::Files(vec![relative]))
     }
@@ -176,11 +191,20 @@ impl ArtifactManager {
 
     /// Atomically join the current usearch generation to the pinned project
     /// manifest after semantic publication succeeds.
-    pub fn attach_vector_generation(&self, vector_generation: u64) -> tldr_core::TldrResult<()> {
+    pub fn attach_vector_generation(
+        &self,
+        expected_generation: u64,
+        vector_generation: u64,
+    ) -> tldr_core::TldrResult<()> {
         let generation = self
             .store
             .active_generation()?
             .ok_or_else(|| TldrError::DaemonError("artifact store is not ready".into()))?;
+        if generation != expected_generation {
+            return Err(TldrError::DaemonError(format!(
+                "artifact generation changed during semantic build: expected {expected_generation}, active {generation}"
+            )));
+        }
         self.store
             .set_vector_generation(generation, vector_generation)
     }
@@ -216,17 +240,14 @@ impl ArtifactManager {
         }
     }
 
-    fn function_keys(
+    fn function_keys_for_facts(
         &self,
-        file: &Path,
+        facts: &FileFacts,
         function: &str,
         kind: ArtifactKind,
         producer: &str,
         version: u32,
     ) -> tldr_core::TldrResult<(ArtifactKey, ArtifactKey)> {
-        let facts = self.file_facts(file).map_err(|state| {
-            TldrError::DaemonError(format!("artifact generation is not ready: {state:?}"))
-        })?;
         let project = ProjectId::for_root(&self.project)?;
         let facts_key = ArtifactKey {
             project,
@@ -244,4 +265,8 @@ impl ArtifactManager {
         };
         Ok((facts_key, key))
     }
+}
+
+fn not_ready(state: ArtifactState) -> TldrError {
+    TldrError::DaemonError(format!("artifact generation is not ready: {state:?}"))
 }

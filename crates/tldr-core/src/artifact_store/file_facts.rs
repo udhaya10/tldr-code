@@ -287,7 +287,7 @@ impl FileFactsParser {
         let semantic_chunks = Vec::new();
 
         Ok(FileFacts {
-            path: root_relative(root, path),
+            path: root_relative(root, path)?,
             revision: RevisionId::for_bytes(source.as_bytes()),
             language: language.to_string(),
             definitions,
@@ -347,11 +347,22 @@ fn function_fact(function: &crate::FunctionInfo, kind: &str) -> DefinitionFact {
     }
 }
 
-fn root_relative(root: &Path, path: &Path) -> String {
-    path.strip_prefix(root)
-        .unwrap_or(path)
-        .to_string_lossy()
-        .replace('\\', "/")
+fn root_relative(root: &Path, path: &Path) -> TldrResult<String> {
+    let relative = path
+        .strip_prefix(root)
+        .map_err(|_| crate::TldrError::ParseError {
+            file: path.to_path_buf(),
+            line: None,
+            message: format!("source path is outside project root {}", root.display()),
+        })?;
+    let relative = relative
+        .to_str()
+        .ok_or_else(|| crate::TldrError::ParseError {
+            file: path.to_path_buf(),
+            line: None,
+            message: "source path is not valid UTF-8".into(),
+        })?;
+    Ok(relative.replace('\\', "/"))
 }
 
 #[allow(dead_code)]

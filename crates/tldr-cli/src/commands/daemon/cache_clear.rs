@@ -164,11 +164,11 @@ fn clear_files_recursive(
 ) -> DaemonResult<()> {
     for entry in fs::read_dir(directory)?.flatten() {
         let path = entry.path();
-        let metadata = entry.metadata()?;
-        if metadata.is_dir() {
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
             clear_files_recursive(&path, files_removed, bytes_freed)?;
-        } else if metadata.is_file() {
-            *bytes_freed += metadata.len();
+        } else {
+            *bytes_freed += fs::symlink_metadata(&path)?.len();
             fs::remove_file(path)?;
             *files_removed += 1;
         }

@@ -147,21 +147,26 @@ impl WarmJob {
         #[cfg(feature = "semantic")]
         if let Some(model) = self.model {
             let mgr = Arc::clone(&self.semantic_store);
+            let artifacts = Arc::clone(&self.artifact_manager);
             let project = self.project.clone();
-            let source_chunks = self
-                .artifact_manager
-                .snapshot()
-                .map(|snapshot| snapshot.semantic_source_chunks(&project))
-                .unwrap_or_default();
             let res = tokio::task::spawn_blocking(move || {
+                let snapshot = artifacts
+                    .snapshot()
+                    .map_err(|state| format!("artifact generation is not ready: {state:?}"))?;
+                let artifact_generation = snapshot.generation();
+                let source_chunks = snapshot.semantic_source_chunks(&project);
                 let built = mgr.warm(&project, model, source_chunks)?;
-                let generation = mgr.active_generation(&project)?;
-                Ok::<_, String>((built, generation))
+                let vector_generation = mgr.active_generation(&project)?;
+                Ok::<_, String>((built, artifact_generation, vector_generation))
             })
             .await;
             match res {
-                Ok(Ok((built, Some(generation)))) => {
-                    if let Err(error) = self.artifact_manager.attach_vector_generation(generation) {
+                Ok(Ok((built, artifact_generation, Some(vector_generation)))) => {
+                    if let Err(error) = self
+                        .artifact_manager
+                        .attach_vector_generation(artifact_generation, vector_generation)
+                    {
+                        self.semantic_store.invalidate();
                         errors.push(format!("semantic_generation_join: {error}"));
                     } else if built {
                         warmed.push("semantic_store");
@@ -169,7 +174,9 @@ impl WarmJob {
                         warmed.push("semantic_store (cached)");
                     }
                 }
-                Ok(Ok((_, None))) => errors.push("semantic_store: no published generation".into()),
+                Ok(Ok((_, _, None))) => {
+                    errors.push("semantic_store: no published generation".into())
+                }
                 Ok(Err(e)) => errors.push(format!("semantic_store: {}", e)),
                 Err(e) => errors.push(format!("semantic_store: {}", e)),
             }
@@ -236,14 +243,14 @@ impl TLDRDaemon {
     ///
     /// The daemon starts in `Initializing` status and must have `run()` called
     /// to begin accepting connections.
-    pub fn new(project: PathBuf, config: DaemonConfig) -> Self {
+    pub fn new(project: PathBuf, config: DaemonConfig) -> DaemonResult<Self> {
         let (shutdown_tx, _shutdown_rx) = watch::channel(false);
         let artifact_manager = Arc::new(
             ArtifactManager::open(&project)
-                .unwrap_or_else(|error| panic!("failed to open project artifact store: {error}")),
+                .map_err(|error| DaemonError::ArtifactStore(error.to_string()))?,
         );
 
-        Self {
+        Ok(Self {
             project,
             config,
             start_time: Instant::now(),
@@ -260,7 +267,7 @@ impl TLDRDaemon {
             indexed_files: Arc::new(RwLock::new(0)),
             #[cfg(feature = "semantic")]
             semantic_store: Arc::new(IndexManager::new()),
-        }
+        })
     }
 
     /// Get the daemon's current status.
@@ -1616,12 +1623,6 @@ impl TLDRDaemon {
             let artifacts = Arc::clone(&self.artifact_manager);
             let project = self.project.clone();
             let changed = file.clone();
-            let source_chunk = artifacts.snapshot().ok().and_then(|snapshot| {
-                snapshot
-                    .semantic_source_chunks(&project)
-                    .into_iter()
-                    .find(|chunk| chunk.file_path == changed)
-            });
             // Busy guard owned by the closure (see Warm handler note): the
             // delta must defer idle shutdown for exactly as long as it runs,
             // regardless of what happens to this awaiting task.
@@ -1629,11 +1630,29 @@ impl TLDRDaemon {
             let _ = tokio::task::spawn_blocking(move || {
                 let _busy = busy;
                 use super::index_manager::DeltaOutcome;
+                let snapshot = match artifacts.snapshot() {
+                    Ok(snapshot) => snapshot,
+                    Err(state) => {
+                        eprintln!(
+                            "[artifact-store] semantic delta skipped: generation is not ready: {state:?}"
+                        );
+                        mgr.invalidate();
+                        return;
+                    }
+                };
+                let artifact_generation = snapshot.generation();
+                let source_chunk = snapshot
+                    .semantic_source_chunks(&project)
+                    .into_iter()
+                    .find(|chunk| chunk.file_path == changed);
                 match mgr.apply_delta(&project, &changed, source_chunk) {
                     Ok(DeltaOutcome::NeedsRebuild) => mgr.invalidate(),
                     Ok(_) => match mgr.active_generation(&project) {
                         Ok(Some(generation)) => {
-                            if let Err(error) = artifacts.attach_vector_generation(generation) {
+                            if let Err(error) = artifacts
+                                .attach_vector_generation(artifact_generation, generation)
+                            {
+                                mgr.invalidate();
                                 eprintln!(
                                     "[artifact-store] semantic generation join failed: {error}"
                                 );

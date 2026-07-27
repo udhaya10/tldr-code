@@ -212,6 +212,7 @@ impl ArtifactStore for RedbArtifactStore {
             if let Some(existing) = existing {
                 let existing: IngestionJob = decode(&existing)?;
                 if existing.target_generation != job.target_generation
+                    || existing.scope != job.scope
                     || existing.source_revision != job.source_revision
                     || job.next_batch < existing.next_batch
                     || job.next_batch > existing.next_batch.saturating_add(1)
@@ -378,6 +379,19 @@ impl ArtifactStore for RedbArtifactStore {
         let mut tx = self.database.begin_write().map_err(redb_error)?;
         tx.set_durability(Durability::Immediate)
             .map_err(redb_error)?;
+        let active = {
+            let metadata = tx.open_table(METADATA).map_err(redb_error)?;
+            let active = metadata
+                .get(ACTIVE_GENERATION_KEY)
+                .map_err(redb_error)?
+                .and_then(|value| value.value().try_into().ok().map(u64::from_le_bytes));
+            active
+        };
+        if active.is_some_and(|active| manifest.generation <= active) {
+            return Err(store_error(
+                "published generation must be newer than the active generation",
+            ));
+        }
         {
             let artifacts = tx.open_table(ARTIFACTS).map_err(redb_error)?;
             for key in &keys {
@@ -416,13 +430,9 @@ impl ArtifactStore for RedbArtifactStore {
         }
         {
             let mut metadata = tx.open_table(METADATA).map_err(redb_error)?;
-            let active = metadata
-                .get(ACTIVE_GENERATION_KEY)
-                .map_err(redb_error)?
-                .map(|value| value.value().to_vec());
             if let Some(active) = active {
                 metadata
-                    .insert(PREVIOUS_GENERATION_KEY, active.as_slice())
+                    .insert(PREVIOUS_GENERATION_KEY, active.to_le_bytes().as_slice())
                     .map_err(redb_error)?;
             }
             metadata

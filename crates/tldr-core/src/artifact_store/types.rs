@@ -25,9 +25,13 @@ impl ProjectId {
     /// Derive a stable project identity from its canonical root path.
     pub fn for_root(root: &Path) -> std::io::Result<Self> {
         let canonical = dunce::canonicalize(root)?;
-        Ok(Self(
-            *blake3::hash(canonical.to_string_lossy().as_bytes()).as_bytes(),
-        ))
+        let canonical = canonical.to_str().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "canonical project root is not valid UTF-8",
+            )
+        })?;
+        Ok(Self(*blake3::hash(canonical.as_bytes()).as_bytes()))
     }
 }
 

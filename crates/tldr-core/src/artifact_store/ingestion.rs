@@ -43,9 +43,11 @@ pub struct IngestionEngine {
 impl IngestionEngine {
     /// Create an engine for one canonical project.
     pub fn new(root: &Path, store: Arc<dyn ArtifactStore>) -> TldrResult<Self> {
+        let root = dunce::canonicalize(root)?;
+        let project = ProjectId::for_root(&root)?;
         Ok(Self {
-            root: dunce::canonicalize(root)?,
-            project: ProjectId::for_root(root)?,
+            root,
+            project,
             store,
         })
     }
@@ -71,6 +73,7 @@ impl IngestionEngine {
         scope: IngestionScope,
         batch_limit: Option<usize>,
     ) -> TldrResult<IngestionReport> {
+        let scope = normalize_scope(scope);
         let all_files = discover(&self.root);
         let (source_revision, revisions) = source_manifest(&self.root, &all_files)?;
         let active = self.store.active_generation()?.unwrap_or(0);
@@ -79,26 +82,35 @@ impl IngestionEngine {
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>();
-        let job_id = format!("ingestion-{generation}-{revision_tag}");
+        let job_id = format!(
+            "ingestion-{generation}-{revision_tag}-{}",
+            scope_tag(&scope)
+        );
         let previous = self.store.generation(active)?;
         let previous_keys = previous
             .as_ref()
             .map(|manifest| manifest.artifacts.as_slice())
             .unwrap_or_default();
+        let fresh_file_facts = previous_keys
+            .iter()
+            .filter(|key| {
+                key.kind == ArtifactKind::FileFacts
+                    && key.producer == ProducerId::new(FILE_FACTS_PRODUCER, FILE_FACTS_VERSION)
+            })
+            .map(|key| (key.subject.clone(), key.revision))
+            .collect::<HashSet<_>>();
 
         let selected: Vec<PathBuf> = match &scope {
             IngestionScope::Project => all_files
                 .iter()
                 .filter(|path| {
                     let relative = relative(&self.root, path);
-                    let revision = revisions.get(&relative);
-                    !previous_keys.iter().any(|key| {
-                        key.kind == ArtifactKind::FileFacts
-                            && key.producer
-                                == ProducerId::new(FILE_FACTS_PRODUCER, FILE_FACTS_VERSION)
-                            && key.revision == *revision.expect("discovered file has revision")
-                            && key.subject == ArtifactSubject::File(relative.clone())
-                    })
+                    !fresh_file_facts.contains(&(
+                        ArtifactSubject::File(relative.clone()),
+                        *revisions
+                            .get(&relative)
+                            .expect("discovered file has revision"),
+                    ))
                 })
                 .cloned()
                 .collect(),
@@ -108,23 +120,25 @@ impl IngestionEngine {
                     .iter()
                     .filter(|path| {
                         let relative = relative(&self.root, path);
-                        let revision = revisions.get(&relative);
                         wanted.contains(&relative)
-                            && !previous_keys.iter().any(|key| {
-                                key.kind == ArtifactKind::FileFacts
-                                    && key.producer
-                                        == ProducerId::new(FILE_FACTS_PRODUCER, FILE_FACTS_VERSION)
-                                    && key.revision
-                                        == *revision.expect("discovered file has revision")
-                                    && key.subject == ArtifactSubject::File(relative.clone())
-                            })
+                            && !fresh_file_facts.contains(&(
+                                ArtifactSubject::File(relative.clone()),
+                                *revisions
+                                    .get(&relative)
+                                    .expect("discovered file has revision"),
+                            ))
                     })
                     .cloned()
                     .collect()
             }
         };
 
-        let existing = self.store.job(&job_id)?;
+        let existing = self.store.job(&job_id)?.filter(|job| {
+            job.target_generation == generation
+                && job.scope == scope
+                && job.source_revision == source_revision
+                && job.stage != IngestionStage::Published
+        });
         let resumed = existing.is_some();
         let next_batch = existing.as_ref().map_or(0, |job| job.next_batch);
         let total_batches = selected.len().div_ceil(BATCH_FILES) as u64;
@@ -140,35 +154,51 @@ impl IngestionEngine {
             .collect::<TldrResult<Vec<_>>>()?;
         let parsed_files = parser.invocations() as usize;
 
-        let changed = match &scope {
-            IngestionScope::Project => HashSet::new(),
-            IngestionScope::Files(files) => files.iter().cloned().collect(),
+        let regenerated = match &scope {
+            IngestionScope::Project => selected
+                .iter()
+                .map(|path| relative(&self.root, path))
+                .collect::<HashSet<_>>(),
+            IngestionScope::Files(files) => {
+                let selected = selected
+                    .iter()
+                    .map(|path| relative(&self.root, path))
+                    .collect::<HashSet<_>>();
+                files
+                    .iter()
+                    .filter(|path| selected.contains(*path) || !revisions.contains_key(*path))
+                    .cloned()
+                    .collect::<HashSet<_>>()
+            }
         };
         let mut manifest_keys = previous
             .map(|manifest| {
                 manifest
                     .artifacts
                     .into_iter()
-                    .filter(|key| !subject_changed(&key.subject, &changed))
+                    .filter(|key| !subject_changed(&key.subject, &regenerated))
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        if matches!(scope, IngestionScope::Project) {
-            let selected_paths = selected
-                .iter()
-                .map(|path| relative(&self.root, path))
-                .collect::<HashSet<_>>();
-            manifest_keys.retain(|key| !subject_changed(&key.subject, &selected_paths));
-        }
 
         // A resumed generation already owns committed records that are not yet
         // reachable from an active manifest. Recover those keys before adding
-        // the remaining batches.
+        // the remaining batches. Only recover current-revision subjects in
+        // this exact scope: an abandoned generation may otherwise contain
+        // records from a different delta request.
         for kind in ALL_ARTIFACT_KINDS {
             manifest_keys.extend(
                 self.store
                     .artifacts(generation, kind)?
                     .into_iter()
+                    .filter(|artifact| {
+                        subject_file(&artifact.key.subject).is_some_and(|path| {
+                            regenerated.contains(path)
+                                && revisions
+                                    .get(path)
+                                    .is_some_and(|revision| *revision == artifact.key.revision)
+                        })
+                    })
                     .map(|artifact| artifact.key),
             );
         }
@@ -215,17 +245,23 @@ impl IngestionEngine {
             .filter(|key| key.kind == ArtifactKind::FileFacts)
             .cloned()
             .collect::<Vec<_>>();
+        let decoded_irs = call_dependencies
+            .par_iter()
+            .map(|dependency| {
+                let Some(artifact) = self.store.artifact(dependency)? else {
+                    return Err(ingestion_error("file-facts dependency disappeared"));
+                };
+                let facts: FileFacts = super::redb::decode(&artifact.payload)?;
+                let ir: crate::callgraph::FileIR =
+                    ciborium::de::from_reader(facts.callgraph_ir.as_slice()).map_err(|error| {
+                        ingestion_error(format!("call-graph artifact decoding failed: {error}"))
+                    })?;
+                Ok((facts.language, ir))
+            })
+            .collect::<TldrResult<Vec<_>>>()?;
         let mut file_irs = HashMap::<String, Vec<crate::callgraph::FileIR>>::new();
-        for dependency in &call_dependencies {
-            let Some(artifact) = self.store.artifact(dependency)? else {
-                return Err(ingestion_error("file-facts dependency disappeared"));
-            };
-            let facts: FileFacts = super::redb::decode(&artifact.payload)?;
-            let ir: crate::callgraph::FileIR =
-                ciborium::de::from_reader(facts.callgraph_ir.as_slice()).map_err(|error| {
-                    ingestion_error(format!("call-graph artifact decoding failed: {error}"))
-                })?;
-            file_irs.entry(facts.language).or_default().push(ir);
+        for (language, ir) in decoded_irs {
+            file_irs.entry(language).or_default().push(ir);
         }
         let mut project_calls = Vec::new();
         for (language, irs) in file_irs {
@@ -400,6 +436,39 @@ fn subject_changed(subject: &ArtifactSubject, changed: &HashSet<String>) -> bool
             .iter()
             .any(|path| anchor == path || anchor.starts_with(&format!("{path}::"))),
         ArtifactSubject::Project => false,
+    }
+}
+
+fn subject_file(subject: &ArtifactSubject) -> Option<&str> {
+    match subject {
+        ArtifactSubject::File(path) => Some(path),
+        ArtifactSubject::Symbol(anchor) => anchor.split_once("::").map(|(path, _)| path),
+        ArtifactSubject::Project => None,
+    }
+}
+
+fn normalize_scope(scope: IngestionScope) -> IngestionScope {
+    match scope {
+        IngestionScope::Project => IngestionScope::Project,
+        IngestionScope::Files(mut files) => {
+            files.sort();
+            files.dedup();
+            IngestionScope::Files(files)
+        }
+    }
+}
+
+fn scope_tag(scope: &IngestionScope) -> String {
+    match scope {
+        IngestionScope::Project => "project".into(),
+        IngestionScope::Files(files) => {
+            let mut hasher = blake3::Hasher::new();
+            for file in files {
+                hasher.update(file.as_bytes());
+                hasher.update(&[0]);
+            }
+            hasher.finalize().to_hex()[..16].to_owned()
+        }
     }
 }
 
