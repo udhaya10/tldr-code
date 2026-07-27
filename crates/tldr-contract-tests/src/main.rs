@@ -4,8 +4,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
+use tldr_cli::commands::daemon::artifact_manager::ArtifactManager;
 use tldr_core::artifact_store::{
-    schema::STORE_FILE, ArtifactKey, ArtifactKind, ArtifactStore, ArtifactSubject,
+    schema::STORE_FILE, ArtifactKey, ArtifactKind, ArtifactStore, ArtifactSubject, FileFactsParser,
     FunctionArtifactCoordinator, GenerationManifest, GenerationSnapshot, IngestionEngine,
     IngestionScope, ProducerId, ProjectId, RedbArtifactStore,
 };
@@ -55,6 +56,16 @@ const SCENARIOS: &[Scenario] = &[
         name: "cache_clear_symlink_containment",
         smoke: false,
         run: cache_clear_symlink_containment,
+    },
+    Scenario {
+        name: "source_path_containment",
+        smoke: false,
+        run: source_path_containment,
+    },
+    Scenario {
+        name: "full_project_deletion",
+        smoke: false,
+        run: full_project_deletion,
     },
     Scenario {
         name: "language_matrix",
@@ -384,6 +395,103 @@ fn cache_clear_symlink_containment() -> Result<(), String> {
 #[cfg(not(unix))]
 fn cache_clear_symlink_containment() -> Result<(), String> {
     Ok(())
+}
+
+#[cfg(unix)]
+fn source_path_containment() -> Result<(), String> {
+    use std::os::unix::fs::symlink;
+
+    let project = tempfile::tempdir().map_err(display)?;
+    let external = tempfile::tempdir().map_err(display)?;
+    let inside = project.path().join("inside.py");
+    let outside = external.path().join("outside.py");
+    let link = project.path().join("escape.py");
+    let directory_link = project.path().join("external-directory");
+    fs::write(&inside, "def inside():\n    return 1\n").map_err(display)?;
+    fs::write(&outside, "def outside():\n    return 2\n").map_err(display)?;
+    symlink(&outside, &link).map_err(display)?;
+    symlink(external.path(), &directory_link).map_err(display)?;
+
+    let parser = FileFactsParser::default();
+    ensure(
+        parser.parse(project.path(), &link).is_err(),
+        "parser followed a source symlink outside the project",
+    )?;
+    ensure(
+        parser.invocations() == 0,
+        "parser read the source before containment validation",
+    )?;
+
+    let manager = ArtifactManager::open(project.path()).map_err(display)?;
+    manager.warm().map_err(display)?;
+    ensure(
+        manager.apply_delta(&link).is_err(),
+        "delta ingestion followed a source symlink outside the project",
+    )?;
+    ensure(
+        manager
+            .apply_delta(&directory_link.join("deleted.py"))
+            .is_err(),
+        "deleted delta escaped through a symlinked parent directory",
+    )?;
+
+    fs::remove_file(&inside).map_err(display)?;
+    manager.apply_delta(&inside).map_err(display)?;
+    ensure(
+        manager
+            .snapshot()
+            .map_err(|state| format!("artifact manager not ready: {state:?}"))?
+            .file("inside.py")
+            .is_none(),
+        "legitimate deleted-file delta remained queryable",
+    )
+}
+
+#[cfg(not(unix))]
+fn source_path_containment() -> Result<(), String> {
+    Ok(())
+}
+
+fn full_project_deletion() -> Result<(), String> {
+    let project = tempfile::tempdir().map_err(display)?;
+    copy_fixture(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/lifecycle"),
+        project.path(),
+    )?;
+    let store = Arc::new(
+        RedbArtifactStore::open(&project.path().join(".tldr/store").join(STORE_FILE))
+            .map_err(display)?,
+    );
+    let engine = IngestionEngine::new(project.path(), store.clone()).map_err(display)?;
+    engine.ingest(IngestionScope::Project).map_err(display)?;
+
+    fs::remove_file(project.path().join("helper.py")).map_err(display)?;
+    engine.ingest(IngestionScope::Project).map_err(display)?;
+    let snapshot = GenerationSnapshot::active(store.as_ref())
+        .map_err(display)?
+        .ok_or("deletion generation missing")?;
+    ensure(
+        snapshot.file("helper.py").is_none(),
+        "deleted file remained queryable after a full project ingestion",
+    )?;
+    ensure(
+        !snapshot
+            .call_edges(Some(Language::Python))
+            .any(|edge| edge.source_file == "helper.py" || edge.destination_file == "helper.py"),
+        "deleted file remained in the project call graph",
+    )?;
+    let manifest = store
+        .generation(snapshot.generation())
+        .map_err(display)?
+        .ok_or("deletion manifest missing")?;
+    ensure(
+        !manifest.artifacts.iter().any(|key| match &key.subject {
+            ArtifactSubject::File(path) => path == "helper.py",
+            ArtifactSubject::Symbol(anchor) => anchor.starts_with("helper.py::"),
+            ArtifactSubject::Project => false,
+        }),
+        "deleted file or symbol subject remained in the manifest",
+    )
 }
 
 fn language_matrix() -> Result<(), String> {

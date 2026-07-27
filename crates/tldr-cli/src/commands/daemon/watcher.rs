@@ -481,12 +481,19 @@ mod tests {
         let mut pipeline = WatchPipeline::new(config());
         let file = PathBuf::from("/project/src/lib.rs");
 
-        for second in 0..5 {
+        for half_second in 0..10 {
             assert_eq!(
-                pipeline.accept(file.clone(), started + Duration::from_secs(second)),
+                pipeline.accept(
+                    file.clone(),
+                    started + Duration::from_millis(half_second * 500),
+                ),
                 None
             );
         }
+        assert_eq!(
+            pipeline.flush_due(started + Duration::from_millis(4_999)),
+            None
+        );
         assert_eq!(
             pipeline.flush_due(started + Duration::from_secs(5)),
             Some(Flush::Delta(vec![file]))

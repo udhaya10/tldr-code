@@ -160,18 +160,7 @@ impl ArtifactManager {
 
     /// Submit a canonical source change through the same resumable engine.
     pub fn apply_delta(&self, file: &Path) -> tldr_core::TldrResult<IngestionReport> {
-        let relative = file
-            .strip_prefix(&self.project)
-            .map_err(|_| {
-                TldrError::DaemonError(format!(
-                    "delta path {} is outside project root {}",
-                    file.display(),
-                    self.project.display()
-                ))
-            })?
-            .to_str()
-            .ok_or_else(|| TldrError::DaemonError("delta path is not valid UTF-8".into()))?
-            .replace('\\', "/");
+        let relative = delta_relative(&self.project, file)?;
         self.ingest(IngestionScope::Files(vec![relative]))
     }
 
@@ -265,6 +254,50 @@ impl ArtifactManager {
         };
         Ok((facts_key, key))
     }
+}
+
+fn delta_relative(project: &Path, file: &Path) -> tldr_core::TldrResult<String> {
+    let resolved = if file.exists() {
+        dunce::canonicalize(file)?
+    } else {
+        let mut ancestor = file;
+        while !ancestor.exists() {
+            ancestor = ancestor.parent().ok_or_else(|| {
+                TldrError::DaemonError(format!(
+                    "delta path {} has no existing ancestor",
+                    file.display()
+                ))
+            })?;
+        }
+        let canonical_ancestor = dunce::canonicalize(ancestor)?;
+        let suffix = file.strip_prefix(ancestor).map_err(|_| {
+            TldrError::DaemonError(format!(
+                "delta path {} cannot be normalized",
+                file.display()
+            ))
+        })?;
+        if suffix
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+        {
+            return Err(TldrError::DaemonError(format!(
+                "delta path {} contains non-normal components",
+                file.display()
+            )));
+        }
+        canonical_ancestor.join(suffix)
+    };
+    let relative = resolved.strip_prefix(project).map_err(|_| {
+        TldrError::DaemonError(format!(
+            "delta path {} is outside project root {}",
+            file.display(),
+            project.display()
+        ))
+    })?;
+    relative
+        .to_str()
+        .map(|value| value.replace('\\', "/"))
+        .ok_or_else(|| TldrError::DaemonError("delta path is not valid UTF-8".into()))
 }
 
 fn not_ready(state: ArtifactState) -> TldrError {

@@ -195,18 +195,21 @@ pub struct FileFactsParser {
 impl FileFactsParser {
     /// Parse one file exactly once and project all normalized facts.
     pub fn parse(&self, root: &Path, path: &Path) -> TldrResult<FileFacts> {
-        let language = Language::from_path_with_siblings(path)
-            .or_else(|| Language::from_path(path))
+        let root = dunce::canonicalize(root)?;
+        let path = dunce::canonicalize(path)?;
+        let relative = root_relative(&root, &path)?;
+        let language = Language::from_path_with_siblings(&path)
+            .or_else(|| Language::from_path(&path))
             .ok_or_else(|| crate::TldrError::UnsupportedLanguage(path.display().to_string()))?;
-        let (tree, source, language) = parse_file_with_lang(path, Some(language))?;
+        let (tree, source, language) = parse_file_with_lang(&path, Some(language))?;
         self.invocations.fetch_add(1, Ordering::Relaxed);
-        let module = extract_from_tree(&tree, &source, language, path, Some(root))?;
+        let module = extract_from_tree(&tree, &source, language, &path, Some(&root))?;
         let structure = crate::ast::extractor::extract_file_structure_from_tree(
-            path, root, language, &tree, &source,
+            &path, &root, language, &tree, &source,
         )?;
         let callgraph_ir = crate::callgraph::builder_v2::file_ir_from_tree(
-            root,
-            path,
+            &root,
+            &path,
             language.as_str(),
             &source,
             &tree,
@@ -263,7 +266,7 @@ impl FileFactsParser {
 
         #[cfg(feature = "semantic")]
         let semantic_chunks = crate::semantic::chunker::chunks_from_parsed(
-            path,
+            &path,
             &source,
             &tree,
             language,
@@ -287,7 +290,7 @@ impl FileFactsParser {
         let semantic_chunks = Vec::new();
 
         Ok(FileFacts {
-            path: root_relative(root, path)?,
+            path: relative,
             revision: RevisionId::for_bytes(source.as_bytes()),
             language: language.to_string(),
             definitions,

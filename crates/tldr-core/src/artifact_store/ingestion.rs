@@ -99,6 +99,12 @@ impl IngestionEngine {
             })
             .map(|key| (key.subject.clone(), key.revision))
             .collect::<HashSet<_>>();
+        let removed_files = previous_keys
+            .iter()
+            .filter_map(|key| subject_file(&key.subject))
+            .filter(|path| !revisions.contains_key(*path))
+            .map(ToOwned::to_owned)
+            .collect::<HashSet<_>>();
 
         let selected: Vec<PathBuf> = match &scope {
             IngestionScope::Project => all_files
@@ -158,6 +164,7 @@ impl IngestionEngine {
             IngestionScope::Project => selected
                 .iter()
                 .map(|path| relative(&self.root, path))
+                .chain(removed_files.iter().cloned())
                 .collect::<HashSet<_>>(),
             IngestionScope::Files(files) => {
                 let selected = selected
