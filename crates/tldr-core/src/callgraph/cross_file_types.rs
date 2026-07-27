@@ -839,7 +839,7 @@ impl VarType {
 // =============================================================================
 
 /// IR version constant for serialization compatibility checking.
-pub const IR_VERSION: &str = "1.0";
+pub const IR_VERSION: &str = "2.0";
 
 /// All IR data for a single source file.
 ///

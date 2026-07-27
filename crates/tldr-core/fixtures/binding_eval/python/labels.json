@@ -1,0 +1,12 @@
+{
+  "language": "python",
+  "callee_suffix": ".save",
+  "expected": [
+    {
+      "source_file": "service.py",
+      "caller": "persist",
+      "destination_file": "models.py",
+      "callee": "User.save"
+    }
+  ]
+}

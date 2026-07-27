@@ -56,6 +56,7 @@ pub mod type_aware_resolver;
 pub mod type_resolver;
 
 // Phase 14: Builder V2 sub-modules (modularization)
+mod binding_eval;
 mod imports;
 mod module_path;
 mod resolution;
@@ -82,6 +83,7 @@ pub mod compat;
 // These tests verify the behavioral specification in CROSSFILE_SPEC.md.
 // NOTE: hypotheses_test.rs contains discriminative tests for Tier-2 Fowler smells.
 // These tests validate data availability in the call graph IR for smell detectors.
+pub use binding_eval::{evaluate_binding_edges, BindingEdgeLabel, BindingEvalReport};
 pub use builder::build_project_call_graph;
 pub use cross_file_types::{
     // Phase 3: Container types

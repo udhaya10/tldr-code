@@ -39,7 +39,8 @@ use super::cross_file_types::{
 ///
 /// Version history:
 /// - "1.0": Initial release
-pub const IR_VERSION: &str = "1.0";
+/// - "2.0": AST-derived, scope-aware variable binding facts
+pub const IR_VERSION: &str = "2.0";
 
 // =============================================================================
 // SerializationError (Spec Section 15.6)
