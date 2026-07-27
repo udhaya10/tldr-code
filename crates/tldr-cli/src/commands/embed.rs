@@ -13,7 +13,7 @@ use clap::Args;
 use tldr_core::config::{find_project_root, TldrConfig};
 use tldr_core::semantic::{
     load_or_build_store, store_dir_for, BuildOptions, CacheConfig, ChunkGranularity, EmbedReport,
-    EmbeddingModel,
+    EmbeddingModel, GenerationManager, GenerationSelection,
 };
 
 use crate::output::{OutputFormat, OutputWriter};
@@ -58,6 +58,10 @@ pub struct EmbedArgs {
     /// for metrics (use it only to also bypass the dedup cache).
     #[arg(long)]
     pub metrics: Option<PathBuf>,
+
+    /// Complete generation to serve after the build: active, previous, or a number.
+    #[arg(long, default_value = "active")]
+    pub generation: String,
 }
 
 impl EmbedArgs {
@@ -131,7 +135,20 @@ impl EmbedArgs {
         };
 
         let store_dir = store_dir_for(&self.path);
-        let store = load_or_build_store(&self.path, &store_dir, &build_opts, cache_config)?;
+        let selection = GenerationSelection::parse(&self.generation).map_err(anyhow::Error::msg)?;
+        if self.metrics.is_some() && selection != GenerationSelection::Active {
+            anyhow::bail!("--metrics can only be combined with --generation active");
+        }
+        let mut store = load_or_build_store(&self.path, &store_dir, &build_opts, cache_config)?;
+        let identity = tldr_core::semantic::store_search::manifest_id_for(&self.path, &build_opts);
+        let generations = GenerationManager::open(&store_dir)?;
+        store = match selection {
+            GenerationSelection::Active => store,
+            GenerationSelection::Previous => generations
+                .select_previous(&identity)?
+                .ok_or_else(|| anyhow::anyhow!("no previous complete generation is retained"))?,
+            GenerationSelection::Number(generation) => generations.select(generation, &identity)?,
+        };
 
         // TLDR-9bxa.1: emit the build-instrumentation report. `--metrics` sets
         // collect_metrics, which forces a fresh build, so a report is always
@@ -208,6 +225,7 @@ mod tests {
                 langs: None,
                 no_cache: true,
                 metrics: None,
+                generation: "active".into(),
             };
             let err = args
                 .run(OutputFormat::Json, true)

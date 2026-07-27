@@ -1103,20 +1103,31 @@ fn test_inheritance_typescript() {
 }
 
 #[test]
-fn test_inheritance_cpp_unsupported() {
-    // C++ is NOT in the inheritance module's supported languages.
-    // It falls through to `_ => Vec::new()` in extract_classes match.
-    // Verify graceful handling -- returns 0 classes without error.
+fn test_inheritance_cpp() {
     let dir = TempDir::new().unwrap();
     create_file(&dir, "widgets.cpp", fixtures::CPP_INHERITANCE_HIERARCHY);
 
     let opts = InheritanceOptions::default();
     let report = extract_inheritance(dir.path(), Some(Language::Cpp), &opts).unwrap();
 
-    // C++ inheritance extraction is not implemented; should return empty gracefully
-    assert_eq!(
-        report.count, 0,
-        "C++ is not supported by inheritance module, should return 0 classes"
+    assert!(
+        report.count >= 3,
+        "Should find Base, Widget, and Button, got {}",
+        report.count
+    );
+    assert!(
+        report
+            .edges
+            .iter()
+            .any(|edge| edge.child == "Widget" && edge.parent == "Base"),
+        "Widget should extend Base"
+    );
+    assert!(
+        report
+            .edges
+            .iter()
+            .any(|edge| edge.child == "Button" && edge.parent == "Widget"),
+        "Button should extend Widget"
     );
 }
 

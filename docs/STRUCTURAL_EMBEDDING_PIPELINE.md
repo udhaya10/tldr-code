@@ -396,6 +396,44 @@ Gate: worker memory disappears after exit and a killed build resumes safely.
 - Compare retrieval quality and performance with the current implementation.
 - Retain the previous complete generation as rollback.
 
+### Frozen rollout thresholds and decision (2026-07-26)
+
+The final comparison uses the constants in `semantic::rollout`; they were
+recorded before the rollout decision:
+
+| Gate | Threshold |
+| --- | ---: |
+| Recall@5 / Recall@10 regression | at most 0.02 / 0.01 absolute |
+| MRR / nDCG@10 regression | at most 0.02 absolute |
+| Oversized-code recall | at least +0.01 absolute |
+| Cold worker peak RSS | at most 4 GiB |
+| Wall time and query p95 | at most 1.10x |
+| Cache-hit regression | at most 0.05 absolute |
+| Unexpected one-file delta records | 0 |
+| Mixed-generation recoveries | 0 |
+| Maximum numerical component delta | `1e-4` |
+
+The structural Arctic-L comparison improved Recall@5 from 0.750 to 0.849,
+Recall@10 from 0.827 to 0.887, and MRR from 0.599 to 0.724; the declared
+oversized `VectorStore::build` case moved to rank 1. The expanded harness now
+also records nDCG@10 and covers nested blocks, NL-to-code, code-to-code, and a
+cross-language code-shaped query.
+
+The final fixed-shape whole-repository worker peaked at 3,029,172,224 bytes
+(2.82 GiB), an 82.34% reduction from the 17,151,557,632-byte FastEmbed oracle,
+and plateaued. Numerical parity, finite shapes, delta scope, and crash recovery
+passed. Wall time was 4,240,426 ms versus 3,584,903 ms (+18.285%), exceeding
+the normal 10% gate. The rollout explicitly approves that exception for the
+measured retrieval and 82.34% memory improvement.
+
+Accordingly, fixed-shape is the staged default. Rollback remains available in
+two independent ways for at least one stable release:
+
+- `TLDR_EMBEDDING_BACKEND=fastembed` selects the numerical oracle.
+- `--generation previous` (or `TLDR_SEMANTIC_GENERATION=previous` in the
+  daemon) atomically selects the prior complete redb generation. A retained
+  generation number may also be selected explicitly.
+
 ## 10. Acceptance Criteria
 
 - Cold-build peak RSS is at most 4 GiB and visibly plateaus.

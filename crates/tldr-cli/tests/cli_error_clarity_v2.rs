@@ -30,7 +30,9 @@ use std::process::Command;
 use tempfile::TempDir;
 
 fn tldr_cmd() -> Command {
-    Command::new(assert_cmd::cargo::cargo_bin!("tldr"))
+    let mut command = Command::new(assert_cmd::cargo::cargo_bin!("tldr"));
+    command.env("TLDR_ONESHOT", "1");
+    command
 }
 
 // =============================================================================
@@ -184,7 +186,7 @@ fn format_help_matches_runtime_structure() {
             .failure();
         let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
         assert!(
-            stderr.contains(&format!("not supported by structure")),
+            stderr.contains("not supported by structure"),
             "structure --format {} should be rejected; got:\n{}",
             fmt,
             stderr
@@ -237,6 +239,7 @@ fn context_works_from_repo_root() {
             temp.path().to_str().unwrap(),
             "--depth",
             "1",
+            "--oneshot",
             "-q",
         ])
         .assert()
@@ -262,6 +265,7 @@ fn context_works_from_repo_root() {
             temp.path().join("src").to_str().unwrap(),
             "--depth",
             "1",
+            "--oneshot",
             "-q",
         ])
         .assert()

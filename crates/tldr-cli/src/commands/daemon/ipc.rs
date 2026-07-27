@@ -976,19 +976,23 @@ mod tests {
         assert!(check_not_symlink(&path).is_ok());
     }
 
-    #[tokio::test]
-    async fn test_connect_nonexistent_daemon() {
+    #[test]
+    fn test_connect_nonexistent_daemon() {
         use crate::commands::daemon::daemon_registry::test_support::REGISTRY_ENV_LOCK;
         // connect resolves via the registry first; isolate it from the real one.
-        // `with_registry_dir` takes a sync closure, so hold the env override
-        // manually across the await. tokio::test is current-thread, so holding
-        // the !Send guard across `.await` is fine.
+        // Keep the process-global environment mutation under the synchronous
+        // test lock, and drive the async connect with a local current-thread
+        // runtime so no MutexGuard crosses an `.await` point.
         let _guard = REGISTRY_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let temp = TempDir::new().unwrap();
         std::env::set_var("TLDR_DAEMON_REGISTRY_DIR", temp.path());
         let project = temp.path().join("nonexistent");
 
-        let result = IpcStream::connect(&project).await;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build test runtime");
+        let result = runtime.block_on(IpcStream::connect(&project));
         std::env::remove_var("TLDR_DAEMON_REGISTRY_DIR");
         assert!(matches!(result, Err(DaemonError::NotRunning)));
     }

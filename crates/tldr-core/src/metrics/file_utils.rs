@@ -384,7 +384,10 @@ pub fn should_skip_path_with_lang(path: &Path, lang: Option<crate::types::Langua
 /// Get the set of directories that should be skipped (the canonical
 /// `DEFAULT_EXCLUDE_DIRS` — TLDR-boa.7 unified the old metrics-only list onto it).
 pub fn skip_directories() -> HashSet<&'static str> {
-    crate::walker::DEFAULT_EXCLUDE_DIRS.iter().copied().collect()
+    crate::walker::DEFAULT_EXCLUDE_DIRS
+        .iter()
+        .copied()
+        .collect()
 }
 
 // =============================================================================

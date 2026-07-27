@@ -17,6 +17,7 @@ fn create_test_file(dir: &std::path::Path, name: &str, content: &str) -> std::pa
 #[test]
 fn test_taint_help() {
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("tldr"));
+    cmd.env("TLDR_ONESHOT", "1");
     cmd.arg("taint").arg("--help");
     cmd.assert()
         .success()
@@ -27,6 +28,7 @@ fn test_taint_help() {
 #[test]
 fn test_taint_missing_args() {
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("tldr"));
+    cmd.env("TLDR_ONESHOT", "1");
     cmd.arg("taint");
     cmd.assert()
         .failure()
@@ -44,6 +46,7 @@ def vulnerable(user_data):
     let file = create_test_file(dir.path(), "vuln.py", content);
 
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("tldr"));
+    cmd.env("TLDR_ONESHOT", "1");
     cmd.arg("taint")
         .arg(file.to_str().unwrap())
         .arg("vulnerable")
@@ -52,7 +55,7 @@ def vulnerable(user_data):
 
     cmd.assert()
         .success()
-        .stdout(predicate::str::contains("function_name"))
+        .stdout(predicate::str::contains("\"function\""))
         .stdout(predicate::str::contains("vulnerable"));
 }
 
@@ -67,6 +70,7 @@ def vulnerable():
     let file = create_test_file(dir.path(), "eval_vuln.py", content);
 
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("tldr"));
+    cmd.env("TLDR_ONESHOT", "1");
     cmd.arg("taint")
         .arg(file.to_str().unwrap())
         .arg("vulnerable")
@@ -82,6 +86,7 @@ def vulnerable():
 #[test]
 fn test_taint_file_not_found() {
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("tldr"));
+    cmd.env("TLDR_ONESHOT", "1");
     cmd.arg("taint")
         .arg("/nonexistent/file.py")
         .arg("test_func");
@@ -101,6 +106,7 @@ def existing_func():
     let file = create_test_file(dir.path(), "test.py", content);
 
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("tldr"));
+    cmd.env("TLDR_ONESHOT", "1");
     cmd.arg("taint")
         .arg(file.to_str().unwrap())
         .arg("nonexistent_func");
@@ -122,6 +128,7 @@ def process_user():
     let file = create_test_file(dir.path(), "sql_injection.py", content);
 
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("tldr"));
+    cmd.env("TLDR_ONESHOT", "1");
     cmd.arg("taint")
         .arg(file.to_str().unwrap())
         .arg("process_user")
@@ -137,6 +144,7 @@ def process_user():
 #[test]
 fn test_taint_alias_works() {
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("tldr"));
+    cmd.env("TLDR_ONESHOT", "1");
     cmd.arg("ta").arg("--help");
     cmd.assert()
         .success()

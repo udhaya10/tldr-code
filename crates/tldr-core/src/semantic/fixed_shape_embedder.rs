@@ -22,18 +22,18 @@ use crate::TldrResult;
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DocumentEmbeddingBackend {
-    /// Existing FastEmbed executor and rollback path.
-    #[default]
+    /// Existing FastEmbed executor and explicit rollback path.
     FastEmbed,
-    /// Explicit finite-shape ONNX executor.
+    /// Explicit finite-shape ONNX executor; staged default after TLDR-9bxa.11.
+    #[default]
     FixedShapeOrt,
 }
 
 impl DocumentEmbeddingBackend {
-    /// Resolve the default-off rollout selector.
+    /// Resolve the staged-default rollout selector.
     ///
-    /// `TLDR_EMBEDDING_BACKEND` accepts `fastembed` (default) or
-    /// `fixed-shape`. Unknown values fail rather than silently selecting a
+    /// `TLDR_EMBEDDING_BACKEND` accepts `fixed-shape` (default) or
+    /// `fastembed` (rollback). Unknown values fail rather than silently selecting a
     /// backend different from the requested one.
     pub fn from_env() -> TldrResult<Self> {
         match std::env::var("TLDR_EMBEDDING_BACKEND") {
@@ -47,7 +47,7 @@ impl DocumentEmbeddingBackend {
 
     fn parse(value: Option<&str>) -> TldrResult<Self> {
         match value {
-            None => Ok(Self::FastEmbed),
+            None => Ok(Self::FixedShapeOrt),
             Some(value) if value.eq_ignore_ascii_case("fastembed") => Ok(Self::FastEmbed),
             Some(value)
                 if value.eq_ignore_ascii_case("fixed-shape")
@@ -222,9 +222,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn backend_selector_is_default_off_and_rejects_unknown_values() {
+    fn backend_selector_defaults_to_passing_candidate_and_preserves_rollback() {
         assert_eq!(
             DocumentEmbeddingBackend::parse(None).unwrap(),
+            DocumentEmbeddingBackend::FixedShapeOrt
+        );
+        assert_eq!(
+            DocumentEmbeddingBackend::parse(Some("fastembed")).unwrap(),
             DocumentEmbeddingBackend::FastEmbed
         );
         assert_eq!(

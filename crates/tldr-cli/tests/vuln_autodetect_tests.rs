@@ -8,10 +8,8 @@
 //!    scanned" with no signal to the user. Now, when `--lang` is missing
 //!    the command uses `Language::from_directory` (the VAL-002 detector)
 //!    to decide what the user meant and:
-//!      - runs the scan when the detected language is in the taint
-//!        engine's native-analysis set ({Python, Rust});
-//!      - emits a stderr error and exits 2 when the detected language is
-//!        outside that set, pointing the user at `--lang`;
+//!      - runs the scan when the detected language is supported by the
+//!        native or multi-language pattern analyzers;
 //!      - preserves the historical empty-report-exit-0 on an empty tree
 //!        (no detectable language).
 //!
@@ -34,7 +32,9 @@ use tempfile::tempdir;
 
 /// Get the tldr binary under test.
 fn tldr_cmd() -> Command {
-    Command::new(assert_cmd::cargo::cargo_bin!("tldr"))
+    let mut command = Command::new(assert_cmd::cargo::cargo_bin!("tldr"));
+    command.env("TLDR_ONESHOT", "1");
+    command
 }
 
 /// Write a file, creating parent directories if needed.
@@ -136,24 +136,13 @@ fn test_vuln_autodetects_python() {
 }
 
 // =============================================================================
-// VAL-006: autodetect errors helpfully on unsupported language
+// VAL-006: autodetect runs the multi-language analyzer
 // =============================================================================
 
 /// When the user omits `--lang` in a Java project, autodetect picks
-/// Java. Java is not in the taint engine's autodetect-supported set
-/// (the Python/Rust paths have dedicated tree-sitter / line analyzers,
-/// and VAL-011 of v0.2.2-hotfix-bundle promoted TypeScript+JavaScript
-/// after verifying the engine's `TYPESCRIPT_PATTERNS` is populated;
-/// other languages still fall back to the pattern scanner in tldr-core
-/// and have weaker guarantees). To avoid silent "scanned 0 files"
-/// behavior, we error with exit code 2 and a message that mentions the
-/// detected language and points the user at `--lang`.
-///
-/// Pre-VAL-011 this test used TypeScript as the unsupported example;
-/// once TS was promoted into `is_natively_analyzed`, the test was
-/// switched to Java (still gated; manifest-detected via `pom.xml`).
+/// Java and routes it through the multi-language pattern analyzer.
 #[test]
-fn test_vuln_errors_on_unsupported_autodetected_lang() {
+fn test_vuln_autodetects_java() {
     let dir = tempdir().unwrap();
     let root = dir.path();
 
@@ -173,28 +162,12 @@ fn test_vuln_errors_on_unsupported_autodetected_lang() {
     let mut cmd = tldr_cmd();
     cmd.arg("vuln").arg(root).arg("--format").arg("json");
 
-    let output = cmd.assert().failure().get_output().clone();
-    let exit_code = output.status.code().unwrap_or(-1);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-
+    let output = cmd.assert().success().get_output().clone();
+    let stdout = String::from_utf8_lossy(&output.stdout);
     assert_eq!(
-        exit_code, 2,
-        "unsupported autodetected language should exit 2; got {}\nstderr:\n{}",
-        exit_code, stderr
-    );
-    // The error message must identify the problem and point at a fix.
-    assert!(
-        stderr.contains("not yet supported") || stderr.contains("java"),
-        "stderr should explain Java is not yet supported by autodetect; got:\n{}",
-        stderr
-    );
-    assert!(
-        stderr.contains("--lang python")
-            || stderr.contains("--lang rust")
-            || stderr.contains("--lang typescript")
-            || stderr.contains("--lang javascript"),
-        "stderr should suggest an explicit --lang from the supported set; got:\n{}",
-        stderr
+        extract_files_scanned(&stdout),
+        Some(1),
+        "vuln should autodetect Java and scan its source file; stdout:\n{stdout}"
     );
 }
 

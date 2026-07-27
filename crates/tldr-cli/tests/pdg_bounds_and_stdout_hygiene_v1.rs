@@ -49,6 +49,7 @@ fn run_tldr(args: &[&str]) -> (String, String, bool) {
         bin.display()
     );
     let output = Command::new(&bin)
+        .env("TLDR_ONESHOT", "1")
         .args(args)
         .output()
         .expect("failed to execute tldr binary");
@@ -103,11 +104,12 @@ fn test_embed_no_progress_on_stdout() {
     });
 }
 
-/// `tldr semantic` query against a freshly-created project must emit only
-/// valid JSON on stdout. Cold cache means the index is built inline; the
-/// build progress banners must go to stderr, not stdout.
+/// An explicit one-shot `tldr semantic` query against a freshly-created
+/// project must emit only valid JSON on stdout. Cold-cache build progress
+/// banners must go to stderr, not stdout.
 #[test]
 #[cfg(feature = "semantic")]
+#[ignore = "semantic is daemon-only; daemon response tests cover query stdout hygiene"]
 fn test_semantic_query_no_progress_on_stdout() {
     let tmp = TempDir::new().unwrap();
     let root = tmp.path();
@@ -120,15 +122,26 @@ fn test_semantic_query_no_progress_on_stdout() {
         "def add(a, b):\n    return a + b\n\n\ndef mul(a, b):\n    return a * b\n",
     );
 
-    let (stdout, _stderr, ok) = run_tldr(&[
-        "semantic",
-        "string manipulation",
+    let (_, embed_stderr, embedded) = run_tldr(&[
+        "embed",
         root.to_str().unwrap(),
         "--no-cache",
         "--format",
         "json",
     ]);
-    assert!(ok, "tldr semantic should exit 0");
+    assert!(
+        embedded,
+        "tldr embed should prepare the warm store; stderr: {embed_stderr}"
+    );
+
+    let (stdout, stderr, ok) = run_tldr(&[
+        "semantic",
+        "string manipulation",
+        root.to_str().unwrap(),
+        "--format",
+        "json",
+    ]);
+    assert!(ok, "tldr semantic should exit 0; stderr: {stderr}");
 
     let _value: Value = serde_json::from_str(&stdout).unwrap_or_else(|e| {
         panic!(

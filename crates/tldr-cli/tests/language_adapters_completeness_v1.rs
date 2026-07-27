@@ -21,6 +21,7 @@ use std::path::Path;
 
 fn run_tldr_json(args: &[&str]) -> Option<Value> {
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("tldr"));
+    cmd.env("TLDR_ONESHOT", "1");
     cmd.args(args).arg("--format").arg("json");
     let output = cmd.output().expect("failed to execute tldr");
     if !output.status.success() {

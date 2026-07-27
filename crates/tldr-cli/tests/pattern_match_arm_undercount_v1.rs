@@ -11,7 +11,7 @@
 //!   - kotlin `when_entry` (non-`else`)
 //!   - ocaml `match_case` (non-wildcard, in both `match` and `function`)
 //!   - elixir `stab_clause` (non-catchall, inside `case`/`cond`/`with`)
-//! each receive +1 cognitive and +1 cyclomatic per SonarSource v1.4.
+//!     each receive +1 cognitive and +1 cyclomatic per SonarSource v1.4.
 //!
 //! Additionally, BUG-P19-02 (Rust `max_nesting` permanently 0) is fixed by
 //! teaching `increases_nesting` about the Rust grammar's `*_expression`

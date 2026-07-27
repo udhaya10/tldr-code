@@ -3,29 +3,26 @@
 //! 8 secondary defects from the phase-19 aggregate audit:
 //!
 //!  - BUG-P19-02: Rust `max_nesting` permanently 0 across the corpus
-//!                (Rust grammar uses `*_expression` shape that the
-//!                cognitive walker's nesting set didn't recognise).
+//!    (Rust grammar uses `*_expression` shape that the cognitive walker's
+//!    nesting set didn't recognise).
 //!  - BUG-P19-03: OCaml `cognitive` lists every function twice (the
-//!                walker matches both `value_definition` and inner
-//!                `let_binding`, emitting (name, line) duplicates).
+//!    walker matches both `value_definition` and inner `let_binding`, emitting
+//!    (name, line) duplicates).
 //!  - BUG-P19-04: C++ `XMLClass::ParseDeep` overloads all reported
-//!                identical metrics — bare-name fallback returned the
-//!                first match for all 7 overloads.
+//!    identical metrics — bare-name fallback returned the first match for all 7
+//!    overloads.
 //!  - BUG-P19-05: `tldr structure tinyxml2.h --lang cpp` reported enums
-//!                as classes and missed all macro-prefixed real
-//!                classes; `parse_file()` ignored the `--lang cpp` hint
-//!                and re-detected `.h` → C.
+//!    as classes and missed all macro-prefixed real classes; `parse_file()`
+//!    ignored the `--lang cpp` hint and re-detected `.h` → C.
 //!  - BUG-P19-06: `tldr definition` always emitted `column: 0` because
-//!                `FuncDef`/`ClassDef` only carry the line number.
+//!    `FuncDef`/`ClassDef` only carry the line number.
 //!  - BUG-P19-07: cpp `complexity` and `context` reported different
-//!                cyclomatic for the same function (two distinct
-//!                decision counters).
+//!    cyclomatic for the same function (two distinct decision counters).
 //!  - BUG-P19-08: cpp class count drifted across `structure`,
-//!                `interface`, and `health` for the same input.
+//!    `interface`, and `health` for the same input.
 //!  - BUG-P19-09: Rust `specs --from-tests` extracted specs from only
-//!                1/6 test functions because `assert!(call(...))`
-//!                shape was unrecognised (`call_expression` wrapper is
-//!                missing inside Rust macro `token_tree`).
+//!    1/6 test functions because `assert!(call(...))` shape was unrecognised
+//!    (`call_expression` wrapper is missing inside Rust macro `token_tree`).
 //!
 //! Real-repo gated per no-synthetic-fixtures-v1: each test returns
 //! early when its `/tmp/repos/<repo>` corpus is absent and otherwise

@@ -172,6 +172,13 @@ pub use worker_protocol::{
     WORKER_PIPELINE_VERSION, WORKER_PROTOCOL_VERSION,
 };
 
+// TLDR-9bxa.11: frozen acceptance thresholds and explicit rollout selection.
+pub mod rollout;
+pub use rollout::{
+    evaluate_rollout, GenerationEvaluation, GenerationSelection, OperationalMetrics,
+    RetrievalMetrics, RolloutDecision, RolloutThresholds, STRUCTURAL_ROLLOUT_THRESHOLDS,
+};
+
 // Phase 6: shared build/search options + index limits. The `SemanticIndex`
 // type itself was nuked in TLDR-7xz.7 — serving goes through the daemon's
 // resident VectorStore only (store_search/vector_store below).

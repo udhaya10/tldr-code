@@ -40,7 +40,9 @@ use std::path::Path;
 use tempfile::TempDir;
 
 fn tldr_cmd() -> Command {
-    Command::new(assert_cmd::cargo::cargo_bin!("tldr"))
+    let mut command = Command::new(assert_cmd::cargo::cargo_bin!("tldr"));
+    command.env("TLDR_ONESHOT", "1");
+    command
 }
 
 fn write(p: &Path, body: &str) {
@@ -162,7 +164,7 @@ fn rust_test_attribute_excluded_from_dead() {
     // The genuinely-unused private helper SHOULD appear in dead_functions
     // (sanity check that the analyzer is actually running over the fixture).
     assert!(
-        names.iter().any(|n| *n == "_truly_unused_helper"),
+        names.contains(&"_truly_unused_helper"),
         "expected `_truly_unused_helper` in dead_functions or possibly_dead; got: {names:?}"
     );
 

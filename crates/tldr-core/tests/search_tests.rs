@@ -133,8 +133,11 @@ mod regex_search_tests {
         // IgnoreSpec — TLDR-boa.4). Tempdir avoids polluting the shared fixture.
         let project = tempfile::tempdir().unwrap();
         std::fs::write(project.path().join("main.py"), "def main():\n    pass\n").unwrap();
-        std::fs::write(project.path().join("test_extra.py"), "def test_extra():\n    pass\n")
-            .unwrap();
+        std::fs::write(
+            project.path().join("test_extra.py"),
+            "def test_extra():\n    pass\n",
+        )
+        .unwrap();
         std::fs::write(project.path().join(".tldrignore"), "test_*.py\n").unwrap();
 
         // WHEN: We search (canonical walker honors `.tldrignore`)

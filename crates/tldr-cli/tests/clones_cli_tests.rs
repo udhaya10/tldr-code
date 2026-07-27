@@ -9,7 +9,9 @@ use tempfile::TempDir;
 
 /// Helper to get the tldr binary
 fn tldr_cmd() -> Command {
-    Command::new(assert_cmd::cargo::cargo_bin!("tldr"))
+    let mut command = Command::new(assert_cmd::cargo::cargo_bin!("tldr"));
+    command.env("TLDR_ONESHOT", "1");
+    command
 }
 
 /// Create a temp directory with test Python files for clone detection

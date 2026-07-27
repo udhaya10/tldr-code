@@ -277,13 +277,13 @@ fn java_explain_callees_and_caller_line() {
     let v = parse_json(&out);
     let callees = v["callees"].as_array().cloned().unwrap_or_default();
     assert!(
-        callees.len() >= 1,
+        !callees.is_empty(),
         "java explain callees ({}) should be >= 1 (function calls findByLastNameStartingWith etc.)",
         callees.len()
     );
     let callers = v["callers"].as_array().cloned().unwrap_or_default();
     assert!(
-        callers.len() >= 1,
+        !callers.is_empty(),
         "java explain callers ({}) should be >= 1 (called by processFindForm)",
         callers.len()
     );
@@ -391,7 +391,7 @@ fn nonreg_lua_smells_kind_populated() {
     assert_eq!(rc, 0);
     let v = parse_json(&out);
     let smells = v["smells"].as_array().cloned().unwrap_or_default();
-    assert!(smells.len() >= 1, "lua smells should yield >= 1 finding");
+    assert!(!smells.is_empty(), "lua smells should yield >= 1 finding");
     // Each smell entry must have a non-null `smell_type` (the
     // categorical kind discriminator emitted by the lua categorizer).
     let null_kinds = smells

@@ -521,7 +521,7 @@ fn agg17_2_non_regression_js_explain_callees_clean() {
     let callees = v
         .get("callees")
         .and_then(|c| c.as_array())
-        .map(|a| a.clone())
+        .cloned()
         .unwrap_or_default();
     let mut corrupted = 0usize;
     for c in &callees {

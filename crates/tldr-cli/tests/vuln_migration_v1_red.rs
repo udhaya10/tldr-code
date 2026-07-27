@@ -32,6 +32,7 @@ fn run_tldr_vuln(rel_fixture: &str, lang: &str) -> Value {
     assert!(path.exists(), "fixture missing: {}", path.display());
 
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("tldr"));
+    cmd.env("TLDR_ONESHOT", "1");
     cmd.arg("vuln")
         .arg(&path)
         .arg("--lang")

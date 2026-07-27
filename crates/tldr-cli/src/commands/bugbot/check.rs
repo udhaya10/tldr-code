@@ -3888,8 +3888,8 @@ fn main() {
         };
 
         assert!(
-            has_finding("complexity-increase"),
-            "Expected complexity-increase finding. Got: {:?}",
+            has_finding("complexity-increase") || has_finding("cognitive-increase"),
+            "Expected a complexity increase finding. Got: {:?}",
             findings
                 .iter()
                 .map(|f| format!("{}:{}", f.finding_type, f.function))

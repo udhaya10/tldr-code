@@ -31,7 +31,9 @@ use std::process::Command;
 use tempfile::TempDir;
 
 fn tldr_cmd() -> Command {
-    Command::new(assert_cmd::cargo::cargo_bin!("tldr"))
+    let mut command = Command::new(assert_cmd::cargo::cargo_bin!("tldr"));
+    command.env("TLDR_ONESHOT", "1");
+    command
 }
 
 // =============================================================================
@@ -203,7 +205,7 @@ fn swift_imports_extracted() {
         .collect();
 
     assert!(
-        modules.iter().any(|m| *m == "Foundation"),
+        modules.contains(&"Foundation"),
         "expected Foundation in Swift imports, got: {:?}",
         modules
     );
@@ -216,7 +218,7 @@ fn swift_imports_extracted() {
     );
     // @testable attribute prefix must be tolerated.
     assert!(
-        modules.iter().any(|m| *m == "MyMod"),
+        modules.contains(&"MyMod"),
         "expected MyMod in Swift imports (with @testable attribute), got: {:?}",
         modules
     );

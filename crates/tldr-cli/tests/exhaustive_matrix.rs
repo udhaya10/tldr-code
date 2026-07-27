@@ -121,7 +121,7 @@ fn run_tldr_timed(args: &[&str], timeout: Duration) -> CellResult {
     let start = Instant::now();
     let handle = thread::spawn(move || {
         let mut cmd = Command::new(bin);
-        cmd.args(&argv);
+        cmd.env("TLDR_ONESHOT", "1").args(&argv);
         let res = cmd.output();
         let _ = tx.send(res);
     });
@@ -1345,13 +1345,15 @@ fn check_coupling(lang: &str) {
 
 #[cfg(feature = "semantic")]
 fn check_embed(lang: &str) {
-    let _guard = embedding_mutex().lock().unwrap();
+    let _guard = embedding_mutex()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let tmp = make_fixture(lang);
     let path = tmp.path().to_str().unwrap();
     let (json, stdout, stderr) = check_success(
         "embed",
         lang,
-        &["embed", path, "--format", "json", "--quiet"],
+        &["embed", path, "--no-cache", "--format", "json", "--quiet"],
     );
     if !json.is_object() || json.get("chunks_embedded").is_none() {
         panic!(

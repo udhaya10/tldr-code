@@ -16,7 +16,9 @@ use std::process::Command;
 
 /// Get the path to the test binary
 fn tldr_cmd() -> Command {
-    Command::new(assert_cmd::cargo::cargo_bin!("tldr"))
+    let mut command = Command::new(assert_cmd::cargo::cargo_bin!("tldr"));
+    command.env("TLDR_ONESHOT", "1");
+    command
 }
 
 /// Health with -l flag should NOT crash with TypeId mismatch

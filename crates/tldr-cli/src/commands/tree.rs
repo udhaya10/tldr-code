@@ -9,8 +9,8 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::Args;
 
-use tldr_core::types::FileTree;
 use tldr_core::get_file_tree;
+use tldr_core::types::FileTree;
 
 use crate::commands::daemon_router::{is_oneshot, route_for_path};
 use crate::output::{format_file_tree_text, OutputFormat, OutputWriter};
@@ -79,6 +79,10 @@ impl TreeArgs {
         } else {
             Some(ext_vec.iter().cloned().collect())
         };
-        Ok(get_file_tree(&self.path, extensions.as_ref(), !self.include_hidden)?)
+        Ok(get_file_tree(
+            &self.path,
+            extensions.as_ref(),
+            !self.include_hidden,
+        )?)
     }
 }

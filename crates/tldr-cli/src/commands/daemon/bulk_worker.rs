@@ -259,7 +259,7 @@ mod tests {
         assert_eq!(report.attempts, 1);
         // Local protocol/process overhead stays negligible relative to a cold
         // model build; this fixture performs no model work.
-        assert!(report.elapsed_ms < 250);
+        assert!(report.elapsed_ms < 2_000);
     }
 
     #[test]

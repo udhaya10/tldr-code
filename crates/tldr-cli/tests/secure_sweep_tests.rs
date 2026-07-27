@@ -25,7 +25,9 @@ use tempfile::tempdir;
 
 /// Get the tldr command
 fn tldr_cmd() -> Command {
-    Command::new(assert_cmd::cargo::cargo_bin!("tldr"))
+    let mut command = Command::new(assert_cmd::cargo::cargo_bin!("tldr"));
+    command.env("TLDR_ONESHOT", "1");
+    command
 }
 
 /// Create a test file in the given directory
@@ -113,7 +115,7 @@ def vulnerable(user_input):
     cmd.assert()
         .success()
         .stdout(predicate::str::contains("\"wrapper\": \"secure\""))
-        .stdout(predicate::str::contains("\"path\""));
+        .stdout(predicate::str::contains("\"root\""));
 }
 
 #[test]
@@ -320,7 +322,7 @@ fn test_secure_json_structure() {
     cmd.assert()
         .success()
         .stdout(predicate::str::contains("\"wrapper\""))
-        .stdout(predicate::str::contains("\"path\""))
+        .stdout(predicate::str::contains("\"root\""))
         .stdout(predicate::str::contains("\"findings\""))
         .stdout(predicate::str::contains("\"summary\""))
         .stdout(predicate::str::contains("\"total_elapsed_ms\""));
@@ -401,7 +403,7 @@ fn test_secure_sub_results_structure() {
     // Per `wrapper-cross-consistency-v1` (commit 226609d) the `secure`
     // wrapper no longer emits per-sub-analysis records — `sub_results`
     // is now empty + serde-skipped. The post-milestone shape is:
-    //   { wrapper: "secure", path, findings[], summary{...},
+    //   { wrapper: "secure", root, findings[], summary{...},
     //     total_elapsed_ms }
     // This test now PINS that contract: assert `sub_results` is ABSENT
     // (catches regressions that re-introduce it) and required top-level
@@ -440,7 +442,7 @@ fn test_secure_sub_results_structure() {
         "`details` should be absent from secure JSON; got: {stdout}"
     );
     // Required top-level keys per the new contract.
-    for key in ["wrapper", "path", "findings", "summary", "total_elapsed_ms"] {
+    for key in ["wrapper", "root", "findings", "summary", "total_elapsed_ms"] {
         assert!(
             obj.contains_key(key),
             "secure JSON missing required key `{key}`; got: {stdout}"

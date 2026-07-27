@@ -23,7 +23,9 @@ use std::process::Command;
 use tempfile::TempDir;
 
 fn tldr_cmd() -> Command {
-    Command::new(assert_cmd::cargo::cargo_bin!("tldr"))
+    let mut command = Command::new(assert_cmd::cargo::cargo_bin!("tldr"));
+    command.env("TLDR_ONESHOT", "1");
+    command
 }
 
 /// BUG-02: `vuln.summary.by_type` keys are snake_case (matching `.vuln_type`).
@@ -115,9 +117,10 @@ def handler(req):
     }
 }
 
-/// BUG-17: `extract` exposes a unified `line` alongside `line_number`.
+/// Canonical extract locations use `line`/`line_end` without the retired
+/// duplicate `line_number` alias.
 #[test]
-fn test_extract_emits_line_alias() {
+fn test_extract_emits_canonical_line_fields() {
     let temp = TempDir::new().unwrap();
     let f = temp.path().join("ex.py");
     fs::write(&f, "def hello():\n    return 1\n").unwrap();
@@ -133,18 +136,16 @@ fn test_extract_emits_line_alias() {
         .expect("extract output should have .functions array");
     assert!(!funcs.is_empty(), "expected at least one function");
     let f0 = &funcs[0];
-    let line_number = f0
-        .get("line_number")
-        .and_then(Value::as_u64)
-        .expect("functions[0].line_number missing");
     let line = f0
         .get("line")
         .and_then(Value::as_u64)
-        .expect("functions[0].line missing — schema-unification-v1 alias");
-    assert_eq!(
-        line_number, line,
-        "line and line_number must agree (alias mapping)"
-    );
+        .expect("functions[0].line missing");
+    let line_end = f0
+        .get("line_end")
+        .and_then(Value::as_u64)
+        .expect("functions[0].line_end missing");
+    assert!(f0.get("line_number").is_none());
+    assert!(line > 0 && line_end >= line);
 }
 
 /// BUG-17: `explain` exposes a unified `line` alongside `line_start`.

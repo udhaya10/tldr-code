@@ -40,7 +40,9 @@ use serde_json::Value;
 use std::path::PathBuf;
 
 fn tldr_cmd() -> Command {
-    Command::new(assert_cmd::cargo::cargo_bin!("tldr"))
+    let mut command = Command::new(assert_cmd::cargo::cargo_bin!("tldr"));
+    command.env("TLDR_ONESHOT", "1");
+    command
 }
 
 fn fixture_path(dir: &str, file: &str) -> PathBuf {

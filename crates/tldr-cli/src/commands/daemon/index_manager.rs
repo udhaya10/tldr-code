@@ -17,7 +17,7 @@ use tldr_core::semantic::vector_store::{
 use tldr_core::semantic::{
     query_store_with_vector, store_dir_for, BuildCancellation, BuildOptions, BulkInferenceRunner,
     CacheConfig, ChunkGranularity, EmbeddingModel, FixedShapeInferenceRunner, GenerationManager,
-    IndexSearchOptions, InferenceRunnerSnapshot,
+    GenerationSelection, IndexSearchOptions, InferenceRunnerSnapshot,
 };
 
 use super::bulk_worker::BulkWorker;
@@ -240,6 +240,9 @@ impl IndexManager {
                 ..Default::default()
             };
             let store_dir = store_dir_for(project);
+            let requested =
+                std::env::var("TLDR_SEMANTIC_GENERATION").unwrap_or_else(|_| "active".into());
+            let selection = GenerationSelection::parse(&requested)?;
             let worker = BulkWorker::installed()?;
             worker.build(
                 project,
@@ -249,9 +252,21 @@ impl IndexManager {
                 &BuildCancellation::default(),
             )?;
             let identity = tldr_core::semantic::store_search::manifest_id_for(project, &build_opts);
-            let replacement = GenerationManager::open(&store_dir)
-                .and_then(|manager| manager.load(&identity))
-                .map_err(|error| error.to_string())?;
+            let manager = GenerationManager::open(&store_dir).map_err(|error| error.to_string())?;
+            let replacement = match selection {
+                GenerationSelection::Active => manager.load(&identity),
+                GenerationSelection::Previous => {
+                    manager.select_previous(&identity).and_then(|store| {
+                        store.ok_or_else(|| {
+                            tldr_core::TldrError::Embedding(
+                                "no previous complete generation is retained".into(),
+                            )
+                        })
+                    })
+                }
+                GenerationSelection::Number(generation) => manager.select(generation, &identity),
+            }
+            .map_err(|error| error.to_string())?;
             // Publication alone takes the write lock; an existing generation
             // continues serving while the replacement is built.
             *self.store.write() = Some((model, replacement));

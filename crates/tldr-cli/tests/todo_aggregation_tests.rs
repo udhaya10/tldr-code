@@ -33,7 +33,9 @@ use tempfile::tempdir;
 
 /// Get the tldr command
 fn tldr_cmd() -> Command {
-    Command::new(assert_cmd::cargo::cargo_bin!("tldr"))
+    let mut command = Command::new(assert_cmd::cargo::cargo_bin!("tldr"));
+    command.env("TLDR_ONESHOT", "1");
+    command
 }
 
 /// Create a test file in the given directory

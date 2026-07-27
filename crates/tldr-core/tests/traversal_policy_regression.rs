@@ -68,7 +68,11 @@ fn build_fixture() -> tempfile::TempDir {
     // `.gitignore`-denied.
     fs::write(root.join("git_ignored.cpp"), "int ghost() { return 1; }\n").unwrap();
     fs::create_dir_all(root.join("build_output")).unwrap();
-    fs::write(root.join("build_output/x.cpp"), "int built() { return 2; }\n").unwrap();
+    fs::write(
+        root.join("build_output/x.cpp"),
+        "int built() { return 2; }\n",
+    )
+    .unwrap();
 
     // `.tldrignore`-denied (exact name + glob).
     fs::write(root.join("tldr_ignored.py"), "def denied():\n    pass\n").unwrap();
@@ -78,7 +82,11 @@ fn build_fixture() -> tempfile::TempDir {
     fs::create_dir_all(root.join("sub")).unwrap();
     fs::write(root.join("sub/.tldrignore"), "nested_skip.py\n").unwrap();
     fs::write(root.join("sub/keep.py"), "def nested_keep():\n    pass\n").unwrap();
-    fs::write(root.join("sub/nested_skip.py"), "def nested_skip():\n    pass\n").unwrap();
+    fs::write(
+        root.join("sub/nested_skip.py"),
+        "def nested_skip():\n    pass\n",
+    )
+    .unwrap();
 
     // Generated directory: `doxygen.css` sentinel marks `gen/` as generated.
     fs::create_dir_all(root.join("gen")).unwrap();
@@ -93,7 +101,11 @@ fn build_fixture() -> tempfile::TempDir {
 
     // DEFAULT-excluded dir (`vendor`) with a negation attempt that must fail.
     fs::create_dir_all(root.join("vendor")).unwrap();
-    fs::write(root.join("vendor/keep.cpp"), "int vendored() { return 4; }\n").unwrap();
+    fs::write(
+        root.join("vendor/keep.cpp"),
+        "int vendored() { return 4; }\n",
+    )
+    .unwrap();
 
     // Make it a git repo root so `.gitignore` is honored deterministically.
     std::process::Command::new("git")
@@ -126,11 +138,7 @@ fn tree_rel_files(tree: &FileTree, out: &mut HashSet<String>) {
 fn walk_rel_files(root: &Path) -> HashSet<String> {
     let mut out = HashSet::new();
     for entry in ProjectWalker::new(root).iter() {
-        if entry
-            .file_type()
-            .map(|ft| ft.is_file())
-            .unwrap_or(false)
-        {
+        if entry.file_type().map(|ft| ft.is_file()).unwrap_or(false) {
             if let Ok(rel) = entry.path().strip_prefix(root) {
                 out.insert(rel.to_string_lossy().replace('\\', "/"));
             }
@@ -164,7 +172,10 @@ fn fixture_categories_agree_across_walk_tree_and_gate() {
 
     // ---- Unsupported extensions: corpus NO (language filter), tree/walk YES. ----
     for unsupported in ["data.csv", "app.log"] {
-        assert!(!gate(unsupported), "{unsupported} must fail the corpus gate");
+        assert!(
+            !gate(unsupported),
+            "{unsupported} must fail the corpus gate"
+        );
         assert!(in_tree(unsupported), "{unsupported} stays in the tree");
         assert!(in_walk(unsupported), "{unsupported} stays in the walk");
     }
@@ -173,7 +184,10 @@ fn fixture_categories_agree_across_walk_tree_and_gate() {
     assert!(!gate("git_ignored.cpp"), "gitignored file must be excluded");
     assert!(!in_tree("git_ignored.cpp"));
     assert!(!in_walk("git_ignored.cpp"));
-    assert!(!gate("build_output/x.cpp"), "gitignored dir contents excluded");
+    assert!(
+        !gate("build_output/x.cpp"),
+        "gitignored dir contents excluded"
+    );
     assert!(!in_tree("build_output/x.cpp"));
     assert!(!in_walk("build_output/x.cpp"));
 
@@ -183,7 +197,10 @@ fn fixture_categories_agree_across_walk_tree_and_gate() {
     assert!(!in_walk("tldr_ignored.py"));
 
     // ---- Nested `.tldrignore`: honored at depth. ----
-    assert!(!gate("sub/nested_skip.py"), "nested .tldrignore must exclude");
+    assert!(
+        !gate("sub/nested_skip.py"),
+        "nested .tldrignore must exclude"
+    );
     assert!(!in_tree("sub/nested_skip.py"));
     assert!(!in_walk("sub/nested_skip.py"));
 
@@ -266,6 +283,9 @@ fn single_file_gate_agrees_with_bulk_walk() {
         "gen/out.cpp",
         "tmp_skip.py",
     ] {
-        assert!(!walk_files.contains(denied), "{denied} should not be walked");
+        assert!(
+            !walk_files.contains(denied),
+            "{denied} should not be walked"
+        );
     }
 }

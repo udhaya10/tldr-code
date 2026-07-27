@@ -63,7 +63,10 @@ fn test_language_extensions() {
 
     // P2 Languages
     assert_eq!(Language::C.extensions(), &[".c", ".h"]);
-    assert_eq!(Language::Cpp.extensions(), &[".cpp", ".cc", ".cxx", ".hpp"]);
+    assert_eq!(
+        Language::Cpp.extensions(),
+        &[".cpp", ".cc", ".cxx", ".c++", ".hpp", ".hh", ".hxx", ".h++"]
+    );
     assert_eq!(Language::Ruby.extensions(), &[".rb"]);
     assert_eq!(Language::Kotlin.extensions(), &[".kt", ".kts"]);
     assert_eq!(Language::Swift.extensions(), &[".swift"]);

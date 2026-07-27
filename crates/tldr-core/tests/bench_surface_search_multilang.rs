@@ -1040,15 +1040,7 @@ function process_data(input) {
         let dir = search_fixture();
 
         let py_exts: HashSet<String> = [".py".to_string()].into_iter().collect();
-        let results = search(
-            "process_data",
-            dir.path(),
-            Some(&py_exts),
-            0,
-            100,
-            100,
-        )
-        .unwrap();
+        let results = search("process_data", dir.path(), Some(&py_exts), 0, 100, 100).unwrap();
 
         // All results should be .py files only
         for m in &results {
@@ -1061,15 +1053,7 @@ function process_data(input) {
 
         // Also verify the JS file's process_data is excluded
         let js_exts: HashSet<String> = [".js".to_string()].into_iter().collect();
-        let js_results = search(
-            "process_data",
-            dir.path(),
-            Some(&js_exts),
-            0,
-            100,
-            100,
-        )
-        .unwrap();
+        let js_results = search("process_data", dir.path(), Some(&js_exts), 0, 100, 100).unwrap();
 
         for m in &js_results {
             assert!(
@@ -1110,15 +1094,7 @@ function process_data(input) {
     fn test_search_nonexistent_pattern_returns_empty() {
         let dir = search_fixture();
 
-        let results = search(
-            "zzz_nonexistent_pattern_xyz",
-            dir.path(),
-            None,
-            0,
-            100,
-            100,
-        )
-        .unwrap();
+        let results = search("zzz_nonexistent_pattern_xyz", dir.path(), None, 0, 100, 100).unwrap();
 
         assert!(
             results.is_empty(),
@@ -2463,15 +2439,7 @@ module.exports = { handleRequest };
         let dir = multilang_search_fixture();
         let rs_exts: HashSet<String> = [".rs".to_string()].into_iter().collect();
 
-        let results = search(
-            "fn handle_request",
-            dir.path(),
-            Some(&rs_exts),
-            0,
-            100,
-            100,
-        )
-        .unwrap();
+        let results = search("fn handle_request", dir.path(), Some(&rs_exts), 0, 100, 100).unwrap();
 
         assert!(!results.is_empty(), "expected Rust search results");
         assert!(results

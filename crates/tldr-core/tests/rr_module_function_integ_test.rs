@@ -196,9 +196,8 @@ end
     assert_has_sink_of_type(&ast_only, TaintSinkType::ShellExec, "ast_only");
 }
 
-/// Ruby: bare `gets` (UserInput, AST-native via `call_names: ["gets"]`) ->
-/// `IO.popen(cmd)` ShellExec sink. The sink side requires structured
-/// Module.function matching — fails under AST-only at HEAD pre-M2.
+/// Ruby: bare `gets` (UserInput via the documented regex exception) ->
+/// `IO.popen(cmd)` ShellExec sink. The sink side is structurally AST-native.
 #[test]
 fn ruby_io_popen_with_user_input_via_compute_taint() {
     let src = "\
@@ -211,8 +210,9 @@ end
     assert_has_source_of_type(&regular, TaintSourceType::UserInput, "regular");
     assert_has_sink_of_type(&regular, TaintSinkType::ShellExec, "regular");
     let ast_only = analyze_ast_only(src, Language::Ruby, "handler");
-    // Source side already AST-native; the failure point at HEAD is the sink.
-    assert_has_source_of_type(&ast_only, TaintSourceType::UserInput, "ast_only");
+    // Bare `gets` is parsed as an identifier, so AST-only mode intentionally
+    // omits the regex-backed source while still proving the structured sink.
+    assert!(ast_only.sources.is_empty());
     assert_has_sink_of_type(&ast_only, TaintSinkType::ShellExec, "ast_only");
 }
 

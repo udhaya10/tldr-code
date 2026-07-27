@@ -137,9 +137,9 @@ fn test_halstead_info_empty_function() {
 }
 
 #[test]
-fn test_halstead_info_n2_zero_caps_difficulty() {
+fn test_halstead_info_n2_zero_uses_operator_only_difficulty() {
     let hal = HalsteadInfo::from_counts(10, 0, 50, 100);
-    assert_eq!(hal.difficulty, 1000.0); // Capped at 1000 when n2=0
+    assert_eq!(hal.difficulty, 5.0);
 }
 
 #[test]

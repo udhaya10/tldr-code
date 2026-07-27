@@ -18,6 +18,7 @@ fn composite_multi_pattern_string_literal_fp_returns_zero_findings() {
     assert!(path.exists(), "fixture missing: {}", path.display());
 
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("tldr"));
+    cmd.env("TLDR_ONESHOT", "1");
     cmd.arg("vuln")
         .arg(&path)
         .arg("--lang")

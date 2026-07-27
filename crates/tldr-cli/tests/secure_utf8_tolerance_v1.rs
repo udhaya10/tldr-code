@@ -27,7 +27,9 @@ use std::fs;
 use tempfile::tempdir;
 
 fn tldr_cmd() -> Command {
-    Command::new(assert_cmd::cargo::cargo_bin!("tldr"))
+    let mut command = Command::new(assert_cmd::cargo::cargo_bin!("tldr"));
+    command.env("TLDR_ONESHOT", "1");
+    command
 }
 
 /// Write a "1 valid + 1 non-UTF-8 .py" tempdir. Returns the tempdir

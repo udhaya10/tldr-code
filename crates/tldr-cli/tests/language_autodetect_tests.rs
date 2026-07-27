@@ -21,7 +21,9 @@ use tempfile::TempDir;
 
 /// Get the path to the tldr binary under test.
 fn tldr_cmd() -> Command {
-    Command::new(assert_cmd::cargo::cargo_bin!("tldr"))
+    let mut command = Command::new(assert_cmd::cargo::cargo_bin!("tldr"));
+    command.env("TLDR_ONESHOT", "1");
+    command
 }
 
 /// Write a file, creating parent directories if needed.

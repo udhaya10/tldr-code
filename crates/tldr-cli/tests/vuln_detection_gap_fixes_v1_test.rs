@@ -27,6 +27,7 @@ fn run_tldr_vuln_inline(source: &str, file_name: &str, lang: &str) -> Value {
     std::fs::write(&path, source).expect("failed to write fixture");
 
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("tldr"));
+    cmd.env("TLDR_ONESHOT", "1");
     cmd.arg("vuln")
         .arg(&path)
         .arg("--lang")

@@ -74,7 +74,9 @@ use serde_json::Value;
 use std::path::Path;
 
 fn tldr_cmd() -> Command {
-    Command::new(assert_cmd::cargo::cargo_bin!("tldr"))
+    let mut command = Command::new(assert_cmd::cargo::cargo_bin!("tldr"));
+    command.env("TLDR_ONESHOT", "1");
+    command
 }
 
 fn skip_if_missing(path: &str) -> bool {

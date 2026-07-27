@@ -24,9 +24,9 @@
 //!      `.c++`, `.hh`, `.hxx`, `.h++`;
 //!   2. flags `UnsupportedLanguage` as recoverable so directory walks
 //!      skip-and-continue rather than aborting on a stray `.zzz` file.
-//!   Per-file commands (`tldr extract somefile.zzz`) still surface
-//!   `UnsupportedLanguage` as a hard error because they consult the error
-//!   directly, not via `is_recoverable`.
+//!      Per-file commands (`tldr extract somefile.zzz`) still surface
+//!      `UnsupportedLanguage` as a hard error because they consult the error
+//!      directly, not via `is_recoverable`.
 
 use assert_cmd::Command;
 use serde_json::Value;
@@ -35,7 +35,9 @@ use std::path::Path;
 use tempfile::TempDir;
 
 fn tldr_cmd() -> Command {
-    Command::new(assert_cmd::cargo::cargo_bin!("tldr"))
+    let mut command = Command::new(assert_cmd::cargo::cargo_bin!("tldr"));
+    command.env("TLDR_ONESHOT", "1");
+    command
 }
 
 fn write(p: &Path, body: &str) {

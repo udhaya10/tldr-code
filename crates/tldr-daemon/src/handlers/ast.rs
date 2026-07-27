@@ -99,17 +99,18 @@ pub async fn structure(
     let max_results = request.max_results;
 
     // Run in blocking context (M10)
-    let result = tokio::task::spawn_blocking(move || {
-        get_code_structure(&project, language, max_results)
-    })
-    .await
-    .map_err(|e| {
-        HandlerError(
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Task join error: {}", e),
-        )
-    })?
-    .map_err(|e| HandlerError(axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let result =
+        tokio::task::spawn_blocking(move || get_code_structure(&project, language, max_results))
+            .await
+            .map_err(|e| {
+                HandlerError(
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Task join error: {}", e),
+                )
+            })?
+            .map_err(|e| {
+                HandlerError(axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+            })?;
 
     Ok(Json(DaemonResponse::ok(result)))
 }

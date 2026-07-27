@@ -24,8 +24,8 @@ fn test_file_structure_definitions_default_empty() {
 }
 
 #[test]
-fn test_file_structure_definitions_skip_when_empty() {
-    // When definitions is empty, it should NOT appear in serialized JSON
+fn test_file_structure_definitions_stable_when_empty() {
+    // Canonical structure JSON always exposes definitions as an array.
     let fs = FileStructure {
         path: std::path::PathBuf::from("test.py"),
         functions: vec!["foo".to_string()],
@@ -35,11 +35,8 @@ fn test_file_structure_definitions_skip_when_empty() {
         imports: vec![],
         definitions: vec![],
     };
-    let json = serde_json::to_string(&fs).unwrap();
-    assert!(
-        !json.contains("definitions"),
-        "Empty definitions should be skipped in JSON"
-    );
+    let json = serde_json::to_value(&fs).unwrap();
+    assert_eq!(json["definitions"], serde_json::json!([]));
 }
 
 #[test]

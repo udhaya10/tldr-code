@@ -76,7 +76,7 @@ fn func_count(v: &serde_json::Value) -> usize {
     v["functions"].as_array().map(|a| a.len()).unwrap_or(0)
 }
 
-fn entry_point<'a>(v: &'a serde_json::Value) -> &'a str {
+fn entry_point(v: &serde_json::Value) -> &str {
     v["entry_point"].as_str().unwrap_or("")
 }
 

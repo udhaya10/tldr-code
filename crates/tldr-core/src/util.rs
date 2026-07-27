@@ -90,8 +90,7 @@ pub fn current_rss_bytes() -> Option<u64> {
     unsafe {
         let mut info: mach_task_basic_info = std::mem::zeroed();
         let mut count =
-            (std::mem::size_of::<mach_task_basic_info>() / std::mem::size_of::<natural_t>())
-                as u32;
+            (std::mem::size_of::<mach_task_basic_info>() / std::mem::size_of::<natural_t>()) as u32;
         let kr = task_info(
             mach_task_self_,
             MACH_TASK_BASIC_INFO,

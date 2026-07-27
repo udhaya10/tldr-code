@@ -680,54 +680,6 @@ impl RedbStore {
         transaction.commit().map_err(redb_error)
     }
 
-    /// Atomically roll back to the retained previous complete generation.
-    pub fn rollback_generation(&self) -> TldrResult<Option<u64>> {
-        let mut transaction = self.database.begin_write().map_err(redb_error)?;
-        transaction
-            .set_durability(Durability::Immediate)
-            .map_err(redb_error)?;
-        let (active, previous) = {
-            let metadata = transaction.open_table(METADATA).map_err(redb_error)?;
-            let active = {
-                let value = metadata.get(ACTIVE_GENERATION_KEY).map_err(redb_error)?;
-                value.and_then(|value| decode_u64(value.value()))
-            };
-            let previous = {
-                let value = metadata.get(PREVIOUS_GENERATION_KEY).map_err(redb_error)?;
-                value.and_then(|value| decode_u64(value.value()))
-            };
-            (active, previous)
-        };
-        let Some(previous) = previous else {
-            return Ok(None);
-        };
-        {
-            let generations = transaction.open_table(GENERATIONS).map_err(redb_error)?;
-            let value = generations
-                .get(previous)
-                .map_err(redb_error)?
-                .ok_or_else(|| store_error("previous generation metadata is missing"))?;
-            let record: StoredGeneration =
-                serde_json::from_slice(value.value()).map_err(serialization_error)?;
-            if record.state != GenerationState::Complete {
-                return Err(store_error("previous generation is incomplete"));
-            }
-        }
-        {
-            let mut metadata = transaction.open_table(METADATA).map_err(redb_error)?;
-            metadata
-                .insert(ACTIVE_GENERATION_KEY, previous.to_le_bytes().as_slice())
-                .map_err(redb_error)?;
-            if let Some(active) = active {
-                metadata
-                    .insert(PREVIOUS_GENERATION_KEY, active.to_le_bytes().as_slice())
-                    .map_err(redb_error)?;
-            }
-        }
-        transaction.commit().map_err(redb_error)?;
-        Ok(Some(previous))
-    }
-
     /// Return the generation atomically selected for serving.
     pub fn active_generation(&self) -> TldrResult<Option<u64>> {
         let transaction = self.database.begin_read().map_err(redb_error)?;
@@ -736,6 +688,55 @@ impl RedbStore {
             .get(ACTIVE_GENERATION_KEY)
             .map_err(redb_error)?
             .and_then(|value| decode_u64(value.value())))
+    }
+
+    /// Return the retained rollback generation.
+    pub fn previous_generation(&self) -> TldrResult<Option<u64>> {
+        let transaction = self.database.begin_read().map_err(redb_error)?;
+        let metadata = transaction.open_table(METADATA).map_err(redb_error)?;
+        Ok(metadata
+            .get(PREVIOUS_GENERATION_KEY)
+            .map_err(redb_error)?
+            .and_then(|value| decode_u64(value.value())))
+    }
+
+    /// Select any retained complete generation and preserve the former active
+    /// generation as the next rollback target.
+    pub fn select_complete_generation(&self, generation: u64) -> TldrResult<()> {
+        let mut transaction = self.database.begin_write().map_err(redb_error)?;
+        transaction
+            .set_durability(Durability::Immediate)
+            .map_err(redb_error)?;
+        {
+            let generations = transaction.open_table(GENERATIONS).map_err(redb_error)?;
+            let value = generations
+                .get(generation)
+                .map_err(redb_error)?
+                .ok_or_else(|| store_error(format!("generation {generation} is missing")))?;
+            let record: StoredGeneration =
+                serde_json::from_slice(value.value()).map_err(serialization_error)?;
+            if record.state != GenerationState::Complete {
+                return Err(store_error(format!(
+                    "generation {generation} is not complete"
+                )));
+            }
+        }
+        {
+            let mut metadata = transaction.open_table(METADATA).map_err(redb_error)?;
+            let active = {
+                let value = metadata.get(ACTIVE_GENERATION_KEY).map_err(redb_error)?;
+                value.map(|value| value.value().to_vec())
+            };
+            if let Some(active) = active {
+                metadata
+                    .insert(PREVIOUS_GENERATION_KEY, active.as_slice())
+                    .map_err(redb_error)?;
+            }
+            metadata
+                .insert(ACTIVE_GENERATION_KEY, generation.to_le_bytes().as_slice())
+                .map_err(redb_error)?;
+        }
+        transaction.commit().map_err(redb_error)
     }
 
     /// Read one generation's identity and publication state.

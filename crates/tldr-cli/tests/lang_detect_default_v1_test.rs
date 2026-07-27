@@ -32,6 +32,7 @@ const MISSING_PATH: &str = "/tmp/tldr-lang-detect-default-v1-does-not-exist-xyz1
 
 fn run_tldr(args: &[&str]) -> (i32, String, String) {
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("tldr"));
+    cmd.env("TLDR_ONESHOT", "1");
     let output = cmd.args(args).output().expect("tldr binary missing");
     let code = output.status.code().unwrap_or(-1);
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();

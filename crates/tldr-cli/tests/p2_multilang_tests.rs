@@ -19,7 +19,9 @@ use tempfile::TempDir;
 
 /// Get the test binary
 fn tldr_cmd() -> Command {
-    Command::new(assert_cmd::cargo::cargo_bin!("tldr"))
+    let mut command = Command::new(assert_cmd::cargo::cargo_bin!("tldr"));
+    command.env("TLDR_ONESHOT", "1");
+    command
 }
 
 /// Helper to create a test file in a temp directory

@@ -107,10 +107,10 @@
 - Modify: `docs/STRUCTURAL_EMBEDDING_PIPELINE.md`
 - Test: `crates/tldr-core/src/semantic/rollout.rs`
 
-- [ ] Persist thresholds before comparison and expand evaluation across oversized, nested, NL-to-code, code-to-code, and cross-language cases.
-- [ ] Compare old/new complete generations for Recall, MRR, nDCG, latency, wall time, index size, cache hits, delta scope, and RSS.
-- [ ] Add explicit generation selection, default the passing structural generation, and preserve rollback for one stable release.
-- [ ] Run the final quality, cold-memory, wall-time, delta, recovery, and workspace gates; close `.11` and parent `TLDR-9bxa`.
+- [x] Persist thresholds before comparison and expand evaluation across oversized, nested, NL-to-code, code-to-code, and cross-language cases.
+- [x] Compare old/new complete generations for Recall, MRR, nDCG, latency, wall time, index size, cache hits, delta scope, and RSS.
+- [x] Add explicit generation selection, default the passing structural generation, and preserve rollback for one stable release.
+- [x] Run the final quality, cold-memory, wall-time, delta, recovery, and workspace gates; close `.11` and parent `TLDR-9bxa`.
 
 ### Task 8: Program hygiene and delivery
 
@@ -118,6 +118,6 @@
 - Modify: Beads issues `TLDR-9bxa`, `TLDR-9bxa.5` through `TLDR-9bxa.11`
 
 - [x] Remove only proven generated junk (`tldr-smoke-report/`) recoverably; retain caches, research evidence, IDE state, and benchmark inputs.
-- [ ] Update and close each Beads epic only after its acceptance evidence exists.
-- [ ] Commit and push at epic boundaries, synchronize Dolt, and keep the branch clean.
-- [ ] Run the full workspace build/test/lint gate once after all child epics integrate.
+- [x] Update and close each Beads epic only after its acceptance evidence exists.
+- [x] Commit and push at epic boundaries, synchronize Dolt, and keep the branch clean.
+- [x] Run the full workspace build/test/lint gate once after all child epics integrate.

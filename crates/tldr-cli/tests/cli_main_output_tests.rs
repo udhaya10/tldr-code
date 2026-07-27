@@ -12,6 +12,12 @@ use std::fs;
 use std::process::Command;
 use tempfile::TempDir;
 
+fn tldr_cmd() -> Command {
+    let mut command = Command::new(assert_cmd::cargo::cargo_bin!("tldr"));
+    command.env("TLDR_ONESHOT", "1");
+    command
+}
+
 // =============================================================================
 // Test Fixtures
 // =============================================================================
@@ -88,7 +94,7 @@ fn create_empty_project() -> TempDir {
 /// Test: --help shows usage information
 #[test]
 fn test_cli_help_shows_usage() {
-    let output = Command::new(assert_cmd::cargo::cargo_bin!("tldr"))
+    let output = tldr_cmd()
         .args(["--help"])
         .output()
         .expect("Failed to execute tldr --help");
@@ -103,7 +109,7 @@ fn test_cli_help_shows_usage() {
 /// Test: --version shows version number
 #[test]
 fn test_cli_version_shows_version() {
-    let output = Command::new(assert_cmd::cargo::cargo_bin!("tldr"))
+    let output = tldr_cmd()
         .args(["--version"])
         .output()
         .expect("Failed to execute tldr --version");
@@ -120,7 +126,7 @@ fn test_cli_version_shows_version() {
 /// Test: -h shows short help
 #[test]
 fn test_cli_short_help() {
-    let output = Command::new(assert_cmd::cargo::cargo_bin!("tldr"))
+    let output = tldr_cmd()
         .args(["-h"])
         .output()
         .expect("Failed to execute tldr -h");
@@ -133,7 +139,7 @@ fn test_cli_short_help() {
 /// Test: -V shows short version
 #[test]
 fn test_cli_short_version() {
-    let output = Command::new(assert_cmd::cargo::cargo_bin!("tldr"))
+    let output = tldr_cmd()
         .args(["-V"])
         .output()
         .expect("Failed to execute tldr -V");
@@ -144,7 +150,7 @@ fn test_cli_short_version() {
 /// Test: No subcommand shows help
 #[test]
 fn test_cli_no_subcommand_shows_help() {
-    let output = Command::new(assert_cmd::cargo::cargo_bin!("tldr"))
+    let output = tldr_cmd()
         .output()
         .expect("Failed to execute tldr without args");
 
@@ -161,7 +167,7 @@ fn test_cli_no_subcommand_shows_help() {
 /// Test: Invalid subcommand shows error
 #[test]
 fn test_cli_invalid_subcommand() {
-    let output = Command::new(assert_cmd::cargo::cargo_bin!("tldr"))
+    let output = tldr_cmd()
         .args(["invalidcommand"])
         .output()
         .expect("Failed to execute tldr with invalid command");
@@ -179,7 +185,7 @@ fn test_cli_invalid_subcommand() {
 #[test]
 fn test_cli_format_option_json() {
     let temp_dir = create_test_project();
-    let output = Command::new(assert_cmd::cargo::cargo_bin!("tldr"))
+    let output = tldr_cmd()
         .args([
             "tree",
             temp_dir.path().to_str().unwrap(),
@@ -202,7 +208,7 @@ fn test_cli_format_option_json() {
 #[test]
 fn test_cli_format_option_text() {
     let temp_dir = create_test_project();
-    let output = Command::new(assert_cmd::cargo::cargo_bin!("tldr"))
+    let output = tldr_cmd()
         .args([
             "tree",
             temp_dir.path().to_str().unwrap(),
@@ -227,7 +233,7 @@ fn test_cli_format_option_text() {
 #[test]
 fn test_cli_format_option_compact() {
     let temp_dir = create_test_project();
-    let output = Command::new(assert_cmd::cargo::cargo_bin!("tldr"))
+    let output = tldr_cmd()
         .args([
             "tree",
             temp_dir.path().to_str().unwrap(),
@@ -266,7 +272,7 @@ fn test_cli_format_option_sarif() {
     )
     .unwrap();
 
-    let output = Command::new(assert_cmd::cargo::cargo_bin!("tldr"))
+    let output = tldr_cmd()
         .args([
             "clones",
             temp_dir.path().to_str().unwrap(),
@@ -290,7 +296,7 @@ fn test_cli_format_option_sarif() {
 #[test]
 fn test_cli_format_option_dot() {
     let temp_dir = create_test_project();
-    let output = Command::new(assert_cmd::cargo::cargo_bin!("tldr"))
+    let output = tldr_cmd()
         .args([
             "calls",
             temp_dir.path().to_str().unwrap(),
@@ -316,7 +322,7 @@ fn test_cli_format_option_dot() {
 #[test]
 fn test_cli_invalid_format_rejected() {
     let temp_dir = create_test_project();
-    let output = Command::new(assert_cmd::cargo::cargo_bin!("tldr"))
+    let output = tldr_cmd()
         .args([
             "tree",
             temp_dir.path().to_str().unwrap(),
@@ -342,7 +348,7 @@ fn test_cli_invalid_format_rejected() {
 #[test]
 fn test_cli_quiet_flag() {
     let temp_dir = create_test_project();
-    let output = Command::new(assert_cmd::cargo::cargo_bin!("tldr"))
+    let output = tldr_cmd()
         .args(["tree", temp_dir.path().to_str().unwrap(), "-q"])
         .output()
         .expect("Failed to execute with -q");
@@ -361,7 +367,7 @@ fn test_cli_quiet_flag() {
 #[test]
 fn test_cli_verbose_flag() {
     let temp_dir = create_test_project();
-    let output = Command::new(assert_cmd::cargo::cargo_bin!("tldr"))
+    let output = tldr_cmd()
         .args(["tree", temp_dir.path().to_str().unwrap(), "-v", "-q"])
         .output()
         .expect("Failed to execute with -v");
@@ -373,7 +379,7 @@ fn test_cli_verbose_flag() {
 #[test]
 fn test_cli_lang_option() {
     let temp_dir = create_test_project();
-    let output = Command::new(assert_cmd::cargo::cargo_bin!("tldr"))
+    let output = tldr_cmd()
         .args([
             "tree",
             temp_dir.path().to_str().unwrap(),
@@ -391,7 +397,7 @@ fn test_cli_lang_option() {
 #[test]
 fn test_cli_invalid_lang_behavior() {
     let temp_dir = create_test_project();
-    let output = Command::new(assert_cmd::cargo::cargo_bin!("tldr"))
+    let output = tldr_cmd()
         .args([
             "tree",
             temp_dir.path().to_str().unwrap(),
@@ -411,7 +417,7 @@ fn test_cli_invalid_lang_behavior() {
 #[test]
 fn test_cli_global_flags_tree() {
     let temp_dir = create_test_project();
-    let output = Command::new(assert_cmd::cargo::cargo_bin!("tldr"))
+    let output = tldr_cmd()
         .args([
             "tree",
             temp_dir.path().to_str().unwrap(),
@@ -432,7 +438,7 @@ fn test_cli_global_flags_tree() {
 #[test]
 fn test_cli_global_flags_structure() {
     let temp_dir = create_test_project();
-    let output = Command::new(assert_cmd::cargo::cargo_bin!("tldr"))
+    let output = tldr_cmd()
         .args([
             "structure",
             temp_dir.path().to_str().unwrap(),
@@ -455,7 +461,7 @@ fn test_cli_global_flags_structure() {
 #[test]
 fn test_cli_global_flags_calls() {
     let temp_dir = create_test_project();
-    let output = Command::new(assert_cmd::cargo::cargo_bin!("tldr"))
+    let output = tldr_cmd()
         .args([
             "calls",
             temp_dir.path().to_str().unwrap(),
@@ -476,7 +482,7 @@ fn test_cli_global_flags_calls() {
 #[test]
 fn test_cli_command_alias_tree_t() {
     let temp_dir = create_test_project();
-    let output = Command::new(assert_cmd::cargo::cargo_bin!("tldr"))
+    let output = tldr_cmd()
         .args(["t", temp_dir.path().to_str().unwrap(), "-q"])
         .output()
         .expect("Failed to execute t alias");
@@ -488,7 +494,7 @@ fn test_cli_command_alias_tree_t() {
 #[test]
 fn test_cli_command_alias_structure_s() {
     let temp_dir = create_test_project();
-    let output = Command::new(assert_cmd::cargo::cargo_bin!("tldr"))
+    let output = tldr_cmd()
         .args(["s", temp_dir.path().to_str().unwrap(), "-q"])
         .output()
         .expect("Failed to execute s alias");
@@ -500,7 +506,7 @@ fn test_cli_command_alias_structure_s() {
 #[test]
 fn test_cli_command_alias_calls_c() {
     let temp_dir = create_test_project();
-    let output = Command::new(assert_cmd::cargo::cargo_bin!("tldr"))
+    let output = tldr_cmd()
         .args(["c", temp_dir.path().to_str().unwrap(), "-q"])
         .output()
         .expect("Failed to execute c alias");
@@ -512,7 +518,7 @@ fn test_cli_command_alias_calls_c() {
 #[test]
 fn test_cli_command_alias_impact_i() {
     let temp_dir = create_multi_file_project();
-    let output = Command::new(assert_cmd::cargo::cargo_bin!("tldr"))
+    let output = tldr_cmd()
         .args(["i", "helper", temp_dir.path().to_str().unwrap(), "-q"])
         .output()
         .expect("Failed to execute i alias");
@@ -524,7 +530,7 @@ fn test_cli_command_alias_impact_i() {
 #[test]
 fn test_cli_command_alias_dead_d() {
     let temp_dir = create_test_project();
-    let output = Command::new(assert_cmd::cargo::cargo_bin!("tldr"))
+    let output = tldr_cmd()
         .args(["d", temp_dir.path().to_str().unwrap(), "-q"])
         .output()
         .expect("Failed to execute d alias");
@@ -540,7 +546,7 @@ fn test_cli_command_alias_dead_d() {
 #[test]
 fn test_output_json_valid() {
     let temp_dir = create_test_project();
-    let output = Command::new(assert_cmd::cargo::cargo_bin!("tldr"))
+    let output = tldr_cmd()
         .args([
             "tree",
             temp_dir.path().to_str().unwrap(),
@@ -568,7 +574,7 @@ fn test_output_json_valid() {
 #[test]
 fn test_output_text_formatting() {
     let temp_dir = create_multi_file_project();
-    let output = Command::new(assert_cmd::cargo::cargo_bin!("tldr"))
+    let output = tldr_cmd()
         .args([
             "tree",
             temp_dir.path().to_str().unwrap(),
@@ -594,7 +600,7 @@ fn test_output_text_formatting() {
 #[test]
 fn test_output_structure_text_format() {
     let temp_dir = create_test_project();
-    let output = Command::new(assert_cmd::cargo::cargo_bin!("tldr"))
+    let output = tldr_cmd()
         .args([
             "structure",
             temp_dir.path().to_str().unwrap(),
@@ -622,7 +628,7 @@ fn test_output_format_consistency() {
     let temp_dir = create_test_project();
 
     // Run twice with same args
-    let output1 = Command::new(assert_cmd::cargo::cargo_bin!("tldr"))
+    let output1 = tldr_cmd()
         .args([
             "tree",
             temp_dir.path().to_str().unwrap(),
@@ -633,7 +639,7 @@ fn test_output_format_consistency() {
         .output()
         .expect("Failed first execution");
 
-    let output2 = Command::new(assert_cmd::cargo::cargo_bin!("tldr"))
+    let output2 = tldr_cmd()
         .args([
             "tree",
             temp_dir.path().to_str().unwrap(),
@@ -659,13 +665,13 @@ fn test_output_default_format_json() {
     let temp_dir = create_test_project();
 
     // Without -f flag
-    let output1 = Command::new(assert_cmd::cargo::cargo_bin!("tldr"))
+    let output1 = tldr_cmd()
         .args(["tree", temp_dir.path().to_str().unwrap(), "-q"])
         .output()
         .expect("Failed without format");
 
     // With -f json
-    let output2 = Command::new(assert_cmd::cargo::cargo_bin!("tldr"))
+    let output2 = tldr_cmd()
         .args([
             "tree",
             temp_dir.path().to_str().unwrap(),
@@ -691,7 +697,7 @@ fn test_output_default_format_json() {
 /// Test: Output with non-existent path
 #[test]
 fn test_output_nonexistent_path() {
-    let output = Command::new(assert_cmd::cargo::cargo_bin!("tldr"))
+    let output = tldr_cmd()
         .args(["tree", "/nonexistent/path/12345", "-q"])
         .output()
         .expect("Failed to execute");
@@ -714,7 +720,7 @@ fn test_output_file_instead_of_directory() {
     let temp_dir = create_test_project();
     let file_path = temp_dir.path().join("main.py");
 
-    let output = Command::new(assert_cmd::cargo::cargo_bin!("tldr"))
+    let output = tldr_cmd()
         .args(["tree", file_path.to_str().unwrap(), "-q"])
         .output()
         .expect("Failed to execute");
@@ -742,7 +748,7 @@ fn test_output_file_instead_of_directory() {
 #[test]
 fn test_output_compact_minified() {
     let temp_dir = create_test_project();
-    let output = Command::new(assert_cmd::cargo::cargo_bin!("tldr"))
+    let output = tldr_cmd()
         .args([
             "tree",
             temp_dir.path().to_str().unwrap(),
@@ -773,7 +779,7 @@ fn test_output_compact_minified() {
 #[test]
 fn test_output_calls_text_format() {
     let temp_dir = create_multi_file_project();
-    let output = Command::new(assert_cmd::cargo::cargo_bin!("tldr"))
+    let output = tldr_cmd()
         .args([
             "calls",
             temp_dir.path().to_str().unwrap(),
@@ -799,7 +805,7 @@ fn test_output_calls_text_format() {
 #[test]
 fn test_output_impact_text_format() {
     let temp_dir = create_multi_file_project();
-    let output = Command::new(assert_cmd::cargo::cargo_bin!("tldr"))
+    let output = tldr_cmd()
         .args([
             "impact",
             "helper",
@@ -826,7 +832,7 @@ fn test_output_impact_text_format() {
 #[test]
 fn test_output_search_format() {
     let temp_dir = create_test_project();
-    let output = Command::new(assert_cmd::cargo::cargo_bin!("tldr"))
+    let output = tldr_cmd()
         .args([
             "search",
             "def helper",
@@ -854,7 +860,7 @@ fn test_output_search_format() {
 #[test]
 fn test_exit_code_success() {
     let temp_dir = create_test_project();
-    let output = Command::new(assert_cmd::cargo::cargo_bin!("tldr"))
+    let output = tldr_cmd()
         .args(["tree", temp_dir.path().to_str().unwrap(), "-q"])
         .output()
         .expect("Failed to execute");
@@ -871,7 +877,7 @@ fn test_exit_code_success() {
 /// Note: Different error types could have different codes - BUG-004
 #[test]
 fn test_exit_code_failure() {
-    let output = Command::new(assert_cmd::cargo::cargo_bin!("tldr"))
+    let output = tldr_cmd()
         .args(["tree", "/nonexistent/path/12345", "-q"])
         .output()
         .expect("Failed to execute");
@@ -890,7 +896,7 @@ fn test_exit_code_failure() {
 /// Test: Error message format
 #[test]
 fn test_error_message_format() {
-    let output = Command::new(assert_cmd::cargo::cargo_bin!("tldr"))
+    let output = tldr_cmd()
         .args(["tree", "/nonexistent/path/12345"])
         .output()
         .expect("Failed to execute");
@@ -906,7 +912,7 @@ fn test_error_message_format() {
 /// Test: Error with verbose flag shows more details
 #[test]
 fn test_error_verbose_shows_details() {
-    let output = Command::new(assert_cmd::cargo::cargo_bin!("tldr"))
+    let output = tldr_cmd()
         .args(["tree", "/nonexistent/path/12345", "-v"])
         .output()
         .expect("Failed to execute");
@@ -926,7 +932,7 @@ fn test_error_verbose_shows_details() {
 #[test]
 fn test_error_function_not_found() {
     let temp_dir = create_test_project();
-    let output = Command::new(assert_cmd::cargo::cargo_bin!("tldr"))
+    let output = tldr_cmd()
         .args([
             "impact",
             "nonexistent_function",
@@ -959,7 +965,7 @@ fn test_error_function_not_found() {
 #[test]
 fn test_error_invalid_regex() {
     let temp_dir = create_test_project();
-    let output = Command::new(assert_cmd::cargo::cargo_bin!("tldr"))
+    let output = tldr_cmd()
         .args([
             "search",
             "[invalid(regex",
@@ -1055,7 +1061,7 @@ fn test_signal_interrupt_behavior() {
 #[test]
 fn test_edge_empty_directory() {
     let temp_dir = create_empty_project();
-    let output = Command::new(assert_cmd::cargo::cargo_bin!("tldr"))
+    let output = tldr_cmd()
         .args([
             "tree",
             temp_dir.path().to_str().unwrap(),
@@ -1082,7 +1088,7 @@ fn test_edge_special_characters_in_path() {
     fs::create_dir(&project_path).unwrap();
     fs::write(project_path.join("file.py"), "def foo(): pass\n").unwrap();
 
-    let output = Command::new(assert_cmd::cargo::cargo_bin!("tldr"))
+    let output = tldr_cmd()
         .args(["tree", project_path.to_str().unwrap(), "-f", "json", "-q"])
         .output()
         .expect("Failed to execute");
@@ -1098,7 +1104,7 @@ fn test_edge_unicode_in_path() {
     fs::create_dir(&project_path).unwrap();
     fs::write(project_path.join("文件.py"), "def foo(): pass\n").unwrap();
 
-    let output = Command::new(assert_cmd::cargo::cargo_bin!("tldr"))
+    let output = tldr_cmd()
         .args(["tree", project_path.to_str().unwrap(), "-f", "json", "-q"])
         .output()
         .expect("Failed to execute");
@@ -1110,7 +1116,7 @@ fn test_edge_unicode_in_path() {
 #[test]
 fn test_edge_multiple_flags() {
     let temp_dir = create_test_project();
-    let output = Command::new(assert_cmd::cargo::cargo_bin!("tldr"))
+    let output = tldr_cmd()
         .args([
             "tree",
             temp_dir.path().to_str().unwrap(),
@@ -1134,7 +1140,7 @@ fn test_edge_multiple_flags() {
 fn test_edge_flag_order() {
     let temp_dir = create_test_project();
 
-    let output1 = Command::new(assert_cmd::cargo::cargo_bin!("tldr"))
+    let output1 = tldr_cmd()
         .args([
             "tree",
             "-f",
@@ -1145,7 +1151,7 @@ fn test_edge_flag_order() {
         .output()
         .expect("Failed first execution");
 
-    let output2 = Command::new(assert_cmd::cargo::cargo_bin!("tldr"))
+    let output2 = tldr_cmd()
         .args([
             "tree",
             temp_dir.path().to_str().unwrap(),
@@ -1177,7 +1183,7 @@ fn test_edge_deep_nesting() {
     }
     fs::write(current_path.join("deep.py"), "def deep(): pass\n").unwrap();
 
-    let output = Command::new(assert_cmd::cargo::cargo_bin!("tldr"))
+    let output = tldr_cmd()
         .args(["tree", temp_dir.path().to_str().unwrap(), "-q"])
         .output()
         .expect("Failed to execute");
@@ -1192,7 +1198,7 @@ fn test_edge_binary_file() {
     // Write binary content
     fs::write(temp_dir.path().join("binary.bin"), vec![0u8, 1, 2, 255, 0]).unwrap();
 
-    let output = Command::new(assert_cmd::cargo::cargo_bin!("tldr"))
+    let output = tldr_cmd()
         .args(["tree", temp_dir.path().to_str().unwrap(), "-q"])
         .output()
         .expect("Failed to execute");
@@ -1219,7 +1225,7 @@ fn test_edge_symlink() {
         symlink_file(project_path.join("real.py"), project_path.join("link.py")).unwrap();
     }
 
-    let output = Command::new(assert_cmd::cargo::cargo_bin!("tldr"))
+    let output = tldr_cmd()
         .args(["tree", project_path.to_str().unwrap(), "-q"])
         .output()
         .expect("Failed to execute");
@@ -1306,7 +1312,7 @@ fn test_text_formatters_available() {
 #[test]
 fn test_tree_output_fields() {
     let temp_dir = create_test_project();
-    let output = Command::new(assert_cmd::cargo::cargo_bin!("tldr"))
+    let output = tldr_cmd()
         .args([
             "tree",
             temp_dir.path().to_str().unwrap(),
@@ -1330,7 +1336,7 @@ fn test_tree_output_fields() {
 #[test]
 fn test_structure_output_fields() {
     let temp_dir = create_test_project();
-    let output = Command::new(assert_cmd::cargo::cargo_bin!("tldr"))
+    let output = tldr_cmd()
         .args([
             "structure",
             temp_dir.path().to_str().unwrap(),
@@ -1354,7 +1360,7 @@ fn test_structure_output_fields() {
 #[test]
 fn test_calls_output_fields() {
     let temp_dir = create_multi_file_project();
-    let output = Command::new(assert_cmd::cargo::cargo_bin!("tldr"))
+    let output = tldr_cmd()
         .args([
             "calls",
             temp_dir.path().to_str().unwrap(),
@@ -1385,7 +1391,7 @@ fn test_calls_output_fields() {
 #[test]
 fn test_smells_output_format() {
     let temp_dir = create_test_project();
-    let output = Command::new(assert_cmd::cargo::cargo_bin!("tldr"))
+    let output = tldr_cmd()
         .args([
             "smells",
             temp_dir.path().to_str().unwrap(),
@@ -1407,7 +1413,7 @@ fn test_smells_output_format() {
 #[test]
 fn test_health_output_format() {
     let temp_dir = create_test_project();
-    let output = Command::new(assert_cmd::cargo::cargo_bin!("tldr"))
+    let output = tldr_cmd()
         .args([
             "health",
             temp_dir.path().to_str().unwrap(),
@@ -1429,7 +1435,7 @@ fn test_health_output_format() {
 #[test]
 fn test_stats_output_format() {
     let temp_dir = create_test_project();
-    let output = Command::new(assert_cmd::cargo::cargo_bin!("tldr"))
+    let output = tldr_cmd()
         .args([
             "stats",
             temp_dir.path().to_str().unwrap(),

@@ -18,7 +18,11 @@ use tempfile::TempDir;
 
 fn run_tldr(args: &[&str]) -> (i32, String, String) {
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("tldr"));
-    let output = cmd.args(args).output().expect("tldr binary missing");
+    let output = cmd
+        .env("TLDR_ONESHOT", "1")
+        .args(args)
+        .output()
+        .expect("tldr binary missing");
     let code = output.status.code().unwrap_or(-1);
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();

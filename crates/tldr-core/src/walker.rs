@@ -388,11 +388,7 @@ impl ProjectWalker {
         let mut builder = WalkBuilder::new(&self.root);
         // Shared canonical walk config (hidden, gitignore family, `.tldrignore`,
         // follow_links). See [`apply_canonical_walk_config`].
-        apply_canonical_walk_config(
-            &mut builder,
-            self.exclude_hidden,
-            self.respect_gitignore,
-        );
+        apply_canonical_walk_config(&mut builder, self.exclude_hidden, self.respect_gitignore);
 
         if let Some(depth) = self.max_depth {
             builder.max_depth(Some(depth));
@@ -485,8 +481,7 @@ impl ProjectWalker {
         if self.default_ignore || deny.is_some() {
             let preserve_js_ts = matches!(
                 self.lang_hint,
-                Some(crate::types::Language::JavaScript)
-                    | Some(crate::types::Language::TypeScript)
+                Some(crate::types::Language::JavaScript) | Some(crate::types::Language::TypeScript)
             );
             if let Some(class) =
                 classify_explicit_path(path, name, is_dir, deny.as_ref(), preserve_js_ts)

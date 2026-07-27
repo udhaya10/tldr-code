@@ -45,6 +45,7 @@ fn smells_default_excludes_test_files() {
     write(&dir, "tests/test_thing.py", &god_class_py("TestThing"));
 
     let out = Command::new(tldr_bin())
+        .env("TLDR_ONESHOT", "1")
         .args(["smells", dir.path().to_str().unwrap(), "--format", "json"])
         .output()
         .expect("tldr smells");
@@ -100,6 +101,7 @@ fn smells_files_filter_limits_scan() {
     write(&dir, "src/quux.py", &god_class_py("Quux"));
 
     let out = Command::new(tldr_bin())
+        .env("TLDR_ONESHOT", "1")
         .args([
             "smells",
             dir.path().to_str().unwrap(),
@@ -134,6 +136,7 @@ fn smells_files_filter_includes_tests_by_default() {
     write(&dir, "tests/test_foo.py", &god_class_py("TestFoo"));
 
     let out = Command::new(tldr_bin())
+        .env("TLDR_ONESHOT", "1")
         .args([
             "smells",
             dir.path().to_str().unwrap(),
@@ -177,6 +180,7 @@ fn smells_files_path_validation_blocks_system_dirs() {
     write(&dir, "src/foo.py", &god_class_py("Foo"));
 
     let out = Command::new(tldr_bin())
+        .env("TLDR_ONESHOT", "1")
         .args([
             "smells",
             dir.path().to_str().unwrap(),

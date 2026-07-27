@@ -29,6 +29,7 @@ use tempfile::TempDir;
 
 fn run_tldr_vuln(path: &std::path::Path, lang: &str, include_tests: bool) -> Value {
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("tldr"));
+    cmd.env("TLDR_ONESHOT", "1");
     cmd.arg("vuln")
         .arg(path)
         .arg("--lang")

@@ -205,11 +205,34 @@ impl GenerationManager {
 
     /// Switch back to the retained previous complete generation.
     pub fn rollback(&self, identity: &ManifestId) -> TldrResult<Option<VectorStore>> {
-        let Some(generation) = self.ledger.rollback_generation()? else {
+        self.select_previous(identity)
+    }
+
+    /// Select a retained complete generation by number.
+    pub fn select(&self, generation: u64, identity: &ManifestId) -> TldrResult<VectorStore> {
+        let record = self
+            .ledger
+            .generation(generation)?
+            .ok_or_else(|| generation_error(format!("generation {generation} is missing")))?;
+        if record.state != GenerationState::Complete
+            || record.dimensions != identity.dimensions
+            || record.manifest_identity != serde_json::to_vec(identity).map_err(generation_error)?
+        {
+            return Err(generation_error(
+                "selected generation is incomplete or incompatible",
+            ));
+        }
+        self.ledger.select_complete_generation(generation)?;
+        activate_current(&self.directory, generation)?;
+        self.load(identity)
+    }
+
+    /// Select the retained previous generation without discarding rollback.
+    pub fn select_previous(&self, identity: &ManifestId) -> TldrResult<Option<VectorStore>> {
+        let Some(generation) = self.ledger.previous_generation()? else {
             return Ok(None);
         };
-        activate_current(&self.directory, generation)?;
-        self.load(identity).map(Some)
+        self.select(generation, identity).map(Some)
     }
 }
 
@@ -309,6 +332,8 @@ mod tests {
         .unwrap();
         assert!(manager.load(&id).unwrap().contains(2));
         assert!(manager.rollback(&id).unwrap().unwrap().contains(1));
+        assert!(manager.select(second, &id).unwrap().contains(2));
+        assert!(manager.select_previous(&id).unwrap().unwrap().contains(1));
         assert_ne!(first, second);
         std::fs::write(directory.path().join("unrelated.keep"), b"keep").unwrap();
         assert!(directory.path().join("unrelated.keep").exists());

@@ -563,7 +563,7 @@ fn p18_nonreg_java_reaching_defs_no_field_definite_fp() {
         })
         .unwrap_or_default();
     assert!(
-        !definite.iter().any(|d| *d == "owners"),
+        !definite.contains(&"owners"),
         "non-regression (P14.AGG14-12): java field `owners` must not be definite-uninit; got {:?}",
         definite
     );

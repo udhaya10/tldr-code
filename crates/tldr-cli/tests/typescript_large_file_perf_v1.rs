@@ -28,7 +28,9 @@ use std::time::{Duration, Instant};
 use tempfile::tempdir;
 
 fn tldr_cmd() -> Command {
-    Command::new(assert_cmd::cargo::cargo_bin!("tldr"))
+    let mut command = Command::new(assert_cmd::cargo::cargo_bin!("tldr"));
+    command.env("TLDR_ONESHOT", "1");
+    command
 }
 
 /// Cap from `tldr_core::fs::oversize::MAX_AUTOGEN_FILE_SIZE_BYTES`.

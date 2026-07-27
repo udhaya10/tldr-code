@@ -22,7 +22,9 @@ use tempfile::tempdir;
 use tldr_core::fs::oversize::MAX_AUTOGEN_FILE_SIZE_BYTES;
 
 fn tldr_cmd() -> Command {
-    Command::new(assert_cmd::cargo::cargo_bin!("tldr"))
+    let mut command = Command::new(assert_cmd::cargo::cargo_bin!("tldr"));
+    command.env("TLDR_ONESHOT", "1");
+    command
 }
 
 /// `tldr deps` MUST soft-skip oversize files (per the central `oversize`
@@ -47,7 +49,7 @@ fn test_deps_skips_oversize_files_gracefully() {
     let mut bytes: Vec<u8> = Vec::new();
     bytes.extend_from_slice(b"export declare const padded: string;\n");
     let pad_size = (MAX_AUTOGEN_FILE_SIZE_BYTES as usize) + 16 * 1024; // cap + 16KB
-    bytes.extend(std::iter::repeat(b' ').take(pad_size));
+    bytes.extend(std::iter::repeat_n(b' ', pad_size));
     bytes.extend_from_slice(b"\n");
     fs::write(dir.path().join("dom.generated.d.ts"), bytes).unwrap();
 

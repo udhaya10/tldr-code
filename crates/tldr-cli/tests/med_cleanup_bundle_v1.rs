@@ -5,7 +5,7 @@
 //!   M2  definition exits non-zero on unresolved
 //!   M3  available skips comments / docstrings
 //!   M7  Ruby module nested classes don't leak into God Class
-//!   M14 smells emits stderr note about --deep when default
+//!   M14 smells emits a report warning about --deep when default
 //!   M15 churn text suppresses per-file ranks on degenerate-shallow
 //!   M16 similar aggregates per file by default
 //!   M18 verify exposes coverage.scope
@@ -17,7 +17,9 @@ use std::process::Command;
 use tempfile::TempDir;
 
 fn tldr_cmd() -> Command {
-    Command::new(assert_cmd::cargo::cargo_bin!("tldr"))
+    let mut command = Command::new(assert_cmd::cargo::cargo_bin!("tldr"));
+    command.env("TLDR_ONESHOT", "1");
+    command
 }
 
 // =============================================================================
@@ -147,11 +149,11 @@ fn m14_smells_notes_deep_only_analyzers() {
         .args(["smells", temp.path().to_str().unwrap()])
         .output()
         .unwrap();
-    let stderr = String::from_utf8_lossy(&out.stderr);
+    let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        stderr.contains("--deep") && stderr.contains("smell analyzers require"),
-        "Expected --deep notice on stderr; got: {}",
-        stderr
+        stdout.contains("--deep") && stdout.contains("smell analyzers require"),
+        "Expected --deep warning in the report; got: {}",
+        stdout
     );
 }
 
@@ -165,11 +167,11 @@ fn m14_smells_no_note_with_deep() {
         .args(["smells", temp.path().to_str().unwrap(), "--deep"])
         .output()
         .unwrap();
-    let stderr = String::from_utf8_lossy(&out.stderr);
+    let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        !stderr.contains("smell analyzers require"),
-        "Did not expect --deep notice when --deep is set; got: {}",
-        stderr
+        !stdout.contains("smell analyzers require"),
+        "Did not expect --deep warning when --deep is set; got: {}",
+        stdout
     );
 }
 

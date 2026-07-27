@@ -31,7 +31,9 @@ use tempfile::TempDir;
 
 /// Get the path to the test binary
 fn tldr_cmd() -> Command {
-    Command::new(assert_cmd::cargo::cargo_bin!("tldr"))
+    let mut command = Command::new(assert_cmd::cargo::cargo_bin!("tldr"));
+    command.env("TLDR_ONESHOT", "1");
+    command
 }
 
 /// Get assert_cmd version for better assertion support
@@ -181,7 +183,7 @@ mod remaining_types {
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct ExplainReport {
-        pub function_name: String,
+        pub function: String,
         pub file: String,
         pub line_start: u32,
         pub line_end: u32,
@@ -234,7 +236,7 @@ mod remaining_types {
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct SecureReport {
         pub wrapper: String,
-        pub path: String,
+        pub root: String,
         pub findings: Vec<SecureFinding>,
         pub summary: SecureSummary,
         #[serde(default)]
@@ -596,6 +598,11 @@ def unsafe_query(user_input):
 def unsafe_command(filename):
     """Command injection vulnerability."""
     os.system(f"cat {filename}")
+
+def tainted_command():
+    """Request input flows directly to a command sink."""
+    filename = request.args.get("filename")
+    os.system(filename)
 
 def unsafe_deserialize(data):
     """Insecure deserialization."""
@@ -1124,7 +1131,7 @@ mod explain_command {
         let report: ExplainReport =
             serde_json::from_str(&stdout).expect("Should return valid JSON ExplainReport");
 
-        assert_eq!(report.function_name, "calculate_total");
+        assert_eq!(report.function, "calculate_total");
         assert!(
             !report.signature.params.is_empty(),
             "Should have parameters"
@@ -1313,7 +1320,7 @@ mod explain_command {
         let value: Value = serde_json::from_str(&stdout).expect("Should be valid JSON");
 
         // Verify required fields
-        assert!(value.get("function_name").is_some());
+        assert!(value.get("function").is_some());
         assert!(value.get("file").is_some());
         assert!(value.get("line_start").is_some());
         assert!(value.get("signature").is_some());
@@ -1538,7 +1545,7 @@ mod secure_command {
         let value: Value = serde_json::from_str(&stdout).expect("Should be valid JSON");
 
         assert!(value.get("wrapper").is_some());
-        assert!(value.get("path").is_some());
+        assert!(value.get("root").is_some());
         assert!(value.get("findings").is_some());
         assert!(value.get("summary").is_some());
 
@@ -1772,7 +1779,7 @@ result = len([1, 2, 3])
         let temp = TempDir::new().unwrap();
         let file_path = create_test_file(&temp, "sample.py", PYTHON_DEFINITION_SAMPLE);
 
-        // Command gracefully handles invalid positions (returns placeholder, exit 0)
+        // Invalid source coordinates are a clear analysis error.
         tldr_assert_cmd()
             .args([
                 "definition",
@@ -1781,7 +1788,8 @@ result = len([1, 2, 3])
                 "0",
             ])
             .assert()
-            .success();
+            .failure()
+            .stderr(predicate::str::contains("line 9999 out of range"));
     }
 
     // -------------------------------------------------------------------------

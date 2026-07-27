@@ -309,6 +309,27 @@ const GOLD: &[(&str, &str, Option<&str>)] = &[
         "semantic/vector_store.rs",
         Some("build"),
     ),
+    // TLDR-9bxa.11: predeclared modality/structure expansion.
+    (
+        "inside a nested cache-miss branch embed only missing documents then persist them",
+        "semantic/vector_store.rs",
+        Some("flush_streaming_window"),
+    ),
+    (
+        "fn cosine_score(left: &[f32], right: &[f32]) -> f32",
+        "semantic/similarity.rs",
+        Some("cosine_similarity"),
+    ),
+    (
+        "oversized function should split recursively without losing its signature",
+        "semantic/structural_planner.rs",
+        Some("plan_chunks"),
+    ),
+    (
+        "def find_function(tree, name): return next(node for node in tree if node.name == name)",
+        "ast/function_finder.rs",
+        Some("find_function_node"),
+    ),
 ];
 
 const TOP_K: usize = 10;
@@ -391,6 +412,9 @@ fn main() {
     let mut hits_at_5 = 0usize;
     let mut hits_at_10 = 0usize;
     let mut mrr_sum = 0.0f64;
+    let mut ndcg_at_10_sum = 0.0f64;
+    let mut oversized_total = 0usize;
+    let mut oversized_hits = 0usize;
 
     // ASCII-only, pipe-safe rendering (this harness is used in a paste-the-output
     // workflow under TLDR_QUIET=1): a leading status column makes hits/misses
@@ -406,6 +430,11 @@ fn main() {
 
     for (query, want_file, want_fn) in &gold {
         let want_file_n = norm(want_file);
+        let oversized =
+            query.contains("oversized") || query.contains("collapse onnx tensor shapes");
+        if oversized {
+            oversized_total += 1;
+        }
 
         // Dense-only: first chunk whose file matches the expected suffix.
         // Store paths are root-relative, so the suffix match is direct.
@@ -449,6 +478,10 @@ fn main() {
             }
             if r <= 10 {
                 hits_at_10 += 1;
+                ndcg_at_10_sum += 1.0 / ((r + 1) as f64).log2();
+                if oversized {
+                    oversized_hits += 1;
+                }
             }
             mrr_sum += 1.0 / r as f64;
         } else {
@@ -477,6 +510,13 @@ fn main() {
         gold.len()
     );
     println!("MRR:         {:.3}", mrr_sum / n);
+    println!("nDCG@10:     {:.3}", ndcg_at_10_sum / n);
+    println!(
+        "Oversized:   {:.3}  ({}/{})",
+        oversized_hits as f64 / oversized_total.max(1) as f64,
+        oversized_hits,
+        oversized_total
+    );
 
     // Re-list the queries that fell outside top-10 so the worst cases are visible
     // without re-scanning the table (the [X] rows above).

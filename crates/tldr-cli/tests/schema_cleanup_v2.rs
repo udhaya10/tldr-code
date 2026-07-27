@@ -25,14 +25,15 @@
 //!   exit 0 + empty results + a `warnings` field, and `calls` reports
 //!   `language: null` rather than silently defaulting to Python.
 
-use assert_cmd::prelude::*;
 use serde_json::Value;
 use std::fs;
 use std::process::Command;
 use tempfile::TempDir;
 
 fn tldr_cmd() -> Command {
-    Command::new(assert_cmd::cargo::cargo_bin!("tldr"))
+    let mut command = Command::new(assert_cmd::cargo::cargo_bin!("tldr"));
+    command.env("TLDR_ONESHOT", "1");
+    command
 }
 
 // =============================================================================

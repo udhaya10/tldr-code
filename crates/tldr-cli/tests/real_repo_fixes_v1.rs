@@ -17,6 +17,7 @@ use std::path::Path;
 
 fn run_tldr_json_strict(args: &[&str]) -> Value {
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("tldr"));
+    cmd.env("TLDR_ONESHOT", "1");
     cmd.args(args).arg("--format").arg("json");
     let output = cmd.output().expect("failed to execute tldr");
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();

@@ -57,9 +57,7 @@ fn bench_tree(c: &mut Criterion) {
         group.bench_with_input(
             BenchmarkId::new("get_file_tree", name),
             &full_path,
-            |b, path| {
-                b.iter(|| get_file_tree(black_box(path), None, true))
-            },
+            |b, path| b.iter(|| get_file_tree(black_box(path), None, true)),
         );
     }
     group.finish();
@@ -93,9 +91,7 @@ fn bench_structure(c: &mut Criterion) {
         group.bench_with_input(
             BenchmarkId::new("get_code_structure", name),
             &(full_path.clone(), lang),
-            |b, (path, lang)| {
-                b.iter(|| get_code_structure(black_box(path), *lang, 0))
-            },
+            |b, (path, lang)| b.iter(|| get_code_structure(black_box(path), *lang, 0)),
         );
     }
     group.finish();

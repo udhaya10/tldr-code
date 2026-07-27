@@ -1469,10 +1469,10 @@ impl VectorStore {
 
     /// Build with an explicit document backend.
     ///
-    /// Production callers normally use [`Self::build`], whose default-off
+    /// Production callers normally use [`Self::build`], whose staged-default
     /// selector comes from `TLDR_EMBEDDING_BACKEND`. Tests, benchmarks, and
-    /// staged rollout use this entry point to avoid process-global environment
-    /// mutation.
+    /// rollback validation use this entry point to avoid process-global
+    /// environment mutation.
     pub fn build_with_backend(
         root: &Path,
         options: &BuildOptions,
