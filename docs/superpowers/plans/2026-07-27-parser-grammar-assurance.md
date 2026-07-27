@@ -117,4 +117,4 @@ Remove the stale self-parent blocker on TLDR-lxc.2 while preserving its parent r
 
 - [x] **Step 2: Close TLDR-6rt.5, TLDR-lxc.1, TLDR-lxc.2, TLDR-lxc.4, and TLDR-lxc**
 
-- [ ] **Step 3: Commit, pull/rebase, push Beads, push code, and verify a clean `fork/main`**
+- [x] **Step 3: Commit, pull/rebase, push Beads, push code, and verify a clean `fork/main`**
