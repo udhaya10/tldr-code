@@ -10,6 +10,8 @@ autobins = false
 [lib]
 name = "tldr_daemon"
 path = "src/lib.rs"
+doctest = false
+test = false
 
 [package.metadata.dist]
 dist = false
@@ -41,8 +43,3 @@ dunce = { workspace = true }
 
 # LRU cache for call graph/BM25 (M13)
 lru = { workspace = true }
-
-[dev-dependencies]
-tempfile = { workspace = true }
-tokio-test = "0.4"
-serde_json = { workspace = true }

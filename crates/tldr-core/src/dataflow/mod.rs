@@ -70,9 +70,6 @@ pub mod available;
 pub mod abstract_interp;
 
 // Tests
-#[cfg(test)]
-mod dataflow_tests;
-
 // =============================================================================
 // Re-exports (Phase 12: Integration & Public API)
 // =============================================================================

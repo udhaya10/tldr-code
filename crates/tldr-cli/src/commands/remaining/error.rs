@@ -181,39 +181,3 @@ impl RemainingError {
 
 /// Result type alias for remaining commands
 pub type RemainingResult<T> = Result<T, RemainingError>;
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_file_not_found_error() {
-        let err = RemainingError::file_not_found("/path/to/file.py");
-        assert!(err.to_string().contains("file not found"));
-        assert!(err.to_string().contains("file.py"));
-    }
-
-    #[test]
-    fn test_symbol_not_found_error() {
-        let err = RemainingError::symbol_not_found("my_function", "/path/to/file.py");
-        assert!(err.to_string().contains("my_function"));
-        assert!(err.to_string().contains("not found"));
-    }
-
-    #[test]
-    fn test_exit_codes() {
-        // med-low-schema-cleanup-v1 (N9): file_not_found is now 5
-        // (filesystem-class) and symbol_not_found is now 20
-        // (analysis-class, matches `tldr impact` convention).
-        assert_eq!(RemainingError::file_not_found("/foo").exit_code(), 5);
-        assert_eq!(
-            RemainingError::symbol_not_found("foo", "/bar.py").exit_code(),
-            20
-        );
-        assert_eq!(RemainingError::findings_detected(5).exit_code(), 2);
-        assert_eq!(
-            RemainingError::autodetect_unsupported("nope").exit_code(),
-            2
-        );
-    }
-}

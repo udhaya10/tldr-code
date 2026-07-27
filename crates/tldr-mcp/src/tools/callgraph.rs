@@ -221,28 +221,3 @@ pub fn handle_arch(args: Value) -> ToolsCallResult {
         Err(e) => ToolsCallResult::error(format!("Error: {}", e)),
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn test_handle_calls_missing_args() {
-        let result = handle_calls(json!({}));
-        assert!(result.is_error == Some(true));
-    }
-
-    #[test]
-    fn test_handle_impact_missing_function() {
-        let result = handle_impact(json!({"path": ".", "language": "python"}));
-        assert!(result.is_error == Some(true));
-        assert!(result.content[0].text.contains("Missing required argument"));
-    }
-
-    #[test]
-    fn test_handle_dead_missing_language() {
-        let result = handle_dead(json!({"path": "."}));
-        assert!(result.is_error == Some(true));
-    }
-}

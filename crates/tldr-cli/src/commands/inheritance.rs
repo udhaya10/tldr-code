@@ -162,33 +162,3 @@ impl InheritanceArgs {
         Ok(())
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_parse_inheritance_format() {
-        assert_eq!(
-            parse_inheritance_format("json").unwrap(),
-            InheritanceFormat::Json
-        );
-        assert_eq!(
-            parse_inheritance_format("text").unwrap(),
-            InheritanceFormat::Text
-        );
-        assert_eq!(
-            parse_inheritance_format("dot").unwrap(),
-            InheritanceFormat::Dot
-        );
-        assert_eq!(
-            parse_inheritance_format("graphviz").unwrap(),
-            InheritanceFormat::Dot
-        );
-        assert_eq!(
-            parse_inheritance_format("DOT").unwrap(),
-            InheritanceFormat::Dot
-        );
-        assert!(parse_inheritance_format("invalid").is_err());
-    }
-}

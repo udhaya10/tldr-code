@@ -1,1 +1,0 @@
-app.ts(6,18): error TS2339: Property 'username' does not exist on type 'User'.

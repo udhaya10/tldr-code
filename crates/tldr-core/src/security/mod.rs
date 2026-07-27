@@ -14,9 +14,6 @@ pub mod taint;
 pub mod vuln;
 
 // Taint analysis tests (CFG-based taint tracking)
-#[cfg(test)]
-mod taint_tests;
-
 pub use secrets::{scan_secrets, SecretFinding, SecretsReport, Severity};
 pub use taint::{
     compute_taint, compute_taint_with_tree, detect_sanitizer_ast, detect_sinks_ast,

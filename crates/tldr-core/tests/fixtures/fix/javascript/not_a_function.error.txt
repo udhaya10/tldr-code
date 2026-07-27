@@ -1,5 +1,0 @@
-/app/app.js:2
-const count = items.length();
-                          ^
-TypeError: items.length is not a function
-    at Object.<anonymous> (/app/app.js:2:27)

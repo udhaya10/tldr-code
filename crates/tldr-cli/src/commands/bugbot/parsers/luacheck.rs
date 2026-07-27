@@ -68,38 +68,3 @@ pub fn parse_luacheck_output(stdout: &str) -> Result<Vec<L1Finding>, ParseError>
 
     Ok(findings)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_parse_empty() {
-        assert!(parse_luacheck_output("").unwrap().is_empty());
-    }
-
-    #[test]
-    fn test_parse_finding() {
-        let output = "    main.lua:10:5: (W211) unused variable 'x'";
-        let findings = parse_luacheck_output(output).unwrap();
-        assert_eq!(findings.len(), 1);
-        assert_eq!(findings[0].file, PathBuf::from("main.lua"));
-        assert_eq!(findings[0].line, 10);
-        assert_eq!(findings[0].column, 5);
-        assert_eq!(findings[0].severity, "medium");
-        assert_eq!(findings[0].code, Some("W211".to_string()));
-    }
-
-    #[test]
-    fn test_parse_error() {
-        let output = "bad.lua:1:1: (E011) expected expression near 'end'";
-        let findings = parse_luacheck_output(output).unwrap();
-        assert_eq!(findings[0].severity, "high");
-    }
-
-    #[test]
-    fn test_parse_skips_summary() {
-        let output = "Total: 3 warnings / 1 error in 2 files";
-        assert!(parse_luacheck_output(output).unwrap().is_empty());
-    }
-}

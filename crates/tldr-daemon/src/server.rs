@@ -279,38 +279,3 @@ impl<E: std::error::Error> From<E> for HandlerError {
         HandlerError(StatusCode::INTERNAL_SERVER_ERROR, err.to_string())
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_compute_socket_path() {
-        let path = compute_socket_path(Path::new("/tmp/test-project"), "1.0");
-        assert!(path.to_string_lossy().contains("tldr-"));
-        assert!(path.to_string_lossy().contains("-v1.0.sock"));
-    }
-
-    #[test]
-    fn test_compute_tcp_port() {
-        let port = compute_tcp_port(Path::new("/tmp/test-project"));
-        assert!(port >= 49152);
-        assert!(port < 59152);
-    }
-
-    #[test]
-    fn test_daemon_response_ok() {
-        let response = DaemonResponse::ok("pong");
-        let json = serde_json::to_string(&response).unwrap();
-        assert!(json.contains("\"status\":\"ok\""));
-        assert!(json.contains("\"result\":\"pong\""));
-    }
-
-    #[test]
-    fn test_daemon_response_error() {
-        let response: DaemonResponse<()> = DaemonResponse::error("Something went wrong");
-        let json = serde_json::to_string(&response).unwrap();
-        assert!(json.contains("\"status\":\"error\""));
-        assert!(json.contains("Something went wrong"));
-    }
-}

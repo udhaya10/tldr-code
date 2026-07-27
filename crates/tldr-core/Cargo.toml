@@ -5,9 +5,19 @@ edition = "2021"
 description = "Core analysis engine for TLDR code analysis tool"
 repository = "https://github.com/parcadei/tldr-code"
 license = "AGPL-3.0"
+autobins = false
 
 [package.metadata.dist]
 dist = false
+
+[lib]
+doctest = false
+test = false
+
+[[bin]]
+name = "callgraph_resolution_stats"
+path = "src/bin/callgraph_resolution_stats.rs"
+test = false
 
 [dependencies]
 # Error handling
@@ -133,22 +143,3 @@ semantic = [
 ]
 # Experimental V2 call graph builder with parallel processing (Phase 14)
 experimental_callgraph = []
-
-[dev-dependencies]
-tempfile = { workspace = true }
-md5 = { workspace = true }
-serde_json = { workspace = true }
-proptest = "1.4"
-criterion = { version = "0.5", features = ["html_reports"] }
-
-[[bench]]
-name = "core_benchmarks"
-harness = false
-
-[[bench]]
-name = "enriched_bench"
-harness = false
-
-[[bench]]
-name = "embedding_cache_bench"
-harness = false

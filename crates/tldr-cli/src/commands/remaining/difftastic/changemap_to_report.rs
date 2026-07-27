@@ -751,26 +751,3 @@ fn truncate_name(content: &str) -> String {
         s
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_truncate_name_short() {
-        assert_eq!(truncate_name("hello"), "hello");
-    }
-
-    #[test]
-    fn test_truncate_name_long() {
-        let long = "a".repeat(100);
-        let result = truncate_name(&long);
-        assert_eq!(result.len(), 83); // 80 + "..."
-        assert!(result.ends_with("..."));
-    }
-
-    #[test]
-    fn test_truncate_name_newlines() {
-        assert_eq!(truncate_name("foo\nbar"), "foo bar");
-    }
-}

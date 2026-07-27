@@ -144,30 +144,3 @@ pub fn handle_imports(args: Value) -> ToolsCallResult {
         Err(e) => ToolsCallResult::error(format!("Error: {}", e)),
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn test_handle_tree_missing_path() {
-        let result = handle_tree(json!({}));
-        assert!(result.is_error == Some(true));
-        assert!(result.content[0].text.contains("Missing required argument"));
-    }
-
-    #[test]
-    fn test_handle_tree_path_not_found() {
-        let result = handle_tree(json!({"path": "/nonexistent/path"}));
-        assert!(result.is_error == Some(true));
-        assert!(result.content[0].text.contains("Path not found"));
-    }
-
-    #[test]
-    fn test_handle_structure_missing_language() {
-        let result = handle_structure(json!({"path": "."}));
-        assert!(result.is_error == Some(true));
-        assert!(result.content[0].text.contains("Missing required argument"));
-    }
-}

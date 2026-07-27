@@ -82,28 +82,3 @@ pub struct ProjectFilesReport {
     pub ignore_created: bool,
     pub tldr_dir: PathBuf,
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use tempfile::tempdir;
-
-    #[test]
-    fn ensure_project_files_is_idempotent() {
-        let tmp = tempdir().unwrap();
-        let root = tmp.path();
-        let r1 = ensure_project_files(root).unwrap();
-        assert!(r1.config_created);
-        assert!(r1.ignore_created);
-        let r2 = ensure_project_files(root).unwrap();
-        assert!(!r2.config_created);
-        assert!(!r2.ignore_created);
-        assert!(root.join(".tldr").join("config.json").is_file());
-    }
-
-    #[test]
-    fn resolve_requires_existing_dir() {
-        let err = resolve_project_root(Path::new("/no/such/tldr/init/path")).unwrap_err();
-        assert!(err.to_string().contains("does not exist"));
-    }
-}

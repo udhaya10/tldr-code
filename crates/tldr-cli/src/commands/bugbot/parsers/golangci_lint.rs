@@ -66,35 +66,3 @@ pub fn parse_golangci_lint_output(stdout: &str) -> Result<Vec<L1Finding>, ParseE
 
     Ok(findings)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_parse_empty() {
-        assert!(parse_golangci_lint_output("").unwrap().is_empty());
-    }
-
-    #[test]
-    fn test_parse_no_issues() {
-        let json = r#"{"Issues": []}"#;
-        assert!(parse_golangci_lint_output(json).unwrap().is_empty());
-    }
-
-    #[test]
-    fn test_parse_finding() {
-        let json = r#"{"Issues": [{
-            "FromLinter": "unused",
-            "Text": "func `helper` is unused",
-            "Severity": "warning",
-            "Pos": {"Filename": "main.go", "Line": 10, "Column": 6}
-        }]}"#;
-        let findings = parse_golangci_lint_output(json).unwrap();
-        assert_eq!(findings.len(), 1);
-        assert_eq!(findings[0].file, PathBuf::from("main.go"));
-        assert_eq!(findings[0].line, 10);
-        assert_eq!(findings[0].severity, "medium");
-        assert_eq!(findings[0].code, Some("unused".to_string()));
-    }
-}

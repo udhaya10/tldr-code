@@ -52,6 +52,25 @@ impl IngestionEngine {
 
     /// Build or resume either the complete project or a file subset.
     pub fn ingest(&self, scope: IngestionScope) -> TldrResult<IngestionReport> {
+        self.ingest_with_batch_limit(scope, None)
+    }
+
+    /// Certification hook that interrupts after a fixed number of durable
+    /// batches. A subsequent normal [`Self::ingest`] must resume that job.
+    #[doc(hidden)]
+    pub fn ingest_interrupted_after(
+        &self,
+        scope: IngestionScope,
+        committed_batches: usize,
+    ) -> TldrResult<IngestionReport> {
+        self.ingest_with_batch_limit(scope, Some(committed_batches))
+    }
+
+    fn ingest_with_batch_limit(
+        &self,
+        scope: IngestionScope,
+        batch_limit: Option<usize>,
+    ) -> TldrResult<IngestionReport> {
         let all_files = discover(&self.root);
         let (source_revision, revisions) = source_manifest(&self.root, &all_files)?;
         let active = self.store.active_generation()?.unwrap_or(0);
@@ -184,6 +203,9 @@ impl IngestionEngine {
                 },
                 &job,
             )?;
+            if batch_limit.is_some_and(|limit| offset + 1 >= limit) {
+                return Err(ingestion_error("certification interruption"));
+            }
         }
         manifest_keys.sort_by_key(artifact_order);
         manifest_keys.dedup();
@@ -372,7 +394,13 @@ fn relative(root: &Path, path: &Path) -> String {
 }
 
 fn subject_changed(subject: &ArtifactSubject, changed: &HashSet<String>) -> bool {
-    matches!(subject, ArtifactSubject::File(path) if changed.contains(path))
+    match subject {
+        ArtifactSubject::File(path) => changed.contains(path),
+        ArtifactSubject::Symbol(anchor) => changed
+            .iter()
+            .any(|path| anchor == path || anchor.starts_with(&format!("{path}::"))),
+        ArtifactSubject::Project => false,
+    }
 }
 
 fn artifact_order(key: &ArtifactKey) -> String {

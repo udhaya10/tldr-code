@@ -19,27 +19,3 @@ pub enum Severity {
     /// Critical severity, must fix immediately
     Critical,
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_severity_debug() {
-        assert_eq!(format!("{:?}", Severity::Critical), "Critical");
-    }
-
-    #[test]
-    fn test_severity_clone() {
-        let s = Severity::High;
-        let cloned = s;
-        assert_eq!(s, cloned);
-    }
-
-    #[test]
-    fn test_severity_copy() {
-        let s = Severity::Medium;
-        let copied = s; // Copy
-        assert_eq!(s, copied); // Original still usable
-    }
-}

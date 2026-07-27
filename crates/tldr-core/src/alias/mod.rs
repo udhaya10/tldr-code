@@ -138,6 +138,3 @@ pub fn compute_alias_from_ssa(ssa: &SsaFunction) -> Result<AliasInfo, AliasError
 pub fn compute_alias(ssa: &SsaFunction) -> Result<AliasInfo, AliasError> {
     compute_alias_from_ssa(ssa)
 }
-
-#[cfg(test)]
-mod alias_tests;

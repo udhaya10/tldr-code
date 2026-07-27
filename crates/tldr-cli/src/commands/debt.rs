@@ -134,34 +134,3 @@ fn parse_language(lang: &str) -> Option<Language> {
 fn format_debt_text(report: &DebtReport) -> String {
     report.to_text()
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_parse_language_python() {
-        assert_eq!(parse_language("python"), Some(Language::Python));
-        assert_eq!(parse_language("py"), Some(Language::Python));
-        assert_eq!(parse_language("Python"), Some(Language::Python));
-    }
-
-    #[test]
-    fn test_parse_language_typescript() {
-        assert_eq!(parse_language("typescript"), Some(Language::TypeScript));
-        assert_eq!(parse_language("ts"), Some(Language::TypeScript));
-    }
-
-    #[test]
-    fn test_parse_language_unknown() {
-        assert_eq!(parse_language("unknown"), None);
-        assert_eq!(parse_language(""), None);
-    }
-
-    #[test]
-    fn test_valid_categories() {
-        assert!(VALID_CATEGORIES.contains(&"reliability"));
-        assert!(VALID_CATEGORIES.contains(&"maintainability"));
-        assert!(!VALID_CATEGORIES.contains(&"invalid"));
-    }
-}

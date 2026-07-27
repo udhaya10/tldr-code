@@ -50,34 +50,3 @@ pub fn parse_phpstan_output(stdout: &str) -> Result<Vec<L1Finding>, ParseError> 
 
     Ok(findings)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_parse_empty() {
-        assert!(parse_phpstan_output("").unwrap().is_empty());
-    }
-
-    #[test]
-    fn test_parse_finding() {
-        let json = r#"{"totals": {"errors": 1, "file_errors": 1},
-            "files": {"/var/www/app.php": {"errors": 1, "messages": [{
-                "message": "Variable $x might not be defined.",
-                "line": 15,
-                "ignorable": true
-            }]}}}"#;
-        let findings = parse_phpstan_output(json).unwrap();
-        assert_eq!(findings.len(), 1);
-        assert_eq!(findings[0].file, PathBuf::from("/var/www/app.php"));
-        assert_eq!(findings[0].line, 15);
-        assert_eq!(findings[0].severity, "medium");
-    }
-
-    #[test]
-    fn test_parse_no_files() {
-        let json = r#"{"totals": {"errors": 0}, "files": {}}"#;
-        assert!(parse_phpstan_output(json).unwrap().is_empty());
-    }
-}

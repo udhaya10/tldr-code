@@ -10,6 +10,8 @@ autobins = false
 [lib]
 name = "tldr_mcp"
 path = "src/lib.rs"
+doctest = false
+test = false
 
 [package.metadata.dist]
 dist = false
@@ -20,6 +22,3 @@ tokio = { workspace = true }
 serde_json = { workspace = true }
 serde = { workspace = true }
 anyhow = { workspace = true }
-
-[dev-dependencies]
-tempfile = { workspace = true }

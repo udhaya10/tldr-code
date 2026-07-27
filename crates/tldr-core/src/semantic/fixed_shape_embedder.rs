@@ -216,38 +216,3 @@ impl FixedShapeEmbedder {
         self.backend.shape_observations()
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn backend_selector_defaults_to_passing_candidate_and_preserves_rollback() {
-        assert_eq!(
-            DocumentEmbeddingBackend::parse(None).unwrap(),
-            DocumentEmbeddingBackend::FixedShapeOrt
-        );
-        assert_eq!(
-            DocumentEmbeddingBackend::parse(Some("fastembed")).unwrap(),
-            DocumentEmbeddingBackend::FastEmbed
-        );
-        assert_eq!(
-            DocumentEmbeddingBackend::parse(Some("fixed-shape")).unwrap(),
-            DocumentEmbeddingBackend::FixedShapeOrt
-        );
-        assert!(DocumentEmbeddingBackend::parse(Some("not-a-backend")).is_err());
-    }
-
-    #[test]
-    fn execution_reports_padding_fraction() {
-        let execution = FixedShapeExecution {
-            sequence: 128,
-            batch: 4,
-            real_rows: 3,
-            attended_tokens: 384,
-            tensor_tokens: 512,
-            latency_ms: 1.0,
-        };
-        assert_eq!(execution.padding_fraction(), 0.25);
-    }
-}

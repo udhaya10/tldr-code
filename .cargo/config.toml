@@ -1,0 +1,3 @@
+[alias]
+tldr-smoke = "run -p tldr-contract-tests -- smoke"
+tldr-certification = "run -p tldr-contract-tests -- certification"

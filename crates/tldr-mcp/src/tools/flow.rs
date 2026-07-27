@@ -261,32 +261,3 @@ pub fn handle_pdg(args: Value) -> ToolsCallResult {
         Err(e) => ToolsCallResult::error(format!("Error: {}", e)),
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn test_handle_cfg_missing_args() {
-        let result = handle_cfg(json!({}));
-        assert!(result.is_error == Some(true));
-    }
-
-    #[test]
-    fn test_handle_slice_missing_line() {
-        let result = handle_slice(json!({"file": "test.py", "function": "foo"}));
-        assert!(result.is_error == Some(true));
-        assert!(result.content[0].text.contains("line"));
-    }
-
-    #[test]
-    fn test_handle_dfg_file_not_found() {
-        let result = handle_dfg(json!({
-            "file": "/nonexistent/file.py",
-            "function": "foo"
-        }));
-        assert!(result.is_error == Some(true));
-        assert!(result.content[0].text.contains("File not found"));
-    }
-}

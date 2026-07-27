@@ -66,16 +66,6 @@ impl BulkWorker {
         })
     }
 
-    #[cfg(test)]
-    fn for_test(executable: PathBuf, max_attempts: u32, rss_watermark_bytes: u64) -> Self {
-        Self {
-            executable,
-            max_attempts,
-            rss_watermark_bytes,
-            poll_interval: Duration::from_millis(5),
-        }
-    }
-
     /// Build or load a generation in a disposable process. The prior resident
     /// generation remains untouched until the child durably publishes.
     pub fn build(
@@ -232,98 +222,4 @@ fn process_rss_bytes(pid: u32) -> Option<u64> {
 #[cfg(not(target_os = "linux"))]
 fn process_rss_bytes(_pid: u32) -> Option<u64> {
     None
-}
-
-#[cfg(all(test, unix))]
-mod tests {
-    use super::*;
-    use std::os::unix::fs::PermissionsExt;
-
-    fn script(body: &str) -> (tempfile::TempDir, PathBuf) {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("worker");
-        std::fs::write(&path, format!("#!/bin/sh\nread request\n{body}\n")).unwrap();
-        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&path, permissions).unwrap();
-        (directory, path)
-    }
-
-    #[test]
-    fn bounded_protocol_completion_is_observable() {
-        let (_directory, executable) =
-            script("printf '%s\\n' '{\"event\":\"started\",\"attempt\":1}' '{\"event\":\"completed\",\"vectors\":7}'");
-        let worker = BulkWorker::for_test(executable, 1, u64::MAX);
-        let project = tempfile::tempdir().unwrap();
-        let store = tempfile::tempdir().unwrap();
-        let report = worker
-            .build(
-                project.path(),
-                store.path(),
-                &BuildOptions::default(),
-                None,
-                &BuildCancellation::default(),
-                &[],
-            )
-            .unwrap();
-        assert_eq!(report.vectors, 7);
-        assert_eq!(report.attempts, 1);
-        // Local protocol/process overhead stays negligible relative to a cold
-        // model build; this fixture performs no model work.
-        assert!(report.elapsed_ms < 2_000);
-    }
-
-    #[test]
-    fn crashes_retry_finitely_and_cancellation_stays_responsive() {
-        let (_directory, executable) = script("exit 9");
-        let worker = BulkWorker::for_test(executable, 2, u64::MAX);
-        let project = tempfile::tempdir().unwrap();
-        let store = tempfile::tempdir().unwrap();
-        let cancellation = BuildCancellation::default();
-        let error = worker
-            .build(
-                project.path(),
-                store.path(),
-                &BuildOptions::default(),
-                None,
-                &cancellation,
-                &[],
-            )
-            .unwrap_err();
-        assert!(error.contains("exhausted 2 attempts"));
-
-        cancellation.cancel();
-        let started = Instant::now();
-        assert!(worker
-            .build(
-                project.path(),
-                store.path(),
-                &BuildOptions::default(),
-                None,
-                &cancellation,
-                &[],
-            )
-            .is_err());
-        assert!(started.elapsed() < Duration::from_millis(100));
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn rss_recycling_kills_child_and_reclaims_process_memory() {
-        let (_directory, executable) = script("sleep 2");
-        let worker = BulkWorker::for_test(executable, 1, 1);
-        let project = tempfile::tempdir().unwrap();
-        let store = tempfile::tempdir().unwrap();
-        let started = Instant::now();
-        let result = worker.build(
-            project.path(),
-            store.path(),
-            &BuildOptions::default(),
-            None,
-            &BuildCancellation::default(),
-            &[],
-        );
-        assert!(result.is_err());
-        assert!(started.elapsed() < Duration::from_secs(1));
-    }
 }

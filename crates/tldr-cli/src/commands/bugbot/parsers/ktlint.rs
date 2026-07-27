@@ -50,27 +50,3 @@ pub fn parse_ktlint_output(stdout: &str) -> Result<Vec<L1Finding>, ParseError> {
 
     Ok(findings)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_parse_empty() {
-        assert!(parse_ktlint_output("").unwrap().is_empty());
-        assert!(parse_ktlint_output("[]").unwrap().is_empty());
-    }
-
-    #[test]
-    fn test_parse_finding() {
-        let json = r#"[{"file": "Main.kt", "errors": [{
-            "line": 1, "column": 1,
-            "message": "File must end with a newline",
-            "rule": "standard:final-newline"
-        }]}]"#;
-        let findings = parse_ktlint_output(json).unwrap();
-        assert_eq!(findings.len(), 1);
-        assert_eq!(findings[0].file, PathBuf::from("Main.kt"));
-        assert_eq!(findings[0].code, Some("standard:final-newline".to_string()));
-    }
-}

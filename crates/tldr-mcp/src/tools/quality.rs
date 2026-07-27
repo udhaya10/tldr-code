@@ -360,28 +360,3 @@ pub fn handle_todo(args: Value) -> ToolsCallResult {
         .to_string(),
     )
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn test_handle_context_missing_args() {
-        let result = handle_context(json!({}));
-        assert!(result.is_error == Some(true));
-    }
-
-    #[test]
-    fn test_handle_smells_path_not_found() {
-        let result = handle_smells(json!({"path": "/nonexistent/path"}));
-        assert!(result.is_error == Some(true));
-        assert!(result.content[0].text.contains("Path not found"));
-    }
-
-    #[test]
-    fn test_handle_maintainability_missing_path() {
-        let result = handle_maintainability(json!({}));
-        assert!(result.is_error == Some(true));
-    }
-}

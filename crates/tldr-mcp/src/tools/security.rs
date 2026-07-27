@@ -192,34 +192,3 @@ pub fn handle_secure(args: Value) -> ToolsCallResult {
         .to_string(),
     )
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn test_handle_secrets_missing_path() {
-        let result = handle_secrets(json!({}));
-        assert!(result.is_error == Some(true));
-    }
-
-    #[test]
-    fn test_handle_secrets_path_not_found() {
-        let result = handle_secrets(json!({"path": "/nonexistent/path"}));
-        assert!(result.is_error == Some(true));
-        assert!(result.content[0].text.contains("Path not found"));
-    }
-
-    #[test]
-    fn test_handle_vuln_missing_path() {
-        let result = handle_vuln(json!({}));
-        assert!(result.is_error == Some(true));
-    }
-
-    #[test]
-    fn test_handle_api_check_missing_path() {
-        let result = handle_api_check(json!({}));
-        assert!(result.is_error == Some(true));
-    }
-}

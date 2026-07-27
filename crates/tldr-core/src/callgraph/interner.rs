@@ -409,32 +409,3 @@ impl Default for ConcurrentInterner {
         Self::new()
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_normalize_path_backslash() {
-        let path = Path::new("src\\main\\lib.rs");
-        assert_eq!(normalize_path(path), "src/main/lib.rs");
-    }
-
-    #[test]
-    fn test_normalize_path_already_normalized() {
-        let path = Path::new("src/main/lib.rs");
-        assert_eq!(normalize_path(path), "src/main/lib.rs");
-    }
-
-    #[test]
-    fn test_normalize_path_mixed() {
-        let path = Path::new("src\\main/lib.rs");
-        assert_eq!(normalize_path(path), "src/main/lib.rs");
-    }
-
-    #[test]
-    fn test_normalize_path_absolute_windows() {
-        let path = Path::new("C:\\Users\\project\\main.rs");
-        assert_eq!(normalize_path(path), "C:/Users/project/main.rs");
-    }
-}

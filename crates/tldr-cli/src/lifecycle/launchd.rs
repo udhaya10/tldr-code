@@ -185,36 +185,3 @@ pub fn remove_launch_agent(_label: &str, _plist_path: Option<&Path>) -> Result<(
 fn get_uid() -> u32 {
     unsafe { libc::getuid() }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::path::PathBuf;
-
-    #[test]
-    fn render_plist_substitutes_all_placeholders() {
-        let vars = LaunchdVars {
-            label: "com.parcadei.tldr-daemon.demo".into(),
-            tldr_bin: PathBuf::from("/usr/local/bin/tldr"),
-            project: PathBuf::from("/tmp/demo"),
-            stdout_log: PathBuf::from("/tmp/demo.out.log"),
-            stderr_log: PathBuf::from("/tmp/demo.err.log"),
-            path_env: "/usr/bin:/bin".into(),
-        };
-        let out = render_plist(&vars);
-        assert!(!out.contains("{{"));
-        assert!(out.contains("com.parcadei.tldr-daemon.demo"));
-        assert!(out.contains("/usr/local/bin/tldr"));
-        assert!(out.contains("--project"));
-        assert!(out.contains("/tmp/demo"));
-        assert!(out.contains("/tmp/demo.out.log"));
-        assert!(out.contains("/tmp/demo.err.log"));
-        assert!(out.contains("<key>KeepAlive</key>"));
-        assert!(out.contains("<string>--foreground</string>"));
-    }
-
-    #[test]
-    fn template_version_constant_is_one() {
-        assert_eq!(TEMPLATE_VERSION, 1);
-    }
-}

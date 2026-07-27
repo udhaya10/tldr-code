@@ -150,37 +150,3 @@ pub fn decode_message<T: for<'de> Deserialize<'de>>(bytes: &[u8]) -> TldrResult<
 fn protocol_error(error: impl std::fmt::Display) -> TldrError {
     TldrError::Embedding(format!("bulk worker protocol: {error}"))
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn protocol_roundtrip_is_bounded_and_versioned() {
-        let request = WorkerBuildRequest::new(
-            "job".into(),
-            "/project".into(),
-            "/store".into(),
-            BuildOptions::default(),
-            Some(CacheConfig::default()),
-        );
-        let encoded = encode_message(&request).unwrap();
-        let decoded: WorkerBuildRequest = decode_message(&encoded).unwrap();
-        decoded.validate().unwrap();
-        assert!(encoded.len() < MAX_WORKER_MESSAGE_BYTES);
-    }
-
-    #[test]
-    fn mismatch_and_oversize_fail_before_execution() {
-        let mut request = WorkerBuildRequest::new(
-            "job".into(),
-            "/project".into(),
-            "/store".into(),
-            BuildOptions::default(),
-            None,
-        );
-        request.protocol_version += 1;
-        assert!(request.validate().is_err());
-        assert!(decode_message::<WorkerEvent>(&vec![b'x'; MAX_WORKER_MESSAGE_BYTES + 1]).is_err());
-    }
-}

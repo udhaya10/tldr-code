@@ -26,6 +26,13 @@
   statistics cache files were removed. The remaining bounded hot response
   cache is process-local and non-durable.
 
+### Tests
+
+- Replaced the complete legacy first-party Rust test tree with one shared
+  lifecycle contract harness (`cargo tldr-smoke` / `cargo
+  tldr-certification`). Both profiles select from the same cases and fixtures;
+  routine smoke work no longer compiles hundreds of integration-test crates.
+
 ## Unreleased — semantic search: one warm path (TLDR-7xz)
 
 **Philosophy: the tool has exactly two modes — it works beautifully (warm,

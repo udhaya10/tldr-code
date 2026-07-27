@@ -59,9 +59,3 @@ pub use reaching::{
     BitVectorReachingDefs, DefId, DenseDefMapping, ReachingDefinitions,
     ReachingDefinitionsWithStats,
 };
-
-#[cfg(test)]
-mod reaching_tests;
-
-#[cfg(test)]
-mod gvn_tests;

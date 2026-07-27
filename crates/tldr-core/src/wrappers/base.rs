@@ -133,30 +133,3 @@ where
 pub fn progress(step: usize, total: usize, name: &str) {
     eprintln!("[{}/{}] Analyzing {}...", step, total, name);
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_round_to_1_decimal() {
-        assert_eq!(round_to_1_decimal(1.234), 1.2);
-        assert_eq!(round_to_1_decimal(1.25), 1.3); // round half up
-        assert_eq!(round_to_1_decimal(1.0), 1.0);
-        assert_eq!(round_to_1_decimal(0.05), 0.1); // round half up
-        assert_eq!(round_to_1_decimal(99.999), 100.0);
-    }
-
-    #[test]
-    fn test_sub_analysis_result_default_fields() {
-        let result = SubAnalysisResult {
-            name: "test".to_string(),
-            success: true,
-            data: None,
-            error: None,
-            elapsed_ms: 0.0,
-        };
-        assert_eq!(result.name, "test");
-        assert!(result.success);
-    }
-}

@@ -104,27 +104,3 @@ pub fn write_service_state(project: &Path, state: &ServiceState) -> std::io::Res
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     fs::write(path, text + "\n")
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn derive_label_is_stable_and_hashed() {
-        let p = PathBuf::from("/tmp/My_App.Name");
-        let (label, slug) = derive_label(&p);
-        assert!(label.starts_with("com.parcadei.tldr-daemon."));
-        assert!(slug.contains("my-app-name"));
-        let (label2, _) = derive_label(&p);
-        assert_eq!(label, label2);
-    }
-
-    #[test]
-    fn different_paths_same_basename_differ() {
-        let a = PathBuf::from("/tmp/a/proj");
-        let b = PathBuf::from("/tmp/b/proj");
-        let (la, _) = derive_label(&a);
-        let (lb, _) = derive_label(&b);
-        assert_ne!(la, lb);
-    }
-}

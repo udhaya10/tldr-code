@@ -36,15 +36,6 @@ pub mod martin;
 pub mod similarity;
 pub mod smells;
 
-#[cfg(test)]
-mod churn_tests;
-
-#[cfg(test)]
-mod debt_tests;
-
-#[cfg(test)]
-mod health_tests;
-
 pub use churn::{
     build_summary, check_shallow_clone, count_unique_commits, get_author_stats, get_file_churn,
     get_recommendation, is_bot_author, is_degenerate_shallow, is_git_repository,

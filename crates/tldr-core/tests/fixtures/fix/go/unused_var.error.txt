@@ -1,1 +1,0 @@
-./main.go:4:2: x declared but not used

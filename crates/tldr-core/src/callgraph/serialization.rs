@@ -339,34 +339,3 @@ fn unflatten_calls(calls: Vec<CallSite>) -> HashMap<String, Vec<CallSite>> {
 // =============================================================================
 // Tests
 // =============================================================================
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_normalize_path_string() {
-        assert_eq!(normalize_path_string("src\\main.py"), "src/main.py");
-        assert_eq!(normalize_path_string("src/main.py"), "src/main.py");
-        assert_eq!(
-            normalize_path_string("C:\\Users\\test\\project"),
-            "C:/Users/test/project"
-        );
-    }
-
-    #[test]
-    fn test_ir_version_constant() {
-        assert_eq!(IR_VERSION, "1.0");
-    }
-
-    #[test]
-    fn test_error_display() {
-        let err = SerializationError::IRVersionMismatch {
-            expected: "1.0".to_string(),
-            actual: "0.5".to_string(),
-        };
-        let msg = err.to_string();
-        assert!(msg.contains("1.0"));
-        assert!(msg.contains("0.5"));
-    }
-}

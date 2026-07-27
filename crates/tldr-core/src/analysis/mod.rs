@@ -98,26 +98,3 @@ pub use whatbreaks::{
 };
 
 // Test modules
-#[cfg(test)]
-mod callgraph_tests;
-
-#[cfg(test)]
-mod architecture_tests;
-
-#[cfg(test)]
-mod change_impact_tests;
-
-#[cfg(test)]
-mod deps_tests;
-
-#[cfg(test)]
-mod references_tests;
-
-#[cfg(test)]
-mod clones_tests;
-
-#[cfg(test)]
-mod dice_tests;
-
-#[cfg(test)]
-mod clones_integration_tests;

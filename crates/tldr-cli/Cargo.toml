@@ -9,22 +9,28 @@ license = "AGPL-3.0"
 [lib]
 name = "tldr_cli"
 path = "src/lib.rs"
+doctest = false
+test = false
 
 [[bin]]
 name = "tldr"
 path = "src/main.rs"
+test = false
 
 [[bin]]
 name = "tldr-daemon"
 path = "src/bin/tldr_daemon.rs"
+test = false
 
 [[bin]]
 name = "tldr-mcp"
 path = "src/bin/tldr_mcp.rs"
+test = false
 
 [[bin]]
 name = "tldr-embed-worker"
 path = "src/bin/tldr_embed_worker.rs"
+test = false
 required-features = ["semantic"]
 
 [features]
@@ -97,20 +103,3 @@ libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.52", features = ["Win32_System_Threading", "Win32_Foundation"] }
-
-
-[dev-dependencies]
-assert_cmd = { workspace = true }
-predicates = { workspace = true }
-proptest = "1.4"
-tokio = { version = "1", features = ["net", "io-util", "sync", "rt-multi-thread", "macros", "time", "test-util"] }
-# M4 VAL-004 (v0.3.0): cross-binary serialization of embed/semantic/similar
-# tests. The in-process embedding_mutex serializes within a single test
-# binary; #[serial(embedding_cache)] from serial_test serializes across
-# binaries and across the cargo-test process tree.
-serial_test = "3"
-# language-command-matrix-extension-v1: `paste` lets `gen_lang_tests!` in
-# tests/language_command_matrix.rs expand 18 `#[test] fn` stubs per command
-# from a compact macro form. Without it, the file would balloon by ~600+
-# hand-written test items for the 37-command extension.
-paste = "1"

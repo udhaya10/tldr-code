@@ -67,33 +67,3 @@ impl SimilarArgs {
         );
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// TLDR-7xz.4: `similar` is parked — it must fail fast with the
-    /// standardized message before touching the filesystem or any model.
-    #[test]
-    fn similar_is_parked_with_standardized_message() {
-        let args = SimilarArgs {
-            file: PathBuf::from("does-not-need-to-exist.rs"),
-            function: None,
-            top: 5,
-            threshold: 0.7,
-            path: PathBuf::from("."),
-            model: None,
-            include_self: false,
-            no_cache: false,
-            by_chunk: false,
-        };
-        let err = args
-            .run(OutputFormat::Json, true)
-            .expect_err("parked command must fail fast");
-        assert!(
-            err.to_string()
-                .starts_with("not available in this version,"),
-            "expected standardized parked message, got: {err}"
-        );
-    }
-}

@@ -76,31 +76,12 @@ pub mod compat;
 
 // NOTE: builder_v2_test.rs contains TDD tests for phases 14b-14f.
 // Enabled for Phase 14b file discovery testing.
-#[cfg(feature = "experimental_callgraph")]
-#[cfg(test)]
-mod builder_v2_test;
-
 // NOTE: serialization_test.rs contains TDD tests for Phase 15.
-#[cfg(feature = "experimental_callgraph")]
-#[cfg(test)]
-mod serialization_test;
-
 // NOTE: compat_test.rs contains TDD tests for Phase 16.
-#[cfg(feature = "experimental_callgraph")]
-#[cfg(test)]
-mod compat_test;
-
 // NOTE: cross_file_test.rs contains TDD tests for cross-file call detection.
 // These tests verify the behavioral specification in CROSSFILE_SPEC.md.
-#[cfg(feature = "experimental_callgraph")]
-#[cfg(test)]
-mod cross_file_test;
-
 // NOTE: hypotheses_test.rs contains discriminative tests for Tier-2 Fowler smells.
 // These tests validate data availability in the call graph IR for smell detectors.
-#[cfg(test)]
-mod hypotheses_test;
-
 pub use builder::build_project_call_graph;
 pub use cross_file_types::{
     // Phase 3: Container types

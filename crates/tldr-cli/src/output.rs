@@ -2720,7 +2720,3 @@ pub fn format_clones_sarif(report: &tldr_core::analysis::ClonesReport) -> String
 // =============================================================================
 // Tests
 // =============================================================================
-
-#[cfg(test)]
-#[path = "output_tests.rs"]
-mod output_tests;

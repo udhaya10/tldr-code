@@ -59,13 +59,3 @@ impl DaemonListArgs {
         Ok(())
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn list_args_default_constructs() {
-        let _args = DaemonListArgs::default();
-    }
-}

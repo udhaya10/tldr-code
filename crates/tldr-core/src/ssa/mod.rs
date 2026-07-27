@@ -28,6 +28,3 @@ pub use dominators::*;
 pub use format::*;
 pub use memory::*;
 pub use types::*;
-
-#[cfg(test)]
-mod ssa_tests;

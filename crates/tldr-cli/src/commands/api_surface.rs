@@ -121,33 +121,3 @@ fn language_to_string(lang: Language) -> String {
         Language::Ocaml => "ocaml".to_string(),
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::path::PathBuf;
-
-    #[test]
-    fn test_api_surface_args_has_manifest_path_field() {
-        let args = ApiSurfaceArgs {
-            target: "my-crate".to_string(),
-            lookup: None,
-            include_private: false,
-            limit: None,
-            manifest_path: Some(PathBuf::from("./Cargo.toml")),
-        };
-        assert_eq!(args.manifest_path, Some(PathBuf::from("./Cargo.toml")));
-    }
-
-    #[test]
-    fn test_api_surface_args_manifest_path_defaults_to_none() {
-        let args = ApiSurfaceArgs {
-            target: "json".to_string(),
-            lookup: None,
-            include_private: false,
-            limit: None,
-            manifest_path: None,
-        };
-        assert!(args.manifest_path.is_none());
-    }
-}
