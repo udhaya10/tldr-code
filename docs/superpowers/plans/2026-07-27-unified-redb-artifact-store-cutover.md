@@ -6,9 +6,28 @@
 
 **Architecture:** `redb` becomes the durable source of truth for project revisions, normalized file facts, analyzer artifacts, dependencies, ingestion jobs, and generation manifests. Parallel workers read and analyze files, a bounded single-writer service commits artifact batches, and queries serve only an atomically published generation. The released binary has no legacy-cache read path or silent fallback; existing caches are ignored and the new store is rebuilt resumably from source.
 
-**Tech Stack:** Rust, redb, Serde, Tokio, Rayon, Tree-sitter, DashMap for bounded hot caches, existing usearch vector index, proptest, tempfile.
+**Tech Stack:** Rust, redb, Serde, Tokio, Rayon, Tree-sitter, bounded hot caches, existing usearch vector index, and tempfile for isolated construction checks.
 
 ---
+
+## Execution scope correction (user-confirmed 2026-07-27)
+
+This plan implements the complete production cutover, but it does **not** build
+the permanent replacement test architecture. `TLDR-dpbc` follows this epic and
+owns that work.
+
+- Tests named in the tasks below are acceptance examples, not a requirement to
+  create many Rust integration-test crates.
+- Reuse existing tests or add the smallest disposable construction check that
+  proves the invariant currently being implemented.
+- Do not add proptest, fuzzing, mutation, simulation, formal verification, or a
+  general-purpose scenario framework during this epic.
+- Prefer inline module checks or one compact cutover acceptance target over
+  repeated cold/warm, bulk/delta, CLI/MCP, command, or language test bodies.
+- The production requirements, deletion of legacy persistent-cache paths,
+  measured rollout gates, and release validation remain mandatory.
+- When `TLDR-dpbc` begins, it deletes these construction checks together with
+  the legacy suite and builds the permanent one-harness/two-filter suite once.
 
 ## One-shot cutover contract
 
