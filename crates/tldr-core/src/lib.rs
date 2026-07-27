@@ -35,6 +35,8 @@
 #![warn(missing_docs)]
 #![warn(rustdoc::missing_crate_level_docs)]
 
+/// Shared generation-aware structural and semantic artifact persistence.
+pub mod artifact_store;
 pub mod config;
 pub mod error;
 pub mod git;

@@ -6,6 +6,7 @@ use redb::{
     Database, Durability, MultimapTableDefinition, ReadableDatabase, ReadableTable,
     ReadableTableMetadata, TableDefinition,
 };
+use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 
 use crate::{TldrError, TldrResult};
@@ -33,7 +34,9 @@ const PREVIOUS_GENERATION_KEY: &str = "previous_generation";
 pub const DEFAULT_REDB_CACHE_BYTES: usize = 64 * 1024 * 1024;
 
 /// Durable file metadata used by incremental generation construction.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Archive, Debug, Clone, PartialEq, Eq, Serialize, Deserialize, RkyvDeserialize, RkyvSerialize,
+)]
 pub struct StoredFileRecord {
     /// Root-relative source path.
     pub path: String,
@@ -46,7 +49,9 @@ pub struct StoredFileRecord {
 }
 
 /// Durable chunk metadata. Embedding bytes live in the separate embedding table.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Archive, Debug, Clone, PartialEq, Eq, Serialize, Deserialize, RkyvDeserialize, RkyvSerialize,
+)]
 pub struct StoredChunkRecord {
     /// Stable logical chunk ID.
     pub chunk_id: String,
@@ -61,7 +66,18 @@ pub struct StoredChunkRecord {
 }
 
 /// State of one resumable bulk embedding job.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Archive,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    RkyvDeserialize,
+    RkyvSerialize,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum JobState {
     /// Work exists but has not started.
@@ -77,7 +93,9 @@ pub enum JobState {
 }
 
 /// Durable checkpoint for a resumable bulk embedding job.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Archive, Debug, Clone, PartialEq, Eq, Serialize, Deserialize, RkyvDeserialize, RkyvSerialize,
+)]
 pub struct JobRecord {
     /// Caller-stable job identifier.
     pub id: String,
@@ -151,7 +169,18 @@ pub struct StoredEmbedding {
 }
 
 /// Publication state for one immutable semantic generation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Archive,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    RkyvDeserialize,
+    RkyvSerialize,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum GenerationState {
     /// Authoritative records are being staged and must not be served.
@@ -161,7 +190,9 @@ pub enum GenerationState {
 }
 
 /// Authoritative identity and integrity metadata for one generation.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Archive, Debug, Clone, PartialEq, Eq, Serialize, Deserialize, RkyvDeserialize, RkyvSerialize,
+)]
 pub struct StoredGeneration {
     /// Monotonic generation number.
     pub generation: u64,
@@ -417,10 +448,10 @@ impl RedbStore {
         if chunks.iter().any(|chunk| chunk.file_path != file.path) {
             return Err(store_error("chunk belongs to a different file"));
         }
-        let file_bytes = serde_json::to_vec(file).map_err(serialization_error)?;
+        let file_bytes = encode_record(file)?;
         let chunk_bytes = chunks
             .iter()
-            .map(|chunk| serde_json::to_vec(chunk).map_err(serialization_error))
+            .map(encode_record)
             .collect::<TldrResult<Vec<_>>>()?;
         let mut transaction = self.database.begin_write().map_err(redb_error)?;
         transaction
@@ -479,7 +510,7 @@ impl RedbStore {
         let Some(value) = table.get(id).map_err(redb_error)? else {
             return Ok(None);
         };
-        let job = serde_json::from_slice(value.value()).map_err(serialization_error)?;
+        let job = decode_record(value.value())?;
         Ok(Some(job))
     }
 
@@ -503,7 +534,7 @@ impl RedbStore {
                 .map(|bytes| (write.key, bytes))
             })
             .collect::<TldrResult<Vec<_>>>()?;
-        let job_bytes = serde_json::to_vec(job).map_err(serialization_error)?;
+        let job_bytes = encode_record(job)?;
         let mut transaction = self.database.begin_write().map_err(redb_error)?;
         transaction
             .set_durability(Durability::Immediate)
@@ -515,8 +546,7 @@ impl RedbStore {
                 .map_err(redb_error)?
                 .map(|value| value.value().to_vec());
             if let Some(existing) = existing {
-                let existing: JobRecord =
-                    serde_json::from_slice(&existing).map_err(serialization_error)?;
+                let existing: JobRecord = decode_record(&existing)?;
                 if existing.protocol_version != job.protocol_version
                     || existing.recipe != job.recipe
                 {
@@ -554,7 +584,7 @@ impl RedbStore {
         if generation.generation == 0 || generation.state != GenerationState::Staged {
             return Err(store_error("new generation must be non-zero and staged"));
         }
-        let bytes = serde_json::to_vec(generation).map_err(serialization_error)?;
+        let bytes = encode_record(generation)?;
         let mut transaction = self.database.begin_write().map_err(redb_error)?;
         transaction
             .set_durability(Durability::Immediate)
@@ -602,8 +632,7 @@ impl RedbStore {
                 .get(generation)
                 .map_err(redb_error)?
                 .ok_or_else(|| store_error(format!("generation {generation} is not staged")))?;
-            let record: StoredGeneration =
-                serde_json::from_slice(value.value()).map_err(serialization_error)?;
+            let record: StoredGeneration = decode_record(value.value())?;
             if record.state != GenerationState::Staged || record.dimensions as usize != dimensions {
                 return Err(store_error(format!(
                     "generation {generation} is not a compatible staged generation"
@@ -635,8 +664,7 @@ impl RedbStore {
                 .get(generation)
                 .map_err(redb_error)?
                 .ok_or_else(|| store_error(format!("generation {generation} is missing")))?;
-            serde_json::from_slice::<StoredGeneration>(value.value())
-                .map_err(serialization_error)?
+            decode_record::<StoredGeneration>(value.value())?
         };
         let prefix = generation.to_be_bytes();
         let actual = {
@@ -655,7 +683,7 @@ impl RedbStore {
             )));
         }
         record.state = GenerationState::Complete;
-        let bytes = serde_json::to_vec(&record).map_err(serialization_error)?;
+        let bytes = encode_record(&record)?;
         {
             let mut generations = transaction.open_table(GENERATIONS).map_err(redb_error)?;
             generations
@@ -713,8 +741,7 @@ impl RedbStore {
                 .get(generation)
                 .map_err(redb_error)?
                 .ok_or_else(|| store_error(format!("generation {generation} is missing")))?;
-            let record: StoredGeneration =
-                serde_json::from_slice(value.value()).map_err(serialization_error)?;
+            let record: StoredGeneration = decode_record(value.value())?;
             if record.state != GenerationState::Complete {
                 return Err(store_error(format!(
                     "generation {generation} is not complete"
@@ -746,7 +773,7 @@ impl RedbStore {
         table
             .get(generation)
             .map_err(redb_error)?
-            .map(|value| serde_json::from_slice(value.value()).map_err(serialization_error))
+            .map(|value| decode_record(value.value()))
             .transpose()
     }
 
@@ -960,6 +987,33 @@ fn redb_error(error: impl std::fmt::Display) -> TldrError {
 
 fn serialization_error(error: impl std::fmt::Display) -> TldrError {
     store_error(format!("record serialization failed: {error}"))
+}
+
+fn encode_record<T>(value: &T) -> TldrResult<Vec<u8>>
+where
+    T: for<'a> RkyvSerialize<
+        rkyv::api::high::HighSerializer<
+            rkyv::util::AlignedVec,
+            rkyv::ser::allocator::ArenaHandle<'a>,
+            rkyv::rancor::Error,
+        >,
+    >,
+{
+    rkyv::to_bytes::<rkyv::rancor::Error>(value)
+        .map(|bytes| bytes.into_vec())
+        .map_err(serialization_error)
+}
+
+fn decode_record<T>(bytes: &[u8]) -> TldrResult<T>
+where
+    T: Archive,
+    T::Archived: for<'a> rkyv::bytecheck::CheckBytes<rkyv::api::high::HighValidator<'a, rkyv::rancor::Error>>
+        + RkyvDeserialize<T, rkyv::api::high::HighDeserializer<rkyv::rancor::Error>>,
+{
+    let mut aligned: rkyv::util::AlignedVec<16> =
+        rkyv::util::AlignedVec::with_capacity(bytes.len());
+    aligned.extend_from_slice(bytes);
+    rkyv::from_bytes::<T, rkyv::rancor::Error>(&aligned).map_err(serialization_error)
 }
 
 fn store_error(message: impl Into<String>) -> TldrError {

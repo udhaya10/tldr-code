@@ -400,6 +400,30 @@ pub fn chunk_file<P: AsRef<Path>>(path: P, options: &ChunkOptions) -> TldrResult
     Ok(ChunkResult::from_parts(chunks, skipped))
 }
 
+/// Derive semantic chunks from an already parsed source file.
+///
+/// The shared artifact ingestion pipeline calls this after its single parse,
+/// avoiding the former second tree-sitter pass in semantic indexing.
+pub fn chunks_from_parsed(
+    path: &Path,
+    source: &str,
+    tree: &tree_sitter::Tree,
+    language: Language,
+    options: &ChunkOptions,
+) -> Vec<CodeChunk> {
+    match options.granularity {
+        ChunkGranularity::File => vec![create_file_chunk(path, source, language)],
+        ChunkGranularity::Function => {
+            let chunks = extract_function_chunks(tree, source, path, language);
+            if chunks.is_empty() {
+                vec![create_file_chunk(path, source, language)]
+            } else {
+                chunks
+            }
+        }
+    }
+}
+
 // =============================================================================
 // Internal Functions
 // =============================================================================
