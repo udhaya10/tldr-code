@@ -27,6 +27,8 @@ pub trait ArtifactStore: Send + Sync {
     fn artifacts(&self, generation: u64, kind: ArtifactKind) -> TldrResult<Vec<ArtifactEnvelope>>;
     /// Commit one bounded batch and its resumable checkpoint atomically.
     fn commit_batch(&self, batch: &ArtifactBatch, job: &IngestionJob) -> TldrResult<()>;
+    /// Atomically attach a demand-driven artifact to the active generation.
+    fn commit_optional(&self, artifact: &ArtifactEnvelope) -> TldrResult<()>;
     /// Atomically publish a validated generation.
     fn publish(&self, manifest: &GenerationManifest) -> TldrResult<()>;
     /// Read a durable generation manifest.
@@ -237,6 +239,85 @@ impl ArtifactStore for RedbArtifactStore {
         {
             let mut jobs = tx.open_table(JOBS).map_err(redb_error)?;
             jobs.insert(job.id.as_str(), job_bytes.as_slice())
+                .map_err(redb_error)?;
+        }
+        tx.commit().map_err(redb_error)
+    }
+
+    fn commit_optional(&self, artifact: &ArtifactEnvelope) -> TldrResult<()> {
+        if !artifact.is_valid() {
+            return Err(store_error("optional artifact is invalid"));
+        }
+        let key = encode(&artifact.key)?;
+        let record = encode(artifact)?;
+        let dependencies = artifact
+            .dependencies
+            .iter()
+            .map(encode)
+            .collect::<TldrResult<Vec<_>>>()?;
+
+        let mut tx = self.database.begin_write().map_err(redb_error)?;
+        tx.set_durability(Durability::Immediate)
+            .map_err(redb_error)?;
+        let active = {
+            let metadata = tx.open_table(METADATA).map_err(redb_error)?;
+            let active = metadata
+                .get(ACTIVE_GENERATION_KEY)
+                .map_err(redb_error)?
+                .and_then(|value| value.value().try_into().ok().map(u64::from_le_bytes))
+                .ok_or_else(|| store_error("no active generation for optional artifact"))?;
+            active
+        };
+        if active != artifact.generation {
+            return Err(store_error(
+                "optional artifact does not target the active generation",
+            ));
+        }
+        {
+            let records = tx.open_table(ARTIFACTS).map_err(redb_error)?;
+            for dependency in &dependencies {
+                if records
+                    .get(dependency.as_slice())
+                    .map_err(redb_error)?
+                    .is_none()
+                {
+                    return Err(store_error("optional artifact dependency is missing"));
+                }
+            }
+        }
+        {
+            let mut records = tx.open_table(ARTIFACTS).map_err(redb_error)?;
+            records
+                .insert(key.as_slice(), record.as_slice())
+                .map_err(redb_error)?;
+        }
+        {
+            let mut links = tx
+                .open_multimap_table(GENERATION_ARTIFACTS)
+                .map_err(redb_error)?;
+            links.insert(active, key.as_slice()).map_err(redb_error)?;
+        }
+        {
+            let mut deps = tx.open_multimap_table(ARTIFACT_DEPS).map_err(redb_error)?;
+            for dependency in &dependencies {
+                deps.insert(dependency.as_slice(), key.as_slice())
+                    .map_err(redb_error)?;
+            }
+        }
+        {
+            let mut generations = tx.open_table(GENERATIONS).map_err(redb_error)?;
+            let bytes = generations
+                .get(active)
+                .map_err(redb_error)?
+                .map(|value| value.value().to_vec())
+                .ok_or_else(|| store_error("active generation manifest is missing"))?;
+            let mut manifest: GenerationManifest = decode(&bytes)?;
+            if !manifest.artifacts.contains(&artifact.key) {
+                manifest.artifacts.push(artifact.key.clone());
+            }
+            let bytes = encode(&manifest)?;
+            generations
+                .insert(active, bytes.as_slice())
                 .map_err(redb_error)?;
         }
         tx.commit().map_err(redb_error)

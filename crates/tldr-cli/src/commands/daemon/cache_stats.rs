@@ -2,9 +2,7 @@
 //!
 //! CLI command: `tldr cache stats [--project PATH]`
 //!
-//! Displays cache statistics for a TLDR project:
-//! - If daemon is running: queries cache stats via IPC
-//! - If daemon is not running: reads cache files directly
+//! Displays shared artifact-store statistics for a TLDR project.
 //!
 //! Statistics include:
 //! - Salsa-style query cache: hits, misses, hit rate, invalidations
@@ -20,8 +18,12 @@ use crate::output::OutputFormat;
 
 use super::error::{DaemonError, DaemonResult};
 use super::ipc::send_command;
-use super::salsa::QueryCache;
-use super::types::{CacheFileInfo, DaemonCommand, DaemonResponse, SalsaCacheStats};
+use super::types::{
+    ArtifactStoreStats, CacheFileInfo, DaemonCommand, DaemonResponse, SalsaCacheStats,
+};
+use tldr_core::artifact_store::{
+    schema::STORE_FILE, ArtifactStore, GenerationSnapshot, RedbArtifactStore,
+};
 
 // =============================================================================
 // CLI Arguments
@@ -42,6 +44,9 @@ pub struct CacheStatsArgs {
 /// Output structure for cache stats command.
 #[derive(Debug, Clone, Serialize)]
 pub struct CacheStatsOutput {
+    /// Authoritative shared artifact generation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artifact_store: Option<ArtifactStoreStats>,
     /// Salsa-style query cache statistics
     #[serde(skip_serializing_if = "Option::is_none")]
     pub salsa_stats: Option<SalsaCacheStats>,
@@ -78,10 +83,15 @@ impl CacheStatsArgs {
         let cmd = DaemonCommand::Status { session: None };
 
         match send_command(&project, &cmd).await {
-            Ok(DaemonResponse::FullStatus { salsa_stats, .. }) => {
+            Ok(DaemonResponse::FullStatus {
+                salsa_stats,
+                artifact_store,
+                ..
+            }) => {
                 // Daemon is running, use its stats
                 let cache_files = scan_cache_files(&project)?;
                 let output = CacheStatsOutput {
+                    artifact_store,
                     salsa_stats: Some(salsa_stats),
                     cache_files: Some(cache_files),
                     message: None,
@@ -108,6 +118,7 @@ impl CacheStatsArgs {
         // Check if cache directory exists
         if !cache_dir.exists() {
             let output = CacheStatsOutput {
+                artifact_store: None,
                 salsa_stats: None,
                 cache_files: None,
                 message: Some("No cache directory found".to_string()),
@@ -115,15 +126,15 @@ impl CacheStatsArgs {
             return self.print_output(&output, format, quiet);
         }
 
-        // Try to load salsa stats from file
-        let salsa_stats = self.load_salsa_stats(&cache_dir);
+        let artifact_store = load_artifact_stats(project);
 
         // Scan cache files
         let cache_files = scan_cache_files(project)?;
 
         // Check if we have any cache data
-        if salsa_stats.is_none() && cache_files.file_count == 0 {
+        if artifact_store.is_none() && cache_files.file_count == 0 {
             let output = CacheStatsOutput {
+                artifact_store: None,
                 salsa_stats: None,
                 cache_files: Some(cache_files),
                 message: Some("No cache statistics found".to_string()),
@@ -132,27 +143,13 @@ impl CacheStatsArgs {
         }
 
         let output = CacheStatsOutput {
-            salsa_stats,
+            artifact_store,
+            salsa_stats: None,
             cache_files: Some(cache_files),
             message: None,
         };
 
         self.print_output(&output, format, quiet)
-    }
-
-    /// Try to load salsa cache stats from persisted file.
-    fn load_salsa_stats(&self, cache_dir: &Path) -> Option<SalsaCacheStats> {
-        let salsa_cache_file = cache_dir.join("salsa_cache.bin");
-
-        if !salsa_cache_file.exists() {
-            return None;
-        }
-
-        // Try to load the cache and extract stats
-        match QueryCache::load_from_file(&salsa_cache_file) {
-            Ok(cache) => Some(cache.stats()),
-            Err(_) => None,
-        }
     }
 
     /// Print output in the requested format.
@@ -179,6 +176,15 @@ impl CacheStatsArgs {
 
                 println!("Cache Statistics");
                 println!("================");
+
+                if let Some(ref store) = output.artifact_store {
+                    println!();
+                    println!("Artifact Store:");
+                    println!("  State:      {}", store.state);
+                    println!("  Generation: {:?}", store.active_generation);
+                    println!("  Files:      {}", format_number(store.files as u64));
+                    println!("  redb bytes: {}", format_number(store.redb_bytes));
+                }
 
                 if let Some(ref stats) = output.salsa_stats {
                     println!();
@@ -209,7 +215,7 @@ impl CacheStatsArgs {
 
 /// Scan cache files in the project's .tldr/cache/ directory.
 fn scan_cache_files(project: &Path) -> DaemonResult<CacheFileInfo> {
-    let cache_dir = project.join(".tldr").join("cache");
+    let cache_dir = project.join(".tldr").join("store");
 
     if !cache_dir.exists() {
         return Ok(CacheFileInfo {
@@ -238,6 +244,33 @@ fn scan_cache_files(project: &Path) -> DaemonResult<CacheFileInfo> {
         file_count,
         total_bytes,
         total_size_human: format_bytes(total_bytes),
+    })
+}
+
+fn load_artifact_stats(project: &Path) -> Option<ArtifactStoreStats> {
+    let path = project.join(".tldr").join("store").join(STORE_FILE);
+    if !path.exists() {
+        return None;
+    }
+    let store = RedbArtifactStore::open(&path).ok()?;
+    let active_generation = store.active_generation().ok().flatten();
+    let files = GenerationSnapshot::active(&store)
+        .ok()
+        .flatten()
+        .map_or(0, |snapshot| snapshot.file_count());
+    Some(ArtifactStoreStats {
+        state: if active_generation.is_some() {
+            "ready".into()
+        } else {
+            "cold".into()
+        },
+        active_generation,
+        target_generation: None,
+        files,
+        redb_bytes: std::fs::metadata(path)
+            .map(|value| value.len())
+            .unwrap_or(0),
+        last_error: None,
     })
 }
 

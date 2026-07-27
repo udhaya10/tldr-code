@@ -708,6 +708,27 @@ pub struct MemoryStats {
     pub peak_rss_bytes: Option<u64>,
 }
 
+/// Shared artifact-store status. Optional on the wire for old-daemon
+/// compatibility; authoritative in the new runtime.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArtifactStoreStats {
+    /// `cold`, `building`, `ready`, or `failed`.
+    pub state: String,
+    /// Complete generation currently visible to readers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_generation: Option<u64>,
+    /// Generation currently being built.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_generation: Option<u64>,
+    /// Normalized files in the resident generation snapshot.
+    pub files: usize,
+    /// Authoritative redb bytes on disk.
+    pub redb_bytes: u64,
+    /// Last ingestion failure, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+}
+
 /// Response from daemon
 ///
 /// IMPORTANT: Variant order matters for serde(untagged)!
@@ -752,6 +773,9 @@ pub enum DaemonResponse {
         /// Daemon process memory (TLDR-yll). Same compat rules as `liveness`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         memory: Option<MemoryStats>,
+        /// Authoritative shared artifact generation.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        artifact_store: Option<ArtifactStoreStats>,
     },
 
     /// Notify response (4 required fields)
@@ -808,6 +832,7 @@ mod tests {
             liveness: None,
             semantic_index: None,
             memory: None,
+            artifact_store: None,
         };
         // liveness/semantic_index/memory are skip_serializing_if=None → this
         // JSON is byte-identical to an old server's payload.
@@ -854,6 +879,14 @@ mod tests {
             memory: Some(MemoryStats {
                 rss_bytes: Some(1024 * 1024 * 1024),
                 peak_rss_bytes: Some(22 * 1024 * 1024 * 1024),
+            }),
+            artifact_store: Some(ArtifactStoreStats {
+                state: "ready".into(),
+                active_generation: Some(4),
+                target_generation: None,
+                files: 12,
+                redb_bytes: 4096,
+                last_error: None,
             }),
         };
         let json = serde_json::to_string(&new_shape).unwrap();

@@ -14,6 +14,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 use usearch::{Index, IndexOptions, MetricKind, ScalarKind};
 
@@ -56,7 +57,9 @@ fn new_f32_index(dimensions: usize, capacity: usize) -> TldrResult<Index> {
 
 /// Per-chunk metadata held in the sidecar — everything needed to serve a search
 /// result, since the usearch index stores **only** the vector. Design doc §4.2.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(
+    Archive, Debug, Clone, PartialEq, RkyvDeserialize, RkyvSerialize, Serialize, Deserialize,
+)]
 pub struct ChunkMeta {
     /// Hex-encoded [`ChunkId`] used to guard the derived u64 usearch key.
     pub identity: String,
@@ -492,7 +495,7 @@ impl VectorStore {
 /// stores lack it and are rebuilt once.
 /// v4: replaced positional identities with persisted chunk lineage, exact
 /// document revisions, and structural reconciliation anchors (TLDR-9bxa.4).
-const STORE_FORMAT_VERSION: u32 = 4;
+const STORE_FORMAT_VERSION: u32 = 5;
 /// `CURRENT` magic ("TLDR") so a torn/foreign pointer is detectable.
 const CURRENT_MAGIC: u32 = 0x544C_4452;
 /// Generations retained by GC (the active one + rollback headroom). Keeps a
@@ -501,7 +504,18 @@ const KEEP_GENS: u64 = 3;
 
 /// What kind of filesystem object a tracked path was at index time — lets
 /// reconcile (§7.3) detect file↔dir/type swaps, not just content changes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Archive,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    RkyvDeserialize,
+    RkyvSerialize,
+    Serialize,
+    Deserialize,
+)]
 pub enum FileKind {
     /// A regular indexable source file.
     Regular,
@@ -513,7 +527,9 @@ pub enum FileKind {
 
 /// Per-file record (design doc §4.3): which keys belong to the file plus the
 /// `(mtime, size, file_type)` reconcile signal.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(
+    Archive, Debug, Clone, PartialEq, RkyvDeserialize, RkyvSerialize, Serialize, Deserialize,
+)]
 pub struct FileRecord {
     /// Chunk keys belonging to this file (for O(1) per-file deltas).
     pub keys: std::collections::BTreeSet<u64>,
@@ -529,7 +545,9 @@ pub struct FileRecord {
 /// the persisted store is incompatible and the caller must full-rebuild
 /// (design doc §4.0). Every field here changes the vectors OR the chunk
 /// boundaries, so a mismatch means the stored vectors can't be trusted.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Archive, Debug, Clone, PartialEq, Eq, RkyvDeserialize, RkyvSerialize, Serialize, Deserialize,
+)]
 pub struct ManifestId {
     /// Embedding model identifier (e.g. `"ArcticL"`).
     pub embedding_model: String,
@@ -554,7 +572,7 @@ pub struct ManifestId {
     pub root: String,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Archive, RkyvDeserialize, RkyvSerialize, Serialize, Deserialize)]
 struct Manifest {
     format_version: u32,
     generation: u64,
@@ -576,15 +594,8 @@ struct Manifest {
     corpus_digest: u64,
 }
 
-/// Borrowed view for serialization (avoids cloning the sidecar on save).
-#[derive(Serialize)]
-struct SidecarRef<'a> {
-    meta: &'a HashMap<u64, ChunkMeta>,
-    files: &'a HashMap<String, FileRecord>,
-}
-
 /// Owned view for deserialization on load.
-#[derive(Deserialize)]
+#[derive(Archive, RkyvDeserialize, RkyvSerialize, Deserialize)]
 struct SidecarOwned {
     meta: HashMap<u64, ChunkMeta>,
     files: HashMap<String, FileRecord>,
@@ -592,7 +603,7 @@ struct SidecarOwned {
 
 /// The structured `CURRENT` pointer — the single atomic commit point. `magic` +
 /// `checksum` make a torn/partial write detectable (design doc §7.1).
-#[derive(Serialize, Deserialize)]
+#[derive(Archive, RkyvDeserialize, RkyvSerialize, Serialize, Deserialize)]
 struct CurrentPointer {
     magic: u32,
     generation: u64,
@@ -664,11 +675,10 @@ impl VectorStore {
         sync_dir(dir)?;
         let index_checksum = digest_bytes(&std::fs::read(&index_path)?);
 
-        let sidecar = SidecarRef {
-            meta: &self.meta,
-            files: &self.files,
-        };
-        let sidecar_bytes = serde_json::to_vec(&sidecar).map_err(|error| vs_err("save", error))?;
+        let sidecar_bytes = encode_binary(&SidecarOwned {
+            meta: self.meta.clone(),
+            files: self.files.clone(),
+        })?;
         let sidecar_checksum = digest_bytes(&sidecar_bytes);
         write_sync(&dir.join(format!("meta.{gen}")), &sidecar_bytes)?;
         let mut keys: Vec<u64> = self.meta.keys().copied().collect();
@@ -683,8 +693,7 @@ impl VectorStore {
             sidecar_checksum,
             corpus_digest: self.corpus_digest,
         };
-        let manifest_bytes =
-            serde_json::to_vec(&manifest).map_err(|error| vs_err("save", error))?;
+        let manifest_bytes = encode_binary(&manifest)?;
         write_sync(&dir.join(format!("manifest.{gen}")), &manifest_bytes)?;
         sync_dir(dir)
     }
@@ -772,8 +781,7 @@ impl VectorStore {
     fn load_generation(dir: &Path, gen: u64, expect: &ManifestId) -> Result<Self, LoadFail> {
         let manifest_bytes = std::fs::read(dir.join(format!("manifest.{gen}")))
             .map_err(|e| LoadFail::Corrupt(e.into()))?;
-        let manifest: Manifest = serde_json::from_slice(&manifest_bytes)
-            .map_err(|e| LoadFail::Corrupt(vs_err("load", e)))?;
+        let manifest: Manifest = decode_binary(&manifest_bytes).map_err(LoadFail::Corrupt)?;
         if manifest.format_version != STORE_FORMAT_VERSION {
             return Err(LoadFail::Incompatible(vs_err(
                 "load",
@@ -807,8 +815,7 @@ impl VectorStore {
             return Err(LoadFail::Corrupt(vs_err("load", "index checksum mismatch")));
         }
 
-        let sidecar: SidecarOwned = serde_json::from_slice(&meta_bytes)
-            .map_err(|e| LoadFail::Corrupt(vs_err("load", e)))?;
+        let sidecar: SidecarOwned = decode_binary(&meta_bytes).map_err(LoadFail::Corrupt)?;
         let mut keys: Vec<u64> = sidecar.meta.keys().copied().collect();
         keys.sort_unstable();
         if keys_digest(&keys) != manifest.keys_checksum {
@@ -888,7 +895,7 @@ pub(crate) fn activate_current(dir: &Path, generation: u64) -> TldrResult<()> {
         generation,
         checksum: current_checksum(CURRENT_MAGIC, generation),
     };
-    let bytes = serde_json::to_vec(&current).map_err(|error| vs_err("save", error))?;
+    let bytes = encode_binary(&current)?;
     let staged = dir.join("CURRENT.tmp");
     write_sync(&staged, &bytes)?;
     std::fs::rename(&staged, dir.join("CURRENT"))?;
@@ -990,6 +997,34 @@ fn current_checksum(magic: u32, generation: u64) -> u32 {
     (stable_hash(&buf) & 0xFFFF_FFFF) as u32
 }
 
+pub(crate) fn encode_binary<T>(value: &T) -> TldrResult<Vec<u8>>
+where
+    T: for<'a> RkyvSerialize<
+        rkyv::api::high::HighSerializer<
+            rkyv::util::AlignedVec,
+            rkyv::ser::allocator::ArenaHandle<'a>,
+            rkyv::rancor::Error,
+        >,
+    >,
+{
+    rkyv::to_bytes::<rkyv::rancor::Error>(value)
+        .map(|bytes| bytes.into_vec())
+        .map_err(|error| vs_err("binary encode", error))
+}
+
+pub(crate) fn decode_binary<T>(bytes: &[u8]) -> TldrResult<T>
+where
+    T: Archive,
+    T::Archived: for<'a> rkyv::bytecheck::CheckBytes<rkyv::api::high::HighValidator<'a, rkyv::rancor::Error>>
+        + RkyvDeserialize<T, rkyv::api::high::HighDeserializer<rkyv::rancor::Error>>,
+{
+    let mut aligned: rkyv::util::AlignedVec<16> =
+        rkyv::util::AlignedVec::with_capacity(bytes.len());
+    aligned.extend_from_slice(bytes);
+    rkyv::from_bytes::<T, rkyv::rancor::Error>(&aligned)
+        .map_err(|error| vs_err("binary decode", error))
+}
+
 /// Write `bytes` to `path` and fsync the file.
 fn write_sync(path: &Path, bytes: &[u8]) -> TldrResult<()> {
     use std::io::Write;
@@ -1026,7 +1061,7 @@ fn sync_dir(dir: &Path) -> TldrResult<()> {
 /// scanning `manifest.<gen>` for the newest verifying generation.
 fn read_current(dir: &Path) -> Option<CurrentPointer> {
     let bytes = std::fs::read(dir.join("CURRENT")).ok()?;
-    let cur: CurrentPointer = serde_json::from_slice(&bytes).ok()?;
+    let cur: CurrentPointer = decode_binary(&bytes).ok()?;
     if cur.magic != CURRENT_MAGIC {
         return None;
     }

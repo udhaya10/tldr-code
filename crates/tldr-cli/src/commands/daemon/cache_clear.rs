@@ -2,17 +2,8 @@
 //!
 //! CLI command: `tldr cache clear [--project PATH]`
 //!
-//! Clears the cache for a TLDR project:
-//! 1. If daemon is running, stops it first (or sends Clear command)
-//! 2. Deletes cache files in `.tldr/cache/`
-//! 3. Reports cleared size
-//!
-//! Files removed:
-//! - salsa_cache.bin (Salsa query cache)
-//! - salsa_stats.json (legacy stats file)
-//! - call_graph.json (call graph cache)
-//! - *.pkl files (pickle files, if any)
-//! - Any other files in the cache directory
+//! Stops the project daemon, removes the authoritative redb/usearch derived
+//! store, and then removes preserved legacy cache files.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -114,31 +105,21 @@ impl CacheClearArgs {
         let _ = send_command(project, &cmd).await;
     }
 
-    /// Clear all cache files in the project's .tldr/cache/ directory.
+    /// Clear the new artifact store and any preserved legacy cache files.
     fn clear_cache_files(&self, project: &Path) -> DaemonResult<(usize, u64)> {
-        let cache_dir = project.join(".tldr").join("cache");
-
-        if !cache_dir.exists() {
-            return Ok((0, 0));
-        }
-
         let mut files_removed = 0;
         let mut bytes_freed = 0u64;
+        let mut roots = vec![
+            project.join(".tldr").join("store"),
+            project.join(".tldr").join("cache"),
+        ];
+        #[cfg(feature = "semantic")]
+        roots.push(tldr_core::semantic::store_dir_for(project));
 
-        // Collect files to remove
-        let entries: Vec<_> = fs::read_dir(&cache_dir)?
-            .filter_map(|e| e.ok())
-            .filter(|e| e.metadata().map(|m| m.is_file()).unwrap_or(false))
-            .collect();
-
-        // Remove each file
-        for entry in entries {
-            let path = entry.path();
-            if let Ok(metadata) = entry.metadata() {
-                bytes_freed += metadata.len();
-            }
-            if fs::remove_file(&path).is_ok() {
-                files_removed += 1;
+        for root in roots {
+            if root.exists() {
+                clear_files_recursive(&root, &mut files_removed, &mut bytes_freed)?;
+                let _ = fs::remove_dir_all(&root);
             }
         }
 
@@ -174,6 +155,25 @@ impl CacheClearArgs {
 
         Ok(())
     }
+}
+
+fn clear_files_recursive(
+    directory: &Path,
+    files_removed: &mut usize,
+    bytes_freed: &mut u64,
+) -> DaemonResult<()> {
+    for entry in fs::read_dir(directory)?.flatten() {
+        let path = entry.path();
+        let metadata = entry.metadata()?;
+        if metadata.is_dir() {
+            clear_files_recursive(&path, files_removed, bytes_freed)?;
+        } else if metadata.is_file() {
+            *bytes_freed += metadata.len();
+            fs::remove_file(path)?;
+            *files_removed += 1;
+        }
+    }
+    Ok(())
 }
 
 // =============================================================================

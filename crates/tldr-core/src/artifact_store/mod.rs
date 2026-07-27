@@ -1,7 +1,9 @@
 //! Shared, generation-aware persistence for structural and semantic artifacts.
 
 mod file_facts;
+mod function_artifacts;
 mod ingestion;
+mod projections;
 mod redb;
 pub mod schema;
 mod types;
@@ -9,7 +11,9 @@ mod types;
 pub use file_facts::{
     CallFact, DefinitionFact, FileFacts, FileFactsParser, ImportFact, SemanticChunkFact,
 };
+pub use function_artifacts::FunctionArtifactCoordinator;
 pub use ingestion::{IngestionEngine, IngestionReport};
+pub use projections::GenerationSnapshot;
 pub use redb::{ArtifactStore, RedbArtifactStore};
 pub use types::{
     ArtifactBatch, ArtifactEnvelope, ArtifactKey, ArtifactKind, ArtifactSubject,
@@ -109,17 +113,26 @@ mod tests {
         let full = engine.ingest(IngestionScope::Project).unwrap();
         assert_eq!(full.generation, 1);
         assert_eq!(full.parsed_files, 2);
+        let unchanged = engine.ingest(IngestionScope::Project).unwrap();
+        assert_eq!(unchanged.generation, 2);
+        assert_eq!(unchanged.parsed_files, 0);
 
         std::fs::write(&first, "fn first_changed() {}\n").unwrap();
         let delta = engine
             .ingest(IngestionScope::Files(vec!["first.rs".into()]))
             .unwrap();
-        assert_eq!(delta.generation, 2);
+        assert_eq!(delta.generation, 3);
         assert_eq!(delta.parsed_files, 1);
-        let manifest = store.generation(2).unwrap().unwrap();
+        let manifest = store.generation(3).unwrap().unwrap();
         assert!(manifest
             .artifacts
             .iter()
             .any(|key| matches!(&key.subject, ArtifactSubject::File(path) if path == "second.rs")));
+        let snapshot = GenerationSnapshot::active(store.as_ref()).unwrap().unwrap();
+        assert_eq!(snapshot.generation(), 3);
+        assert_eq!(snapshot.file_count(), 2);
+        assert!(snapshot
+            .definitions()
+            .any(|(_, definition)| definition.name == "first_changed"));
     }
 }

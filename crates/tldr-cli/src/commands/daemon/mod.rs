@@ -46,6 +46,7 @@
 //! - `cache_clear`: Cache clearing command
 
 pub(crate) mod activity;
+pub mod artifact_manager;
 #[cfg(feature = "semantic")]
 pub mod bulk_worker;
 pub mod cache_clear;

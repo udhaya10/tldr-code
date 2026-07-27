@@ -12,6 +12,7 @@
 
 use std::path::PathBuf;
 
+use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 
 use crate::Language;
@@ -73,7 +74,20 @@ pub struct CodeChunk {
 }
 
 /// How a chunk relates to its extracted semantic root.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(
+    Archive,
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    RkyvDeserialize,
+    RkyvSerialize,
+    Serialize,
+    Deserialize,
+    PartialEq,
+    Eq,
+    Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum StructuralRole {
     /// Extracted semantic root retained intact.
@@ -90,7 +104,18 @@ pub enum StructuralRole {
 }
 
 /// Deterministic structural provenance for a planned chunk.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(
+    Archive,
+    Debug,
+    Clone,
+    Default,
+    RkyvDeserialize,
+    RkyvSerialize,
+    Serialize,
+    Deserialize,
+    PartialEq,
+    Eq,
+)]
 #[serde(default)]
 pub struct ChunkStructure {
     /// Structural role of this chunk.

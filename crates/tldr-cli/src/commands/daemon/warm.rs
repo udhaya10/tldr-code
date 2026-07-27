@@ -20,18 +20,22 @@
 //!   "files": 150,
 //!   "edges": 2500,
 //!   "languages": ["python", "typescript"],
-//!   "cache_path": ".tldr/cache/call_graph.json"
+//!   "cache_path": ".tldr/store/project.redb"
 //! }
 //! ```
 
+#[cfg(test)]
 use std::collections::HashSet;
+#[cfg(test)]
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command as StdCommand;
 
 use clap::Args;
+#[cfg(test)]
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
 use tldr_core::walker::walk_project;
 
 use crate::output::OutputFormat;
@@ -78,6 +82,7 @@ pub struct WarmOutput {
 
 /// Call graph edge for serialization.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg(test)]
 pub struct CallEdge {
     pub from_file: PathBuf,
     pub from_func: String,
@@ -87,6 +92,7 @@ pub struct CallEdge {
 
 /// Call graph cache file format.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg(test)]
 pub struct CallGraphCache {
     pub edges: Vec<CallEdge>,
     pub languages: Vec<String>,
@@ -227,61 +233,33 @@ impl WarmArgs {
         if !quiet {
             match format {
                 OutputFormat::Text | OutputFormat::Sarif | OutputFormat::Dot => {
-                    println!("Warming call graph cache...");
+                    println!("Building shared artifact generation...");
                 }
                 _ => {}
             }
         }
 
-        // Ensure .tldr directory exists
-        let tldr_dir = project.join(".tldr");
-        fs::create_dir_all(&tldr_dir)?;
-
-        // Ensure .tldrignore exists
-        let ignore_path = project.join(".tldrignore");
-        if !ignore_path.exists() {
-            fs::write(
-                &ignore_path,
-                "# TLDR ignore file\n\
-                 .git/\n\
-                 node_modules/\n\
-                 __pycache__/\n\
-                 target/\n\
-                 build/\n\
-                 dist/\n\
-                 .venv/\n\
-                 venv/\n\
-                 *.pyc\n\
-                 *.pyo\n",
-            )?;
-        }
-
-        // Auto-detect languages
-        let languages = detect_languages(project)?;
-
-        // Build call graph
-        let (files, edges) = build_call_graph(project, &languages)?;
-
-        // Write cache file
-        let cache_dir = tldr_dir.join("cache");
-        fs::create_dir_all(&cache_dir)?;
-        let cache_path = cache_dir.join("call_graph.json");
-
-        let cache = CallGraphCache {
-            edges: edges.clone(),
-            languages: languages.clone(),
-            timestamp: chrono::Utc::now().timestamp(),
-        };
-
-        fs::write(&cache_path, serde_json::to_string_pretty(&cache)?)?;
+        let manager = super::artifact_manager::ArtifactManager::open(project)?;
+        let report = manager.warm()?;
+        let snapshot = manager
+            .snapshot()
+            .map_err(|state| anyhow::anyhow!("artifact generation is not ready: {state:?}"))?;
+        let mut languages = snapshot
+            .files()
+            .map(|facts| facts.language.clone())
+            .collect::<Vec<_>>();
+        languages.sort();
+        languages.dedup();
+        let files = snapshot.file_count();
+        let edges = snapshot.intra_file_call_graph().edge_count();
 
         // Output result
         let output = WarmOutput {
             status: "ok".to_string(),
             files,
-            edges: edges.len(),
+            edges,
             languages,
-            cache_path: PathBuf::from(".tldr/cache/call_graph.json"),
+            cache_path: PathBuf::from(".tldr/store/project.redb"),
         };
 
         // Always output result (quiet only suppresses progress messages)
@@ -295,7 +273,12 @@ impl WarmArgs {
                     output.files, output.edges
                 );
                 println!("Languages: {}", output.languages.join(", "));
-                println!("Cache written to: {}", output.cache_path.display());
+                println!(
+                    "Generation {} published to: {}{}",
+                    report.generation,
+                    output.cache_path.display(),
+                    if report.resumed { " (resumed)" } else { "" }
+                );
             }
         }
 
@@ -308,6 +291,7 @@ impl WarmArgs {
 // =============================================================================
 
 /// Hardcoded directory names to always skip during warm walks.
+#[cfg(test)]
 const SKIP_DIRS: &[&str] = &[
     "node_modules",
     "__pycache__",
@@ -320,6 +304,7 @@ const SKIP_DIRS: &[&str] = &[
 
 /// Load ignore patterns from `.tldrignore` file in the project root.
 /// Returns directory stems to skip (e.g., "corpus" from "corpus/").
+#[cfg(test)]
 fn load_tldrignore(project: &Path) -> HashSet<String> {
     let mut patterns = HashSet::new();
     let ignore_path = project.join(".tldrignore");
@@ -340,6 +325,7 @@ fn load_tldrignore(project: &Path) -> HashSet<String> {
 }
 
 /// Check if a path component should be skipped (hidden, hardcoded, or .tldrignore).
+#[cfg(test)]
 fn should_skip_component(component: &str, ignore_patterns: &HashSet<String>) -> bool {
     component.starts_with('.')
         || SKIP_DIRS.contains(&component)
@@ -352,6 +338,7 @@ fn should_skip_component(component: &str, ignore_patterns: &HashSet<String>) -> 
 /// already covers most of `SKIP_DIRS` (node_modules, target, etc.) plus
 /// hidden dirs, but `venv`/`.venv` and user patterns must still be checked
 /// here to match the historical behavior.
+#[cfg(test)]
 fn path_has_ignored_component(
     path: &Path,
     project: &Path,
@@ -367,6 +354,7 @@ fn path_has_ignored_component(
 }
 
 /// Detect languages present in the project.
+#[cfg(test)]
 fn detect_languages(project: &Path) -> anyhow::Result<Vec<String>> {
     let mut languages = HashSet::new();
     let ignore_patterns = load_tldrignore(project);
@@ -427,6 +415,7 @@ fn detect_languages(project: &Path) -> anyhow::Result<Vec<String>> {
 /// Build call graph for the project.
 ///
 /// Returns (file_count, edges).
+#[cfg(test)]
 fn build_call_graph(
     project: &Path,
     languages: &[String],
@@ -482,6 +471,7 @@ fn build_call_graph(
 ///
 /// This is a simplified regex-based implementation.
 /// Production code would use tree-sitter for accurate parsing.
+#[cfg(test)]
 fn extract_call_edges(file_path: &std::path::Path, content: &str, lang: &str) -> Vec<CallEdge> {
     let mut edges = Vec::new();
     let mut current_func: Option<String> = None;
@@ -539,6 +529,7 @@ fn extract_call_edges(file_path: &std::path::Path, content: &str, lang: &str) ->
 }
 
 /// Check if a name is a builtin or language keyword.
+#[cfg(test)]
 fn is_builtin_or_keyword(name: &str) -> bool {
     let common_builtins = [
         "if",
@@ -643,33 +634,31 @@ pub async fn cmd_warm(args: WarmArgs) -> DaemonResult<WarmOutput> {
             .join(&args.path)
     });
 
-    // Auto-detect languages
-    let languages = detect_languages(&project)
-        .map_err(|e| DaemonError::Io(std::io::Error::other(e.to_string())))?;
-
-    // Build call graph
-    let (files, edges) = build_call_graph(&project, &languages)
-        .map_err(|e| DaemonError::Io(std::io::Error::other(e.to_string())))?;
-
-    // Write cache file
-    let cache_dir = project.join(".tldr/cache");
-    fs::create_dir_all(&cache_dir).map_err(DaemonError::Io)?;
-    let cache_path = cache_dir.join("call_graph.json");
-
-    let cache = CallGraphCache {
-        edges: edges.clone(),
-        languages: languages.clone(),
-        timestamp: chrono::Utc::now().timestamp(),
-    };
-
-    fs::write(&cache_path, serde_json::to_string_pretty(&cache)?)?;
+    let manager = super::artifact_manager::ArtifactManager::open(&project)
+        .map_err(|error| DaemonError::Io(std::io::Error::other(error.to_string())))?;
+    manager
+        .warm()
+        .map_err(|error| DaemonError::Io(std::io::Error::other(error.to_string())))?;
+    let snapshot = manager.snapshot().map_err(|state| {
+        DaemonError::Io(std::io::Error::other(format!(
+            "artifact generation is not ready: {state:?}"
+        )))
+    })?;
+    let mut languages = snapshot
+        .files()
+        .map(|facts| facts.language.clone())
+        .collect::<Vec<_>>();
+    languages.sort();
+    languages.dedup();
+    let files = snapshot.file_count();
+    let edges = snapshot.intra_file_call_graph().edge_count();
 
     Ok(WarmOutput {
         status: "ok".to_string(),
         files,
-        edges: edges.len(),
+        edges,
         languages,
-        cache_path: PathBuf::from(".tldr/cache/call_graph.json"),
+        cache_path: PathBuf::from(".tldr/store/project.redb"),
     })
 }
 

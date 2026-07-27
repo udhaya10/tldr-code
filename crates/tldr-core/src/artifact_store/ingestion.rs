@@ -1,6 +1,6 @@
 //! One resumable engine for full-project and file-delta ingestion.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -53,37 +53,69 @@ impl IngestionEngine {
     /// Build or resume either the complete project or a file subset.
     pub fn ingest(&self, scope: IngestionScope) -> TldrResult<IngestionReport> {
         let all_files = discover(&self.root);
-        let source_revision = manifest_revision(&self.root, &all_files)?;
+        let (source_revision, revisions) = source_manifest(&self.root, &all_files)?;
         let active = self.store.active_generation()?.unwrap_or(0);
         let generation = active.saturating_add(1);
-        let job_id = format!("ingestion-{generation}");
+        let revision_tag = source_revision.0[..8]
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let job_id = format!("ingestion-{generation}-{revision_tag}");
         let previous = self.store.generation(active)?;
+        let previous_keys = previous
+            .as_ref()
+            .map(|manifest| manifest.artifacts.as_slice())
+            .unwrap_or_default();
 
-        let selected = match &scope {
-            IngestionScope::Project => all_files.clone(),
+        let selected: Vec<PathBuf> = match &scope {
+            IngestionScope::Project => all_files
+                .iter()
+                .filter(|path| {
+                    let relative = relative(&self.root, path);
+                    let revision = revisions.get(&relative);
+                    !previous_keys.iter().any(|key| {
+                        key.kind == ArtifactKind::FileFacts
+                            && key.revision == *revision.expect("discovered file has revision")
+                            && key.subject == ArtifactSubject::File(relative.clone())
+                    })
+                })
+                .cloned()
+                .collect(),
             IngestionScope::Files(files) => {
                 let wanted = files.iter().cloned().collect::<HashSet<_>>();
                 all_files
                     .iter()
-                    .filter(|path| wanted.contains(&relative(&self.root, path)))
+                    .filter(|path| {
+                        let relative = relative(&self.root, path);
+                        let revision = revisions.get(&relative);
+                        wanted.contains(&relative)
+                            && !previous_keys.iter().any(|key| {
+                                key.kind == ArtifactKind::FileFacts
+                                    && key.revision
+                                        == *revision.expect("discovered file has revision")
+                                    && key.subject == ArtifactSubject::File(relative.clone())
+                            })
+                    })
                     .cloned()
                     .collect()
             }
         };
+
+        let existing = self.store.job(&job_id)?;
+        let resumed = existing.is_some();
+        let next_batch = existing.as_ref().map_or(0, |job| job.next_batch);
+        let total_batches = selected.len().div_ceil(BATCH_FILES) as u64;
+        let remaining = selected
+            .iter()
+            .skip(next_batch as usize * BATCH_FILES)
+            .cloned()
+            .collect::<Vec<_>>();
         let parser = FileFactsParser::default();
-        let facts = selected
+        let facts = remaining
             .par_iter()
             .map(|path| parser.parse(&self.root, path))
             .collect::<TldrResult<Vec<_>>>()?;
         let parsed_files = parser.invocations() as usize;
-        let mut derived = facts
-            .iter()
-            .map(|facts| self.derive(generation, facts))
-            .collect::<TldrResult<Vec<_>>>()?
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>();
-        derived.sort_by(|left, right| artifact_order(&left.key).cmp(&artifact_order(&right.key)));
 
         let changed = match &scope {
             IngestionScope::Project => HashSet::new(),
@@ -99,35 +131,58 @@ impl IngestionEngine {
             })
             .unwrap_or_default();
         if matches!(scope, IngestionScope::Project) {
-            manifest_keys.clear();
+            let selected_paths = selected
+                .iter()
+                .map(|path| relative(&self.root, path))
+                .collect::<HashSet<_>>();
+            manifest_keys.retain(|key| !subject_changed(&key.subject, &selected_paths));
         }
-        manifest_keys.extend(derived.iter().map(|artifact| artifact.key.clone()));
 
-        let total_batches = derived.len().div_ceil(BATCH_FILES) as u64;
-        let existing = self.store.job(&job_id)?;
-        let resumed = existing.is_some();
-        let next_batch = existing.as_ref().map_or(0, |job| job.next_batch);
-        for (index, chunk) in derived.chunks(BATCH_FILES).enumerate() {
-            if (index as u64) < next_batch {
-                continue;
-            }
+        // A resumed generation already owns committed records that are not yet
+        // reachable from an active manifest. Recover those keys before adding
+        // the remaining batches.
+        for kind in ALL_ARTIFACT_KINDS {
+            manifest_keys.extend(
+                self.store
+                    .artifacts(generation, kind)?
+                    .into_iter()
+                    .map(|artifact| artifact.key),
+            );
+        }
+
+        let mut committed_artifacts = 0usize;
+        for (offset, chunk) in facts.chunks(BATCH_FILES).enumerate() {
+            let index = next_batch + offset as u64;
+            let mut artifacts = chunk
+                .iter()
+                .map(|facts| self.derive(generation, facts))
+                .collect::<TldrResult<Vec<_>>>()?
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>();
+            artifacts
+                .sort_by(|left, right| artifact_order(&left.key).cmp(&artifact_order(&right.key)));
             let job = IngestionJob {
                 id: job_id.clone(),
                 target_generation: generation,
                 scope: scope.clone(),
                 stage: IngestionStage::Commit,
-                next_batch: index as u64 + 1,
+                next_batch: index + 1,
                 total_batches,
                 source_revision,
             };
+            manifest_keys.extend(artifacts.iter().map(|artifact| artifact.key.clone()));
+            committed_artifacts += artifacts.len();
             self.store.commit_batch(
                 &ArtifactBatch {
                     generation,
-                    artifacts: chunk.to_vec(),
+                    artifacts,
                 },
                 &job,
             )?;
         }
+        manifest_keys.sort_by_key(artifact_order);
+        manifest_keys.dedup();
 
         let validation_job = IngestionJob {
             id: job_id.clone(),
@@ -166,7 +221,7 @@ impl IngestionEngine {
         Ok(IngestionReport {
             generation,
             parsed_files,
-            artifacts: derived.len(),
+            artifacts: committed_artifacts,
             resumed,
         })
     }
@@ -217,13 +272,34 @@ fn discover(root: &Path) -> Vec<PathBuf> {
     paths
 }
 
-fn manifest_revision(root: &Path, paths: &[PathBuf]) -> TldrResult<RevisionId> {
+const ALL_ARTIFACT_KINDS: [ArtifactKind; 10] = [
+    ArtifactKind::FileFacts,
+    ArtifactKind::Symbols,
+    ArtifactKind::References,
+    ArtifactKind::CallEdges,
+    ArtifactKind::CallGraph,
+    ArtifactKind::Cfg,
+    ArtifactKind::Dfg,
+    ArtifactKind::Pdg,
+    ArtifactKind::SemanticChunks,
+    ArtifactKind::Embeddings,
+];
+
+fn source_manifest(
+    root: &Path,
+    paths: &[PathBuf],
+) -> TldrResult<(RevisionId, HashMap<String, RevisionId>)> {
     let mut hasher = blake3::Hasher::new();
+    let mut revisions = HashMap::with_capacity(paths.len());
     for path in paths {
-        hasher.update(relative(root, path).as_bytes());
-        hasher.update(&std::fs::read(path)?);
+        let relative = relative(root, path);
+        let bytes = std::fs::read(path)?;
+        let revision = RevisionId::for_bytes(&bytes);
+        hasher.update(relative.as_bytes());
+        hasher.update(&revision.0);
+        revisions.insert(relative, revision);
     }
-    Ok(RevisionId(*hasher.finalize().as_bytes()))
+    Ok((RevisionId(*hasher.finalize().as_bytes()), revisions))
 }
 
 fn relative(root: &Path, path: &Path) -> String {

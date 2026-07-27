@@ -3,16 +3,43 @@
 use std::collections::HashMap;
 use std::hash::Hash;
 
+use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 
 use crate::semantic::types::{EmbeddingModel, StructuralRole};
 
 /// Persistent logical identity of a chunk across localized source edits.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(
+    Archive,
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    Hash,
+    RkyvDeserialize,
+    RkyvSerialize,
+    Serialize,
+    Deserialize,
+)]
 pub struct ChunkId(pub u128);
 
 /// Hash of the exact composed document passed to the embedding backend.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(
+    Archive,
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    Hash,
+    RkyvDeserialize,
+    RkyvSerialize,
+    Serialize,
+    Deserialize,
+)]
 pub struct ChunkRevision(pub [u8; 32]);
 
 impl ChunkRevision {
@@ -23,7 +50,19 @@ impl ChunkRevision {
 }
 
 /// Structural evidence used to reconcile a chunk after its file changes.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(
+    Archive,
+    Debug,
+    Clone,
+    Default,
+    PartialEq,
+    Eq,
+    Hash,
+    RkyvDeserialize,
+    RkyvSerialize,
+    Serialize,
+    Deserialize,
+)]
 pub struct StructuralAnchor {
     /// Stable path relative to the indexed repository.
     pub repository_path: String,

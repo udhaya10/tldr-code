@@ -23,6 +23,7 @@ use dashmap::DashMap;
 use tokio::sync::{watch, RwLock};
 
 use super::activity::{ActivityTracker, Source};
+use super::artifact_manager::ArtifactManager;
 use super::error::{DaemonError, DaemonResult};
 use super::ipc::{read_command, send_response, IpcListener, IpcStream};
 use super::salsa::{hash_bytes, hash_path, QueryCache, QueryKey};
@@ -207,6 +208,7 @@ fn build_project_call_graph_memoized(
 struct WarmJob {
     project: PathBuf,
     lang: Language,
+    artifact_manager: Arc<ArtifactManager>,
     cache: Arc<QueryCache>,
     /// TLDR-iqr: FileIR memo handle so the warm build populates it.
     file_ir_memo: Arc<FileIrMemo>,
@@ -226,7 +228,28 @@ impl WarmJob {
         let mut warmed = Vec::new();
         let mut errors = Vec::new();
 
-        // 1. Warm call graph
+        // 1. Build or resume the authoritative shared generation. This step
+        // reuses unchanged revisions and is the only structural ingestion
+        // entry point used by both startup and watcher deltas.
+        let manager = Arc::clone(&self.artifact_manager);
+        match tokio::task::spawn_blocking(move || manager.warm()).await {
+            Ok(Ok(report)) => {
+                if report.parsed_files == 0 {
+                    warmed.push("artifact_store (cached)");
+                } else if report.resumed {
+                    warmed.push("artifact_store (resumed)");
+                } else {
+                    warmed.push("artifact_store");
+                }
+            }
+            Ok(Err(error)) => errors.push(format!("artifact_store: {error}")),
+            Err(error) => errors.push(format!("artifact_store: {error}")),
+        }
+
+        // Legacy result memoization remains memory-only during the cutover.
+        // Durable authority is the generation above, never these JSON-shaped
+        // transport values.
+        // 2. Warm call graph
         let calls_key = QueryKey::new(
             "calls",
             hash_str_args(&[&self.project.to_string_lossy()]),
@@ -353,6 +376,8 @@ pub struct TLDRDaemon {
     start_time: Instant,
     /// Current daemon status
     status: Arc<RwLock<DaemonStatus>>,
+    /// Authoritative redb-backed project artifacts and resumable ingestion.
+    artifact_manager: Arc<ArtifactManager>,
     /// Salsa-style query cache. Behind `Arc` so the detached warm-build task
     /// (TLDR-utj.7) can own a handle without holding the whole daemon.
     cache: Arc<QueryCache>,
@@ -391,12 +416,17 @@ impl TLDRDaemon {
     /// to begin accepting connections.
     pub fn new(project: PathBuf, config: DaemonConfig) -> Self {
         let (shutdown_tx, _shutdown_rx) = watch::channel(false);
+        let artifact_manager = Arc::new(
+            ArtifactManager::open(&project)
+                .unwrap_or_else(|error| panic!("failed to open project artifact store: {error}")),
+        );
 
         Self {
             project,
             config,
             start_time: Instant::now(),
             status: Arc::new(RwLock::new(DaemonStatus::Initializing)),
+            artifact_manager,
             cache: Arc::new(QueryCache::with_defaults()),
             sessions: DashMap::new(),
             hooks: DashMap::new(),
@@ -1584,6 +1614,17 @@ impl TLDRDaemon {
         let salsa_stats = self.cache_stats();
         let all_sessions = Some(self.all_sessions_summary());
         let hook_stats = Some(self.hook_stats());
+        let artifact_stats = self.artifact_manager.stats();
+        let (artifact_state, target_generation, last_error) = match self.artifact_manager.state() {
+            super::artifact_manager::ArtifactState::Cold => ("cold", None, None),
+            super::artifact_manager::ArtifactState::Building { target_generation } => {
+                ("building", Some(target_generation), None)
+            }
+            super::artifact_manager::ArtifactState::Ready { .. } => ("ready", None, None),
+            super::artifact_manager::ArtifactState::Failed { error, .. } => {
+                ("failed", None, Some(error))
+            }
+        };
 
         // Get session-specific stats if requested
         let session_stats =
@@ -1604,6 +1645,14 @@ impl TLDRDaemon {
             memory: Some(super::types::MemoryStats {
                 rss_bytes: super::rss::current_rss_bytes(),
                 peak_rss_bytes: super::rss::peak_rss_bytes(),
+            }),
+            artifact_store: Some(super::types::ArtifactStoreStats {
+                state: artifact_state.into(),
+                active_generation: artifact_stats.active_generation,
+                target_generation,
+                files: artifact_stats.hot_files,
+                redb_bytes: artifact_stats.redb_bytes,
+                last_error,
             }),
         }
     }
@@ -1646,6 +1695,7 @@ impl TLDRDaemon {
             file_ir_memo: Arc::clone(&self.file_ir_memo),
             project: self.project.clone(),
             lang,
+            artifact_manager: Arc::clone(&self.artifact_manager),
             cache: Arc::clone(&self.cache),
             indexed_files: Arc::clone(&self.indexed_files),
             #[cfg(feature = "semantic")]
@@ -1830,6 +1880,25 @@ impl TLDRDaemon {
         self.cache
             .invalidate_by_input(super::salsa::hash_path(&self.project));
 
+        // Structural facts and their generation checkpoint take the same
+        // resumable path as a bulk warm. Queries retain their old Arc snapshot
+        // until this delta publishes atomically.
+        {
+            let manager = Arc::clone(&self.artifact_manager);
+            let changed = file.clone();
+            let busy = self.activity.begin("artifact-delta");
+            let _ = tokio::task::spawn_blocking(move || {
+                let _busy = busy;
+                if let Err(error) = manager.apply_delta(&changed) {
+                    eprintln!(
+                        "[artifact-store] delta failed for {}: {error}",
+                        changed.display()
+                    );
+                }
+            })
+            .await;
+        }
+
         // Incrementally re-index the changed file in the resident store instead
         // of dropping it (TLDR-t8f). A warm store applies a per-file delta —
         // re-embedding only that file's changed chunks — so query results
@@ -1926,22 +1995,9 @@ impl TLDRDaemon {
 
     /// Persist statistics to disk.
     async fn persist_stats(&self) -> DaemonResult<()> {
-        // Create cache directory if it doesn't exist
-        let cache_dir = self.project.join(".tldr/cache");
-        if !cache_dir.exists() {
-            std::fs::create_dir_all(&cache_dir)?;
-        }
-
-        // Save Salsa cache stats
-        let salsa_stats_path = cache_dir.join("salsa_stats.json");
-        let stats = self.cache_stats();
-        let json = serde_json::to_string_pretty(&stats)?;
-        std::fs::write(salsa_stats_path, json)?;
-
-        // Save full query cache
-        let cache_path = cache_dir.join("query_cache.bin");
-        self.cache.save_to_file(&cache_path)?;
-
+        // Long-lived derived state is committed transactionally by
+        // ArtifactManager. Session/result-cache telemetry is intentionally
+        // process-local; JSON is a transport format, never a durable cache.
         Ok(())
     }
 }

@@ -4,13 +4,14 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use fs2::FileExt;
-use serde::{Deserialize, Serialize};
+use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 
 use super::redb_store::{
     GenerationState, GenerationVectorWrite, RedbStore, StoredGeneration, DEFAULT_REDB_CACHE_BYTES,
 };
 use super::vector_store::{
-    activate_current, next_generation, ChunkMeta, FileRecord, ManifestId, VectorStore,
+    activate_current, decode_binary, encode_binary, next_generation, ChunkMeta, FileRecord,
+    ManifestId, VectorStore,
 };
 use crate::{TldrError, TldrResult};
 
@@ -25,7 +26,7 @@ pub(crate) enum PublicationFault {
     Activation,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Archive, RkyvDeserialize, RkyvSerialize)]
 struct GenerationFiles {
     records: HashMap<String, FileRecord>,
 }
@@ -75,11 +76,10 @@ impl GenerationManager {
                 .checked_add(1)
                 .ok_or_else(|| generation_error("generation counter overflow"))?;
         }
-        let manifest_identity = serde_json::to_vec(identity).map_err(generation_error)?;
-        let files = serde_json::to_vec(&GenerationFiles {
+        let manifest_identity = encode_binary(identity)?;
+        let files = encode_binary(&GenerationFiles {
             records: store.files_snapshot(),
-        })
-        .map_err(generation_error)?;
+        })?;
         self.ledger.stage_generation(&StoredGeneration {
             generation,
             state: GenerationState::Staged,
@@ -96,7 +96,7 @@ impl GenerationManager {
             batch.push(OwnedVector {
                 key,
                 vector: vector.to_vec(),
-                metadata: serde_json::to_vec(metadata).map_err(generation_error)?,
+                metadata: encode_binary(metadata)?,
             });
             if batch.len() == RECORD_BATCH {
                 self.flush(generation, store.dimensions(), &batch)?;
@@ -158,7 +158,7 @@ impl GenerationManager {
             .ok_or_else(|| generation_error("active generation metadata is missing"))?;
         if record.state != GenerationState::Complete
             || record.dimensions != identity.dimensions
-            || record.manifest_identity != serde_json::to_vec(identity).map_err(generation_error)?
+            || record.manifest_identity != encode_binary(identity)?
         {
             return Err(generation_error(
                 "active generation model, metric, dimensions, or pipeline identity mismatch",
@@ -186,13 +186,11 @@ impl GenerationManager {
         let records = vectors
             .into_iter()
             .map(|vector| {
-                let metadata = serde_json::from_slice::<ChunkMeta>(&vector.metadata)
-                    .map_err(generation_error)?;
+                let metadata = decode_binary::<ChunkMeta>(&vector.metadata)?;
                 Ok((vector.key, vector.vector, metadata))
             })
             .collect::<TldrResult<Vec<_>>>()?;
-        let files: GenerationFiles =
-            serde_json::from_slice(&record.files).map_err(generation_error)?;
+        let files: GenerationFiles = decode_binary(&record.files)?;
         let store = VectorStore::from_generation_records(
             record.dimensions as usize,
             records,
@@ -216,7 +214,7 @@ impl GenerationManager {
             .ok_or_else(|| generation_error(format!("generation {generation} is missing")))?;
         if record.state != GenerationState::Complete
             || record.dimensions != identity.dimensions
-            || record.manifest_identity != serde_json::to_vec(identity).map_err(generation_error)?
+            || record.manifest_identity != encode_binary(identity)?
         {
             return Err(generation_error(
                 "selected generation is incomplete or incompatible",

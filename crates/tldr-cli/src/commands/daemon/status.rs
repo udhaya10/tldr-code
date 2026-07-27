@@ -22,8 +22,8 @@ use super::daemon_registry::live_entries;
 use super::error::DaemonError;
 use super::ipc::send_command;
 use super::types::{
-    DaemonCommand, DaemonResponse, DaemonStatus, InferenceRunnerStats, LivenessStats, MemoryStats,
-    SalsaCacheStats, SemanticIndexStats,
+    ArtifactStoreStats, DaemonCommand, DaemonResponse, DaemonStatus, InferenceRunnerStats,
+    LivenessStats, MemoryStats, SalsaCacheStats, SemanticIndexStats,
 };
 
 // =============================================================================
@@ -80,6 +80,9 @@ pub struct DaemonStatusOutput {
     /// Daemon process memory: current + peak RSS (TLDR-yll).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub memory: Option<MemoryStats>,
+    /// Authoritative shared artifact generation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artifact_store: Option<ArtifactStoreStats>,
     /// Optional message
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
@@ -155,6 +158,7 @@ impl DaemonStatusArgs {
                     liveness: None,
                     semantic_index: None,
                     memory: None,
+                    artifact_store: None,
                     message: Some("Daemon not running".to_string()),
                 };
 
@@ -192,6 +196,7 @@ impl DaemonStatusArgs {
                 liveness,
                 semantic_index,
                 memory,
+                artifact_store,
                 ..
             } => {
                 let status_str = format_status(status);
@@ -207,6 +212,7 @@ impl DaemonStatusArgs {
                     liveness: liveness.clone(),
                     semantic_index: semantic_index.clone(),
                     memory: memory.clone(),
+                    artifact_store: artifact_store.clone(),
                     message: None,
                 };
 
@@ -222,6 +228,12 @@ impl DaemonStatusArgs {
                         println!("Uptime:  {}", uptime_human);
                         println!("Project: {}", project.display());
                         println!("Files:   {}", files);
+                        if let Some(store) = &artifact_store {
+                            println!(
+                                "Artifacts: {} generation {:?}, {} bytes",
+                                store.state, store.active_generation, store.redb_bytes
+                            );
+                        }
                         if let Some(idx) = &semantic_index {
                             println!("Index:   {}", format_semantic_index(idx));
                             if !idx.runners.is_empty() {
@@ -264,6 +276,7 @@ impl DaemonStatusArgs {
                     liveness: None,
                     semantic_index: None,
                     memory: None,
+                    artifact_store: None,
                     message,
                 };
 
@@ -523,6 +536,7 @@ mod tests {
                 rss_bytes: Some(1024 * 1024 * 1024),
                 peak_rss_bytes: Some(22 * 1024 * 1024 * 1024),
             }),
+            artifact_store: None,
             message: None,
         };
 
@@ -550,6 +564,7 @@ mod tests {
             liveness: None,
             semantic_index: None,
             memory: None,
+            artifact_store: None,
             message: Some("Daemon not running".to_string()),
         };
 
