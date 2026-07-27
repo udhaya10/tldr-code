@@ -40,6 +40,6 @@ Replace the stale pre-fixed-shape description with the resolved design and measu
 
 Record that all six children are complete and close the epic.
 
-- [ ] **Step 3: Commit and sync**
+- [x] **Step 3: Commit and sync**
 
 Commit the plan and Beads export, pull/rebase from `fork/main`, push Beads, push code to `fork/main`, and verify a clean synchronized worktree.
