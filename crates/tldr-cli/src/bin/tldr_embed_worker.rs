@@ -5,9 +5,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context, Result};
 use tldr_core::semantic::{
-    decode_worker_message, encode_worker_message, load_or_build_store, GenerationManager,
-    JobRecord, JobState, RedbStore, WorkerBuildRequest, WorkerEvent, DEFAULT_REDB_CACHE_BYTES,
-    MAX_WORKER_MESSAGE_BYTES, WORKER_PROTOCOL_VERSION,
+    decode_worker_message, encode_worker_message, load_or_build_store_from_artifacts,
+    GenerationManager, JobRecord, JobState, RedbStore, WorkerBuildRequest, WorkerEvent,
+    DEFAULT_REDB_CACHE_BYTES, MAX_WORKER_MESSAGE_BYTES, WORKER_PROTOCOL_VERSION,
 };
 
 fn main() -> Result<()> {
@@ -57,11 +57,19 @@ fn main() -> Result<()> {
     ledger.commit_job_batch(&running, &[])?;
     emit(&WorkerEvent::Started { attempt })?;
 
-    match load_or_build_store(
+    let source_path = request
+        .source_artifacts
+        .as_ref()
+        .ok_or_else(|| anyhow!("shared semantic source artifact export is missing"))?;
+    let source_file = std::fs::File::open(source_path).context("open semantic source export")?;
+    let source_chunks: Vec<tldr_core::semantic::CodeChunk> =
+        ciborium::de::from_reader(source_file).context("decode semantic source export")?;
+    match load_or_build_store_from_artifacts(
         &request.project,
         &request.store_dir,
         &request.options,
         request.cache_config,
+        source_chunks,
     ) {
         Ok(store) => {
             let completed = JobRecord {

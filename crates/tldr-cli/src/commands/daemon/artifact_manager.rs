@@ -233,7 +233,7 @@ impl ArtifactManager {
             revision: facts.revision,
             subject: ArtifactSubject::File(facts.path.clone()),
             kind: ArtifactKind::FileFacts,
-            producer: ProducerId::new("file-facts", 3),
+            producer: ProducerId::new("file-facts", 4),
         };
         let key = ArtifactKey {
             project,

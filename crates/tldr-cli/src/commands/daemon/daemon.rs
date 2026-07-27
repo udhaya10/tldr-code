@@ -150,8 +150,13 @@ impl WarmJob {
         if let Some(model) = self.model {
             let mgr = Arc::clone(&self.semantic_store);
             let project = self.project.clone();
+            let source_chunks = self
+                .artifact_manager
+                .snapshot()
+                .map(|snapshot| snapshot.semantic_source_chunks(&project))
+                .unwrap_or_default();
             let res = tokio::task::spawn_blocking(move || {
-                let built = mgr.warm(&project, model)?;
+                let built = mgr.warm(&project, model, source_chunks)?;
                 let generation = mgr.active_generation(&project)?;
                 Ok::<_, String>((built, generation))
             })
@@ -1621,6 +1626,12 @@ impl TLDRDaemon {
             let artifacts = Arc::clone(&self.artifact_manager);
             let project = self.project.clone();
             let changed = file.clone();
+            let source_chunk = artifacts.snapshot().ok().and_then(|snapshot| {
+                snapshot
+                    .semantic_source_chunks(&project)
+                    .into_iter()
+                    .find(|chunk| chunk.file_path == changed)
+            });
             // Busy guard owned by the closure (see Warm handler note): the
             // delta must defer idle shutdown for exactly as long as it runs,
             // regardless of what happens to this awaiting task.
@@ -1628,7 +1639,7 @@ impl TLDRDaemon {
             let _ = tokio::task::spawn_blocking(move || {
                 let _busy = busy;
                 use super::index_manager::DeltaOutcome;
-                match mgr.apply_delta(&project, &changed) {
+                match mgr.apply_delta(&project, &changed, source_chunk) {
                     Ok(DeltaOutcome::NeedsRebuild) => mgr.invalidate(),
                     Ok(_) => match mgr.active_generation(&project) {
                         Ok(Some(generation)) => {

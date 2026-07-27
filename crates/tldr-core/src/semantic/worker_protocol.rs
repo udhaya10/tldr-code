@@ -8,7 +8,7 @@ use super::{BuildOptions, CacheConfig};
 use crate::{TldrError, TldrResult};
 
 /// Wire compatibility version. A mismatch fails before model loading.
-pub const WORKER_PROTOCOL_VERSION: u32 = 1;
+pub const WORKER_PROTOCOL_VERSION: u32 = 2;
 /// Embedding/chunking pipeline identity negotiated with the worker.
 pub const WORKER_PIPELINE_VERSION: &str = "structural-embedding-v1";
 /// Maximum request or response line accepted over local stdio.
@@ -33,6 +33,9 @@ pub struct WorkerBuildRequest {
     pub options: BuildOptions,
     /// Optional embedding-cache configuration.
     pub cache_config: Option<CacheConfig>,
+    /// Short-lived CBOR export of source chunks from the pinned artifact
+    /// generation. The worker never walks the project source tree.
+    pub source_artifacts: Option<PathBuf>,
     /// Finite retry limit shared with the durable job record.
     pub max_retries: u32,
 }
@@ -54,6 +57,7 @@ impl WorkerBuildRequest {
             store_dir,
             options,
             cache_config,
+            source_artifacts: None,
             max_retries: DEFAULT_WORKER_ATTEMPTS,
         }
     }
@@ -77,6 +81,15 @@ impl WorkerBuildRequest {
         }
         if self.options.model.dimensions() == 0 {
             return Err(protocol_error("embedding model has zero dimensions"));
+        }
+        if self
+            .source_artifacts
+            .as_ref()
+            .is_none_or(|path| !path.is_file())
+        {
+            return Err(protocol_error(
+                "shared semantic source artifact export is missing",
+            ));
         }
         Ok(())
     }

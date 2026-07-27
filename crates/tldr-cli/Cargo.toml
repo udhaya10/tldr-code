@@ -41,6 +41,7 @@ serde_json = { workspace = true }
 serde = { workspace = true }
 serde_yaml = { workspace = true }
 anyhow = { workspace = true }
+ciborium = { workspace = true }
 thiserror = { workspace = true }
 colored = "2"
 comfy-table = "7"

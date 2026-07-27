@@ -3831,6 +3831,7 @@ dependencies = [
  "assert_cmd",
  "bumpalo",
  "chrono",
+ "ciborium",
  "clap",
  "colored",
  "comfy-table",

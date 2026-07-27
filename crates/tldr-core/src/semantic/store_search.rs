@@ -180,6 +180,29 @@ pub fn load_or_build_store(
     }
 }
 
+/// Load a fresh vector generation or rebuild it exclusively from the complete
+/// source chunks exported by the matching shared artifact generation.
+pub fn load_or_build_store_from_artifacts(
+    root: &Path,
+    store_dir: &Path,
+    build_options: &BuildOptions,
+    cache_config: Option<CacheConfig>,
+    source_chunks: Vec<crate::semantic::CodeChunk>,
+) -> TldrResult<VectorStore> {
+    let id = manifest_id_for(root, build_options);
+    let current_digest = compute_corpus_digest(root);
+    let generations = super::GenerationManager::open(store_dir)?;
+    if let Ok(store) = generations.load(&id) {
+        if store.corpus_digest() == current_digest && !build_options.collect_metrics {
+            return Ok(store);
+        }
+    }
+    let built =
+        VectorStore::build_from_artifacts(root, build_options, cache_config, source_chunks)?;
+    generations.publish(&built, &id)?;
+    Ok(built)
+}
+
 /// Search an already-loaded store — the daemon reuse entry point.
 ///
 /// Takes a [`VectorStore`] reference (the daemon holds this resident in its

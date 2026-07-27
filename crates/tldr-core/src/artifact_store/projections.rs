@@ -104,6 +104,35 @@ impl GenerationSnapshot {
         })
     }
 
+    /// Restore the semantic planner's complete source inputs without walking or
+    /// reading the project again.
+    #[cfg(feature = "semantic")]
+    pub fn semantic_source_chunks(&self, project: &Path) -> Vec<crate::semantic::CodeChunk> {
+        let mut chunks = self
+            .files
+            .values()
+            .flat_map(|facts| {
+                let language = Language::from_extension(&facts.language)
+                    .or_else(|| Language::from_path(Path::new(&facts.path)));
+                facts.semantic_chunks.iter().filter_map(move |chunk| {
+                    language.map(|language| crate::semantic::CodeChunk {
+                        file_path: project.join(&facts.path),
+                        function_name: chunk.function_name.clone(),
+                        class_name: chunk.class_name.clone(),
+                        line_start: chunk.line_start,
+                        line_end: chunk.line_end,
+                        content: chunk.content.clone(),
+                        content_hash: chunk.content_hash.clone(),
+                        language,
+                        structure: Default::default(),
+                    })
+                })
+            })
+            .collect::<Vec<_>>();
+        chunks.sort_by(|left, right| left.file_path.cmp(&right.file_path));
+        chunks
+    }
+
     /// Build the structure command's exact schema from stored file projections.
     pub fn code_structure(
         &self,

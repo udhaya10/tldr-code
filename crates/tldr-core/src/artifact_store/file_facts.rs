@@ -267,7 +267,10 @@ impl FileFactsParser {
             &source,
             &tree,
             language,
-            &crate::semantic::ChunkOptions::default(),
+            &crate::semantic::ChunkOptions {
+                granularity: crate::semantic::ChunkGranularity::File,
+                ..Default::default()
+            },
         )
         .into_iter()
         .map(|chunk| SemanticChunkFact {

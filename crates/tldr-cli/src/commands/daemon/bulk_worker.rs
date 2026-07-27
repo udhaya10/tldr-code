@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use tldr_core::semantic::vector_store::compute_corpus_digest;
 use tldr_core::semantic::{
     decode_worker_message, encode_worker_message, BuildCancellation, BuildOptions, CacheConfig,
-    WorkerBuildRequest, WorkerEvent, DEFAULT_WORKER_ATTEMPTS, MAX_WORKER_MESSAGE_BYTES,
+    CodeChunk, WorkerBuildRequest, WorkerEvent, DEFAULT_WORKER_ATTEMPTS, MAX_WORKER_MESSAGE_BYTES,
 };
 
 const DEFAULT_RSS_WATERMARK_BYTES: u64 = 768 * 1024 * 1024;
@@ -85,8 +85,17 @@ impl BulkWorker {
         options: &BuildOptions,
         cache_config: Option<CacheConfig>,
         cancellation: &BuildCancellation,
+        source_chunks: &[CodeChunk],
     ) -> Result<BulkWorkerReport, String> {
         let started = Instant::now();
+        let mut source_export =
+            tempfile::NamedTempFile::new().map_err(|error| error.to_string())?;
+        ciborium::ser::into_writer(source_chunks, source_export.as_file_mut())
+            .map_err(|error| error.to_string())?;
+        source_export
+            .as_file_mut()
+            .flush()
+            .map_err(|error| error.to_string())?;
         let mut request = WorkerBuildRequest::new(
             stable_job_id(project, options),
             project.to_path_buf(),
@@ -94,6 +103,7 @@ impl BulkWorker {
             options.clone(),
             cache_config,
         );
+        request.source_artifacts = Some(source_export.path().to_path_buf());
         request.max_retries = self.max_attempts;
         let payload = encode_worker_message(&request).map_err(|error| error.to_string())?;
         let mut rss_recycles = 0;
@@ -253,6 +263,7 @@ mod tests {
                 &BuildOptions::default(),
                 None,
                 &BuildCancellation::default(),
+                &[],
             )
             .unwrap();
         assert_eq!(report.vectors, 7);
@@ -276,6 +287,7 @@ mod tests {
                 &BuildOptions::default(),
                 None,
                 &cancellation,
+                &[],
             )
             .unwrap_err();
         assert!(error.contains("exhausted 2 attempts"));
@@ -289,6 +301,7 @@ mod tests {
                 &BuildOptions::default(),
                 None,
                 &cancellation,
+                &[],
             )
             .is_err());
         assert!(started.elapsed() < Duration::from_millis(100));
@@ -308,6 +321,7 @@ mod tests {
             &BuildOptions::default(),
             None,
             &BuildCancellation::default(),
+            &[],
         );
         assert!(result.is_err());
         assert!(started.elapsed() < Duration::from_secs(1));

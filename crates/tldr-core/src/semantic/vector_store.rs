@@ -1325,6 +1325,24 @@ pub fn plan_structural_delta(
     Ok((chunks, documents))
 }
 
+/// Plan a changed file from the complete source chunk in the shared artifact
+/// generation. This is the delta counterpart to `build_from_artifacts`.
+pub fn plan_structural_delta_from_artifact(
+    root: &Path,
+    mut file: CodeChunk,
+    budget: &crate::semantic::TokenBudget,
+    granularity: crate::semantic::ChunkGranularity,
+) -> TldrResult<(Vec<CodeChunk>, Vec<String>)> {
+    file.structure.repository_path = root_relative(root, &file.file_path);
+    let chunks = crate::semantic::structural_planner::plan_chunks(&[file], budget, granularity)?;
+    let documents = chunks
+        .iter()
+        .map(|chunk| crate::semantic::structural_planner::compose_minimal(chunk, budget))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| TldrError::Embedding(format!("delta composition failed: {error}")))?;
+    Ok((chunks, documents))
+}
+
 /// `(mtime_secs, size, kind)` for a path — the per-file reconcile signal.
 /// Best-effort: an un-stattable path yields `(0, 0, Other)`. Also the signal a
 /// delta stamps into the refreshed [`FileRecord`] (TLDR-t8f).
@@ -1540,6 +1558,27 @@ impl VectorStore {
             document_backend,
             pipeline_config,
             cancellation,
+            None,
+        )
+    }
+
+    /// Build from complete source chunks emitted by the shared artifact
+    /// generation. The semantic worker still owns inference and usearch
+    /// publication, but no longer walks, reads, or initially parses source.
+    pub fn build_from_artifacts(
+        root: &Path,
+        options: &BuildOptions,
+        cache_config: Option<CacheConfig>,
+        source_chunks: Vec<CodeChunk>,
+    ) -> TldrResult<Self> {
+        build_streaming_store(
+            root,
+            options,
+            cache_config,
+            crate::semantic::DocumentEmbeddingBackend::from_env()?,
+            crate::semantic::StreamingBuildConfig::default(),
+            crate::semantic::BuildCancellation::default(),
+            Some(source_chunks),
         )
     }
 
@@ -1939,6 +1978,7 @@ fn build_streaming_store(
     document_backend: crate::semantic::DocumentEmbeddingBackend,
     pipeline_config: crate::semantic::StreamingBuildConfig,
     cancellation: crate::semantic::BuildCancellation,
+    source_artifacts: Option<Vec<CodeChunk>>,
 ) -> TldrResult<VectorStore> {
     use crate::semantic::build_pipeline::{BuildPipelineError, PipelineStage};
     use crate::semantic::cache::EmbeddingCache;
@@ -1976,7 +2016,17 @@ fn build_streaming_store(
             .filter_map(|language| crate::Language::from_extension(language))
             .collect::<Vec<_>>()
     });
-    let mut files = crate::semantic::chunker::enumerate_corpus_files(root);
+    let mut artifact_files = source_artifacts.map(|chunks| {
+        chunks
+            .into_iter()
+            .map(|chunk| (chunk.file_path.clone(), chunk))
+            .collect::<std::collections::HashMap<_, _>>()
+    });
+    let mut files = artifact_files
+        .as_ref()
+        .map(|chunks| chunks.keys().cloned().collect::<Vec<_>>())
+        .unwrap_or_else(|| crate::semantic::chunker::enumerate_corpus_files(root));
+    files.sort();
     if let Some(languages) = languages.as_ref() {
         files.retain(|file| {
             crate::Language::from_path(file).is_some_and(|language| languages.contains(&language))
@@ -2058,24 +2108,28 @@ fn build_streaming_store(
     while let Some(file) = producer.recv() {
         cancellation.check().map_err(pipeline_error)?;
         telemetry.files_seen += 1;
-        let result = crate::semantic::chunk_file(
-            &file,
-            &crate::semantic::ChunkOptions {
-                granularity: crate::semantic::ChunkGranularity::File,
-                languages: languages.clone(),
-                ..Default::default()
-            },
-        )
-        .map_err(|error| {
-            pipeline_error(
-                BuildPipelineError::new(PipelineStage::Parse, error.to_string()).at_file(&file),
+        let mut source_files = if let Some(artifacts) = artifact_files.as_mut() {
+            artifacts.remove(&file).into_iter().collect()
+        } else {
+            let result = crate::semantic::chunk_file(
+                &file,
+                &crate::semantic::ChunkOptions {
+                    granularity: crate::semantic::ChunkGranularity::File,
+                    languages: languages.clone(),
+                    ..Default::default()
+                },
             )
-        })?;
-        build_stats.files_indexed += result.stats.files_indexed;
-        build_stats.files_skipped += result.stats.files_skipped;
-        build_stats.files_unsupported += result.stats.files_unsupported;
-        build_stats.files_oversized += result.stats.files_oversized;
-        let mut source_files = result.chunks;
+            .map_err(|error| {
+                pipeline_error(
+                    BuildPipelineError::new(PipelineStage::Parse, error.to_string()).at_file(&file),
+                )
+            })?;
+            build_stats.files_skipped += result.stats.files_skipped;
+            build_stats.files_unsupported += result.stats.files_unsupported;
+            build_stats.files_oversized += result.stats.files_oversized;
+            result.chunks
+        };
+        build_stats.files_indexed += usize::from(!source_files.is_empty());
         for chunk in &mut source_files {
             chunk.structure.repository_path = root_relative(root, &chunk.file_path);
         }

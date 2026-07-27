@@ -135,7 +135,13 @@ impl ArtifactStore for RedbArtifactStore {
         table
             .get(key.as_slice())
             .map_err(redb_error)?
-            .map(|value| decode(value.value()))
+            .map(|value| {
+                let artifact: ArtifactEnvelope = decode(value.value())?;
+                if !artifact.is_valid() {
+                    return Err(store_error("artifact checksum validation failed"));
+                }
+                Ok(artifact)
+            })
             .transpose()
     }
 
@@ -152,6 +158,9 @@ impl ArtifactStore for RedbArtifactStore {
                 return Err(store_error("generation references a missing artifact"));
             };
             let envelope: ArtifactEnvelope = decode(record.value())?;
+            if !envelope.is_valid() {
+                return Err(store_error("artifact checksum validation failed"));
+            }
             if envelope.key.kind == kind {
                 result.push(envelope);
             }

@@ -11,8 +11,8 @@ use std::time::{Duration, Instant};
 use parking_lot::RwLock;
 
 use tldr_core::semantic::vector_store::{
-    chunk_id_key, key_chunks_reconciled, plan_structural_delta, root_relative, stat_signal,
-    VectorStore,
+    chunk_id_key, key_chunks_reconciled, plan_structural_delta_from_artifact, root_relative,
+    stat_signal, VectorStore,
 };
 use tldr_core::semantic::{
     query_store_with_vector, store_dir_for, BuildCancellation, BuildOptions, BulkInferenceRunner,
@@ -214,7 +214,12 @@ impl IndexManager {
     ///
     /// Returns `Ok(true)` if the store was built/replaced, `Ok(false)` if
     /// already warm with the same model.
-    pub fn warm(&self, project: &Path, model: EmbeddingModel) -> Result<bool, String> {
+    pub fn warm(
+        &self,
+        project: &Path,
+        model: EmbeddingModel,
+        source_chunks: Vec<tldr_core::semantic::CodeChunk>,
+    ) -> Result<bool, String> {
         if self
             .store
             .read()
@@ -250,6 +255,7 @@ impl IndexManager {
                 &build_opts,
                 Some(CacheConfig::default()),
                 &BuildCancellation::default(),
+                &source_chunks,
             )?;
             let identity = tldr_core::semantic::store_search::manifest_id_for(project, &build_opts);
             let manager = GenerationManager::open(&store_dir).map_err(|error| error.to_string())?;
@@ -297,7 +303,12 @@ impl IndexManager {
     /// model (the next cold query already reflects the change). Any `Err` — or
     /// [`DeltaOutcome::NeedsRebuild`] — means the caller should [`Self::invalidate`]
     /// and let the next query full-rebuild (the design's fallback).
-    pub fn apply_delta(&self, project: &Path, file: &Path) -> Result<DeltaOutcome, String> {
+    pub fn apply_delta(
+        &self,
+        project: &Path,
+        file: &Path,
+        source_chunk: Option<tldr_core::semantic::CodeChunk>,
+    ) -> Result<DeltaOutcome, String> {
         let is_delete = !(file.exists() && file.is_file());
 
         // 0. Capture the warm model (or bail if cold) FIRST — a cold store always
@@ -364,9 +375,16 @@ impl IndexManager {
         // resident model's tokenizer. This is the same raw structural recipe
         // as a whole build.
         let planned_signal = stat_signal(file);
+        let source_chunk =
+            source_chunk.ok_or_else(|| "shared semantic source artifact is missing".to_string())?;
         let (new_chunks, documents) = self.delta_runner.with_token_budget(model, |budget| {
-            plan_structural_delta(project, file, budget, ChunkGranularity::Function)
-                .map_err(|error| error.to_string())
+            plan_structural_delta_from_artifact(
+                project,
+                source_chunk,
+                budget,
+                ChunkGranularity::Function,
+            )
+            .map_err(|error| error.to_string())
         })?;
         let file_rel = root_relative(project, file);
         let prior = {
@@ -712,7 +730,7 @@ mod tests {
         for path in &cases {
             let manager = seeded_manager();
             let before = manager.store_len();
-            let outcome = manager.apply_delta(tmp.path(), path).unwrap();
+            let outcome = manager.apply_delta(tmp.path(), path, None).unwrap();
             assert_eq!(
                 outcome,
                 DeltaOutcome::Filtered,
@@ -743,7 +761,7 @@ mod tests {
 
         let previous_enrich = std::env::var_os("TLDR_ENRICH");
         std::env::remove_var("TLDR_ENRICH");
-        let outcome = manager.apply_delta(tmp.path(), &file);
+        let outcome = manager.apply_delta(tmp.path(), &file, None);
         match previous_enrich {
             Some(value) => std::env::set_var("TLDR_ENRICH", value),
             None => std::env::remove_var("TLDR_ENRICH"),
@@ -777,7 +795,7 @@ mod tests {
         let manager = seeded_manager();
         let before = manager.store_len();
 
-        let outcome = manager.apply_delta(tmp.path(), &deleted).unwrap();
+        let outcome = manager.apply_delta(tmp.path(), &deleted, None).unwrap();
         assert_eq!(outcome, DeltaOutcome::Filtered);
         assert_eq!(manager.store_len(), before);
     }
@@ -793,7 +811,7 @@ mod tests {
         let manager = seeded_manager();
         assert_eq!(manager.store_len(), Some(1));
 
-        let outcome = manager.apply_delta(tmp.path(), &deleted).unwrap();
+        let outcome = manager.apply_delta(tmp.path(), &deleted, None).unwrap();
         assert_eq!(outcome, DeltaOutcome::Deleted { removed: 1 });
         assert_eq!(manager.store_len(), Some(0));
     }
@@ -1244,7 +1262,7 @@ mod tests {
         let manager = seeded_manager();
         let before = manager.store_len();
         let path = tmp.path().join("generated/auto.py");
-        let outcome = manager.apply_delta(tmp.path(), &path).unwrap();
+        let outcome = manager.apply_delta(tmp.path(), &path, None).unwrap();
         assert_eq!(
             outcome,
             DeltaOutcome::Filtered,
