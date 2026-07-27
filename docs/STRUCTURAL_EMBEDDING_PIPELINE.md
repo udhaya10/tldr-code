@@ -1,8 +1,12 @@
 # Structural Embedding Pipeline
 
-Status: Proposed  
-Date: 2026-07-25  
-Beads: `TLDR-vbw0`, `TLDR-vbw0.1`, `TLDR-3rh`, `TLDR-k8s`
+Status: Implemented; staged default with rollback
+
+Designed: 2026-07-25
+
+Completed: 2026-07-27
+
+Beads: `TLDR-9bxa`, `TLDR-9bxa.1` through `TLDR-9bxa.11`
 
 ## Purpose
 
@@ -28,9 +32,42 @@ This design addresses three separate concerns:
 2. Memory safety: ONNX receives a finite set of tensor shapes.
 3. Operational safety: bulk inference is resumable and process-isolated.
 
-## Current Problem
+## Implemented Outcome
 
-The current semantic build:
+The rollout replaced a fast but operationally fragile bulk embedding path with
+a bounded, structural, incremental, and recoverable pipeline.
+
+| Concern | Previous pipeline | Implemented pipeline | Result |
+| --- | --- | --- | --- |
+| Input limits | Character-based truncation | Model-tokenizer accounting, including prefixes and special tokens | No silent source loss |
+| Retrieval units | Function chunks cut at arbitrary boundaries | Recursive AST splitting, sibling merging, parent summaries, and structural context | Better retrieval inside large symbols |
+| Chunk identity | Content- and position-sensitive keys | Stable `ChunkId` lineage plus independent `ChunkRevision` | Local edits preserve unaffected embeddings |
+| ONNX execution | Many dynamically padded tensor shapes | Four measured finite-shape buckets | Inference RSS reaches a bounded plateau |
+| Workload isolation | Query, delta, and bulk work shared session state | Dedicated query, delta, and bulk runners | Bulk indexing does not pollute query-session memory |
+| Build flow | Whole-corpus intermediate collections | Memory-budgeted streaming windows with backpressure | Non-ONNX pipeline memory is bounded |
+| Persistence | Whole-map cache generations | redb per-record cache and durable job ledger | Changed records update independently |
+| Publication | Separately persisted metadata and search index | Staged immutable generations with atomic activation | Crashes cannot publish mixed generations |
+| Failure recovery | Long bulk builds restarted from the beginning | Checkpointed child worker with finite retry and resume | Completed batches survive interruption |
+| Rollout safety | Single active implementation | Backend and generation selection with retained previous generation | Two independent rollback paths |
+
+The final Arctic-L comparison improved Recall@5 from 0.750 to 0.849,
+Recall@10 from 0.827 to 0.887, and MRR from 0.599 to 0.724. The declared
+oversized-code target moved to rank 1. Peak RSS fell from 15.97 GiB to
+2.82 GiB, an 82.34% reduction, and the final sampling window was flat within
+approximately 28 MiB.
+
+The trade-off is cold-build duration. The measured build increased from
+3,584,903 ms to 4,240,426 ms, or 18.285%. This is approximately 59 minutes
+45 seconds versus 70 minutes 40 seconds. The new build takes longer, but it is
+bounded and resumable: completed batches are committed to the redb job ledger
+before acknowledgement, a restarted worker continues from the latest durable
+checkpoint, and the daemon keeps serving the prior complete generation until
+the new generation is fully published. A worker crash therefore costs only
+uncommitted in-flight work rather than the entire build.
+
+## Previous Pipeline Problem
+
+The previous semantic build:
 
 1. Creates function-level `CodeChunk` values.
 2. Truncates chunks at a default 4,000-character boundary.
