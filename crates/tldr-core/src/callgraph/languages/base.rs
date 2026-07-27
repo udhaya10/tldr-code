@@ -265,6 +265,8 @@ pub fn make_import(module: &str, names: &[&str], is_from: bool, level: u8) -> Im
         is_mod: false,
         level,
         is_type_checking: false,
+        scope: None,
+        line: None,
     }
 }
 
@@ -282,6 +284,8 @@ pub fn make_import_with_alias(module: &str, alias: &str, level: u8) -> ImportDef
         is_mod: false,
         level,
         is_type_checking: false,
+        scope: None,
+        line: None,
     }
 }
 

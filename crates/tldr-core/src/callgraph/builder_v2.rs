@@ -24,7 +24,7 @@
 //! ```
 
 use std::borrow::Cow;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -281,10 +281,20 @@ pub fn extract_and_resolve_calls(
     file_ir: &FileIR,
     context: &mut ResolutionContext<'_, '_>,
 ) -> ResolvedCalls {
+    let scoped_import_maps = HashMap::new();
+    extract_and_resolve_calls_with_scoped_imports(file_ir, context, &scoped_import_maps)
+}
+
+fn extract_and_resolve_calls_with_scoped_imports(
+    file_ir: &FileIR,
+    context: &mut ResolutionContext<'_, '_>,
+    scoped_import_maps: &HashMap<String, (ImportMap, ModuleImports)>,
+) -> ResolvedCalls {
     let mut result = ResolvedCalls::default();
     let current_file = &file_ir.path;
     let mut builder_context = BuilderResolutionContext {
         resolution_context: context,
+        scoped_import_maps,
     };
 
     for call_sites in file_ir.calls.values() {
@@ -341,6 +351,7 @@ enum CallSiteResolution {
 
 struct BuilderResolutionContext<'ctx, 'a, 'b> {
     resolution_context: &'ctx mut ResolutionContext<'a, 'b>,
+    scoped_import_maps: &'ctx HashMap<String, (ImportMap, ModuleImports)>,
 }
 
 impl BuilderResolutionContext<'_, '_, '_> {
@@ -362,6 +373,35 @@ impl BuilderResolutionContext<'_, '_, '_> {
             call_type,
             self.resolution_context,
         )
+    }
+
+    fn resolve_local_import_call(&mut self, call_site: &CallSite) -> Option<ResolvedTarget> {
+        let maps = self.scoped_import_maps.get(&call_site.caller)?;
+        let context = &mut self.resolution_context;
+        let mut local_context = ResolutionContext {
+            import_map: &maps.0,
+            module_imports: &maps.1,
+            func_index: context.func_index,
+            class_index: context.class_index,
+            reexport_tracer: context.reexport_tracer,
+            current_file: context.current_file,
+            root: context.root,
+            language: context.language,
+        };
+        match call_site.receiver.as_deref() {
+            Some(receiver) => resolve_call_with_receiver(
+                &call_site.target,
+                receiver,
+                call_site.receiver_type.as_deref(),
+                &CallType::LocalImport,
+                &mut local_context,
+            ),
+            None => resolve_call(
+                &call_site.target,
+                &CallType::LocalImport,
+                &mut local_context,
+            ),
+        }
     }
 }
 
@@ -385,7 +425,10 @@ fn resolve_super_constructor_call(
             | "csharp"
     );
     if !supports_super_ctor
-        || !matches!(call_site.call_type, CallType::Direct | CallType::Intra)
+        || !matches!(
+            call_site.call_type,
+            CallType::Direct | CallType::LocalImport | CallType::Intra
+        )
         || call_site.target != "super"
     {
         return None;
@@ -414,6 +457,7 @@ fn resolve_call_site_for_builder(
 ) -> CallSiteResolution {
     let resolved = match call_site.call_type {
         CallType::Intra => resolve_intra_call(file_ir, call_site, context),
+        CallType::LocalImport => context.resolve_local_import_call(call_site),
         CallType::Static => resolve_static_call(file_ir, call_site, context),
         CallType::Method | CallType::Attr => {
             return resolve_method_or_attr_call(call_site, context, result);
@@ -1023,8 +1067,38 @@ pub fn compose_call_graph_v2(
                 // get rewritten to the canonical func_index key (e.g.
                 // `./apps/web/src/util`). Without this, cross-file edges through
                 // tsconfig path aliases are silently dropped.
+                let global_imports: Vec<_> = resolved_imports
+                    .iter()
+                    .filter(|resolved| resolved.original.scope.is_none())
+                    .cloned()
+                    .collect();
                 let (import_map, mut module_imports) =
-                    build_import_map_with_index(&resolved_imports, Some(&module_index));
+                    build_import_map_with_index(&global_imports, Some(&module_index));
+
+                let mut local_groups: HashMap<String, Vec<_>> = HashMap::new();
+                for resolved in resolved_imports
+                    .iter()
+                    .filter(|resolved| resolved.original.scope.is_some())
+                {
+                    if let Some(scope) = &resolved.original.scope {
+                        local_groups
+                            .entry(scope.clone())
+                            .or_default()
+                            .push(resolved.clone());
+                    }
+                }
+                let scoped_import_maps: HashMap<String, (ImportMap, ModuleImports)> = local_groups
+                    .into_iter()
+                    .map(|(scope, imports)| {
+                        let (local_imports, local_modules) =
+                            build_import_map_with_index(&imports, Some(&module_index));
+                        let mut scoped_imports = import_map.clone();
+                        scoped_imports.extend(local_imports);
+                        let mut scoped_modules = module_imports.clone();
+                        scoped_modules.extend(local_modules);
+                        (scope, (scoped_imports, scoped_modules))
+                    })
+                    .collect();
 
                 // Step 10b.1: Augment module_imports for Go cross-package function calls.
                 // Go imports use full module paths that don't match func_index keys directly.
@@ -1044,7 +1118,11 @@ pub fn compose_call_graph_v2(
                     root,
                     language: &config.language,
                 };
-                let resolved_calls = extract_and_resolve_calls(&file_ir, &mut resolution_context);
+                let resolved_calls = extract_and_resolve_calls_with_scoped_imports(
+                    &file_ir,
+                    &mut resolution_context,
+                    &scoped_import_maps,
+                );
 
                 // Step 10d: Map resolved calls to edges (no shared writes here;
                 // dedup + IR insertion happen serially below, in file order).
@@ -1098,3 +1176,77 @@ pub fn compose_call_graph_v2(
 // =============================================================================
 // Tests
 // =============================================================================
+
+#[cfg(test)]
+mod scoped_import_tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn python_local_imports_resolve_per_function_without_leaking() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "tldr-local-import-scope-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).expect("create fixture");
+        fs::write(root.join("alpha.py"), "def work():\n    pass\n").expect("write alpha");
+        fs::write(root.join("beta.py"), "def work():\n    pass\n").expect("write beta");
+        fs::write(
+            root.join("main.py"),
+            r#"
+def one():
+    from alpha import work
+    work()
+
+def two():
+    from beta import work
+    work()
+
+def before_binding():
+    work()
+    from alpha import work
+
+def sibling():
+    work()
+"#,
+        )
+        .expect("write main");
+
+        let graph = build_project_call_graph_v2(
+            &root,
+            BuildConfig {
+                language: "python".to_string(),
+                respect_ignore: false,
+                ..BuildConfig::default()
+            },
+        )
+        .expect("build graph");
+
+        let one = graph
+            .edges
+            .iter()
+            .find(|edge| edge.src_func == "one" && edge.dst_func == "work")
+            .expect("one edge");
+        assert_eq!(one.dst_file, PathBuf::from("alpha.py"));
+        assert_eq!(one.call_type, CallType::LocalImport);
+
+        let two = graph
+            .edges
+            .iter()
+            .find(|edge| edge.src_func == "two" && edge.dst_func == "work")
+            .expect("two edge");
+        assert_eq!(two.dst_file, PathBuf::from("beta.py"));
+        assert_eq!(two.call_type, CallType::LocalImport);
+
+        assert!(!graph.edges.iter().any(|edge| {
+            matches!(edge.src_func.as_str(), "before_binding" | "sibling")
+                && edge.dst_func == "work"
+        }));
+
+        fs::remove_dir_all(&root).expect("remove fixture");
+    }
+}

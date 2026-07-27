@@ -384,6 +384,7 @@ fn run_impact_analysis(
                 project_path,
                 target,
                 language,
+                depth,
             );
 
             // Count direct callers from all targets

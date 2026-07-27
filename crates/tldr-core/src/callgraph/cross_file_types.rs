@@ -52,6 +52,13 @@ pub enum CallType {
     /// Resolution: Trace through import map to find definition.
     Direct,
 
+    /// Direct call resolved through an import declared inside the caller function.
+    /// Resolution is identical to `Direct`, but the distinct value preserves
+    /// framework-relevant provenance (Django commonly imports inside functions
+    /// to avoid app-registry and circular-import problems).
+    #[serde(rename = "local-import")]
+    LocalImport,
+
     /// Type-aware method call with a receiver (e.g., `user.save()`).
     /// Resolution: Requires type inference to determine receiver type.
     Method,
@@ -579,6 +586,14 @@ pub struct ImportDef {
     /// Python: import is inside a `TYPE_CHECKING` block.
     #[serde(default)]
     pub is_type_checking: bool,
+
+    /// Function that owns this import. `None` means module scope.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+
+    /// Source line of the import (1-indexed), when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line: Option<u32>,
 }
 
 impl ImportDef {
@@ -596,6 +611,8 @@ impl ImportDef {
             is_mod: false,
             level: 0,
             is_type_checking: false,
+            scope: None,
+            line: None,
         }
     }
 
@@ -625,6 +642,8 @@ impl ImportDef {
             is_mod: false,
             level: 0,
             is_type_checking: false,
+            scope: None,
+            line: None,
         }
     }
 
@@ -642,6 +661,8 @@ impl ImportDef {
             is_mod: false,
             level,
             is_type_checking: false,
+            scope: None,
+            line: None,
         }
     }
 

@@ -440,13 +440,43 @@ pub fn impact_analysis_with_ast_fallback(
 pub fn enrich_impact_with_references(
     report: &mut ImpactReport,
     project_root: &Path,
-    target_func: &str,
+    _target_func: &str,
     language: Language,
+    max_depth: usize,
+) {
+    if report.targets.is_empty() || max_depth == 0 {
+        return;
+    }
+
+    let mut file_funcs_cache: HashMap<PathBuf, Vec<(String, u32, u32)>> = HashMap::new();
+    for tree in report.targets.values_mut() {
+        let mut path = HashSet::new();
+        path.insert((tree.function.clone(), tree.file.clone()));
+        enrich_reference_tree(
+            tree,
+            project_root,
+            language,
+            1,
+            max_depth,
+            &mut file_funcs_cache,
+            &mut path,
+        );
+    }
+}
+
+fn enrich_reference_tree(
+    tree: &mut CallerTree,
+    project_root: &Path,
+    language: Language,
+    level: usize,
+    max_depth: usize,
+    file_funcs_cache: &mut HashMap<PathBuf, Vec<(String, u32, u32)>>,
+    path: &mut HashSet<(String, PathBuf)>,
 ) {
     use crate::analysis::references::{find_references, ReferenceKind, ReferencesOptions};
     use crate::extract_file;
 
-    if report.targets.is_empty() {
+    if level > max_depth {
         return;
     }
 
@@ -454,27 +484,16 @@ pub fn enrich_impact_with_references(
     options.kinds = Some(vec![ReferenceKind::Call]);
     options.language = Some(language.as_str().to_string());
     options.limit = Some(500);
-
-    let refs_report = match find_references(target_func, project_root, &options) {
-        Ok(r) => r,
-        Err(_) => return,
+    let Ok(refs_report) = find_references(&tree.function, project_root, &options) else {
+        return;
     };
 
-    let mut file_funcs_cache: HashMap<PathBuf, Vec<(String, u32, u32)>> = HashMap::new();
-
-    let mut additions: Vec<(String, PathBuf, u32)> = Vec::new();
-    // cross-cutting-and-clear-fix-bugs-v1 (P18.X3): collect references from
-    // both the primary lookup and (for Lua/Luau qualified names like
-    // `m.open`) a secondary bare-name lookup with a context filter — same
-    // shape as the explain.rs P13.AGG13-12 enrichment. The lua call graph
-    // does not always resolve `<alias>.<method>(...)` to `function m.<method>`
-    // definitions through references' qualified path, so impact's caller
-    // list comes back empty even though explain reports the same callers
-    // via this exact mechanism.
-    let mut all_refs: Vec<crate::analysis::references::Reference> = refs_report.references.clone();
+    // For Lua/Luau qualified definitions, supplement the qualified lookup with
+    // a context-filtered bare-name lookup.
+    let mut all_refs = refs_report.references;
     if matches!(language, Language::Lua | Language::Luau) {
-        if let Some(bare) = target_func.split('.').next_back() {
-            if bare != target_func && !bare.is_empty() {
+        if let Some(bare) = tree.function.split('.').next_back() {
+            if bare != tree.function && !bare.is_empty() {
                 let mut bare_options = ReferencesOptions::new();
                 bare_options.kinds = Some(vec![ReferenceKind::Call]);
                 bare_options.language = Some(language.as_str().to_string());
@@ -482,117 +501,136 @@ pub fn enrich_impact_with_references(
                 if let Ok(bare_refs) = find_references(bare, project_root, &bare_options) {
                     let dot_pat = format!(".{}(", bare);
                     let space_pat = format!(".{} (", bare);
-                    for r in &bare_refs.references {
-                        if !r.context.contains(&dot_pat) && !r.context.contains(&space_pat) {
-                            continue;
-                        }
-                        // Avoid duplicating refs already present in primary
-                        // lookup (matched on (file, line) pair).
-                        if all_refs
-                            .iter()
-                            .any(|p| p.file == r.file && p.line == r.line)
+                    for reference in bare_refs.references {
+                        if (!reference.context.contains(&dot_pat)
+                            && !reference.context.contains(&space_pat))
+                            || all_refs.iter().any(|known| {
+                                known.file == reference.file && known.line == reference.line
+                            })
                         {
                             continue;
                         }
-                        all_refs.push(r.clone());
+                        all_refs.push(reference);
                     }
                 }
             }
         }
     }
-    for r in &all_refs {
-        let caller_file = r.file.clone();
+
+    let mut additions: Vec<(String, PathBuf, u32)> = Vec::new();
+    for reference in all_refs {
+        let caller_file = reference.file;
         let funcs = file_funcs_cache
             .entry(caller_file.clone())
             .or_insert_with(|| {
                 let module = match extract_file(&caller_file, None) {
-                    Ok(m) => m,
+                    Ok(module) => module,
                     Err(_) => return Vec::new(),
                 };
-                let mut out: Vec<(String, u32, u32)> = Vec::new();
-                for f in &module.functions {
-                    out.push((f.name.clone(), f.line_number, f.line_end));
+                let mut out = Vec::new();
+                for function in &module.functions {
+                    out.push((
+                        function.name.clone(),
+                        function.line_number,
+                        function.line_end,
+                    ));
                 }
                 for class in &module.classes {
-                    for m in &class.methods {
-                        out.push((m.name.clone(), m.line_number, m.line_end));
+                    for method in &class.methods {
                         out.push((
-                            format!("{}.{}", class.name, m.name),
-                            m.line_number,
-                            m.line_end,
+                            format!("{}.{}", class.name, method.name),
+                            method.line_number,
+                            method.line_end,
                         ));
                     }
                 }
                 out
             });
+        let line = reference.line as u32;
         let enclosing = funcs
             .iter()
-            .find(|(_, start, end)| {
-                let line = r.line as u32;
-                line >= *start && (*end == 0 || line <= *end)
-            })
+            .filter(|(_, start, end)| line >= *start && (*end == 0 || line <= *end))
+            .min_by_key(|(_, start, end)| end.saturating_sub(*start))
             .map(|(name, _, _)| name.clone())
             .unwrap_or_else(|| "<module>".to_string());
 
-        let is_self = report.targets.values().any(|tree| {
-            paths_equivalent_root(&tree.file, project_root, &caller_file)
-                && (enclosing == target_func || last_segment_eq_pub(&enclosing, target_func))
-        });
-        if is_self {
-            continue;
-        }
-
-        let key_pair = (enclosing.clone(), caller_file.clone());
-        if additions
-            .iter()
-            .any(|(n, f, _)| n == &key_pair.0 && f == &key_pair.1)
+        let is_self = paths_equivalent_root(&tree.file, project_root, &caller_file)
+            && (enclosing == tree.function
+                || last_segment_eq_pub(&enclosing, &tree.function)
+                || last_segment_eq_pub(&tree.function, &enclosing));
+        if is_self
+            || additions
+                .iter()
+                .any(|(name, file, _)| name == &enclosing && file == &caller_file)
         {
             continue;
         }
-        additions.push((enclosing, caller_file, r.line as u32));
+        additions.push((enclosing, caller_file, line));
     }
 
-    if additions.is_empty() {
+    let mut added_any = false;
+    for (name, file, line) in additions {
+        let already_present = tree.callers.iter().any(|caller| {
+            let names_match = caller.function == name
+                || last_segment_eq_pub(&caller.function, &name)
+                || last_segment_eq_pub(&name, &caller.function);
+            names_match && paths_equivalent_root(&caller.file, project_root, &file)
+        });
+        if already_present {
+            continue;
+        }
+        if path.contains(&(name.clone(), file.clone())) {
+            tree.truncated = true;
+            continue;
+        }
+        tree.callers.push(CallerTree {
+            function: name,
+            file,
+            caller_count: 0,
+            callers: Vec::new(),
+            truncated: false,
+            note: Some(format!(
+                "Discovered via references, level {} (line {}; call graph missing edge)",
+                level, line
+            )),
+            confidence: None,
+            receiver_type: None,
+        });
+        added_any = true;
+    }
+    tree.caller_count = tree.callers.len();
+    if added_any
+        && tree
+            .note
+            .as_deref()
+            .is_some_and(|note| note.contains("Entry point") || note.contains("no callers"))
+    {
+        tree.note = Some(
+            "caller_count derived from references enrichment (call graph missing cross-file edges)"
+                .to_string(),
+        );
+    }
+
+    if level == max_depth {
         return;
     }
-
-    for tree in report.targets.values_mut() {
-        for (name, file, line) in &additions {
-            // P14.AGG14-1: last-segment-aware dedup so call-graph
-            // qualified-name (`Class.method`) and references bare-name
-            // (`method`) collapse to the same caller.
-            let already_present = tree.callers.iter().any(|c| {
-                let names_match = &c.function == name
-                    || last_segment_eq_pub(&c.function, name)
-                    || last_segment_eq_pub(name, &c.function);
-                names_match && paths_equivalent_root(&c.file, project_root, file)
-            });
-            if already_present {
-                continue;
-            }
-            tree.callers.push(CallerTree {
-                function: name.clone(),
-                file: file.clone(),
-                caller_count: 0,
-                callers: vec![],
-                truncated: false,
-                note: Some(format!(
-                    "Discovered via references at line {} (call graph missing edge)",
-                    line
-                )),
-                confidence: None,
-                receiver_type: None,
-            });
-            tree.caller_count = tree.callers.len();
-            if let Some(n) = &tree.note {
-                if n.contains("Entry point") || n.contains("no callers") {
-                    tree.note = Some(
-                        "caller_count derived from references enrichment (call graph missing cross-file edges)"
-                            .to_string(),
-                    );
-                }
-            }
+    for caller in &mut tree.callers {
+        let key = (caller.function.clone(), caller.file.clone());
+        if path.contains(&key) {
+            caller.truncated = true;
+            continue;
         }
+        path.insert(key.clone());
+        enrich_reference_tree(
+            caller,
+            project_root,
+            language,
+            level + 1,
+            max_depth,
+            file_funcs_cache,
+            path,
+        );
+        path.remove(&key);
     }
 }
 
@@ -993,4 +1031,75 @@ fn levenshtein_distance(s1: &str, s2: &str) -> usize {
     }
 
     matrix[len1][len2]
+}
+
+#[cfg(test)]
+mod reference_depth_tests {
+    use super::*;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn test_root() -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "tldr-impact-reference-depth-{}-{nonce}",
+            std::process::id()
+        ))
+    }
+
+    fn root_report(root: &Path) -> ImpactReport {
+        let tree = CallerTree {
+            function: "target".to_string(),
+            file: root.join("target.py"),
+            caller_count: 0,
+            callers: Vec::new(),
+            truncated: false,
+            note: Some("Entry point - no callers found".to_string()),
+            confidence: None,
+            receiver_type: None,
+        };
+        ImpactReport {
+            targets: HashMap::from([("target.py::target".to_string(), tree)]),
+            total_targets: 1,
+            type_resolution: None,
+        }
+    }
+
+    #[test]
+    fn reference_enrichment_honors_depth_and_stops_cycles() {
+        let root = test_root();
+        fs::create_dir_all(&root).expect("create fixture");
+        fs::write(root.join("target.py"), "def target():\n    top()\n").expect("write target");
+        fs::write(root.join("middle.py"), "def middle():\n    target()\n").expect("write middle");
+        fs::write(root.join("top.py"), "def top():\n    middle()\n").expect("write top");
+
+        let mut report = root_report(&root);
+        enrich_impact_with_references(&mut report, &root, "target", Language::Python, 4);
+
+        let target = report.targets.values().next().expect("target tree");
+        let middle = target
+            .callers
+            .iter()
+            .find(|caller| caller.function == "middle")
+            .expect("level-one caller");
+        assert!(middle
+            .note
+            .as_deref()
+            .is_some_and(|note| note.contains("level 1")));
+        let top = middle
+            .callers
+            .iter()
+            .find(|caller| caller.function == "top")
+            .expect("level-two caller");
+        assert!(top
+            .note
+            .as_deref()
+            .is_some_and(|note| note.contains("level 2")));
+        assert!(top.truncated, "target -> middle -> top -> target cycle");
+
+        fs::remove_dir_all(&root).expect("remove fixture");
+    }
 }

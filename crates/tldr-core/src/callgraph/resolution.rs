@@ -192,7 +192,17 @@ pub(crate) fn compute_via_import(
             }
             None
         }
-        CallType::Direct | CallType::Ref | CallType::Static => {
+        CallType::LocalImport if call_site.receiver.is_some() => {
+            let receiver = call_site.receiver.as_ref()?;
+            module_imports.get(receiver).cloned().or_else(|| {
+                import_map
+                    .get(receiver)
+                    .map(|(module_path, original_name)| {
+                        format!("{}.{}", module_path, original_name)
+                    })
+            })
+        }
+        CallType::Direct | CallType::LocalImport | CallType::Ref | CallType::Static => {
             if let Some((module_path, _)) = import_map.get(&call_site.target) {
                 return Some(module_path.clone());
             }
@@ -650,7 +660,7 @@ pub fn resolve_call(
             None
         }
 
-        CallType::Direct => {
+        CallType::Direct | CallType::LocalImport => {
             // Direct call to an imported or local name
 
             // First, check if it's a local function

@@ -28,10 +28,10 @@
 - Modify: Python call-graph resolution modules identified during implementation
 - Modify: call-graph certification coverage
 
-- [ ] Retain `from x import y` and `import x` bindings found inside function bodies with their owning function and source position.
-- [ ] Resolve subsequent calls through those bindings to indexed cross-file definitions.
-- [ ] Mark the emitted edge provenance as function-local-import resolution.
-- [ ] Add focused fixtures proving local-import edges, aliases, ordering, and no leakage into sibling functions.
+- [x] Retain `from x import y` and `import x` bindings found inside function bodies with their owning function and source position.
+- [x] Resolve subsequent calls through those bindings to indexed cross-file definitions.
+- [x] Mark the emitted edge provenance as function-local-import resolution.
+- [x] Add focused fixtures proving local-import edges, aliases, ordering, and no leakage into sibling functions.
 
 ### Task 3: Make Python reference impact recursive
 
@@ -39,10 +39,10 @@
 - Modify: `crates/tldr-core/src/analysis/impact.rs`
 - Modify: impact certification coverage and relevant skill documentation
 
-- [ ] Replace the level-one reference fallback with breadth-first traversal up to `--depth`.
-- [ ] Add a visited set and stable ordering for cycle safety and deterministic output.
-- [ ] Record `Discovered via references, level N` provenance on each enriched result.
-- [ ] Test a depth-two chain and a cycle.
+- [x] Replace the level-one reference fallback with recursive traversal up to `--depth`.
+- [x] Add a path-local visited set and stable ordering for cycle safety and deterministic output.
+- [x] Record `Discovered via references, level N` provenance on each enriched result.
+- [x] Test a depth-two chain and a cycle.
 
 ### Task 4: Ship the Django entry-point preset
 

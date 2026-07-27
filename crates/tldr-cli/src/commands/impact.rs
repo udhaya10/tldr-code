@@ -108,7 +108,13 @@ impl ImpactArgs {
         // moved into `tldr-core::analysis::impact` so the same enrichment
         // also runs inside `whatbreaks`. The same-fix-different-shape
         // dedup (last-segment aware) lives in the core helper.
-        enrich_impact_with_references(&mut report, &self.path, &self.function, language);
+        enrich_impact_with_references(
+            &mut report,
+            &self.path,
+            &self.function,
+            language,
+            self.depth,
+        );
 
         // If type-aware was requested, add placeholder stats to indicate it's enabled
         // (actual type resolution is integrated in callgraph builder - Phase 8 full implementation)

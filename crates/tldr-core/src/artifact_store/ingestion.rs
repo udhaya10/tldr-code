@@ -488,6 +488,7 @@ fn call_type_name(call_type: crate::callgraph::CallType) -> &'static str {
     match call_type {
         CallType::Intra => "intra",
         CallType::Direct => "direct",
+        CallType::LocalImport => "local-import",
         CallType::Method => "method",
         CallType::Attr => "attr",
         CallType::Ref => "ref",

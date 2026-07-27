@@ -78,17 +78,21 @@ pub(crate) fn extract_python_definitions_from_tree(
         match node.kind() {
             "import_statement" => {
                 // import X or import X as Y
-                if let Some(import_def) =
+                if let Some(mut import_def) =
                     super::imports::parse_python_import_statement(&node, source_bytes)
                 {
+                    import_def.scope = python_import_scope(&node, source_bytes);
+                    import_def.line = Some(node.start_position().row as u32 + 1);
                     result.imports.push(import_def);
                 }
             }
             "import_from_statement" => {
                 // from X import Y
-                if let Some(import_def) =
+                if let Some(mut import_def) =
                     super::imports::parse_python_from_import(&node, source_bytes)
                 {
+                    import_def.scope = python_import_scope(&node, source_bytes);
+                    import_def.line = Some(node.start_position().row as u32 + 1);
                     result.imports.push(import_def);
                 }
             }
@@ -318,17 +322,126 @@ pub(crate) fn extract_python_calls(
     caller: &str,
 ) -> Vec<CallSite> {
     let mut calls = Vec::new();
+    let local_imports = python_function_local_imports(func_node, source);
 
     // Walk the function body looking for call expressions
     for node in walk_tree(*func_node) {
         if node.kind() == "call" {
-            if let Some(call_site) = parse_python_call(&node, source, caller) {
+            if let Some(mut call_site) = parse_python_call(&node, source, caller) {
+                let local_binding = match call_site.call_type {
+                    CallType::Direct => local_imports.get(&call_site.target),
+                    CallType::Method | CallType::Attr => call_site
+                        .receiver
+                        .as_ref()
+                        .and_then(|receiver| local_imports.get(receiver)),
+                    _ => None,
+                };
+                if local_binding.is_some_and(|import_line| {
+                    call_site.line.is_some_and(|line| line >= *import_line)
+                }) {
+                    call_site.call_type = CallType::LocalImport;
+                }
                 calls.push(call_site);
             }
         }
     }
 
     calls
+}
+
+/// Return names bound by imports in this function, keyed by their first binding line.
+///
+/// Imports belonging to nested functions are deliberately excluded. Python makes
+/// an import binding local to its owning function, so flattening nested bindings
+/// would produce false call edges in the outer function.
+fn python_function_local_imports(
+    func_node: &tree_sitter::Node,
+    source: &[u8],
+) -> HashMap<String, u32> {
+    let mut bindings = HashMap::new();
+    for node in walk_tree(*func_node) {
+        if !matches!(node.kind(), "import_statement" | "import_from_statement") {
+            continue;
+        }
+
+        let belongs_to_function = node
+            .parent()
+            .and_then(|_| nearest_python_function(&node))
+            .is_some_and(|owner| owner.id() == func_node.id());
+        if !belongs_to_function {
+            continue;
+        }
+
+        let parsed = if node.kind() == "import_statement" {
+            super::imports::parse_python_import_statement(&node, source)
+        } else {
+            super::imports::parse_python_from_import(&node, source)
+        };
+        let Some(import_def) = parsed else {
+            continue;
+        };
+        let line = node.start_position().row as u32 + 1;
+
+        if import_def.is_from {
+            for original in &import_def.names {
+                let local = import_def
+                    .aliases
+                    .as_ref()
+                    .and_then(|aliases| {
+                        aliases
+                            .iter()
+                            .find_map(|(alias, name)| (name == original).then_some(alias))
+                    })
+                    .unwrap_or(original);
+                bindings.entry(local.clone()).or_insert(line);
+            }
+        } else {
+            let local = import_def.alias.unwrap_or_else(|| {
+                import_def
+                    .module
+                    .split('.')
+                    .next()
+                    .unwrap_or(&import_def.module)
+                    .to_string()
+            });
+            bindings.entry(local).or_insert(line);
+        }
+    }
+    bindings
+}
+
+fn nearest_python_function<'tree>(
+    node: &tree_sitter::Node<'tree>,
+) -> Option<tree_sitter::Node<'tree>> {
+    let mut current = node.parent();
+    while let Some(parent) = current {
+        if parent.kind() == "function_definition" {
+            return Some(parent);
+        }
+        current = parent.parent();
+    }
+    None
+}
+
+fn python_import_scope(node: &tree_sitter::Node, source: &[u8]) -> Option<String> {
+    let function = nearest_python_function(node)?;
+    let name = function
+        .child_by_field_name("name")
+        .map(|name| get_node_text(&name, source).to_string())?;
+
+    let mut current = function.parent();
+    while let Some(parent) = current {
+        if parent.kind() == "function_definition" {
+            break;
+        }
+        if parent.kind() == "class_definition" {
+            if let Some(class_name) = parent.child_by_field_name("name") {
+                return Some(format!("{}.{}", get_node_text(&class_name, source), name));
+            }
+        }
+        current = parent.parent();
+    }
+    Some(name)
 }
 
 /// Parse a Python call expression into a CallSite.
@@ -2684,3 +2797,59 @@ pub(crate) fn extract_php_var_types(tree: &tree_sitter::Tree, source: &[u8]) -> 
 // =============================================================================
 // Tests (moved from builder_v2.rs during Phase 3 modularization)
 // =============================================================================
+
+#[cfg(test)]
+mod local_import_tests {
+    use super::*;
+
+    #[test]
+    fn python_function_local_import_calls_preserve_provenance() {
+        let source = r#"
+def run():
+    before()
+    from package.worker import execute as bound
+    bound()
+"#;
+        let parsed = extract_python_definitions(source, Path::new("sample.py"));
+        let calls = parsed.calls.get("run").expect("run calls");
+
+        assert_eq!(
+            calls
+                .iter()
+                .find(|call| call.target == "before")
+                .map(|call| call.call_type),
+            Some(CallType::Direct)
+        );
+        assert_eq!(
+            calls
+                .iter()
+                .find(|call| call.target == "bound")
+                .map(|call| call.call_type),
+            Some(CallType::LocalImport)
+        );
+    }
+
+    #[test]
+    fn nested_function_import_does_not_mark_outer_calls() {
+        let source = r#"
+def outer():
+    def inner():
+        from package.worker import execute
+        execute()
+    execute()
+"#;
+        let parsed = extract_python_definitions(source, Path::new("sample.py"));
+        let calls = parsed.calls.get("outer").expect("outer calls");
+
+        assert!(calls
+            .iter()
+            .filter(|call| call.target == "execute")
+            .all(|call| call.call_type == CallType::Direct));
+        assert!(parsed
+            .calls
+            .get("inner")
+            .expect("inner calls")
+            .iter()
+            .any(|call| call.target == "execute" && call.call_type == CallType::LocalImport));
+    }
+}
