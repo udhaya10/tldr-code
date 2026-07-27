@@ -185,3 +185,28 @@ pub fn remove_launch_agent(_label: &str, _plist_path: Option<&Path>) -> Result<(
 fn get_uid() -> u32 {
     unsafe { libc::getuid() }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn launch_agent_supervises_rust_daemon_directly() {
+        let rendered = render_plist(&LaunchdVars {
+            label: "dev.tldr.test".to_string(),
+            tldr_bin: PathBuf::from("/opt/tldr/bin/tldr"),
+            project: PathBuf::from("/tmp/tldr-project"),
+            stdout_log: PathBuf::from("/tmp/tldr.stdout.log"),
+            stderr_log: PathBuf::from("/tmp/tldr.stderr.log"),
+            path_env: "/usr/bin:/bin".to_string(),
+        });
+
+        assert!(rendered.contains("<string>/opt/tldr/bin/tldr</string>"));
+        assert!(rendered.contains("<string>daemon</string>"));
+        assert!(rendered.contains("<string>start</string>"));
+        assert!(rendered.contains("<string>--foreground</string>"));
+        assert!(rendered.contains("<key>KeepAlive</key>"));
+        assert!(!rendered.contains("fsnotifier"));
+        assert!(!rendered.contains("tldr-cli-demon"));
+    }
+}

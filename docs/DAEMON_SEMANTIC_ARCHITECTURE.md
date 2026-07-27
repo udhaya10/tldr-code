@@ -236,6 +236,16 @@ dir is inside the project root or the OS watcher can't be created — the daemon
 keeps serving IPC `Notify` in that case. Coverage includes end-to-end
 "new file appears → routed → indexed" tests.
 
+### 6.1 Lifecycle ownership after the watcher cutover
+
+On macOS, `tldr init` installs a per-project LaunchAgent whose `ProgramArguments`
+execute `tldr daemon start --project … --foreground` directly with
+`KeepAlive=true`. There is no C++ supervisor or separately shipped
+`fsnotifier` in the lifecycle path. launchd owns process liveness; the Rust
+daemon owns filesystem observation, filtering, coalescing, invalidation, and
+index mutation. IPC `Notify` remains only as an explicit manual/hook poke and
+is not a second filesystem watcher.
+
 ---
 
 ## 7. Single-instance hardening (`TLDR-82b`)
