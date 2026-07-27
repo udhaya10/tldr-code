@@ -40,7 +40,7 @@ pub struct DeadArgs {
     #[arg(long, short = 'l')]
     pub lang: Option<Language>,
 
-    /// Custom entry point patterns (comma-separated)
+    /// Custom entry point patterns (comma-separated); use `django` for the Django preset
     #[arg(long, short = 'e', value_delimiter = ',')]
     pub entry_points: Vec<String>,
 
@@ -75,10 +75,11 @@ impl DeadArgs {
             .lang
             .unwrap_or_else(|| Language::from_directory(&self.path).unwrap_or(Language::Python));
 
-        let entry_points: Option<Vec<String>> = if self.entry_points.is_empty() {
+        let expanded_entry_points = expand_entry_points(&self.entry_points);
+        let entry_points: Option<Vec<String>> = if expanded_entry_points.is_empty() {
             None
         } else {
-            Some(self.entry_points.clone())
+            Some(expanded_entry_points)
         };
 
         // ADR-10 (TLDR-7pp.1.5): daemon is the only serve path; `--oneshot` is
@@ -154,6 +155,55 @@ impl DeadArgs {
             self.no_default_ignore,
         )
     }
+}
+
+/// Django callbacks invoked by framework convention rather than visible calls.
+///
+/// Decorated signal receivers, admin registrations, and task registrations are
+/// already retained by the analyzer's decorator rule. `Meta` is a class and is
+/// outside function-level dead analysis. This preset covers the remaining
+/// method-override surface that otherwise looks unreferenced.
+const DJANGO_ENTRY_POINT_PATTERNS: &[&str] = &[
+    "*.add_arguments",
+    "*.handle",
+    "*.ready",
+    "*.get_queryset",
+    "*.get_serializer",
+    "*.get_serializer_class",
+    "*.get_serializer_context",
+    "*.get_permissions",
+    "*.has_permission",
+    "*.has_object_permission",
+    "*.form_valid",
+    "*.form_invalid",
+    "*.get_context_data",
+    "*.dispatch",
+    "*.save_model",
+    "*.delete_model",
+    "*.get_urls",
+    "*.process_request",
+    "*.process_view",
+    "*.process_exception",
+    "*.process_template_response",
+    "*.process_response",
+];
+
+fn expand_entry_points(values: &[String]) -> Vec<String> {
+    let mut expanded = Vec::new();
+    for value in values {
+        if value.eq_ignore_ascii_case("django") {
+            expanded.extend(
+                DJANGO_ENTRY_POINT_PATTERNS
+                    .iter()
+                    .map(|pattern| (*pattern).to_string()),
+            );
+        } else {
+            expanded.push(value.clone());
+        }
+    }
+    expanded.sort();
+    expanded.dedup();
+    expanded
 }
 
 /// Run the dead-code analysis for `path`, shared by the CLI `--oneshot` path
@@ -601,7 +651,9 @@ fn format_dead_code_text_truncated(
 
 #[cfg(test)]
 mod tests {
-    use super::compute_dead_report;
+    use std::collections::HashSet;
+
+    use super::{compute_dead_report, expand_entry_points};
     use tldr_core::Language;
 
     #[test]
@@ -629,5 +681,60 @@ mod tests {
             .iter()
             .chain(&report.possibly_dead)
             .any(|function| function.name == "build_console_formatter"));
+    }
+
+    #[test]
+    fn django_entry_point_preset_suppresses_callbacks_and_composes() {
+        let project = tempfile::tempdir().expect("temp project");
+        std::fs::write(
+            project.path().join("commands.py"),
+            r#"
+class Command:
+    def add_arguments(self, parser):
+        pass
+
+class App:
+    def ready(self):
+        pass
+
+class Plain:
+    def helper(self):
+        pass
+
+    def custom_callback(self):
+        pass
+"#,
+        )
+        .expect("fixture");
+
+        let baseline = compute_dead_report(project.path(), Language::Python, None, false, false)
+            .expect("baseline");
+        assert!(baseline
+            .dead_functions
+            .iter()
+            .chain(&baseline.possibly_dead)
+            .any(|function| function.name == "Command.add_arguments"));
+
+        let entry_points =
+            expand_entry_points(&["django".to_string(), "*.custom_callback".to_string()]);
+        let report = compute_dead_report(
+            project.path(),
+            Language::Python,
+            Some(&entry_points),
+            false,
+            false,
+        )
+        .expect("preset report");
+        let candidates = report
+            .dead_functions
+            .iter()
+            .chain(&report.possibly_dead)
+            .map(|function| function.name.as_str())
+            .collect::<HashSet<_>>();
+
+        assert!(!candidates.contains("Command.add_arguments"));
+        assert!(!candidates.contains("App.ready"));
+        assert!(!candidates.contains("Plain.custom_callback"));
+        assert!(candidates.contains("Plain.helper"));
     }
 }

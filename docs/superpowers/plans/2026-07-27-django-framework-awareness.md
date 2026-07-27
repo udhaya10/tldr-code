@@ -51,10 +51,10 @@
 - Modify: daemon/MCP routing schemas where required
 - Modify: user documentation and dead certification coverage
 
-- [ ] Document the existing suppression root cause and preserve current callback behavior.
-- [ ] Add `--entry-points django`, expanding to the curated Django callback/decorator surface.
-- [ ] Include `Command.add_arguments`, `handle`, `AppConfig.ready`, queryset/serializer/permission hooks, signal receivers, `Meta`, and registered admin/task targets.
-- [ ] Test the preset and ensure explicit entry points continue to compose with it.
+- [x] Document the existing suppression root cause and preserve current callback behavior.
+- [x] Add `--entry-points django`, expanding to the curated Django callback/decorator surface.
+- [x] Include `Command.add_arguments`, `handle`, `AppConfig.ready`, queryset/serializer/permission hooks, signal receivers, `Meta`, and registered admin/task targets.
+- [x] Test the preset and ensure explicit entry points continue to compose with it.
 
 ### Task 5: Pin the Django compatibility corpus
 

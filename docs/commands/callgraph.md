@@ -147,7 +147,17 @@ tldr dead src/ --call-graph
 
 # With custom entry points
 tldr dead src/ -e main,api_v1,WebHandler
+
+# Django callback preset (composes with custom patterns)
+tldr dead . --lang python --entry-points django,*.project_callback
 ```
+
+The `django` preset retains framework-invoked method overrides such as
+`Command.add_arguments`, `Command.handle`, `AppConfig.ready`, queryset,
+serializer, permission, admin, form, view, and middleware hooks. Decorated
+signal receivers, admin registrations, and task registrations are already
+retained by decorator analysis; Django `Meta` classes are not function-level
+dead-code candidates.
 
 **Output:**
 ```json
