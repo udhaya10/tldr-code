@@ -76,6 +76,12 @@ enum Flush {
     FullRebuild,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum WatchSignal {
+    Path(PathBuf),
+    FullRebuild,
+}
+
 /// Deterministic worker-owned debounce and rolling-burst state.
 ///
 /// The notify thread only enqueues accepted paths. Keeping all timing state in
@@ -198,7 +204,7 @@ struct WatchHandler {
     store_dir: PathBuf,
     ignore: LiveIgnoreMatcher,
     activity: Arc<ActivityTracker>,
-    tx: mpsc::Sender<PathBuf>,
+    tx: mpsc::Sender<WatchSignal>,
     overflowed: Arc<AtomicBool>,
 }
 
@@ -212,7 +218,10 @@ impl WatchHandler {
 
     fn handle_event(&self, event: Event) {
         if self.ignore.reload_for_paths(&event.paths) {
-            eprintln!("[TLDR-1m4] reloaded .tldrignore/.gitignore policy");
+            eprintln!("[TLDR-1hld.11] reloaded ignore policy; scheduling full index rebuild");
+            self.activity.touch(Source::Watcher);
+            self.enqueue(WatchSignal::FullRebuild);
+            return;
         }
         let ignore = self.ignore.snapshot();
         for path in &event.paths {
@@ -229,13 +238,17 @@ impl WatchHandler {
             ) {
                 continue;
             }
-            match self.tx.try_send(path.clone()) {
-                Ok(()) => {}
-                Err(mpsc::error::TrySendError::Full(_)) => {
-                    self.overflowed.store(true, Ordering::SeqCst);
-                }
-                Err(mpsc::error::TrySendError::Closed(_)) => return,
+            self.enqueue(WatchSignal::Path(path.clone()));
+        }
+    }
+
+    fn enqueue(&self, signal: WatchSignal) {
+        match self.tx.try_send(signal) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                self.overflowed.store(true, Ordering::SeqCst);
             }
+            Err(mpsc::error::TrySendError::Closed(_)) => {}
         }
     }
 }
@@ -363,7 +376,7 @@ pub(crate) fn spawn_watcher(daemon: Arc<TLDRDaemon>) -> Option<WatcherGuard> {
     // If the worker is temporarily inside its blocking batch and this still
     // fills, the callback sets `overflowed`; the next worker turn rebuilds.
     let channel_cap = pipeline_config.burst_event_cap.saturating_add(1).max(1);
-    let (tx, rx) = mpsc::channel::<PathBuf>(channel_cap);
+    let (tx, rx) = mpsc::channel::<WatchSignal>(channel_cap);
     let overflowed = Arc::new(AtomicBool::new(false));
 
     // Serialized worker: it alone owns all debounce/burst state. A quiet or
@@ -414,7 +427,7 @@ pub(crate) fn spawn_watcher(daemon: Arc<TLDRDaemon>) -> Option<WatcherGuard> {
 
 async fn run_pipeline_worker(
     daemon: Arc<TLDRDaemon>,
-    mut rx: mpsc::Receiver<PathBuf>,
+    mut rx: mpsc::Receiver<WatchSignal>,
     overflowed: Arc<AtomicBool>,
     config: WatchPipelineConfig,
 ) {
@@ -429,11 +442,11 @@ async fn run_pipeline_worker(
 
         if let Some(deadline) = pipeline.deadline() {
             tokio::select! {
-                maybe_path = rx.recv() => {
-                    let Some(path) = maybe_path else {
+                maybe_signal = rx.recv() => {
+                    let Some(signal) = maybe_signal else {
                         break;
                     };
-                    accept_path(&daemon, &mut pipeline, &mut rx, path).await;
+                    accept_signal(&daemon, &mut pipeline, &mut rx, signal).await;
                 }
                 () = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
                     if let Some(flush) = pipeline.flush_due(Instant::now()) {
@@ -442,20 +455,26 @@ async fn run_pipeline_worker(
                 }
             }
         } else {
-            let Some(path) = rx.recv().await else {
+            let Some(signal) = rx.recv().await else {
                 break;
             };
-            accept_path(&daemon, &mut pipeline, &mut rx, path).await;
+            accept_signal(&daemon, &mut pipeline, &mut rx, signal).await;
         }
     }
 }
 
-async fn accept_path(
+async fn accept_signal(
     daemon: &TLDRDaemon,
     pipeline: &mut WatchPipeline,
-    rx: &mut mpsc::Receiver<PathBuf>,
-    path: PathBuf,
+    rx: &mut mpsc::Receiver<WatchSignal>,
+    signal: WatchSignal,
 ) {
+    let WatchSignal::Path(path) = signal else {
+        drain_receiver(rx);
+        pipeline.reset_all();
+        daemon.schedule_full_rebuild().await;
+        return;
+    };
     if let Some(flush) = pipeline.accept(path, Instant::now()) {
         if matches!(flush, Flush::FullRebuild) {
             drain_receiver(rx);
@@ -464,7 +483,7 @@ async fn accept_path(
     }
 }
 
-fn drain_receiver(rx: &mut mpsc::Receiver<PathBuf>) {
+fn drain_receiver(rx: &mut mpsc::Receiver<WatchSignal>) {
     while rx.try_recv().is_ok() {}
 }
 
@@ -479,9 +498,16 @@ async fn dispatch_flush(daemon: &TLDRDaemon, flush: Flush) {
 
 #[cfg(test)]
 mod tests {
-    use super::{Flush, LiveIgnoreMatcher, WatchPipeline, WatchPipelineConfig};
+    use super::{
+        Flush, LiveIgnoreMatcher, WatchHandler, WatchPipeline, WatchPipelineConfig, WatchSignal,
+    };
+    use crate::commands::daemon::activity::ActivityTracker;
+    use notify_debouncer_full::notify::{Event, EventKind};
     use std::path::PathBuf;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
     use std::time::{Duration, Instant};
+    use tokio::sync::mpsc;
 
     fn config() -> WatchPipelineConfig {
         WatchPipelineConfig {
@@ -556,6 +582,50 @@ mod tests {
         std::fs::remove_file(&git_policy).expect("remove nested git policy");
         assert!(live.reload_for_paths(&[git_policy]));
         assert!(!live.is_ignored(&ignored, false));
+    }
+
+    #[test]
+    fn ignore_policy_event_enqueues_full_rebuild() {
+        let project = tempfile::tempdir().expect("project");
+        std::fs::create_dir(project.path().join(".git")).expect("git metadata directory");
+        let policy = project.path().join(".tldrignore");
+        std::fs::write(&policy, "generated/\n").expect("write policy");
+        let (tx, mut rx) = mpsc::channel(1);
+        let handler = WatchHandler {
+            project: project.path().to_path_buf(),
+            cache_excl: project.path().join(".tldr"),
+            store_dir: project.path().join("external-store"),
+            ignore: LiveIgnoreMatcher::new(project.path()),
+            activity: Arc::new(ActivityTracker::new()),
+            tx,
+            overflowed: Arc::new(AtomicBool::new(false)),
+        };
+
+        handler.handle_event(Event::new(EventKind::Any).add_path(policy));
+
+        assert_eq!(rx.try_recv(), Ok(WatchSignal::FullRebuild));
+    }
+
+    #[test]
+    fn ordinary_source_event_enqueues_path_delta() {
+        let project = tempfile::tempdir().expect("project");
+        std::fs::create_dir(project.path().join(".git")).expect("git metadata directory");
+        let source = project.path().join("lib.rs");
+        std::fs::write(&source, "pub fn value() -> u8 { 1 }\n").expect("write source");
+        let (tx, mut rx) = mpsc::channel(1);
+        let handler = WatchHandler {
+            project: project.path().to_path_buf(),
+            cache_excl: project.path().join(".tldr"),
+            store_dir: project.path().join("external-store"),
+            ignore: LiveIgnoreMatcher::new(project.path()),
+            activity: Arc::new(ActivityTracker::new()),
+            tx,
+            overflowed: Arc::new(AtomicBool::new(false)),
+        };
+
+        handler.handle_event(Event::new(EventKind::Any).add_path(source.clone()));
+
+        assert_eq!(rx.try_recv(), Ok(WatchSignal::Path(source)));
     }
 
     #[test]

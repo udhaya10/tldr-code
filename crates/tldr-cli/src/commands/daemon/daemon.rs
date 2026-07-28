@@ -16,7 +16,7 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use dashmap::DashMap;
@@ -164,20 +164,67 @@ pub(crate) struct ReindexOutcome {
     pub reindex_triggered: bool,
 }
 
-/// Clears the warm single-flight latch when the background build task ends —
+#[derive(Debug, Default)]
+struct WarmBuildState {
+    running: bool,
+    full_rebuild_pending: bool,
+}
+
+impl WarmBuildState {
+    fn try_start(&mut self) -> bool {
+        if self.running {
+            return false;
+        }
+        self.running = true;
+        self.full_rebuild_pending = false;
+        true
+    }
+
+    fn request_full_rebuild(&mut self) {
+        self.full_rebuild_pending = true;
+    }
+
+    fn finish_iteration(&mut self) -> bool {
+        if self.full_rebuild_pending {
+            self.full_rebuild_pending = false;
+            true
+        } else {
+            self.running = false;
+            false
+        }
+    }
+}
+
+/// Clears the warm single-flight state when the background build task ends —
 /// including via panic-unwind, so a crashed build never wedges Warm into
 /// permanent `already_building`.
-struct ClearFlagOnDrop(Arc<AtomicBool>);
+struct ClearWarmStateOnDrop {
+    state: Arc<Mutex<WarmBuildState>>,
+    armed: bool,
+}
 
-impl Drop for ClearFlagOnDrop {
+impl ClearWarmStateOnDrop {
+    fn new(state: Arc<Mutex<WarmBuildState>>) -> Self {
+        Self { state, armed: true }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for ClearWarmStateOnDrop {
     fn drop(&mut self) {
-        self.0.store(false, Ordering::SeqCst);
+        if self.armed {
+            self.state.lock().expect("warm state poisoned").running = false;
+        }
     }
 }
 
 /// The background warm build (TLDR-utj.7). Carries CLONED handles of the
 /// daemon components it needs rather than the daemon itself: the Warm handler
 /// only has `&self`, and the detached task must be `'static`.
+#[derive(Clone)]
 struct WarmJob {
     project: PathBuf,
     artifact_manager: Arc<ArtifactManager>,
@@ -378,10 +425,10 @@ pub struct TLDRDaemon {
     /// timestamps + busy tokens for in-flight internal work. The idle loop
     /// shuts down only when the PROJECT is dormant, not merely the socket.
     activity: Arc<ActivityTracker>,
-    /// Single-flight latch for the background warm build (TLDR-utj.7): a
-    /// second Warm while one is in flight is acked with `already_building`
-    /// instead of stacking builds.
-    warm_in_flight: Arc<AtomicBool>,
+    /// Single-flight warm state plus one coalesced full-rebuild request. A
+    /// policy change during a build must run once more after that build so an
+    /// older corpus snapshot cannot become the final published generation.
+    warm_build: Arc<Mutex<WarmBuildState>>,
     /// Number of indexed files (for status reporting)
     indexed_files: Arc<RwLock<usize>>,
     /// Resident vector store with read/write split (TLDR-ac0.1). Concurrent
@@ -419,7 +466,7 @@ impl TLDRDaemon {
             shutdown_tx,
             stopping: AtomicBool::new(false),
             activity: Arc::new(ActivityTracker::new()),
-            warm_in_flight: Arc::new(AtomicBool::new(false)),
+            warm_build: Arc::new(Mutex::new(WarmBuildState::default())),
             indexed_files: Arc::new(RwLock::new(0)),
             #[cfg(feature = "semantic")]
             semantic_store: Arc::new(IndexManager::new()),
@@ -1644,10 +1691,11 @@ impl TLDRDaemon {
             .map(|_| run_id.unwrap_or_else(super::warm::new_run_id));
         // Single-flight: a second Warm during a build is answered honestly
         // instead of stacking a duplicate build behind the store write lock.
-        if self
-            .warm_in_flight
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .is_err()
+        if !self
+            .warm_build
+            .lock()
+            .expect("warm state poisoned")
+            .try_start()
         {
             return DaemonResponse::Status {
                 status: "already_building".to_string(),
@@ -1687,18 +1735,33 @@ impl TLDRDaemon {
         // timeout/disconnect, so the guard lives exactly as long as the
         // build (TLDR-3w5 invariant preserved).
         let busy = self.activity.begin("warm-build");
-        let in_flight = Arc::clone(&self.warm_in_flight);
+        let warm_build = Arc::clone(&self.warm_build);
         tokio::spawn(async move {
             let _busy = busy;
-            let _clear = ClearFlagOnDrop(in_flight);
-            let (warmed, errors) = job.run().await;
-            if errors.is_empty() {
-                eprintln!("[warm] background build complete: {}", warmed.join(", "));
-            } else {
+            let mut clear = ClearWarmStateOnDrop::new(Arc::clone(&warm_build));
+            loop {
+                let (warmed, errors) = job.clone().run().await;
+                if errors.is_empty() {
+                    eprintln!("[warm] background build complete: {}", warmed.join(", "));
+                } else {
+                    eprintln!(
+                        "[warm] background build finished — warmed: {}; errors: {}",
+                        warmed.join(", "),
+                        errors.join("; ")
+                    );
+                }
+                let rebuild = warm_build
+                    .lock()
+                    .expect("warm state poisoned")
+                    .finish_iteration();
+                if !rebuild {
+                    clear.disarm();
+                    break;
+                }
+                #[cfg(feature = "semantic")]
+                job.semantic_store.invalidate();
                 eprintln!(
-                    "[warm] background build finished — warmed: {}; errors: {}",
-                    warmed.join(", "),
-                    errors.join("; ")
+                    "[TLDR-1hld.11] ignore policy changed during warm; starting replacement build"
                 );
             }
         });
@@ -1946,6 +2009,10 @@ impl TLDRDaemon {
     /// Supersede queued watcher deltas with the existing single-flight warm.
     pub(crate) async fn schedule_full_rebuild(&self) {
         self.dirty_files.write().await.clear();
+        self.warm_build
+            .lock()
+            .expect("warm state poisoned")
+            .request_full_rebuild();
         #[cfg(feature = "semantic")]
         self.semantic_store.invalidate();
 
@@ -2205,7 +2272,80 @@ pub async fn wait_for_daemon(project: &std::path::Path, timeout_secs: u64) -> Da
 
 #[cfg(test)]
 mod tests {
-    use super::{DaemonConfig, TLDRDaemon};
+    use super::{ClearWarmStateOnDrop, DaemonConfig, TLDRDaemon, WarmBuildState};
+    use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn pending_full_rebuild_is_coalesced_and_runs_after_active_warm() {
+        let mut state = WarmBuildState::default();
+        assert!(state.try_start());
+
+        state.request_full_rebuild();
+        state.request_full_rebuild();
+        assert!(state.finish_iteration());
+        assert!(state.running);
+        assert!(!state.full_rebuild_pending);
+
+        assert!(!state.finish_iteration());
+        assert!(!state.running);
+    }
+
+    #[test]
+    fn idle_full_rebuild_request_is_claimed_by_new_warm() {
+        let mut state = WarmBuildState::default();
+        state.request_full_rebuild();
+
+        assert!(state.try_start());
+        assert!(!state.full_rebuild_pending);
+        assert!(!state.finish_iteration());
+    }
+
+    #[test]
+    fn completed_warm_guard_cannot_clear_a_new_build() {
+        let state = Arc::new(Mutex::new(WarmBuildState::default()));
+        let mut guard = ClearWarmStateOnDrop::new(Arc::clone(&state));
+        assert!(state.lock().expect("state").try_start());
+        assert!(!state.lock().expect("state").finish_iteration());
+        guard.disarm();
+
+        assert!(state.lock().expect("state").try_start());
+        drop(guard);
+        assert!(state.lock().expect("state").running);
+    }
+
+    #[test]
+    fn full_artifact_warm_removes_newly_ignored_file() {
+        let project = tempfile::tempdir().expect("temp project");
+        let root = project.path().canonicalize().expect("canonical root");
+        let kept = root.join("kept.rs");
+        let ignored = root.join("generated.rs");
+        std::fs::write(&kept, "pub fn kept() {}\n").expect("write kept source");
+        std::fs::write(&ignored, "pub fn generated() {}\n").expect("write generated source");
+        let daemon = TLDRDaemon::new(root.clone(), DaemonConfig::default()).expect("create daemon");
+
+        daemon
+            .artifact_manager
+            .warm()
+            .expect("publish baseline generation");
+        let baseline = daemon
+            .artifact_manager
+            .snapshot()
+            .expect("baseline snapshot");
+        assert!(baseline.file("kept.rs").is_some());
+        assert!(baseline.file("generated.rs").is_some());
+
+        std::fs::write(root.join(".tldrignore"), "generated.rs\n").expect("write ignore policy");
+        daemon
+            .artifact_manager
+            .warm()
+            .expect("publish replacement generation");
+        let replacement = daemon
+            .artifact_manager
+            .snapshot()
+            .expect("replacement snapshot");
+        assert!(replacement.file("kept.rs").is_some());
+        assert!(replacement.file("generated.rs").is_none());
+    }
 
     #[tokio::test]
     async fn dirty_file_batch_publishes_each_final_revision() {
