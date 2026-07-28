@@ -231,13 +231,45 @@ impl FixedShapePlanner {
             grouped[bucket_index(bucket)].push(input);
         }
 
-        let mut batches = Vec::new();
-        for (index, inputs) in grouped.into_iter().enumerate() {
-            let bucket = bucket_from_index(index);
-            let row_capacity = batch_size.unwrap_or_else(|| bucket.batch_size());
-            for rows in inputs.chunks(row_capacity) {
-                batches.push(self.build_batch(bucket, rows, row_capacity)?);
+        if let Some(row_capacity) = batch_size {
+            let mut batches = Vec::new();
+            for (index, inputs) in grouped.into_iter().enumerate() {
+                let bucket = bucket_from_index(index);
+                for rows in inputs.chunks(row_capacity) {
+                    batches.push(self.build_batch(bucket, rows, row_capacity)?);
+                }
             }
+            return Ok(batches);
+        }
+
+        // Full native batches retain their measured shape. A final partial
+        // batch may promote shorter inputs into otherwise-dummy rows because
+        // their attention masks make the additional sequence padding inert.
+        // Process longest-to-shortest so promotion never creates a larger
+        // tensor solely for a shorter input. This keeps the finite shape set
+        // unchanged while avoiding redundant executions in small durability
+        // windows with mixed token lengths.
+        let mut batches = Vec::new();
+        for index in (0..grouped.len()).rev() {
+            let bucket = bucket_from_index(index);
+            let row_capacity = bucket.batch_size();
+            while grouped[index].len() >= row_capacity {
+                let rows = grouped[index].drain(..row_capacity).collect::<Vec<_>>();
+                batches.push(self.build_batch(bucket, &rows, row_capacity)?);
+            }
+            if grouped[index].is_empty() {
+                continue;
+            }
+            let mut rows = grouped[index].drain(..).collect::<Vec<_>>();
+            for smaller in (0..index).rev() {
+                let available = row_capacity - rows.len();
+                if available == 0 {
+                    break;
+                }
+                let take = available.min(grouped[smaller].len());
+                rows.extend(grouped[smaller].drain(..take));
+            }
+            batches.push(self.build_batch(bucket, &rows, row_capacity)?);
         }
         Ok(batches)
     }
@@ -334,4 +366,55 @@ fn bucket_from_index(index: usize) -> SequenceBucket {
 
 fn shape_error(message: String) -> TldrError {
     TldrError::Embedding(format!("invalid fixed-shape batch: {message}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn input(request_index: usize, tokens: usize) -> TokenizedInput {
+        TokenizedInput {
+            request_index,
+            input_ids: vec![1; tokens],
+            attention_mask: vec![1; tokens],
+            token_type_ids: None,
+        }
+    }
+
+    fn planner() -> FixedShapePlanner {
+        FixedShapePlanner::new(0, input(usize::MAX, 2)).expect("valid planner")
+    }
+
+    #[test]
+    fn partial_long_batch_promotes_shorter_inputs() {
+        let batches = planner()
+            .plan(vec![input(0, 500), input(1, 300), input(2, 200)])
+            .expect("plan succeeds");
+
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].shape(), (8, 512));
+        assert_eq!(batches[0].request_indices, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn shorter_inputs_do_not_create_an_unneeded_long_shape() {
+        let batches = planner()
+            .plan(vec![input(0, 100), input(1, 200)])
+            .expect("plan succeeds");
+
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].shape(), (32, 256));
+        assert_eq!(batches[0].request_indices, vec![1, 0]);
+    }
+
+    #[test]
+    fn explicit_batch_size_keeps_native_buckets() {
+        let batches = planner()
+            .plan_with_batch_size(vec![input(0, 100), input(1, 200)], Some(1))
+            .expect("plan succeeds");
+
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0].shape(), (1, 128));
+        assert_eq!(batches[1].shape(), (1, 256));
+    }
 }
