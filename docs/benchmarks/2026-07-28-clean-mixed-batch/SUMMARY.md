@@ -85,6 +85,46 @@ one second.
 The query `reload ignore policy and rebuild semantic index` ranked
 `load_or_build_store` first, confirming the new vector generation is searchable.
 
+## Context-root coalescing replay
+
+A release-mode, no-inference replay of the same 511-file artifact generation
+after coalescing comments, attributes, and imports into their following
+semantic owners produced:
+
+| Metric | Before | After | Change |
+|---|---:|---:|---:|
+| Planned documents | 49,215 | 15,020 | -34,195 (-69.5%) |
+| Planned tokens | 5,224,463 | 3,902,146 | -1,322,317 (-25.3%) |
+| AST-child documents | 47,495 | 13,299 | -34,196 (-72.0%) |
+| Parent summaries | 1,716 | 1,717 | +1 |
+| Tokenizer fallbacks | 4 | 4 | 0 |
+| Qualified-symbol documents | 13,404 | 13,397 | -7 |
+| Source files | 511 | 511 | 0 |
+| Source overlap | 68 bytes | 68 bytes | 0 |
+
+The dominant standalone context-root kinds fell as follows:
+
+| AST owner kind | Before | After | Change |
+|---|---:|---:|---:|
+| `line_comment` | 30,316 | 1,375 | -28,941 (-95.5%) |
+| `use_declaration` | 2,922 | 35 | -2,887 (-98.8%) |
+| `attribute_item` | 1,502 | 29 | -1,473 (-98.1%) |
+
+The remaining context-owned documents are budget-constrained or context-only
+groups that cannot all travel with a following semantic declaration. They
+remain indexed rather than being dropped.
+
+The replay covered 10,093,425 source bytes with 10,093,493 planned bytes; the
+68-byte difference is the same explicit fallback overlap. No planned document
+exceeded the 512-token budget. The post-change token buckets were 1,375
+documents at 33–64 tokens, 3,161 at 65–128, 3,724 at 129–256, 2,460 at
+257–384, and 4,300 at 385–512.
+
+This replay isolates planning only. It demonstrates the expected reduction in
+documents and model-input tokens, but it does not claim a new cold ONNX wall
+time; that requires rebuilding the invalidated vector generation with pipeline
+version `structural-embedding-v2`.
+
 ## Remaining measured opportunity
 
 The current promotion operates inside durability windows. A cross-window packer

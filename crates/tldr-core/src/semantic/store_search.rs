@@ -68,7 +68,7 @@ use crate::TldrResult;
 /// this whenever chunk boundaries change (so an on-disk store built by an older
 /// pipeline is rejected as `Incompatible` and rebuilt). Paired with
 /// [`chunk_params_tag`] in the [`ManifestId`] (TLDR-7al).
-pub(crate) const CHUNK_WALKER_VERSION: &str = "w1";
+pub(crate) const CHUNK_WALKER_VERSION: &str = "w2";
 
 /// Encode the chunk-boundary-affecting build inputs into a stable tag for the
 /// manifest. ONLY inputs that change which chunks/vectors exist belong here

@@ -10,7 +10,7 @@ use crate::{TldrError, TldrResult};
 /// Wire compatibility version. A mismatch fails before model loading.
 pub const WORKER_PROTOCOL_VERSION: u32 = 2;
 /// Embedding/chunking pipeline identity negotiated with the worker.
-pub const WORKER_PIPELINE_VERSION: &str = "structural-embedding-v1";
+pub const WORKER_PIPELINE_VERSION: &str = "structural-embedding-v2";
 /// Maximum request or response line accepted over local stdio.
 pub const MAX_WORKER_MESSAGE_BYTES: usize = 64 * 1024;
 /// Finite default number of worker attempts.

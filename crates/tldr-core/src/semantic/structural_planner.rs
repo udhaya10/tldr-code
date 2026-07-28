@@ -274,7 +274,10 @@ fn split_node(
         );
         while last + 1 < segments.len() {
             let next = &segments[last + 1];
-            if preserve_named_roots && next.node.is_some() {
+            if preserve_named_roots
+                && next.node.is_some()
+                && segments[index..=last].iter().any(segment_is_semantic_owner)
+            {
                 break;
             }
             let metadata = segments[index..=last + 1]
@@ -334,6 +337,27 @@ struct Segment<'tree> {
     path: Vec<u32>,
     node: Option<tree_sitter::Node<'tree>>,
     context: StructuralContext,
+}
+
+fn is_context_root_kind(kind: &str) -> bool {
+    kind.contains("comment")
+        || matches!(
+            kind,
+            "attribute_item"
+                | "inner_attribute_item"
+                | "use_declaration"
+                | "import_statement"
+                | "import_from_statement"
+                | "future_import_statement"
+                | "import_declaration"
+                | "import_header"
+        )
+}
+
+fn segment_is_semantic_owner(segment: &Segment<'_>) -> bool {
+    segment
+        .node
+        .is_some_and(|node| !is_context_root_kind(node.kind()))
 }
 
 fn named_child_ordinal(node: tree_sitter::Node<'_>, child: tree_sitter::Node<'_>) -> Option<u32> {
@@ -530,4 +554,148 @@ fn derived(
             .filter(|byte| *byte == b'\n')
             .count() as u32;
     chunk
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use tokenizers::models::wordlevel::WordLevel;
+    use tokenizers::{Tokenizer, TruncationParams};
+
+    use super::*;
+    use crate::Language;
+
+    fn budget() -> TokenBudget {
+        let model = WordLevel::builder()
+            .vocab([("[UNK]".to_string(), 0)].into_iter().collect())
+            .unk_token("[UNK]".to_string())
+            .build()
+            .expect("word-level tokenizer");
+        let mut tokenizer = Tokenizer::new(model);
+        tokenizer
+            .with_truncation(Some(TruncationParams {
+                max_length: 512,
+                ..Default::default()
+            }))
+            .expect("truncation config");
+        TokenBudget::from_configured_tokenizer(&tokenizer).expect("token budget")
+    }
+
+    fn rust_file(source: &str) -> CodeChunk {
+        CodeChunk {
+            file_path: PathBuf::from("src/lib.rs"),
+            function_name: None,
+            class_name: None,
+            line_start: 1,
+            line_end: source.lines().count() as u32,
+            content: source.to_string(),
+            content_hash: format!("{:x}", md5::compute(source.as_bytes())),
+            language: Language::Rust,
+            structure: ChunkStructure {
+                repository_path: "src/lib.rs".to_string(),
+                ..Default::default()
+            },
+        }
+    }
+
+    #[test]
+    fn context_roots_attach_to_the_following_semantic_owner() {
+        let source = concat!(
+            "/// first docs\n",
+            "#[inline]\n",
+            "use std::fmt;\n",
+            "fn first() {}\n",
+            "// second docs\n",
+            "fn second() {}\n",
+        );
+
+        let chunks = plan_chunks(&[rust_file(source)], &budget(), ChunkGranularity::Function)
+            .expect("planning succeeds");
+
+        assert_eq!(chunks.len(), 2);
+        assert!(chunks[0].content.contains("/// first docs"));
+        assert!(chunks[0].content.contains("#[inline]"));
+        assert!(chunks[0].content.contains("use std::fmt"));
+        assert!(chunks[0].content.contains("fn first"));
+        assert!(!chunks[0].content.contains("// second docs"));
+        assert!(chunks[1].content.contains("// second docs"));
+        assert!(chunks[1].content.contains("fn second"));
+        assert_eq!(
+            chunks
+                .iter()
+                .map(|chunk| chunk.content.as_str())
+                .collect::<String>(),
+            source
+        );
+        assert_eq!(
+            chunks
+                .iter()
+                .map(|chunk| chunk.structure.qualified_symbol.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("first"), Some("second")]
+        );
+    }
+
+    #[test]
+    fn context_root_classification_is_narrow() {
+        for kind in [
+            "line_comment",
+            "block_comment",
+            "attribute_item",
+            "inner_attribute_item",
+            "use_declaration",
+            "import_statement",
+            "import_from_statement",
+            "future_import_statement",
+            "import_declaration",
+            "import_header",
+        ] {
+            assert!(is_context_root_kind(kind), "{kind}");
+        }
+        for kind in [
+            "function_item",
+            "impl_item",
+            "struct_item",
+            "enum_item",
+            "mod_item",
+            "const_item",
+        ] {
+            assert!(!is_context_root_kind(kind), "{kind}");
+        }
+    }
+
+    #[test]
+    fn artifact_delta_and_bulk_planning_use_identical_boundaries() {
+        let source = concat!(
+            "/// docs\n",
+            "#[derive(Debug)]\n",
+            "struct Item;\n",
+            "// behavior\n",
+            "fn run() {}\n",
+        );
+        let direct = plan_chunks(&[rust_file(source)], &budget(), ChunkGranularity::Function)
+            .expect("bulk planning succeeds");
+        let mut delta_source = rust_file(source);
+        delta_source.file_path = PathBuf::from("/repo/src/lib.rs");
+        let (delta, documents) =
+            crate::semantic::vector_store::plan_structural_delta_from_artifact(
+                std::path::Path::new("/repo"),
+                delta_source,
+                &budget(),
+                ChunkGranularity::Function,
+            )
+            .expect("delta planning succeeds");
+
+        assert_eq!(direct.len(), delta.len());
+        assert_eq!(documents.len(), delta.len());
+        for (bulk, delta) in direct.iter().zip(&delta) {
+            assert_eq!(bulk.content, delta.content);
+            assert_eq!(bulk.structure, delta.structure);
+            assert_eq!(bulk.function_name, delta.function_name);
+            assert_eq!(bulk.class_name, delta.class_name);
+            assert_eq!(bulk.line_start, delta.line_start);
+            assert_eq!(bulk.line_end, delta.line_end);
+        }
+    }
 }
