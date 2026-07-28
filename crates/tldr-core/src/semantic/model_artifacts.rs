@@ -147,6 +147,20 @@ impl ResolvedModelArtifacts {
     }
 }
 
+/// Shared FastEmbed cache location used by inference and tokenizer-only
+/// planning. Keeping this resolution in one place prevents the delta planner
+/// from accidentally consulting a different model snapshot than ONNX.
+pub(crate) fn default_fastembed_cache_dir() -> PathBuf {
+    std::env::var("TLDR_FASTEMBED_CACHE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            dirs::cache_dir()
+                .unwrap_or_else(std::env::temp_dir)
+                .join("tldr")
+                .join("fastembed")
+        })
+}
+
 fn cached_file(repo: &hf_hub::CacheRepo, filename: &str) -> Result<PathBuf, ModelArtifactError> {
     repo.get(filename)
         .ok_or_else(|| ModelArtifactError::MissingFile(filename.to_string()))

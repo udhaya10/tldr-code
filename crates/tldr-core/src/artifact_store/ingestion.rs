@@ -133,15 +133,28 @@ impl IngestionEngine {
             timing.detail_path.as_deref(),
         )?;
         let scope = normalize_scope(scope);
+        let active = self.store.active_generation()?.unwrap_or(0);
+        let generation = active.saturating_add(1);
+        let previous = self.store.generation(active)?;
         let discovery_started = Instant::now();
-        let all_files = discover(&self.root);
-        let (source_revision, revisions) = source_manifest(&self.root, &all_files)?;
+        let (all_files, source_revision, revisions, removed_files) = match &scope {
+            IngestionScope::Project => {
+                let all_files = discover(&self.root);
+                let (source_revision, revisions) = source_manifest(&self.root, &all_files)?;
+                let removed_files =
+                    removed_files(previous.as_ref(), |path| !revisions.contains_key(path));
+                (all_files, source_revision, revisions, removed_files)
+            }
+            IngestionScope::Files(files) => file_scope_manifest(
+                &self.root,
+                files,
+                previous.as_ref().map(|manifest| manifest.source_revision),
+            )?,
+        };
         phases.push(PhaseTiming {
             name: "source_discovery".into(),
             duration_ms: elapsed_ms(discovery_started),
         });
-        let active = self.store.active_generation()?.unwrap_or(0);
-        let generation = active.saturating_add(1);
         let revision_tag = source_revision.0[..8]
             .iter()
             .map(|byte| format!("{byte:02x}"))
@@ -150,7 +163,6 @@ impl IngestionEngine {
             "ingestion-{generation}-{revision_tag}-{}",
             scope_tag(&scope)
         );
-        let previous = self.store.generation(active)?;
         let previous_keys = previous
             .as_ref()
             .map(|manifest| manifest.artifacts.as_slice())
@@ -163,13 +175,6 @@ impl IngestionEngine {
             })
             .map(|key| (key.subject.clone(), key.revision))
             .collect::<HashSet<_>>();
-        let removed_files = previous_keys
-            .iter()
-            .filter_map(|key| subject_file(&key.subject))
-            .filter(|path| !revisions.contains_key(*path))
-            .map(ToOwned::to_owned)
-            .collect::<HashSet<_>>();
-
         let selected: Vec<PathBuf> = match &scope {
             IngestionScope::Project => all_files
                 .iter()
@@ -556,6 +561,90 @@ fn source_manifest(
     Ok((RevisionId(*hasher.finalize().as_bytes()), revisions))
 }
 
+type FileScopeManifest = (
+    Vec<PathBuf>,
+    RevisionId,
+    HashMap<String, RevisionId>,
+    HashSet<String>,
+);
+
+fn file_scope_manifest(
+    root: &Path,
+    files: &[String],
+    previous_revision: Option<RevisionId>,
+) -> TldrResult<FileScopeManifest> {
+    let mut selected_paths = Vec::with_capacity(files.len());
+    let mut revisions = HashMap::with_capacity(files.len());
+    let mut removed = HashSet::new();
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"file-scope-generation-v1");
+    if let Some(previous_revision) = previous_revision {
+        hasher.update(&previous_revision.0);
+    }
+
+    for relative in files {
+        let relative_path = Path::new(relative);
+        if relative_path.as_os_str().is_empty()
+            || relative_path
+                .components()
+                .any(|component| !matches!(component, std::path::Component::Normal(_)))
+        {
+            return Err(ingestion_error(format!(
+                "file-scoped ingestion requires a normalized root-relative path: {relative}"
+            )));
+        }
+
+        hasher.update(relative.as_bytes());
+        let absolute = root.join(relative_path);
+        if is_file_scope_source(root, &absolute) {
+            let bytes = std::fs::read(&absolute)?;
+            let revision = RevisionId::for_bytes(&bytes);
+            hasher.update(b"present");
+            hasher.update(&revision.0);
+            revisions.insert(relative.clone(), revision);
+            selected_paths.push(absolute);
+        } else {
+            hasher.update(b"absent");
+            removed.insert(relative.clone());
+        }
+    }
+
+    Ok((
+        selected_paths,
+        RevisionId(*hasher.finalize().as_bytes()),
+        revisions,
+        removed,
+    ))
+}
+
+fn is_file_scope_source(root: &Path, path: &Path) -> bool {
+    if !path.is_file() || Language::from_path(path).is_none() {
+        return false;
+    }
+    #[cfg(feature = "semantic")]
+    {
+        crate::semantic::is_corpus_file(root, path)
+    }
+    #[cfg(not(feature = "semantic"))]
+    {
+        true
+    }
+}
+
+fn removed_files(
+    previous: Option<&GenerationManifest>,
+    should_remove: impl Fn(&str) -> bool,
+) -> HashSet<String> {
+    previous
+        .into_iter()
+        .flat_map(|manifest| manifest.artifacts.iter())
+        .filter(|key| key.kind == ArtifactKind::FileFacts)
+        .filter_map(|key| subject_file(&key.subject))
+        .filter(|path| should_remove(path))
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
 fn relative(root: &Path, path: &Path) -> String {
     path.strip_prefix(root)
         .unwrap_or(path)
@@ -629,5 +718,50 @@ fn ingestion_error(message: impl Into<String>) -> TldrError {
         file: PathBuf::from("<ingestion>"),
         line: None,
         message: message.into(),
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::Arc;
+
+    use super::{IngestionEngine, IngestionScope};
+    use crate::artifact_store::{ArtifactStore, RedbArtifactStore};
+
+    #[test]
+    fn file_scope_does_not_read_unchanged_sources() {
+        let project = tempfile::tempdir().expect("project");
+        let store_dir = tempfile::tempdir().expect("store");
+        let changed = project.path().join("changed.rs");
+        let untouched = project.path().join("untouched.rs");
+        std::fs::write(&changed, "pub fn changed() -> u8 { 1 }\n").expect("write changed");
+        std::fs::write(&untouched, "pub fn untouched() -> u8 { 2 }\n").expect("write untouched");
+
+        let store: Arc<dyn ArtifactStore> = Arc::new(
+            RedbArtifactStore::open(&store_dir.path().join("artifacts.redb")).expect("open store"),
+        );
+        let engine = IngestionEngine::new(project.path(), store).expect("engine");
+        engine
+            .ingest(IngestionScope::Project)
+            .expect("baseline generation");
+
+        std::fs::write(&changed, "pub fn changed() -> u8 { 3 }\n").expect("edit changed");
+        let mut permissions = std::fs::metadata(&untouched)
+            .expect("untouched metadata")
+            .permissions();
+        permissions.set_mode(0o000);
+        std::fs::set_permissions(&untouched, permissions).expect("make unreadable");
+
+        let result = engine.ingest(IngestionScope::Files(vec!["changed.rs".into()]));
+
+        let mut permissions = std::fs::metadata(&untouched)
+            .expect("unreadable metadata")
+            .permissions();
+        permissions.set_mode(0o644);
+        std::fs::set_permissions(&untouched, permissions).expect("restore permissions");
+
+        let report = result.expect("file-scoped generation must not read untouched source");
+        assert_eq!(report.parsed_files, 1);
     }
 }

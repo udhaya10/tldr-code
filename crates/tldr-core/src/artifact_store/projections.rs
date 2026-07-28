@@ -2,6 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::analysis::dead::dead_code_analysis_refcount;
 use crate::types::{CallEdge, DeadCodeReport, ModuleInfo, ProjectCallGraph};
@@ -12,15 +13,15 @@ use crate::{
 use super::redb::decode;
 use super::GraphSnapshot;
 use super::{
-    ArtifactKind, ArtifactStore, DefinitionFact, FileFacts, ImportFact, ProjectCallEdgeFact,
-    SemanticChunkFact,
+    ArtifactKind, ArtifactStore, ArtifactSubject, DefinitionFact, FileFacts, ImportFact,
+    ProjectCallEdgeFact, SemanticChunkFact,
 };
 
 /// Immutable structural view assembled from one published generation.
 #[derive(Clone, Debug)]
 pub struct GenerationSnapshot {
     generation: u64,
-    files: HashMap<String, FileFacts>,
+    files: HashMap<String, Arc<FileFacts>>,
     project_calls: Vec<ProjectCallEdgeFact>,
     call_nodes: HashMap<String, Vec<String>>,
     graph: GraphSnapshot,
@@ -51,7 +52,7 @@ impl GenerationSnapshot {
                     ))
                 })?;
                 let facts: FileFacts = decode(&artifact.payload)?;
-                Ok((facts.path.clone(), facts))
+                Ok((facts.path.clone(), Arc::new(facts)))
             })
             .collect::<TldrResult<HashMap<_, _>>>()?;
         let project_calls: Vec<ProjectCallEdgeFact> = manifest
@@ -68,6 +69,77 @@ impl GenerationSnapshot {
             })
             .transpose()?
             .unwrap_or_default();
+        Ok(Self::from_resident(generation, files, project_calls))
+    }
+
+    /// Refresh a published file-scoped generation from a resident predecessor.
+    ///
+    /// Unchanged file facts retain their existing `Arc`; only explicitly
+    /// changed paths are removed or decoded from the new manifest.
+    pub fn refresh_files(
+        store: &dyn ArtifactStore,
+        generation: u64,
+        previous: &Self,
+        changed: &[String],
+    ) -> TldrResult<Self> {
+        let manifest = store.generation(generation)?.ok_or_else(|| {
+            TldrError::DaemonError(format!("published generation {generation} is missing"))
+        })?;
+        let file_keys = manifest
+            .artifacts
+            .iter()
+            .filter_map(|key| match (&key.kind, &key.subject) {
+                (ArtifactKind::FileFacts, ArtifactSubject::File(path)) => {
+                    Some((path.as_str(), key))
+                }
+                _ => None,
+            })
+            .collect::<HashMap<_, _>>();
+
+        let mut files = previous.files.clone();
+        for path in changed {
+            files.remove(path);
+            if let Some(key) = file_keys.get(path.as_str()) {
+                let artifact = store.artifact(key)?.ok_or_else(|| {
+                    TldrError::DaemonError(format!(
+                        "published generation {generation} references a missing file artifact"
+                    ))
+                })?;
+                let facts: FileFacts = decode(&artifact.payload)?;
+                files.insert(facts.path.clone(), Arc::new(facts));
+            }
+        }
+
+        let resident_paths = files.keys().map(String::as_str).collect::<HashSet<_>>();
+        let manifest_paths = file_keys.keys().copied().collect::<HashSet<_>>();
+        if resident_paths != manifest_paths {
+            return Err(TldrError::DaemonError(format!(
+                "file-scoped generation {generation} does not match its resident predecessor"
+            )));
+        }
+
+        let project_calls: Vec<ProjectCallEdgeFact> = manifest
+            .artifacts
+            .iter()
+            .find(|key| key.kind == ArtifactKind::CallGraph)
+            .map(|key| {
+                let artifact = store.artifact(key)?.ok_or_else(|| {
+                    TldrError::DaemonError(format!(
+                        "published generation {generation} references a missing call graph"
+                    ))
+                })?;
+                decode(&artifact.payload)
+            })
+            .transpose()?
+            .unwrap_or_default();
+        Ok(Self::from_resident(generation, files, project_calls))
+    }
+
+    fn from_resident(
+        generation: u64,
+        files: HashMap<String, Arc<FileFacts>>,
+        project_calls: Vec<ProjectCallEdgeFact>,
+    ) -> Self {
         let mut call_nodes = HashMap::<String, Vec<String>>::new();
         for facts in files.values() {
             if let Ok(ir) = ciborium::de::from_reader::<crate::callgraph::FileIR, _>(
@@ -87,13 +159,13 @@ impl GenerationSnapshot {
             nodes.dedup();
         }
         let graph = GraphSnapshot::build(&files, &project_calls);
-        Ok(Self {
+        Self {
             generation,
             files,
             project_calls,
             call_nodes,
             graph,
-        })
+        }
     }
 
     /// Generation pinned by this snapshot.
@@ -114,12 +186,12 @@ impl GenerationSnapshot {
     /// Read normalized facts for a root-relative path.
     pub fn file(&self, path: impl AsRef<Path>) -> Option<&FileFacts> {
         let normalized = path.as_ref().to_string_lossy().replace('\\', "/");
-        self.files.get(&normalized)
+        self.files.get(&normalized).map(Arc::as_ref)
     }
 
     /// Iterate over all normalized file facts.
     pub fn files(&self) -> impl Iterator<Item = &FileFacts> {
-        self.files.values()
+        self.files.values().map(Arc::as_ref)
     }
 
     /// Project all definitions without re-reading source.
@@ -159,26 +231,33 @@ impl GenerationSnapshot {
         let mut chunks = self
             .files
             .values()
-            .flat_map(|facts| {
-                let language = Language::from_extension(&facts.language)
-                    .or_else(|| Language::from_path(Path::new(&facts.path)));
-                facts.semantic_chunks.iter().filter_map(move |chunk| {
-                    language.map(|language| crate::semantic::CodeChunk {
-                        file_path: project.join(&facts.path),
-                        function_name: chunk.function_name.clone(),
-                        class_name: chunk.class_name.clone(),
-                        line_start: chunk.line_start,
-                        line_end: chunk.line_end,
-                        content: chunk.content.clone(),
-                        content_hash: chunk.content_hash.clone(),
-                        language,
-                        structure: Default::default(),
-                    })
-                })
-            })
+            .flat_map(|facts| semantic_source_chunks_for_facts(project, facts))
             .collect::<Vec<_>>();
         chunks.sort_by(|left, right| left.file_path.cmp(&right.file_path));
         chunks
+    }
+
+    /// Restore semantic planner inputs only for explicitly requested files.
+    ///
+    /// Unlike [`Self::semantic_source_chunks`], this performs one resident
+    /// `HashMap` lookup per requested path and never walks, clones, or sorts
+    /// unrelated corpus entries. Paths may be root-relative or absolute under
+    /// `project`; input order and per-file chunk order are preserved.
+    #[cfg(feature = "semantic")]
+    pub fn semantic_source_chunks_for<'a>(
+        &self,
+        project: &Path,
+        paths: impl IntoIterator<Item = &'a Path>,
+    ) -> Vec<crate::semantic::CodeChunk> {
+        paths
+            .into_iter()
+            .flat_map(|path| {
+                let relative = path.strip_prefix(project).unwrap_or(path);
+                self.file(relative)
+                    .into_iter()
+                    .flat_map(|facts| semantic_source_chunks_for_facts(project, facts))
+            })
+            .collect()
     }
 
     /// Build the structure command's exact schema from stored file projections.
@@ -385,6 +464,28 @@ impl GenerationSnapshot {
             })
             .flat_map(|(_, nodes)| nodes.iter().map(String::as_str))
     }
+}
+
+#[cfg(feature = "semantic")]
+fn semantic_source_chunks_for_facts<'a>(
+    project: &'a Path,
+    facts: &'a FileFacts,
+) -> impl Iterator<Item = crate::semantic::CodeChunk> + 'a {
+    let language = Language::from_extension(&facts.language)
+        .or_else(|| Language::from_path(Path::new(&facts.path)));
+    facts.semantic_chunks.iter().filter_map(move |chunk| {
+        language.map(|language| crate::semantic::CodeChunk {
+            file_path: project.join(&facts.path),
+            function_name: chunk.function_name.clone(),
+            class_name: chunk.class_name.clone(),
+            line_start: chunk.line_start,
+            line_end: chunk.line_end,
+            content: chunk.content.clone(),
+            content_hash: chunk.content_hash.clone(),
+            language,
+            structure: Default::default(),
+        })
+    })
 }
 
 fn scope_path(path: &str, relative_root: &str, single_file: bool) -> Option<PathBuf> {

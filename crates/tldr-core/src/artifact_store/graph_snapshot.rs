@@ -6,6 +6,7 @@
 //! second durable source of truth.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::Arc;
 
 use crate::types::{CallerTree, ImpactReport};
 use crate::{Language, ProjectCallGraph, TldrError, TldrResult};
@@ -82,7 +83,10 @@ impl GraphSnapshot {
         Self::build(&HashMap::new(), &edges)
     }
 
-    pub(crate) fn build(files: &HashMap<String, FileFacts>, edges: &[ProjectCallEdgeFact]) -> Self {
+    pub(crate) fn build(
+        files: &HashMap<String, Arc<FileFacts>>,
+        edges: &[ProjectCallEdgeFact],
+    ) -> Self {
         let mut keyed = Vec::<(NodeKey, FunctionNode)>::new();
         for facts in files.values() {
             for definition in &facts.definitions {

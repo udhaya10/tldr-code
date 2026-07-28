@@ -217,6 +217,11 @@ impl ArtifactManager {
         timing: Option<IngestionTimingOptions>,
     ) -> tldr_core::TldrResult<IngestionReport> {
         let _writer = self.writer.lock().expect("artifact writer poisoned");
+        let changed_paths = match &scope {
+            IngestionScope::Files(paths) => Some(paths.clone()),
+            IngestionScope::Project => None,
+        };
+        let previous_snapshot = self.hot.load_full();
         let target_generation = self.store.active_generation()?.unwrap_or(0) + 1;
         *self.state.write().expect("artifact state poisoned") =
             ArtifactState::Building { target_generation };
@@ -230,10 +235,16 @@ impl ArtifactManager {
             );
         match result {
             Ok(report) => {
-                let snapshot = Arc::new(GenerationSnapshot::load(
-                    self.store.as_ref(),
-                    report.generation,
-                )?);
+                let snapshot = match (changed_paths.as_deref(), previous_snapshot.as_deref()) {
+                    (Some(paths), Some(previous)) => GenerationSnapshot::refresh_files(
+                        self.store.as_ref(),
+                        report.generation,
+                        previous,
+                        paths,
+                    ),
+                    _ => GenerationSnapshot::load(self.store.as_ref(), report.generation),
+                }
+                .map(Arc::new)?;
                 self.hot.store(Some(snapshot));
                 *self.state.write().expect("artifact state poisoned") = ArtifactState::Ready {
                     generation: report.generation,

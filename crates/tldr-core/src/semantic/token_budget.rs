@@ -19,6 +19,8 @@ use serde::{Deserialize, Serialize};
 use tokenizers::Tokenizer;
 
 use super::fixed_shape::{FixedShapePlanner, TokenizedInput};
+use super::model_artifacts::{default_fastembed_cache_dir, ResolvedModelArtifacts};
+use super::EmbeddingModel;
 
 /// Input-budget diagnostic schema version. Bump whenever accounting semantics
 /// change. Embedding-content cache invalidation is controlled separately by the
@@ -50,6 +52,41 @@ pub struct TokenBudget {
 }
 
 impl TokenBudget {
+    /// Load only the commit-pinned tokenizer needed for structural planning.
+    ///
+    /// This deliberately avoids `fastembed::TextEmbedding` and ORT: planning a
+    /// no-content delta must not construct an inference session or run a model
+    /// integrity probe.
+    pub fn for_model_planning(model: EmbeddingModel) -> Result<Self, TokenBudgetError> {
+        let artifacts = ResolvedModelArtifacts::resolve(model, &default_fastembed_cache_dir())
+            .map_err(|error| TokenBudgetError::TokenizerConfig(error.to_string()))?;
+        let tokenizer_path = artifacts
+            .tokenizer_paths
+            .iter()
+            .find(|path| {
+                path.file_name()
+                    .is_some_and(|name| name == "tokenizer.json")
+            })
+            .ok_or_else(|| {
+                TokenBudgetError::TokenizerConfig(
+                    "commit-pinned tokenizer.json is unavailable".to_string(),
+                )
+            })?;
+        let mut tokenizer = Tokenizer::from_file(tokenizer_path)
+            .map_err(|error| TokenBudgetError::TokenizerConfig(error.to_string()))?;
+        tokenizer
+            .with_truncation(None)
+            .map_err(|error| TokenBudgetError::TokenizerConfig(error.to_string()))?;
+        tokenizer.with_padding(None);
+        Ok(Self {
+            pad_token_id: tokenizer
+                .token_to_id("[PAD]")
+                .or_else(|| tokenizer.token_to_id("<pad>")),
+            tokenizer,
+            budget: model.max_context(),
+        })
+    }
+
     /// Clone FastEmbed's fully configured tokenizer. The clone has truncation
     /// and padding disabled so encoding observes the original length, while the
     /// effective FastEmbed truncation limit is retained as the budget.

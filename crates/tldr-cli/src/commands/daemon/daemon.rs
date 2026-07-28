@@ -99,14 +99,31 @@ fn apply_semantic_delta_batch(
         }
     };
     let artifact_generation = snapshot.generation();
-    let mut source_chunks: HashMap<_, _> = snapshot
-        .semantic_source_chunks(project)
+    let mut source_chunks: HashMap<PathBuf, Vec<_>> = snapshot
+        .semantic_source_chunks_for(project, applied.iter().map(PathBuf::as_path))
         .into_iter()
-        .map(|chunk| (chunk.file_path.clone(), chunk))
-        .collect();
+        .fold(HashMap::new(), |mut grouped, chunk| {
+            grouped
+                .entry(chunk.file_path.clone())
+                .or_default()
+                .push(chunk);
+            grouped
+        });
 
     for changed in applied {
-        let source_chunk = source_chunks.remove(&changed);
+        let source_chunk = match source_chunks.remove(&changed) {
+            None => None,
+            Some(mut chunks) if chunks.len() == 1 => chunks.pop(),
+            Some(chunks) => {
+                eprintln!(
+                    "[artifact-store] semantic delta for {} expected one file source chunk, found {}; rebuilding",
+                    changed.display(),
+                    chunks.len()
+                );
+                mgr.invalidate();
+                return;
+            }
+        };
         match mgr.apply_delta(project, &changed, source_chunk) {
             Ok(DeltaOutcome::NeedsRebuild) => {
                 mgr.invalidate();
@@ -2346,6 +2363,31 @@ mod tests {
             .expect("replacement snapshot");
         assert!(replacement.file("kept.rs").is_some());
         assert!(replacement.file("generated.rs").is_none());
+    }
+
+    #[test]
+    fn semantic_source_chunks_for_selects_only_requested_files() {
+        let project = tempfile::tempdir().expect("temp project");
+        let root = project.path().canonicalize().expect("canonical root");
+        let changed = root.join("changed.rs");
+        let untouched = root.join("untouched.rs");
+        std::fs::write(&changed, "pub fn changed() -> u8 { 1 }\n").expect("write changed");
+        std::fs::write(&untouched, "pub fn untouched() -> u8 { 2 }\n").expect("write untouched");
+
+        let daemon = TLDRDaemon::new(root.clone(), DaemonConfig::default()).expect("create daemon");
+        daemon
+            .artifact_manager
+            .warm()
+            .expect("publish baseline generation");
+        let snapshot = daemon
+            .artifact_manager
+            .snapshot()
+            .expect("baseline snapshot");
+
+        let selected =
+            snapshot.semantic_source_chunks_for(&root, [std::path::Path::new("changed.rs")]);
+        assert!(!selected.is_empty());
+        assert!(selected.iter().all(|chunk| chunk.file_path == changed));
     }
 
     #[tokio::test]

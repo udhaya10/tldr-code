@@ -65,6 +65,9 @@ pub struct FixedShapeInferenceRunner {
     workload: InferenceWorkload,
     batch_one: bool,
     session: Mutex<Option<FixedSession>>,
+    /// Tokenizer-only planning state. Kept separate so classifying a delta can
+    /// remain inference-free until changed documents are actually known.
+    planning_tokenizer: Mutex<Option<(EmbeddingModel, TokenBudget)>>,
     active_model: RwLock<Option<EmbeddingModel>>,
     busy: AtomicUsize,
     sessions_built: AtomicU64,
@@ -88,6 +91,7 @@ impl FixedShapeInferenceRunner {
             workload,
             batch_one,
             session: Mutex::new(None),
+            planning_tokenizer: Mutex::new(None),
             active_model: RwLock::new(None),
             busy: AtomicUsize::new(0),
             sessions_built: AtomicU64::new(0),
@@ -147,9 +151,22 @@ impl FixedShapeInferenceRunner {
         }
         let _busy = BusyGuard::new(&self.busy);
         let result = (|| {
-            let mut guard = mutex_lock(&self.session);
-            let session = self.ensure_session(&mut guard, model)?;
-            operation(session.embedder.token_budget())
+            let mut guard = mutex_lock(&self.planning_tokenizer);
+            if !guard
+                .as_ref()
+                .is_some_and(|(active_model, _)| *active_model == model)
+            {
+                *guard = Some((
+                    model,
+                    TokenBudget::for_model_planning(model).map_err(|error| error.to_string())?,
+                ));
+            }
+            operation(
+                &guard
+                    .as_ref()
+                    .expect("planning tokenizer initialized above")
+                    .1,
+            )
         })();
         if result.is_err() {
             self.failures.fetch_add(1, Ordering::Relaxed);
@@ -326,4 +343,22 @@ fn read_lock<T>(lock: &RwLock<T>) -> RwLockReadGuard<'_, T> {
 fn write_lock<T>(lock: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
     lock.write()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{EmbeddingModel, FixedShapeInferenceRunner};
+
+    #[test]
+    fn token_budget_planning_does_not_build_onnx_session() {
+        let runner = FixedShapeInferenceRunner::delta();
+        let budget = runner
+            .with_token_budget(EmbeddingModel::ArcticM, |budget| Ok(budget.budget()))
+            .expect("load planning tokenizer");
+
+        assert_eq!(budget, EmbeddingModel::ArcticM.max_context());
+        let snapshot = runner.snapshot();
+        assert_eq!(snapshot.sessions_built, 0);
+        assert_eq!(snapshot.requests, 0);
+    }
 }
