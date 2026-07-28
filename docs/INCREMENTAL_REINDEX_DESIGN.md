@@ -292,7 +292,7 @@ exists: `for k in per_file[file]: index.remove(k); sidecar.remove(k)`.
 
 ---
 
-## 6. Notify pipeline — debounce & coalesce
+## 6. Notify pipeline — fixed windows, queue, and coalescing
 
 The missing piece that made the old behavior feel broken.
 
@@ -300,15 +300,16 @@ The missing piece that made the old behavior feel broken.
   path is not an indexable source file (honor the same `ProjectWalker` ignore rules
   — skip `.git/`, `target/`, `node_modules/`, binaries, the `.tldr/` dir, etc.).
   Otherwise editor/tooling churn outside the corpus drives needless deltas.
-- Maintain a `pending: HashSet<PathBuf>` of changed files and a debounce timer.
-- Each accepted `Notify(file)` inserts into `pending` and (re)arms a **quiet timer**
-  (default **750 ms**, configurable).
-- **Hard max-wait deadline.** A re-arming quiet timer alone can be starved forever
-  under a steady low-rate stream of saves. Also stamp the *first* event in a batch;
-  when `now - first >= max_wait` (default **5 s**) flush regardless of the quiet
-  timer. So a batch flushes after 750 ms of quiet **or** 5 s elapsed, whichever first.
-- On flush: drain `pending` and run the §5 delta **per file** inside one
-  `spawn_blocking` job (event loop stays responsive — same pattern as TLDR-atc).
+- Maintain a `pending: HashSet<PathBuf>` of changed files and stamp the first
+  accepted event in each collection window.
+- **Fixed five-second window.** Every event accepted during the five seconds
+  after that first event joins the same batch. Later events do not re-arm or
+  shorten the deadline.
+- On flush: drain `pending` into a bounded completed-batch queue. A separate
+  executor runs §5 **per file** inside one `spawn_blocking` job. The collector
+  immediately opens the next window while the prior batch indexes.
+- The executor is deliberately single-consumer: completed batches wait in FIFO
+  order and publish artifact/vector generations serially, never concurrently.
 - Coalescing: a burst of saves to one file ⇒ one delta; a burst across N files ⇒
   N deltas in one job.
 - **Burst cap (rolling).** Schedule a **single full rebuild** instead of deltas when
@@ -519,7 +520,7 @@ Each phase is independently testable and shippable.
 
 - ✅ Editing one file re-embeds only that file's changed functions.
 - ✅ Deleted functions' vectors are removed.
-- ✅ Query results reflect the change within one debounce + save cycle.
+- ✅ Query results reflect the change after one five-second window + save cycle.
 - ✅ Full rebuild remains the fallback.
 
 ---
@@ -528,7 +529,8 @@ Each phase is independently testable and shippable.
 
 **Resolved (this round):**
 - Quantization → **f32 first** (i8 = TLDR-ccg; measure recall on the n=52 eval first).
-- Debounce → 750 ms quiet + 5 s max-wait; burst cap 200 files / 1000 events-per-2s (§6).
+- Collection → fixed 5 s windows with a bounded FIFO batch queue; burst cap
+  200 files / 1000 events-per-2s (§6).
 - Reconcile signal → **mtime + size** vs the per-file record; no all-files content
   hash on startup (§7.3). Content-hash is the per-chunk change detector inside a delta.
 - Sidecar format → bincode + version byte; `--dump` for JSON debugging.

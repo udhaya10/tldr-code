@@ -25,10 +25,10 @@ pub const IDLE_TIMEOUT_SECS: u64 = 30 * 60;
 /// Default threshold for triggering semantic re-index
 pub const DEFAULT_REINDEX_THRESHOLD: usize = 20;
 
-/// Watcher quiet period after the most recent accepted event.
-pub const DEFAULT_WATCHER_DEBOUNCE_MS: u64 = 750;
+/// Legacy watcher delay, aligned with the fixed collection window.
+pub const DEFAULT_WATCHER_DEBOUNCE_MS: u64 = 5_000;
 
-/// Maximum batch lifetime measured from its first accepted event.
+/// Fixed watcher batch lifetime measured from its first accepted event.
 pub const DEFAULT_WATCHER_MAX_WAIT_MS: u64 = 5_000;
 
 /// Pending unique-file count above which a full rebuild supersedes deltas.
@@ -94,11 +94,12 @@ pub struct DaemonConfig {
     #[serde(default = "default_enable_watcher")]
     pub enable_watcher: bool,
 
-    /// Quiet period after the most recent accepted watcher event.
+    /// Legacy-compatible watcher delay. Fixed-window collection now uses
+    /// `watcher_max_wait_ms`; the default remains aligned at five seconds.
     #[serde(default = "default_watcher_debounce_ms")]
     pub watcher_debounce_ms: u64,
 
-    /// Hard batch deadline measured from its first accepted event.
+    /// Fixed batch window measured from its first accepted event.
     #[serde(default = "default_watcher_max_wait_ms")]
     pub watcher_max_wait_ms: u64,
 
