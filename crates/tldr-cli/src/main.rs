@@ -53,7 +53,7 @@ use tldr_cli::commands::patterns::{
     CohesionArgs, CouplingArgs, InterfaceArgs, ResourcesArgs, TemporalArgs,
 };
 #[cfg(feature = "semantic")]
-use tldr_cli::commands::{EmbedArgs, SemanticArgs, SimilarArgs};
+use tldr_cli::commands::{EmbedArgs, EmbeddingsClearArgs, SemanticArgs, SimilarArgs};
 use tldr_cli::output::{validate_format_for_command, OutputFormat};
 
 /// TLDR - Token-efficient code analysis for LLMs
@@ -303,6 +303,11 @@ pub enum Command {
     #[command(subcommand)]
     Cache(CacheCommand),
 
+    /// Global reusable document-embedding cache management
+    #[cfg(feature = "semantic")]
+    #[command(subcommand)]
+    Embeddings(EmbeddingsCommand),
+
     // -------------------------------------------------------------------------
     // Phase 7-8: Warm and Stats Commands
     // -------------------------------------------------------------------------
@@ -462,6 +467,17 @@ pub enum CacheCommand {
     Clear(CacheClearArgs),
 }
 
+/// Global document-embedding cache subcommands.
+#[cfg(feature = "semantic")]
+#[derive(Debug, Subcommand)]
+pub enum EmbeddingsCommand {
+    /// Clear reusable document embeddings while preserving model weights
+    #[command(
+        long_about = "Clear reusable document embeddings while preserving model weights.\n\nThis cache is shared across every project. Stop all tldr daemons and embedding builders before clearing it. Downloaded fastembed model and tokenizer files are outside this cache and are preserved."
+    )]
+    Clear(EmbeddingsClearArgs),
+}
+
 /// Bugbot subcommands
 #[derive(Debug, Subcommand)]
 pub enum BugbotCommand {
@@ -578,6 +594,8 @@ fn command_name(cmd: &Command) -> &'static str {
             CacheCommand::Stats(_) => "cache stats",
             CacheCommand::Clear(_) => "cache clear",
         },
+        #[cfg(feature = "semantic")]
+        Command::Embeddings(EmbeddingsCommand::Clear(_)) => "embeddings clear",
         Command::Warm(_) => "warm",
         Command::Stats(_) => "stats",
         Command::Surface(_) => "surface",
@@ -721,6 +739,8 @@ fn run_command(cli: &Cli) -> Result<()> {
             CacheCommand::Stats(args) => args.run(cli.format, q),
             CacheCommand::Clear(args) => args.run(cli.format, q),
         },
+        #[cfg(feature = "semantic")]
+        Command::Embeddings(EmbeddingsCommand::Clear(args)) => args.run(cli.format, q),
         // Phase 7-8: Warm and Stats commands
         Command::Warm(args) => args.run(cli.format, q),
         Command::Stats(args) => args.run(cli.format, q),
@@ -761,5 +781,21 @@ fn run_command(cli: &Cli) -> Result<()> {
         Command::Bugbot(bugbot_cmd) => match bugbot_cmd {
             BugbotCommand::Check(args) => args.run(cli.format, q, cli.lang),
         },
+    }
+}
+
+#[cfg(all(test, feature = "semantic"))]
+mod tests {
+    use clap::Parser;
+
+    use super::{Cli, Command, EmbeddingsCommand};
+
+    #[test]
+    fn parses_embeddings_clear_command() {
+        let cli = Cli::try_parse_from(["tldr", "embeddings", "clear"]).expect("parse command");
+        assert!(matches!(
+            cli.command,
+            Command::Embeddings(EmbeddingsCommand::Clear(_))
+        ));
     }
 }

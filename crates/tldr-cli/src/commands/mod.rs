@@ -52,6 +52,8 @@ pub mod loc;
 #[cfg(feature = "semantic")]
 pub mod embed;
 #[cfg(feature = "semantic")]
+pub mod embeddings;
+#[cfg(feature = "semantic")]
 pub mod semantic;
 #[cfg(feature = "semantic")]
 pub mod similar;
@@ -127,6 +129,8 @@ pub use loc::LocArgs;
 // Session 16: Semantic search commands
 #[cfg(feature = "semantic")]
 pub use embed::EmbedArgs;
+#[cfg(feature = "semantic")]
+pub use embeddings::EmbeddingsClearArgs;
 #[cfg(feature = "semantic")]
 pub use semantic::SemanticArgs;
 #[cfg(feature = "semantic")]

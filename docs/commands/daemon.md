@@ -85,11 +85,35 @@ tldr cache stats
 
 ### cache clear
 
-Clear all cache files.
+Clear generated artifacts and vector-store generations for a project.
 
 ```bash
-tldr cache clear
+tldr cache clear --project /path/to/project
 ```
+
+This does not remove the global reusable document-embedding cache or downloaded
+model weights.
+
+---
+
+## embeddings
+
+**Purpose:** Global reusable document-embedding cache management.
+
+### embeddings clear
+
+Clear reusable document vectors shared across all projects:
+
+```bash
+# Stop daemons and builders before mutating the shared cache.
+tldr daemon stop --all
+tldr embeddings clear
+```
+
+The command targets only the fixed global document-embedding cache, reports the
+files and logical bytes removed, and is idempotent. It does not accept an
+arbitrary path, does not follow symlinks found inside the cache, and preserves
+downloaded fastembed model/tokenizer files and project vector stores.
 
 ---
 

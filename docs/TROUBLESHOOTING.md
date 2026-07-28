@@ -98,6 +98,36 @@ echo "vendor/" >> .tldrignore
 echo "node_modules/" >> .tldrignore
 ```
 
+### Force a fully cold semantic rebuild
+
+TLDR keeps project indexes separate from a global document-embedding cache.
+Clear both only when you need a true cold-build measurement or must discard
+all reusable vectors:
+
+```bash
+# Stop every process that could read or write the shared embedding cache.
+tldr daemon stop --all
+
+# Clear this project's generated artifacts and vector-store generations.
+tldr cache clear --project /path/to/project
+
+# Clear reusable document vectors shared by every project.
+tldr embeddings clear
+
+# Rebuild the selected project. Downloaded model weights are reused.
+tldr warm /path/to/project --oneshot
+```
+
+`tldr embeddings clear` is global: the next semantic build for every project
+must recreate its document vectors. It deliberately preserves downloaded
+fastembed model and tokenizer files, unrelated project stores, and other
+runtime caches. Running it when the embedding cache is already absent is safe.
+
+| Command | Removes | Preserves |
+|---|---|---|
+| `tldr cache clear --project PATH` | The selected project's `.tldr` artifacts and external vector-store generations | Global reusable document embeddings and model weights |
+| `tldr embeddings clear` | Global reusable document embeddings for all projects | Downloaded model weights, project vector stores, and unrelated runtime data |
+
 ### Out of memory on large codebase
 
 1. Limit concurrent file processing:
