@@ -191,3 +191,179 @@ it can lose work on init, cannot invalidate an incompatible resume job, exceeds
 90 minutes without reaching warm on this corpus, and cannot be reliably stopped
 through its advertised daemon command. Fresh semantic readiness must be treated
 as failed until these issues are fixed and this benchmark is rerun.
+
+## Corrected implementation rerun
+
+This section records the completed rerun after the `TLDR-bjux` recovery,
+progress, timing, and publication implementation. It supersedes the semantic
+and daemon-stop conclusions above while preserving the original run as the
+before-state.
+
+### Provenance and clean state
+
+- Source commit before the final daemon-stop follow-up:
+  `b62130b01d7614053b0cebd74b46324cff0a63c1`
+- The installed release also included the uncommitted `TLDR-bjux.15` lifecycle
+  fix subsequently validated below.
+- Installed `tldr` SHA-256:
+  `f065acd0d959c4cdb29f740b5687db30a2f5797a563b3e1aea318ac2b623976e`
+- Installed `tldr-daemon` SHA-256:
+  `9d3e117c1590b102fa1851950fa09c4239d69909d4bb90cba53cf5c77e7cc955`
+- Installed `tldr-embed-worker` SHA-256:
+  `329e9aa44ceecbac0d914ac5dad9bbfcebd51cf8213718d67d3fb38e311e63bf`
+- Installed `tldr-mcp` SHA-256:
+  `80e1fb4e2efe9794afaa80ce3769977e22bab9fddc3d84b6fd6b9c9648ff9260`
+- Machine: macOS 26.5.2 (25F84), arm64, Apple M2 Max, 64 GiB RAM.
+- Before the authoritative run, the exact TLDR-owned global cache, logs, and
+  repository `.tldr` state were moved recoverably to
+  `~/.Trash/tldr-certification-final-20260728`.
+- No daemon or embedding worker was running when the measurement started.
+
+The retained machine-readable evidence is:
+
+- `docs/benchmarks/2026-07-28-corrected-semantic-build/build-report.json`
+  (SHA-256 `4af0e70bc4da748dd71c82f510ee814fe56a21ff9af288a0e37dbe2bd719e300`)
+- `docs/benchmarks/2026-07-28-corrected-semantic-build/build-report.units.jsonl`
+  (SHA-256 `1df0840c75424ebf5afcf594d2f204d6f4f80d2cc0ec3757785548ffa746d2d5`)
+
+### Completed cold-build result
+
+The installed release command was:
+
+```text
+tldr warm /Users/udhayakumar/Workspace/03-Parcadei-Ecosystem/tldr-code \
+  --metrics /tmp/tldr-final-certification-20260728/build-report.json \
+  --metrics-detail units
+```
+
+It completed and published successfully:
+
+| Measurement | Result |
+| --- | ---: |
+| External wall time | 4,431.28s (73m51.28s) |
+| Correlated report duration | 4,430.454s |
+| Files parsed/planned | 559 / 559 |
+| Artifact records | 2,796 |
+| Semantic chunks | 51,174 |
+| Newly embedded / cache hits | 51,171 / 3 |
+| Durable windows | 400, fixed maximum 128 vectors |
+| Inference batches | 2,217 |
+| Embedding throughput | 13.138 embeddings/s |
+| Average process CPU from `time` | about 813% |
+| Maximum resident set from `time` | 1,767,194,624 B (about 1.65 GiB) |
+| Peak window payload | 671,416 B |
+| Retries/failures | 0 / 0 |
+
+The phase report makes the remaining bottleneck unambiguous:
+
+| Phase | Wall time |
+| --- | ---: |
+| Structural artifact build | 3.545s |
+| AST parse wall time | 3.051s |
+| Model acquisition/load | 102.560s |
+| Semantic planning | 167.487s |
+| Inference | 3,894.830s (64m54.83s) |
+| Cache lookup | 0.113s |
+| Cache writes | 219.796s |
+| Vector assembly | 30.611s |
+| Generation stage and records | 2.329s |
+| Verification | 0.868s |
+| Activation | 0.076s |
+| Publication | 3.273s |
+
+AST timing is available both by language and per file. The aggregate AST unit
+work was 27.560s across concurrently parsed files, while the actual AST phase
+wall time was 3.051s. Rust accounted for 533 files and 27.366s of summed unit
+work; Go accounted for 20 files and 176ms; Python accounted for 6 files and
+18ms. The slowest AST parse was
+`crates/tldr-core/src/ast/extract.rs` at 2.063s.
+
+The corrected pipeline therefore fixes the original correctness and
+observability failure: it completes, persists each bounded window, exposes live
+progress, publishes atomically, and records enough detail for a postmortem.
+It does **not** meet the aspirational 30-minute empty-cache target. Inference is
+87.9% of overall wall time, so planning parallelism is not justified by this
+profile; any further performance work should target the fixed-shape inference
+batch path first.
+
+### Installed daemon, query, and stop certification
+
+After publication:
+
+- `tldr init` returned in 0.84s.
+- The daemon reached `semantic_index.state=warm` within 13.83s with exactly
+  51,174 resident vectors and zero bulk failures.
+- The installed semantic query returned five results; the top result was
+  `semantic_kill_after_completed_window`, directly relevant to the query.
+- Query wall time was 1.70s including the first resident query-session setup;
+  indexed search latency was 40ms.
+- Repository `.tldr` occupied 104 MiB; the global TLDR cache occupied 1.0 GiB;
+  logs occupied 8 KiB.
+
+Before this authoritative build, the installed release was also tested while a
+daemon and embedding worker were actively in `model_load`. `tldr daemon stop`
+completed in 0.21s, both the daemon and worker PIDs were absent afterward, and
+`launchctl` confirmed that the exact project service was unloaded rather than
+immediately respawned.
+
+### Final assessment
+
+The fresh semantic path is now correct, recoverable, observable, publishable,
+queryable, and cleanly stoppable. The old greater-than-90-minute
+never-published failure is resolved. Performance remains below the 30-minute
+objective: the measured completion time is 73m51.28s, dominated by
+64m54.83s of inference. This result is a completed baseline, not a passing
+performance gate.
+
+## Measured inference follow-up
+
+The completed report showed that the fixed 128-vector durability windows
+contained mixed sequence lengths. Planning each sequence bucket independently
+created partially filled ONNX executions, especially for 256- and 384-token
+rows. The retained optimization fills otherwise-dummy rows in a partial
+longer-sequence batch with shorter inputs that already fit. Attention masks keep
+the additional sequence padding inert. It does not increase the 128-vector
+window, change the finite tensor-shape set, delay cache durability, or affect
+batch-one query inference.
+
+The executor itself was separately checked against the FastEmbed oracle on
+Arctic-M. Fixed-shape throughput was slightly higher at 128, 256, and 512
+tokens and 1.04% lower at 384 tokens; all existing throughput gates passed.
+The retained report is
+`docs/benchmarks/2026-07-28-corrected-semantic-build/fixed-shape-bench.json`
+(SHA-256 `28a89ef010d855afcdecde46d5460cf7b54697a5452c9ac9935ad23ac7ecad1b`).
+
+A cache-empty before/after run used the same three large Rust files, 1,538
+chunks, model files, build options, and 13 durability windows:
+
+| Measurement | Before | After | Change |
+| --- | ---: | ---: | ---: |
+| Total correlated duration | 140.697s | 123.822s | 12.0% faster |
+| Inference duration | 122.839s | 105.019s | 14.5% faster |
+| ONNX executions | 76 | 64 | 15.8% fewer |
+| Cache-write duration | 6.513s | 6.339s | effectively unchanged |
+| Maximum RSS from `time` | 1,404,928,000 B | 1,504,116,736 B | 7.1% higher |
+| Peak durability window | 128 | 128 | unchanged |
+
+The two complete reports and raw unit streams are retained beside the full
+baseline as `mixed-batch-before*` and `mixed-batch-after*`. Their report hashes
+are respectively
+`4e3bbb2d22afaf8fd66b6ac4409d007808e21d4b526d6aa8d66c5813ffbe40b3`
+and
+`79bbe013fc0ef7b31c5144b62ad722e090dfa6c5cc0aefe36a19a03ffd8c076c`.
+
+The planner-optimization benchmark used installed `tldr` SHA-256
+`27bd66382450940bde824616ff42452afb5733108bc9be98b65e30ddff8de02f`.
+After the final idempotent-init lifecycle fix, the installed release SHA-256 is
+`a329a689125260537aeb33c58b7f9cb9f2b9a61e3b19b813170ebd57ca4abc86`.
+The change materially improves the measured dominant phase without adding
+planning parallelism or weakening recovery. It is not represented as a
+30-minute pass: a new full empty-state run is required before establishing a
+new whole-corpus wall time.
+
+The final lifecycle build was also certified during an active warm:
+
+- daemon PID before/after repeated `tldr init`: `94906` / `94906`
+- worker PID before/after repeated `tldr init`: `94928` / `94928`
+- semantic state remained `building`, retry count remained zero, and neither
+  process was replaced

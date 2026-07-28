@@ -1,0 +1,2335 @@
+{
+  "schema_version": 1,
+  "run_id": "1785226389480-91360",
+  "orchestrator_role": "foreground",
+  "project": "/private/tmp/tldr-mixed-batch-benchmark-20260728/new",
+  "started_at_unix_ms": 1785226389480,
+  "duration_ms": 123822,
+  "artifact": {
+    "run_id": "1785226389480-91360",
+    "process_role": "artifact_producer",
+    "started_at_unix_ms": 1785226389480,
+    "duration_ms": 495,
+    "phases": [
+      {
+        "name": "source_discovery",
+        "duration_ms": 3
+      },
+      {
+        "name": "ast_parse",
+        "duration_ms": 460
+      },
+      {
+        "name": "artifact_write",
+        "duration_ms": 12
+      },
+      {
+        "name": "callgraph_compose",
+        "duration_ms": 6
+      },
+      {
+        "name": "publication",
+        "duration_ms": 13
+      }
+    ],
+    "units": [
+      {
+        "kind": "artifact_batch",
+        "count": 1,
+        "total_duration_ms": 12,
+        "min_duration_ms": 12,
+        "p50_duration_ms": 8,
+        "p95_duration_ms": 8,
+        "max_duration_ms": 12,
+        "slowest": [
+          {
+            "identity": "0",
+            "duration_ms": 12
+          }
+        ]
+      },
+      {
+        "kind": "ast_parse",
+        "count": 3,
+        "total_duration_ms": 917,
+        "min_duration_ms": 170,
+        "p50_duration_ms": 256,
+        "p95_duration_ms": 256,
+        "max_duration_ms": 460,
+        "slowest": [
+          {
+            "identity": "crates/tldr-core/src/security/taint.rs",
+            "duration_ms": 460
+          },
+          {
+            "identity": "crates/tldr-core/src/semantic/vector_store.rs",
+            "duration_ms": 287
+          },
+          {
+            "identity": "crates/tldr-cli/src/commands/daemon/daemon.rs",
+            "duration_ms": 170
+          }
+        ]
+      },
+      {
+        "kind": "ast_parse",
+        "group": "rust",
+        "count": 3,
+        "total_duration_ms": 917,
+        "min_duration_ms": 170,
+        "p50_duration_ms": 256,
+        "p95_duration_ms": 256,
+        "max_duration_ms": 460,
+        "slowest": [
+          {
+            "identity": "crates/tldr-core/src/security/taint.rs",
+            "duration_ms": 460
+          },
+          {
+            "identity": "crates/tldr-core/src/semantic/vector_store.rs",
+            "duration_ms": 287
+          },
+          {
+            "identity": "crates/tldr-cli/src/commands/daemon/daemon.rs",
+            "duration_ms": 170
+          }
+        ]
+      },
+      {
+        "kind": "callgraph_compose",
+        "count": 1,
+        "total_duration_ms": 4,
+        "min_duration_ms": 4,
+        "p50_duration_ms": 4,
+        "p95_duration_ms": 4,
+        "max_duration_ms": 4,
+        "slowest": [
+          {
+            "identity": "rust",
+            "duration_ms": 4
+          }
+        ]
+      },
+      {
+        "kind": "callgraph_compose",
+        "group": "rust",
+        "count": 1,
+        "total_duration_ms": 4,
+        "min_duration_ms": 4,
+        "p50_duration_ms": 4,
+        "p95_duration_ms": 4,
+        "max_duration_ms": 4,
+        "slowest": [
+          {
+            "identity": "rust",
+            "duration_ms": 4
+          }
+        ]
+      }
+    ],
+    "generation": 1,
+    "parsed_files": 3,
+    "artifacts": 16,
+    "resumed": false
+  },
+  "semantic": {
+    "schema_version": 6,
+    "run_id": "1785226389480-91360:semantic-worker:1",
+    "parent_run_id": "1785226389480-91360",
+    "process_role": "semantic_worker",
+    "model": {
+      "name": "Snowflake/snowflake-arctic-embed-m",
+      "dimensions": 768
+    },
+    "root": "/private/tmp/tldr-mixed-batch-benchmark-20260728/new",
+    "corpus_digest": 3230953896108994359,
+    "options": {
+      "granularity": "function",
+      "use_cache": true,
+      "enrich": false,
+      "languages": null,
+      "batch_size": 32,
+      "embedding_backend": "fixed_shape_ort"
+    },
+    "started_at_unix_ms": 1785226390913,
+    "duration_ms": 122271,
+    "phases": [
+      {
+        "name": "chunk",
+        "duration_ms": 0,
+        "rss_bytes_at_end": 12222464
+      },
+      {
+        "name": "model_load",
+        "duration_ms": 493,
+        "rss_bytes_at_end": 644136960
+      },
+      {
+        "name": "streaming_pipeline",
+        "duration_ms": 121540,
+        "rss_bytes_at_end": 1504100352
+      },
+      {
+        "name": "semantic_planning",
+        "duration_ms": 9556,
+        "rss_bytes_at_end": null
+      },
+      {
+        "name": "cache_lookup",
+        "duration_ms": 0,
+        "rss_bytes_at_end": null
+      },
+      {
+        "name": "inference",
+        "duration_ms": 105019,
+        "rss_bytes_at_end": null
+      },
+      {
+        "name": "cache_write",
+        "duration_ms": 6339,
+        "rss_bytes_at_end": null
+      },
+      {
+        "name": "vector_assembly",
+        "duration_ms": 429,
+        "rss_bytes_at_end": null
+      },
+      {
+        "name": "generation_stage_and_records",
+        "duration_ms": 92,
+        "rss_bytes_at_end": 1220345856
+      },
+      {
+        "name": "verification",
+        "duration_ms": 43,
+        "rss_bytes_at_end": 1220345856
+      },
+      {
+        "name": "activation",
+        "duration_ms": 16,
+        "rss_bytes_at_end": 1220345856
+      },
+      {
+        "name": "publication",
+        "duration_ms": 152,
+        "rss_bytes_at_end": 1220345856
+      }
+    ],
+    "units": [
+      {
+        "kind": "cache_lookup_window",
+        "count": 13,
+        "total_duration_ms": 0,
+        "min_duration_ms": 0,
+        "p50_duration_ms": 0,
+        "p95_duration_ms": 0,
+        "max_duration_ms": 0,
+        "slowest": [
+          {
+            "identity": "0",
+            "duration_ms": 0
+          },
+          {
+            "identity": "1",
+            "duration_ms": 0
+          },
+          {
+            "identity": "2",
+            "duration_ms": 0
+          },
+          {
+            "identity": "3",
+            "duration_ms": 0
+          },
+          {
+            "identity": "4",
+            "duration_ms": 0
+          },
+          {
+            "identity": "5",
+            "duration_ms": 0
+          },
+          {
+            "identity": "6",
+            "duration_ms": 0
+          },
+          {
+            "identity": "7",
+            "duration_ms": 0
+          },
+          {
+            "identity": "8",
+            "duration_ms": 0
+          },
+          {
+            "identity": "9",
+            "duration_ms": 0
+          }
+        ]
+      },
+      {
+        "kind": "cache_write_window",
+        "count": 13,
+        "total_duration_ms": 6339,
+        "min_duration_ms": 11,
+        "p50_duration_ms": 512,
+        "p95_duration_ms": 512,
+        "max_duration_ms": 560,
+        "slowest": [
+          {
+            "identity": "11",
+            "duration_ms": 560
+          },
+          {
+            "identity": "2",
+            "duration_ms": 532
+          },
+          {
+            "identity": "0",
+            "duration_ms": 528
+          },
+          {
+            "identity": "1",
+            "duration_ms": 528
+          },
+          {
+            "identity": "9",
+            "duration_ms": 527
+          },
+          {
+            "identity": "10",
+            "duration_ms": 526
+          },
+          {
+            "identity": "5",
+            "duration_ms": 523
+          },
+          {
+            "identity": "6",
+            "duration_ms": 523
+          },
+          {
+            "identity": "4",
+            "duration_ms": 521
+          },
+          {
+            "identity": "8",
+            "duration_ms": 521
+          }
+        ]
+      },
+      {
+        "kind": "embedding_window",
+        "count": 13,
+        "total_duration_ms": 111919,
+        "min_duration_ms": 2143,
+        "p50_duration_ms": 8192,
+        "p95_duration_ms": 8192,
+        "max_duration_ms": 11149,
+        "slowest": [
+          {
+            "identity": "5",
+            "duration_ms": 11149
+          },
+          {
+            "identity": "0",
+            "duration_ms": 10257
+          },
+          {
+            "identity": "4",
+            "duration_ms": 9831
+          },
+          {
+            "identity": "2",
+            "duration_ms": 9793
+          },
+          {
+            "identity": "11",
+            "duration_ms": 9705
+          },
+          {
+            "identity": "6",
+            "duration_ms": 9183
+          },
+          {
+            "identity": "7",
+            "duration_ms": 9138
+          },
+          {
+            "identity": "1",
+            "duration_ms": 8858
+          },
+          {
+            "identity": "8",
+            "duration_ms": 8532
+          },
+          {
+            "identity": "10",
+            "duration_ms": 8514
+          }
+        ]
+      },
+      {
+        "kind": "inference_batch",
+        "count": 64,
+        "total_duration_ms": 105022,
+        "min_duration_ms": 1132,
+        "p50_duration_ms": 1024,
+        "p95_duration_ms": 2048,
+        "max_duration_ms": 2292,
+        "slowest": [
+          {
+            "identity": "5",
+            "duration_ms": 2292
+          },
+          {
+            "identity": "4",
+            "duration_ms": 2269
+          },
+          {
+            "identity": "13",
+            "duration_ms": 2220
+          },
+          {
+            "identity": "9",
+            "duration_ms": 2205
+          },
+          {
+            "identity": "14",
+            "duration_ms": 2180
+          },
+          {
+            "identity": "15",
+            "duration_ms": 2161
+          },
+          {
+            "identity": "35",
+            "duration_ms": 2151
+          },
+          {
+            "identity": "61",
+            "duration_ms": 2148
+          },
+          {
+            "identity": "32",
+            "duration_ms": 2143
+          },
+          {
+            "identity": "10",
+            "duration_ms": 2140
+          }
+        ]
+      },
+      {
+        "kind": "inference_window",
+        "count": 13,
+        "total_duration_ms": 105019,
+        "min_duration_ms": 2131,
+        "p50_duration_ms": 8192,
+        "p95_duration_ms": 8192,
+        "max_duration_ms": 10572,
+        "slowest": [
+          {
+            "identity": "5",
+            "duration_ms": 10572
+          },
+          {
+            "identity": "0",
+            "duration_ms": 9705
+          },
+          {
+            "identity": "4",
+            "duration_ms": 9261
+          },
+          {
+            "identity": "2",
+            "duration_ms": 9224
+          },
+          {
+            "identity": "11",
+            "duration_ms": 9097
+          },
+          {
+            "identity": "6",
+            "duration_ms": 8611
+          },
+          {
+            "identity": "7",
+            "duration_ms": 8565
+          },
+          {
+            "identity": "1",
+            "duration_ms": 8295
+          },
+          {
+            "identity": "8",
+            "duration_ms": 7956
+          },
+          {
+            "identity": "10",
+            "duration_ms": 7932
+          }
+        ]
+      },
+      {
+        "kind": "semantic_file_plan",
+        "count": 3,
+        "total_duration_ms": 9556,
+        "min_duration_ms": 1601,
+        "p50_duration_ms": 2048,
+        "p95_duration_ms": 4096,
+        "max_duration_ms": 5751,
+        "slowest": [
+          {
+            "identity": "crates/tldr-core/src/security/taint.rs",
+            "duration_ms": 5751
+          },
+          {
+            "identity": "crates/tldr-cli/src/commands/daemon/daemon.rs",
+            "duration_ms": 2204
+          },
+          {
+            "identity": "crates/tldr-core/src/semantic/vector_store.rs",
+            "duration_ms": 1601
+          }
+        ]
+      },
+      {
+        "kind": "vector_assembly_window",
+        "count": 13,
+        "total_duration_ms": 429,
+        "min_duration_ms": 0,
+        "p50_duration_ms": 32,
+        "p95_duration_ms": 32,
+        "max_duration_ms": 48,
+        "slowest": [
+          {
+            "identity": "9",
+            "duration_ms": 48
+          },
+          {
+            "identity": "10",
+            "duration_ms": 46
+          },
+          {
+            "identity": "8",
+            "duration_ms": 44
+          },
+          {
+            "identity": "7",
+            "duration_ms": 43
+          },
+          {
+            "identity": "5",
+            "duration_ms": 40
+          },
+          {
+            "identity": "6",
+            "duration_ms": 39
+          },
+          {
+            "identity": "4",
+            "duration_ms": 37
+          },
+          {
+            "identity": "3",
+            "duration_ms": 34
+          },
+          {
+            "identity": "11",
+            "duration_ms": 34
+          },
+          {
+            "identity": "2",
+            "duration_ms": 29
+          }
+        ]
+      }
+    ],
+    "chunks_total": 1538,
+    "chunks_cached": 0,
+    "cache_opened": true,
+    "token_budget": {
+      "status": "checked",
+      "inputs_checked": 1538,
+      "oversized": 0,
+      "total_original_tokens": 200022,
+      "total_embedded_tokens": 200022,
+      "max_original_tokens": 512,
+      "budget": 512
+    },
+    "chunks_embedded": 1538,
+    "batches": [
+      {
+        "index": 0,
+        "size": 8,
+        "input_bytes_min": 0,
+        "input_bytes_mean": 0,
+        "input_bytes_max": 0,
+        "token_length_available": true,
+        "sequence_tokens": 512,
+        "tensor_batch_size": 8,
+        "padding_fraction": 0.052734375,
+        "latency_ms": 1234.867334
+      },
+      {
+        "index": 1,
+        "size": 8,
+        "input_bytes_min": 0,
+        "input_bytes_mean": 0,
+        "input_bytes_max": 0,
+        "token_length_available": true,
+        "sequence_tokens": 512,
+        "tensor_batch_size": 8,
+        "padding_fraction": 0.104736328125,
+        "latency_ms": 1195.5427080000002
+      },
+      {
+        "index": 2,
+        "size": 8,
+        "input_bytes_min": 0,
+        "input_bytes_mean": 0,
+        "input_bytes_max": 0,
+        "token_length_available": true,
+        "sequence_tokens": 512,
+        "tensor_batch_size": 8,
+        "padding_fraction": 0.048095703125,
+        "latency_ms": 1220.223
+      },
+      {
+        "index": 3,
+        "size": 14,
+        "input_bytes_min": 0,
+        "input_bytes_mean": 0,
+        "input_bytes_max": 0,
+        "token_length_available": true,
+        "sequence_tokens": 384,
+        "tensor_batch_size": 14,
+        "padding_fraction": 0.27548363095238093,
+        "latency_ms": 1490.069042
+      },
+      {
+        "index": 4,
+        "size": 32,
+        "input_bytes_min": 0,
+        "input_bytes_mean": 0,
+        "input_bytes_max": 0,
+        "token_length_available": true,
+        "sequence_tokens": 256,
+        "tensor_batch_size": 32,
+        "padding_fraction": 0.7779541015625,
+        "latency_ms": 2268.712125
+      },
+      {
+        "index": 5,
+        "size": 58,
+        "input_bytes_min": 0,
+        "input_bytes_mean": 0,
+        "input_bytes_max": 0,
+        "token_length_available": true,
+        "sequence_tokens": 128,
+        "tensor_batch_size": 64,
+        "padding_fraction": 0.500244140625,
+        "latency_ms": 2291.934583
+      },
+      {
+        "index": 6,
+        "size": 8,
+        "input_bytes_min": 0,
+        "input_bytes_mean": 0,
+        "input_bytes_max": 0,
+        "token_length_available": true,
+        "sequence_tokens": 512,
+        "tensor_batch_size": 8,
+        "padding_fraction": 0.05615234375,
+        "latency_ms": 1242.835667
+      },
+      {
+        "index": 7,
+        "size": 8,
+        "input_bytes_min": 0,
+        "input_bytes_mean": 0,
+        "input_bytes_max": 0,
+        "token_length_available": true,
+        "sequence_tokens": 512,
+        "tensor_batch_size": 8,
+        "padding_fraction": 0.144287109375,
+        "latency_ms": 1211.232833
+      },
+      {
+        "index": 8,
+        "size": 14,
+        "input_bytes_min": 0,
+        "input_bytes_mean": 0,
+        "input_bytes_max": 0,
+        "token_length_available": true,
+        "sequence_tokens": 384,
+        "tensor_batch_size": 14,
+        "padding_fraction": 0.5479910714285714,
+        "latency_ms": 1495.024084
+      },
+      {
+        "index": 9,
+        "size": 64,
+        "input_bytes_min": 0,
+        "input_bytes_mean": 0,
+        "input_bytes_max": 0,
+        "token_length_available": true,
+        "sequence_tokens": 128,
+        "tensor_batch_size": 64,
+        "padding_fraction": 0.5535888671875,
+        "latency_ms": 2204.4835
+      },
+      {
+        "index": 10,
+        "size": 34,
+        "input_bytes_min": 0,
+        "input_bytes_mean": 0,
+        "input_bytes_max": 0,
+        "token_length_available": true,
+        "sequence_tokens": 128,
+        "tensor_batch_size": 64,
+        "padding_fraction": 0.7362060546875,
+        "latency_ms": 2139.354834
+      },
+      {
+        "index": 11,
+        "size": 8,
+        "input_bytes_min": 0,
+        "input_bytes_mean": 0,
+        "input_bytes_max": 0,
+        "token_length_available": true,
+        "sequence_tokens": 512,
+        "tensor_batch_size": 8,
+        "padding_fraction": 0.21044921875,
+        "latency_ms": 1201.910042
+      },
+      {
+        "index": 12,
+        "size": 14,
+        "input_bytes_min": 0,
+        "input_bytes_mean": 0,
+        "input_bytes_max": 0,
+        "token_length_available": true,
+        "sequence_tokens": 384,
+        "tensor_batch_size": 14,
+        "padding_fraction": 0.4585193452380952,
+        "latency_ms": 1459.8954580000002
+      },
+      {
+        "index": 13,
+        "size": 32,
+        "input_bytes_min": 0,
+        "input_bytes_mean": 0,
+        "input_bytes_max": 0,
+        "token_length_available": true,
+        "sequence_tokens": 256,
+        "tensor_batch_size": 32,
+        "padding_fraction": 0.6395263671875,
+        "latency_ms": 2219.838833
+      },
+      {
+        "index": 14,
+        "size": 64,
+        "input_bytes_min": 0,
+        "input_bytes_mean": 0,
+        "input_bytes_max": 0,
+        "token_length_available": true,
+        "sequence_tokens": 128,
+        "tensor_batch_size": 64,
+        "padding_fraction": 0.5599365234375,
+        "latency_ms": 2179.689958
+      },
+      {
+        "index": 15,
+        "size": 10,
+        "input_bytes_min": 0,
+        "input_bytes_mean": 0,
+        "input_bytes_max": 0,
+        "token_length_available": true,
+        "sequence_tokens": 128,
+        "tensor_batch_size": 64,
+        "padding_fraction": 0.92041015625,
+        "latency_ms": 2160.409625
+      },
+      {
+        "index": 16,
+        "size": 8,
+        "input_bytes_min": 0,
+        "input_bytes_mean": 0,
+        "input_bytes_max": 0,
+        "token_length_available": true,
+        "sequence_tokens": 512,
+        "tensor_batch_size": 8,
+        "padding_fraction": 0.009033203125,
+        "latency_ms": 1158.787916
+      },
+      {
+        "index": 17,
+        "size": 14,
+        "input_bytes_min": 0,
+        "input_bytes_mean": 0,
+        "input_bytes_max": 0,
+        "token_length_available": true,
+        "sequence_tokens": 384,
+        "tensor_batch_size": 14,
+        "padding_fraction": 0.6728050595238095,
+        "latency_ms": 1447.6374999999998
+      },
+      {
+        "index": 18,
+        "size": 64,
+        "input_bytes_min": 0,
+        "input_bytes_mean": 0,
+        "input_bytes_max": 0,
+        "token_length_available": true,
+        "sequence_tokens": 128,
+        "tensor_batch_size": 64,
+        "padding_fraction": 0.570556640625,
+        "latency_ms": 2104.2032910000003
+      },
+      {
+        "index": 19,
+        "size": 42,
+        "input_bytes_min": 0,
+        "input_bytes_mean": 0,
+        "input_bytes_max": 0,
+        "token_length_available": true,
+        "sequence_tokens": 128,
+        "tensor_batch_size": 64,
+        "padding_fraction": 0.70166015625,
+        "latency_ms": 2124.699708
+      },
+      {
+        "index": 20,
+        "size": 8,
+        "input_bytes_min": 0,
+        "input_bytes_mean": 0,
+        "input_bytes_max": 0,
+        "token_length_available": true,
+        "sequence_tokens": 512,
+        "tensor_batch_size": 8,
+        "padding_fraction": 0.04443359375,
+        "latency_ms": 1145.4914170000002
+      },
+      {
+        "index": 21,
+        "size": 8,
+        "input_bytes_min": 0,
+        "input_bytes_mean": 0,
+        "input_bytes_max": 0,
+        "token_length_available": true,
+        "sequence_tokens": 512,
+        "tensor_batch_size": 8,
+        "padding_fraction": 0.00634765625,
+        "latency_ms": 1192.912375
+      },
+      {
+        "index": 22,
+        "size": 8,
+        "input_bytes_min": 0,
+        "input_bytes_mean": 0,
+        "input_bytes_max": 0,
+        "token_length_available": true,
+        "sequence_tokens": 512,
+        "tensor_batch_size": 8,
+        "padding_fraction": 0.12841796875,
+        "latency_ms": 1214.319917
+      },
+      {
+        "index": 23,
+        "size": 14,
+        "input_bytes_min": 0,
+        "input_bytes_mean": 0,
+        "input_bytes_max": 0,
+        "token_length_available": true,
+        "sequence_tokens": 384,
+        "tensor_batch_size": 14,
+        "padding_fraction": 0.5928199404761905,
+        "latency_ms": 1501.994209
+      },
+      {
+        "index": 24,
+        "size": 64,
+        "input_bytes_min": 0,
+        "input_bytes_mean": 0,
+        "input_bytes_max": 0,
+        "token_length_available": true,
+        "sequence_tokens": 128,
+        "tensor_batch_size": 64,
+        "padding_fraction": 0.5621337890625,
+        "latency_ms": 2093.055792
+      },
+      {
+        "index": 25,
+        "size": 26,
+        "input_bytes_min": 0,
+        "input_bytes_mean": 0,
+        "input_bytes_max": 0,
+        "token_length_available": true,
+        "sequence_tokens": 128,
+        "tensor_batch_size": 64,
+        "padding_fraction": 0.7755126953125,
+        "latency_ms": 2110.910041
+      },
+      {
+        "index": 26,
+        "size": 8,
+        "input_bytes_min": 0,
+        "input_bytes_mean": 0,
+        "input_bytes_max": 0,
+        "token_length_available": true,
+        "sequence_tokens": 512,
+        "tensor_batch_size": 8,
+        "padding_fraction": 0.06005859375,
+        "latency_ms": 1157.339167
+      },
+      {
+        "index": 27,
+        "size": 8,
+        "input_bytes_min": 0,
+        "input_bytes_mean": 0,
+        "input_bytes_max": 0,
+        "token_length_available": true,
+        "sequence_tokens": 512,
+        "tensor_batch_size": 8,
+        "padding_fraction": 0.044189453125,
+        "latency_ms": 1206.702625
+      },
+      {
+        "index": 28,
+        "size": 8,
+        "input_bytes_min": 0,
+        "input_bytes_mean": 0,
+        "input_bytes_max": 0,
+        "token_length_available": true,
+        "sequence_tokens": 512,
+        "tensor_batch_size": 8,
+        "padding_fraction": 0.03125,
+        "latency_ms": 1245.370292
+      },
+      {
+        "index": 29,
+        "size": 8,
+        "input_bytes_min": 0,
+        "input_bytes_mean": 0,
+        "input_bytes_max": 0,
+        "token_length_available": true,
+        "sequence_tokens": 512,
+        "tensor_batch_size": 8,
+        "padding_fraction": 0.2197265625,
+        "latency_ms": 1204.5855
+      },
+      {
+        "index": 30,
+        "size": 14,
+        "input_bytes_min": 0,
+        "input_bytes_mean": 0,
+        "input_bytes_max": 0,
+        "token_length_available": true,
+        "sequence_tokens": 384,
+        "tensor_batch_size": 14,
+        "padding_fraction": 0.4194568452380952,
+        "latency_ms": 1479.485791
+      },
+      {
+        "index": 31,
+        "size": 32,
+        "input_bytes_min": 0,
+        "input_bytes_mean": 0,
+        "input_bytes_max": 0,
+        "token_length_available": true,
+        "sequence_tokens": 256,
+        "tensor_batch_size": 32,
+        "padding_fraction": 0.7275390625,
+        "latency_ms": 2133.211
+      },
+      {
+        "index": 32,
+        "size": 50,
+        "input_bytes_min": 0,
+        "input_bytes_mean": 0,
+        "input_bytes_max": 0,
+        "token_length_available": true,
+        "sequence_tokens": 128,
+        "tensor_batch_size": 64,
+        "padding_fraction": 0.637939453125,
+        "latency_ms": 2142.66275
+      },
+      {
+        "index": 33,
+        "size": 8,
+        "input_bytes_min": 0,
+        "input_bytes_mean": 0,
+        "input_bytes_max": 0,
+        "token_length_available": true,
+        "sequence_tokens": 512,
+        "tensor_batch_size": 8,
+        "padding_fraction": 0.0419921875,
+        "latency_ms": 1150.982584
+      },
+      {
+        "index": 34,
+        "size": 8,
+        "input_bytes_min": 0,
+        "input_bytes_mean": 0,
+        "input_bytes_max": 0,
+        "token_length_available": true,
+        "sequence_tokens": 512,
+        "tensor_batch_size": 8,
+        "padding_fraction": 0.212890625,
+        "latency_ms": 1141.253917
+      },
+      {
+        "index": 35,
+        "size": 32,
+        "input_bytes_min": 0,
+        "input_bytes_mean": 0,
+        "input_bytes_max": 0,
+        "token_length_available": true,
+        "sequence_tokens": 256,
+        "tensor_batch_size": 32,
+        "padding_fraction": 0.6695556640625,
+        "latency_ms": 2150.781333
+      },
+      {
+        "index": 36,
+        "size": 64,
+        "input_bytes_min": 0,
+        "input_bytes_mean": 0,
+        "input_bytes_max": 0,
+        "token_length_available": true,
+        "sequence_tokens": 128,
+        "tensor_batch_size": 64,
+        "padding_fraction": 0.523193359375,
+        "latency_ms": 2067.010208
+      },
+      {
+        "index": 37,
+        "size": 16,
+        "input_bytes_min": 0,
+        "input_bytes_mean": 0,
+        "input_bytes_max": 0,
+        "token_length_available": true,
+        "sequence_tokens": 128,
+        "tensor_batch_size": 64,
+        "padding_fraction": 0.8756103515625,
+        "latency_ms": 2098.554459
+      },
+      {
+        "index": 38,
+        "size": 8,
+        "input_bytes_min": 0,
+        "input_bytes_mean": 0,
+        "input_bytes_max": 0,
+        "token_length_available": true,
+        "sequence_tokens": 512,
+        "tensor_batch_size": 8,
+        "padding_fraction": 0.04248046875,
+        "latency_ms": 1132.506041
+      },
+      {
+        "index": 39,
+        "size": 8,
+        "input_bytes_min": 0,
+        "input_bytes_mean": 0,
+        "input_bytes_max": 0,
+        "token_length_available": true,
+        "sequence_tokens": 512,
+        "tensor_batch_size": 8,
+        "padding_fraction": 0.325927734375,
+        "latency_ms": 1137.863042
+      },
+      {
+        "index": 40,
+        "size": 32,
+        "input_bytes_min": 0,
+        "input_bytes_mean": 0,
+        "input_bytes_max": 0,
+        "token_length_available": true,
+        "sequence_tokens": 256,
+        "tensor_batch_size": 32,
+        "padding_fraction": 0.5743408203125,
+        "latency_ms": 2107.428666
+      },
+      {
+        "index": 41,
+        "size": 64,
+        "input_bytes_min": 0,
+        "input_bytes_mean": 0,
+        "input_bytes_max": 0,
+        "token_length_available": true,
+        "sequence_tokens": 128,
+        "tensor_batch_size": 64,
+        "padding_fraction": 0.5594482421875,
+        "latency_ms": 2072.199667
+      },
+      {
+        "index": 42,
+        "size": 16,
+        "input_bytes_min": 0,
+        "input_bytes_mean": 0,
+        "input_bytes_max": 0,
+        "token_length_available": true,
+        "sequence_tokens": 128,
+        "tensor_batch_size": 64,
+        "padding_fraction": 0.85546875,
+        "latency_ms": 2113.458333
+      },
+      {
+        "index": 43,
+        "size": 8,
+        "input_bytes_min": 0,
+        "input_bytes_mean": 0,
+        "input_bytes_max": 0,
+        "token_length_available": true,
+        "sequence_tokens": 512,
+        "tensor_batch_size": 8,
+        "padding_fraction": 0.085205078125,
+        "latency_ms": 1168.6784590000002
+      },
+      {
+        "index": 44,
+        "size": 8,
+        "input_bytes_min": 0,
+        "input_bytes_mean": 0,
+        "input_bytes_max": 0,
+        "token_length_available": true,
+        "sequence_tokens": 512,
+        "tensor_batch_size": 8,
+        "padding_fraction": 0.189208984375,
+        "latency_ms": 1147.977541
+      },
+      {
+        "index": 45,
+        "size": 14,
+        "input_bytes_min": 0,
+        "input_bytes_mean": 0,
+        "input_bytes_max": 0,
+        "token_length_available": true,
+        "sequence_tokens": 384,
+        "tensor_batch_size": 14,
+        "padding_fraction": 0.6259300595238095,
+        "latency_ms": 1419.3340839999998
+      },
+      {
+        "index": 46,
+        "size": 64,
+        "input_bytes_min": 0,
+        "input_bytes_mean": 0,
+        "input_bytes_max": 0,
+        "token_length_available": true,
+        "sequence_tokens": 128,
+        "tensor_batch_size": 64,
+        "padding_fraction": 0.49365234375,
+        "latency_ms": 2097.083
+      },
+      {
+        "index": 47,
+        "size": 34,
+        "input_bytes_min": 0,
+        "input_bytes_mean": 0,
+        "input_bytes_max": 0,
+        "token_length_available": true,
+        "sequence_tokens": 128,
+        "tensor_batch_size": 64,
+        "padding_fraction": 0.7694091796875,
+        "latency_ms": 2120.519083
+      },
+      {
+        "index": 48,
+        "size": 8,
+        "input_bytes_min": 0,
+        "input_bytes_mean": 0,
+        "input_bytes_max": 0,
+        "token_length_available": true,
+        "sequence_tokens": 512,
+        "tensor_batch_size": 8,
+        "padding_fraction": 0.09912109375,
+        "latency_ms": 1188.50075
+      },
+      {
+        "index": 49,
+        "size": 14,
+        "input_bytes_min": 0,
+        "input_bytes_mean": 0,
+        "input_bytes_max": 0,
+        "token_length_available": true,
+        "sequence_tokens": 384,
+        "tensor_batch_size": 14,
+        "padding_fraction": 0.474702380952381,
+        "latency_ms": 1453.467083
+      },
+      {
+        "index": 50,
+        "size": 64,
+        "input_bytes_min": 0,
+        "input_bytes_mean": 0,
+        "input_bytes_max": 0,
+        "token_length_available": true,
+        "sequence_tokens": 128,
+        "tensor_batch_size": 64,
+        "padding_fraction": 0.577880859375,
+        "latency_ms": 2072.5515840000003
+      },
+      {
+        "index": 51,
+        "size": 42,
+        "input_bytes_min": 0,
+        "input_bytes_mean": 0,
+        "input_bytes_max": 0,
+        "token_length_available": true,
+        "sequence_tokens": 128,
+        "tensor_batch_size": 64,
+        "padding_fraction": 0.6793212890625,
+        "latency_ms": 2116.911
+      },
+      {
+        "index": 52,
+        "size": 8,
+        "input_bytes_min": 0,
+        "input_bytes_mean": 0,
+        "input_bytes_max": 0,
+        "token_length_available": true,
+        "sequence_tokens": 512,
+        "tensor_batch_size": 8,
+        "padding_fraction": 0.054931640625,
+        "latency_ms": 1139.6625840000002
+      },
+      {
+        "index": 53,
+        "size": 8,
+        "input_bytes_min": 0,
+        "input_bytes_mean": 0,
+        "input_bytes_max": 0,
+        "token_length_available": true,
+        "sequence_tokens": 512,
+        "tensor_batch_size": 8,
+        "padding_fraction": 0.125,
+        "latency_ms": 1136.552666
+      },
+      {
+        "index": 54,
+        "size": 14,
+        "input_bytes_min": 0,
+        "input_bytes_mean": 0,
+        "input_bytes_max": 0,
+        "token_length_available": true,
+        "sequence_tokens": 384,
+        "tensor_batch_size": 14,
+        "padding_fraction": 0.45777529761904767,
+        "latency_ms": 1450.11175
+      },
+      {
+        "index": 55,
+        "size": 64,
+        "input_bytes_min": 0,
+        "input_bytes_mean": 0,
+        "input_bytes_max": 0,
+        "token_length_available": true,
+        "sequence_tokens": 128,
+        "tensor_batch_size": 64,
+        "padding_fraction": 0.50830078125,
+        "latency_ms": 2114.1554579999997
+      },
+      {
+        "index": 56,
+        "size": 34,
+        "input_bytes_min": 0,
+        "input_bytes_mean": 0,
+        "input_bytes_max": 0,
+        "token_length_available": true,
+        "sequence_tokens": 128,
+        "tensor_batch_size": 64,
+        "padding_fraction": 0.7125244140625,
+        "latency_ms": 2089.066333
+      },
+      {
+        "index": 57,
+        "size": 8,
+        "input_bytes_min": 0,
+        "input_bytes_mean": 0,
+        "input_bytes_max": 0,
+        "token_length_available": true,
+        "sequence_tokens": 512,
+        "tensor_batch_size": 8,
+        "padding_fraction": 0.068115234375,
+        "latency_ms": 1131.603208
+      },
+      {
+        "index": 58,
+        "size": 8,
+        "input_bytes_min": 0,
+        "input_bytes_mean": 0,
+        "input_bytes_max": 0,
+        "token_length_available": true,
+        "sequence_tokens": 512,
+        "tensor_batch_size": 8,
+        "padding_fraction": 0.05078125,
+        "latency_ms": 1144.220792
+      },
+      {
+        "index": 59,
+        "size": 8,
+        "input_bytes_min": 0,
+        "input_bytes_mean": 0,
+        "input_bytes_max": 0,
+        "token_length_available": true,
+        "sequence_tokens": 512,
+        "tensor_batch_size": 8,
+        "padding_fraction": 0.128662109375,
+        "latency_ms": 1137.277458
+      },
+      {
+        "index": 60,
+        "size": 14,
+        "input_bytes_min": 0,
+        "input_bytes_mean": 0,
+        "input_bytes_max": 0,
+        "token_length_available": true,
+        "sequence_tokens": 384,
+        "tensor_batch_size": 14,
+        "padding_fraction": 0.3091517857142857,
+        "latency_ms": 1431.63025
+      },
+      {
+        "index": 61,
+        "size": 32,
+        "input_bytes_min": 0,
+        "input_bytes_mean": 0,
+        "input_bytes_max": 0,
+        "token_length_available": true,
+        "sequence_tokens": 256,
+        "tensor_batch_size": 32,
+        "padding_fraction": 0.580810546875,
+        "latency_ms": 2147.99375
+      },
+      {
+        "index": 62,
+        "size": 58,
+        "input_bytes_min": 0,
+        "input_bytes_mean": 0,
+        "input_bytes_max": 0,
+        "token_length_available": true,
+        "sequence_tokens": 128,
+        "tensor_batch_size": 64,
+        "padding_fraction": 0.539794921875,
+        "latency_ms": 2101.126834
+      },
+      {
+        "index": 63,
+        "size": 2,
+        "input_bytes_min": 0,
+        "input_bytes_mean": 0,
+        "input_bytes_max": 0,
+        "token_length_available": true,
+        "sequence_tokens": 256,
+        "tensor_batch_size": 32,
+        "padding_fraction": 0.9599609375,
+        "latency_ms": 2131.1273330000004
+      }
+    ],
+    "embed_latency_ms": 105019,
+    "rss": {
+      "peak_bytes": 1504116736,
+      "process_peak_bytes": 1504116736,
+      "final_bytes": 1504083968,
+      "sample_interval_ms": 500,
+      "timeline": [
+        {
+          "t_offset_ms": 0,
+          "rss_bytes": 12173312
+        },
+        {
+          "t_offset_ms": 504,
+          "rss_bytes": 644169728
+        },
+        {
+          "t_offset_ms": 1005,
+          "rss_bytes": 658866176
+        },
+        {
+          "t_offset_ms": 1506,
+          "rss_bytes": 660832256
+        },
+        {
+          "t_offset_ms": 2007,
+          "rss_bytes": 660897792
+        },
+        {
+          "t_offset_ms": 2512,
+          "rss_bytes": 660963328
+        },
+        {
+          "t_offset_ms": 3012,
+          "rss_bytes": 901038080
+        },
+        {
+          "t_offset_ms": 3516,
+          "rss_bytes": 901038080
+        },
+        {
+          "t_offset_ms": 4020,
+          "rss_bytes": 1134002176
+        },
+        {
+          "t_offset_ms": 4523,
+          "rss_bytes": 1141751808
+        },
+        {
+          "t_offset_ms": 5027,
+          "rss_bytes": 1141751808
+        },
+        {
+          "t_offset_ms": 5530,
+          "rss_bytes": 1141768192
+        },
+        {
+          "t_offset_ms": 6033,
+          "rss_bytes": 1141768192
+        },
+        {
+          "t_offset_ms": 6537,
+          "rss_bytes": 1181106176
+        },
+        {
+          "t_offset_ms": 7038,
+          "rss_bytes": 1181106176
+        },
+        {
+          "t_offset_ms": 7540,
+          "rss_bytes": 1181106176
+        },
+        {
+          "t_offset_ms": 8043,
+          "rss_bytes": 1181188096
+        },
+        {
+          "t_offset_ms": 8544,
+          "rss_bytes": 1181188096
+        },
+        {
+          "t_offset_ms": 9045,
+          "rss_bytes": 1181188096
+        },
+        {
+          "t_offset_ms": 9552,
+          "rss_bytes": 1181188096
+        },
+        {
+          "t_offset_ms": 10057,
+          "rss_bytes": 1181188096
+        },
+        {
+          "t_offset_ms": 10560,
+          "rss_bytes": 1181302784
+        },
+        {
+          "t_offset_ms": 11062,
+          "rss_bytes": 1181302784
+        },
+        {
+          "t_offset_ms": 11566,
+          "rss_bytes": 1181302784
+        },
+        {
+          "t_offset_ms": 12075,
+          "rss_bytes": 1181302784
+        },
+        {
+          "t_offset_ms": 12578,
+          "rss_bytes": 1181777920
+        },
+        {
+          "t_offset_ms": 13079,
+          "rss_bytes": 1185628160
+        },
+        {
+          "t_offset_ms": 13581,
+          "rss_bytes": 1185660928
+        },
+        {
+          "t_offset_ms": 14082,
+          "rss_bytes": 1185873920
+        },
+        {
+          "t_offset_ms": 14584,
+          "rss_bytes": 1185955840
+        },
+        {
+          "t_offset_ms": 15088,
+          "rss_bytes": 1185988608
+        },
+        {
+          "t_offset_ms": 15590,
+          "rss_bytes": 1186054144
+        },
+        {
+          "t_offset_ms": 16090,
+          "rss_bytes": 1186201600
+        },
+        {
+          "t_offset_ms": 16593,
+          "rss_bytes": 1186234368
+        },
+        {
+          "t_offset_ms": 17094,
+          "rss_bytes": 1186283520
+        },
+        {
+          "t_offset_ms": 17596,
+          "rss_bytes": 1186545664
+        },
+        {
+          "t_offset_ms": 18097,
+          "rss_bytes": 1186660352
+        },
+        {
+          "t_offset_ms": 18601,
+          "rss_bytes": 1186791424
+        },
+        {
+          "t_offset_ms": 19106,
+          "rss_bytes": 1187282944
+        },
+        {
+          "t_offset_ms": 19608,
+          "rss_bytes": 1187282944
+        },
+        {
+          "t_offset_ms": 20112,
+          "rss_bytes": 1187282944
+        },
+        {
+          "t_offset_ms": 20616,
+          "rss_bytes": 1187282944
+        },
+        {
+          "t_offset_ms": 21120,
+          "rss_bytes": 1187282944
+        },
+        {
+          "t_offset_ms": 21621,
+          "rss_bytes": 1195540480
+        },
+        {
+          "t_offset_ms": 22124,
+          "rss_bytes": 1195540480
+        },
+        {
+          "t_offset_ms": 22625,
+          "rss_bytes": 1195540480
+        },
+        {
+          "t_offset_ms": 23129,
+          "rss_bytes": 1198718976
+        },
+        {
+          "t_offset_ms": 23629,
+          "rss_bytes": 1198718976
+        },
+        {
+          "t_offset_ms": 24134,
+          "rss_bytes": 1198718976
+        },
+        {
+          "t_offset_ms": 24639,
+          "rss_bytes": 1198718976
+        },
+        {
+          "t_offset_ms": 25143,
+          "rss_bytes": 1198718976
+        },
+        {
+          "t_offset_ms": 25644,
+          "rss_bytes": 1198718976
+        },
+        {
+          "t_offset_ms": 26146,
+          "rss_bytes": 1198718976
+        },
+        {
+          "t_offset_ms": 26656,
+          "rss_bytes": 1198718976
+        },
+        {
+          "t_offset_ms": 27161,
+          "rss_bytes": 1198718976
+        },
+        {
+          "t_offset_ms": 27673,
+          "rss_bytes": 1199865856
+        },
+        {
+          "t_offset_ms": 28177,
+          "rss_bytes": 1199865856
+        },
+        {
+          "t_offset_ms": 28683,
+          "rss_bytes": 1199865856
+        },
+        {
+          "t_offset_ms": 29186,
+          "rss_bytes": 1199865856
+        },
+        {
+          "t_offset_ms": 29688,
+          "rss_bytes": 1199865856
+        },
+        {
+          "t_offset_ms": 30192,
+          "rss_bytes": 1199865856
+        },
+        {
+          "t_offset_ms": 30696,
+          "rss_bytes": 1494335488
+        },
+        {
+          "t_offset_ms": 31200,
+          "rss_bytes": 1494335488
+        },
+        {
+          "t_offset_ms": 31703,
+          "rss_bytes": 1494335488
+        },
+        {
+          "t_offset_ms": 32208,
+          "rss_bytes": 1494335488
+        },
+        {
+          "t_offset_ms": 32710,
+          "rss_bytes": 1494335488
+        },
+        {
+          "t_offset_ms": 33212,
+          "rss_bytes": 1494335488
+        },
+        {
+          "t_offset_ms": 33722,
+          "rss_bytes": 1494335488
+        },
+        {
+          "t_offset_ms": 34228,
+          "rss_bytes": 1494335488
+        },
+        {
+          "t_offset_ms": 34733,
+          "rss_bytes": 1494335488
+        },
+        {
+          "t_offset_ms": 35235,
+          "rss_bytes": 1494335488
+        },
+        {
+          "t_offset_ms": 35739,
+          "rss_bytes": 1494335488
+        },
+        {
+          "t_offset_ms": 36243,
+          "rss_bytes": 1494335488
+        },
+        {
+          "t_offset_ms": 36745,
+          "rss_bytes": 1494335488
+        },
+        {
+          "t_offset_ms": 37247,
+          "rss_bytes": 1494499328
+        },
+        {
+          "t_offset_ms": 37752,
+          "rss_bytes": 1495252992
+        },
+        {
+          "t_offset_ms": 38255,
+          "rss_bytes": 1495252992
+        },
+        {
+          "t_offset_ms": 38756,
+          "rss_bytes": 1495252992
+        },
+        {
+          "t_offset_ms": 39258,
+          "rss_bytes": 1495252992
+        },
+        {
+          "t_offset_ms": 39762,
+          "rss_bytes": 1495252992
+        },
+        {
+          "t_offset_ms": 40264,
+          "rss_bytes": 1495252992
+        },
+        {
+          "t_offset_ms": 40771,
+          "rss_bytes": 1495252992
+        },
+        {
+          "t_offset_ms": 41275,
+          "rss_bytes": 1495252992
+        },
+        {
+          "t_offset_ms": 41780,
+          "rss_bytes": 1495252992
+        },
+        {
+          "t_offset_ms": 42284,
+          "rss_bytes": 1495252992
+        },
+        {
+          "t_offset_ms": 42793,
+          "rss_bytes": 1495252992
+        },
+        {
+          "t_offset_ms": 43304,
+          "rss_bytes": 1495252992
+        },
+        {
+          "t_offset_ms": 43805,
+          "rss_bytes": 1495252992
+        },
+        {
+          "t_offset_ms": 44310,
+          "rss_bytes": 1495400448
+        },
+        {
+          "t_offset_ms": 44813,
+          "rss_bytes": 1496498176
+        },
+        {
+          "t_offset_ms": 45316,
+          "rss_bytes": 1496743936
+        },
+        {
+          "t_offset_ms": 45817,
+          "rss_bytes": 1496743936
+        },
+        {
+          "t_offset_ms": 46319,
+          "rss_bytes": 1496743936
+        },
+        {
+          "t_offset_ms": 46821,
+          "rss_bytes": 1496743936
+        },
+        {
+          "t_offset_ms": 47325,
+          "rss_bytes": 1496743936
+        },
+        {
+          "t_offset_ms": 47835,
+          "rss_bytes": 1496743936
+        },
+        {
+          "t_offset_ms": 48339,
+          "rss_bytes": 1496743936
+        },
+        {
+          "t_offset_ms": 48842,
+          "rss_bytes": 1496743936
+        },
+        {
+          "t_offset_ms": 49342,
+          "rss_bytes": 1496743936
+        },
+        {
+          "t_offset_ms": 49845,
+          "rss_bytes": 1496743936
+        },
+        {
+          "t_offset_ms": 50349,
+          "rss_bytes": 1496743936
+        },
+        {
+          "t_offset_ms": 50854,
+          "rss_bytes": 1496743936
+        },
+        {
+          "t_offset_ms": 51362,
+          "rss_bytes": 1496743936
+        },
+        {
+          "t_offset_ms": 51873,
+          "rss_bytes": 1496743936
+        },
+        {
+          "t_offset_ms": 52378,
+          "rss_bytes": 1496743936
+        },
+        {
+          "t_offset_ms": 52886,
+          "rss_bytes": 1496743936
+        },
+        {
+          "t_offset_ms": 53387,
+          "rss_bytes": 1496743936
+        },
+        {
+          "t_offset_ms": 53888,
+          "rss_bytes": 1496743936
+        },
+        {
+          "t_offset_ms": 54389,
+          "rss_bytes": 1497186304
+        },
+        {
+          "t_offset_ms": 54893,
+          "rss_bytes": 1498251264
+        },
+        {
+          "t_offset_ms": 55399,
+          "rss_bytes": 1498251264
+        },
+        {
+          "t_offset_ms": 55900,
+          "rss_bytes": 1498251264
+        },
+        {
+          "t_offset_ms": 56403,
+          "rss_bytes": 1498251264
+        },
+        {
+          "t_offset_ms": 56908,
+          "rss_bytes": 1498251264
+        },
+        {
+          "t_offset_ms": 57416,
+          "rss_bytes": 1498251264
+        },
+        {
+          "t_offset_ms": 57921,
+          "rss_bytes": 1498251264
+        },
+        {
+          "t_offset_ms": 58424,
+          "rss_bytes": 1498251264
+        },
+        {
+          "t_offset_ms": 58929,
+          "rss_bytes": 1498251264
+        },
+        {
+          "t_offset_ms": 59430,
+          "rss_bytes": 1498251264
+        },
+        {
+          "t_offset_ms": 59932,
+          "rss_bytes": 1498251264
+        },
+        {
+          "t_offset_ms": 60434,
+          "rss_bytes": 1498251264
+        },
+        {
+          "t_offset_ms": 60939,
+          "rss_bytes": 1498251264
+        },
+        {
+          "t_offset_ms": 61440,
+          "rss_bytes": 1498251264
+        },
+        {
+          "t_offset_ms": 61942,
+          "rss_bytes": 1498251264
+        },
+        {
+          "t_offset_ms": 62455,
+          "rss_bytes": 1498251264
+        },
+        {
+          "t_offset_ms": 62961,
+          "rss_bytes": 1498251264
+        },
+        {
+          "t_offset_ms": 63472,
+          "rss_bytes": 1498251264
+        },
+        {
+          "t_offset_ms": 63975,
+          "rss_bytes": 1498251264
+        },
+        {
+          "t_offset_ms": 64481,
+          "rss_bytes": 1498251264
+        },
+        {
+          "t_offset_ms": 64984,
+          "rss_bytes": 1498251264
+        },
+        {
+          "t_offset_ms": 65488,
+          "rss_bytes": 1498251264
+        },
+        {
+          "t_offset_ms": 65993,
+          "rss_bytes": 1498742784
+        },
+        {
+          "t_offset_ms": 66498,
+          "rss_bytes": 1498742784
+        },
+        {
+          "t_offset_ms": 67001,
+          "rss_bytes": 1498742784
+        },
+        {
+          "t_offset_ms": 67501,
+          "rss_bytes": 1498742784
+        },
+        {
+          "t_offset_ms": 68001,
+          "rss_bytes": 1498742784
+        },
+        {
+          "t_offset_ms": 68503,
+          "rss_bytes": 1498742784
+        },
+        {
+          "t_offset_ms": 69006,
+          "rss_bytes": 1498742784
+        },
+        {
+          "t_offset_ms": 69512,
+          "rss_bytes": 1498742784
+        },
+        {
+          "t_offset_ms": 70016,
+          "rss_bytes": 1498742784
+        },
+        {
+          "t_offset_ms": 70519,
+          "rss_bytes": 1498742784
+        },
+        {
+          "t_offset_ms": 71020,
+          "rss_bytes": 1498742784
+        },
+        {
+          "t_offset_ms": 71521,
+          "rss_bytes": 1498742784
+        },
+        {
+          "t_offset_ms": 72022,
+          "rss_bytes": 1498742784
+        },
+        {
+          "t_offset_ms": 72524,
+          "rss_bytes": 1498742784
+        },
+        {
+          "t_offset_ms": 73031,
+          "rss_bytes": 1498742784
+        },
+        {
+          "t_offset_ms": 73536,
+          "rss_bytes": 1498742784
+        },
+        {
+          "t_offset_ms": 74038,
+          "rss_bytes": 1498742784
+        },
+        {
+          "t_offset_ms": 74541,
+          "rss_bytes": 1498742784
+        },
+        {
+          "t_offset_ms": 75050,
+          "rss_bytes": 1499791360
+        },
+        {
+          "t_offset_ms": 75557,
+          "rss_bytes": 1499791360
+        },
+        {
+          "t_offset_ms": 76059,
+          "rss_bytes": 1499791360
+        },
+        {
+          "t_offset_ms": 76569,
+          "rss_bytes": 1499791360
+        },
+        {
+          "t_offset_ms": 77076,
+          "rss_bytes": 1499791360
+        },
+        {
+          "t_offset_ms": 77586,
+          "rss_bytes": 1499791360
+        },
+        {
+          "t_offset_ms": 78086,
+          "rss_bytes": 1499791360
+        },
+        {
+          "t_offset_ms": 78591,
+          "rss_bytes": 1499791360
+        },
+        {
+          "t_offset_ms": 79097,
+          "rss_bytes": 1499791360
+        },
+        {
+          "t_offset_ms": 79600,
+          "rss_bytes": 1499791360
+        },
+        {
+          "t_offset_ms": 80101,
+          "rss_bytes": 1499791360
+        },
+        {
+          "t_offset_ms": 80601,
+          "rss_bytes": 1499791360
+        },
+        {
+          "t_offset_ms": 81103,
+          "rss_bytes": 1499791360
+        },
+        {
+          "t_offset_ms": 81606,
+          "rss_bytes": 1499791360
+        },
+        {
+          "t_offset_ms": 82111,
+          "rss_bytes": 1499791360
+        },
+        {
+          "t_offset_ms": 82616,
+          "rss_bytes": 1499791360
+        },
+        {
+          "t_offset_ms": 83120,
+          "rss_bytes": 1499791360
+        },
+        {
+          "t_offset_ms": 83621,
+          "rss_bytes": 1499791360
+        },
+        {
+          "t_offset_ms": 84121,
+          "rss_bytes": 1500184576
+        },
+        {
+          "t_offset_ms": 84625,
+          "rss_bytes": 1500282880
+        },
+        {
+          "t_offset_ms": 85128,
+          "rss_bytes": 1500282880
+        },
+        {
+          "t_offset_ms": 85631,
+          "rss_bytes": 1500282880
+        },
+        {
+          "t_offset_ms": 86138,
+          "rss_bytes": 1500282880
+        },
+        {
+          "t_offset_ms": 86643,
+          "rss_bytes": 1500282880
+        },
+        {
+          "t_offset_ms": 87148,
+          "rss_bytes": 1500282880
+        },
+        {
+          "t_offset_ms": 87655,
+          "rss_bytes": 1500282880
+        },
+        {
+          "t_offset_ms": 88160,
+          "rss_bytes": 1500282880
+        },
+        {
+          "t_offset_ms": 88667,
+          "rss_bytes": 1500282880
+        },
+        {
+          "t_offset_ms": 89177,
+          "rss_bytes": 1500282880
+        },
+        {
+          "t_offset_ms": 89680,
+          "rss_bytes": 1500282880
+        },
+        {
+          "t_offset_ms": 90180,
+          "rss_bytes": 1500282880
+        },
+        {
+          "t_offset_ms": 90683,
+          "rss_bytes": 1500282880
+        },
+        {
+          "t_offset_ms": 91187,
+          "rss_bytes": 1500282880
+        },
+        {
+          "t_offset_ms": 91688,
+          "rss_bytes": 1500282880
+        },
+        {
+          "t_offset_ms": 92191,
+          "rss_bytes": 1500282880
+        },
+        {
+          "t_offset_ms": 92694,
+          "rss_bytes": 1500708864
+        },
+        {
+          "t_offset_ms": 93195,
+          "rss_bytes": 1501003776
+        },
+        {
+          "t_offset_ms": 93699,
+          "rss_bytes": 1501085696
+        },
+        {
+          "t_offset_ms": 94202,
+          "rss_bytes": 1501102080
+        },
+        {
+          "t_offset_ms": 94704,
+          "rss_bytes": 1501298688
+        },
+        {
+          "t_offset_ms": 95206,
+          "rss_bytes": 1501298688
+        },
+        {
+          "t_offset_ms": 95709,
+          "rss_bytes": 1501298688
+        },
+        {
+          "t_offset_ms": 96213,
+          "rss_bytes": 1501298688
+        },
+        {
+          "t_offset_ms": 96718,
+          "rss_bytes": 1501298688
+        },
+        {
+          "t_offset_ms": 97226,
+          "rss_bytes": 1501298688
+        },
+        {
+          "t_offset_ms": 97729,
+          "rss_bytes": 1501298688
+        },
+        {
+          "t_offset_ms": 98234,
+          "rss_bytes": 1501298688
+        },
+        {
+          "t_offset_ms": 98739,
+          "rss_bytes": 1501298688
+        },
+        {
+          "t_offset_ms": 99241,
+          "rss_bytes": 1501298688
+        },
+        {
+          "t_offset_ms": 99745,
+          "rss_bytes": 1501298688
+        },
+        {
+          "t_offset_ms": 100247,
+          "rss_bytes": 1501298688
+        },
+        {
+          "t_offset_ms": 100752,
+          "rss_bytes": 1501298688
+        },
+        {
+          "t_offset_ms": 101255,
+          "rss_bytes": 1501528064
+        },
+        {
+          "t_offset_ms": 101765,
+          "rss_bytes": 1502756864
+        },
+        {
+          "t_offset_ms": 102267,
+          "rss_bytes": 1502756864
+        },
+        {
+          "t_offset_ms": 102772,
+          "rss_bytes": 1502756864
+        },
+        {
+          "t_offset_ms": 103277,
+          "rss_bytes": 1502756864
+        },
+        {
+          "t_offset_ms": 103779,
+          "rss_bytes": 1502756864
+        },
+        {
+          "t_offset_ms": 104287,
+          "rss_bytes": 1502756864
+        },
+        {
+          "t_offset_ms": 104792,
+          "rss_bytes": 1502756864
+        },
+        {
+          "t_offset_ms": 105292,
+          "rss_bytes": 1502756864
+        },
+        {
+          "t_offset_ms": 105794,
+          "rss_bytes": 1502756864
+        },
+        {
+          "t_offset_ms": 106299,
+          "rss_bytes": 1502756864
+        },
+        {
+          "t_offset_ms": 106800,
+          "rss_bytes": 1502756864
+        },
+        {
+          "t_offset_ms": 107305,
+          "rss_bytes": 1502756864
+        },
+        {
+          "t_offset_ms": 107810,
+          "rss_bytes": 1502756864
+        },
+        {
+          "t_offset_ms": 108315,
+          "rss_bytes": 1502756864
+        },
+        {
+          "t_offset_ms": 108820,
+          "rss_bytes": 1502756864
+        },
+        {
+          "t_offset_ms": 109323,
+          "rss_bytes": 1502756864
+        },
+        {
+          "t_offset_ms": 109824,
+          "rss_bytes": 1502904320
+        },
+        {
+          "t_offset_ms": 110324,
+          "rss_bytes": 1503657984
+        },
+        {
+          "t_offset_ms": 110828,
+          "rss_bytes": 1503657984
+        },
+        {
+          "t_offset_ms": 111329,
+          "rss_bytes": 1503657984
+        },
+        {
+          "t_offset_ms": 111835,
+          "rss_bytes": 1503657984
+        },
+        {
+          "t_offset_ms": 112342,
+          "rss_bytes": 1503657984
+        },
+        {
+          "t_offset_ms": 112846,
+          "rss_bytes": 1503657984
+        },
+        {
+          "t_offset_ms": 113352,
+          "rss_bytes": 1503657984
+        },
+        {
+          "t_offset_ms": 113853,
+          "rss_bytes": 1503657984
+        },
+        {
+          "t_offset_ms": 114357,
+          "rss_bytes": 1503657984
+        },
+        {
+          "t_offset_ms": 114861,
+          "rss_bytes": 1503657984
+        },
+        {
+          "t_offset_ms": 115366,
+          "rss_bytes": 1503657984
+        },
+        {
+          "t_offset_ms": 115870,
+          "rss_bytes": 1503657984
+        },
+        {
+          "t_offset_ms": 116374,
+          "rss_bytes": 1503657984
+        },
+        {
+          "t_offset_ms": 116876,
+          "rss_bytes": 1503657984
+        },
+        {
+          "t_offset_ms": 117379,
+          "rss_bytes": 1503657984
+        },
+        {
+          "t_offset_ms": 117884,
+          "rss_bytes": 1503657984
+        },
+        {
+          "t_offset_ms": 118385,
+          "rss_bytes": 1503657984
+        },
+        {
+          "t_offset_ms": 118890,
+          "rss_bytes": 1503657984
+        },
+        {
+          "t_offset_ms": 119395,
+          "rss_bytes": 1503657984
+        },
+        {
+          "t_offset_ms": 119898,
+          "rss_bytes": 1503920128
+        },
+        {
+          "t_offset_ms": 120405,
+          "rss_bytes": 1504116736
+        },
+        {
+          "t_offset_ms": 120905,
+          "rss_bytes": 1504116736
+        },
+        {
+          "t_offset_ms": 121408,
+          "rss_bytes": 1504116736
+        },
+        {
+          "t_offset_ms": 121909,
+          "rss_bytes": 1504116736
+        }
+      ]
+    },
+    "throughput": {
+      "chunks_per_second": 12.57861635220126,
+      "embeddings_per_second": 14.644969005608507
+    },
+    "pipeline": {
+      "capacities": {
+        "files": 256,
+        "chunks": 2048,
+        "documents": 2048,
+        "tokenized": 2048,
+        "results": 2048
+      },
+      "files_seen": 3,
+      "windows_completed": 13,
+      "peak_window_items": 128,
+      "peak_payload_bytes": 597513,
+      "producer_backpressure_events": 0
+    },
+    "limitations": []
+  },
+  "unit_detail_path": "/tmp/tldr-mixed-batch-benchmark-20260728/new-report.units.jsonl",
+  "concurrency_note": "phase durations are wall time; atomic-unit totals are summed work and may exceed wall time when units run concurrently"
+}
