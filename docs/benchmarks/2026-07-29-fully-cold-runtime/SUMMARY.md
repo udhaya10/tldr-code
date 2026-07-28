@@ -208,4 +208,6 @@ preserved model manifest are in `RUN_CONTEXT.md`.
 Primary evidence hashes are listed in `EVIDENCE_SHA256.txt`. The raw evidence
 includes the correlated build report and unit log, external timer output,
 daemon startup polls, five-run query matrix and outputs, watcher/delta polls,
-cache-clear results, final disk usage, and daemon snapshots.
+cache-clear results, final disk usage, and daemon snapshots. The manifest has
+48 entries; all 80 per-invocation query stdout/stderr files are retained inside
+the checksum-covered `query-results.tar.gz` archive.
