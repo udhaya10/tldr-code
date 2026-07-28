@@ -1,0 +1,66 @@
+[
+  {
+    "label": "dead",
+    "first_ms": 77,
+    "warm_median_ms": 76,
+    "all_median_ms": 76,
+    "min_ms": 75,
+    "max_ms": 78
+  },
+  {
+    "label": "extract_watcher",
+    "first_ms": 13,
+    "warm_median_ms": 13,
+    "all_median_ms": 13,
+    "min_ms": 13,
+    "max_ms": 15
+  },
+  {
+    "label": "search_enriched",
+    "first_ms": 1077,
+    "warm_median_ms": 1051,
+    "all_median_ms": 1052,
+    "min_ms": 1034,
+    "max_ms": 1097
+  },
+  {
+    "label": "search_lexical",
+    "first_ms": 396,
+    "warm_median_ms": 401,
+    "all_median_ms": 401,
+    "min_ms": 396,
+    "max_ms": 407
+  },
+  {
+    "label": "semantic_delta",
+    "first_ms": 61,
+    "warm_median_ms": 61,
+    "all_median_ms": 61,
+    "min_ms": 61,
+    "max_ms": 62
+  },
+  {
+    "label": "semantic_watcher",
+    "first_ms": 496,
+    "warm_median_ms": 60.5,
+    "all_median_ms": 61,
+    "min_ms": 60,
+    "max_ms": 496
+  },
+  {
+    "label": "structure",
+    "first_ms": 74,
+    "warm_median_ms": 71.5,
+    "all_median_ms": 72,
+    "min_ms": 70,
+    "max_ms": 74
+  },
+  {
+    "label": "tree",
+    "first_ms": 39,
+    "warm_median_ms": 25,
+    "all_median_ms": 25,
+    "min_ms": 24,
+    "max_ms": 39
+  }
+]

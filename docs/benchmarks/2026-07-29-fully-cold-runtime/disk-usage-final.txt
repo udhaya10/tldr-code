@@ -1,0 +1,5 @@
+104432	.tldr
+62260	/Users/udhayakumar/Library/Caches/tldr/embeddings
+515296	/Users/udhayakumar/Library/Caches/tldr/fastembed
+128516	/Users/udhayakumar/Library/Caches/tldr/stores
+8	/Users/udhayakumar/Library/Logs/tldr

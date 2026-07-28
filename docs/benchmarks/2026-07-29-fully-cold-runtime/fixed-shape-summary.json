@@ -1,0 +1,39 @@
+{
+  "by_sequence": [
+    {
+      "sequence_tokens": 128,
+      "calls": 109,
+      "real_rows": 2847,
+      "capacity_rows": 6976,
+      "dummy_rows": 4129
+    },
+    {
+      "sequence_tokens": 256,
+      "calls": 145,
+      "real_rows": 4577,
+      "capacity_rows": 4640,
+      "dummy_rows": 63
+    },
+    {
+      "sequence_tokens": 384,
+      "calls": 208,
+      "real_rows": 2912,
+      "capacity_rows": 2912,
+      "dummy_rows": 0
+    },
+    {
+      "sequence_tokens": 512,
+      "calls": 590,
+      "real_rows": 4720,
+      "capacity_rows": 4720,
+      "dummy_rows": 0
+    }
+  ],
+  "totals": {
+    "calls": 1052,
+    "real_rows": 15056,
+    "capacity_rows": 19248,
+    "dummy_rows": 4192,
+    "weighted_padding_fraction": 0.30148980984454776
+  }
+}

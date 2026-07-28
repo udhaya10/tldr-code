@@ -1,0 +1,33 @@
+warning: /Users/udhayakumar/Workspace/03-Parcadei-Ecosystem/tldr-code/crates/tldr-core/src/search/enriched.rs parsed with 1 tree-sitter ERROR node(s); extraction may be partial
+warning: /Users/udhayakumar/Workspace/03-Parcadei-Ecosystem/tldr-code/crates/tldr-cli/src/commands/hooks.rs parsed with 1 tree-sitter ERROR node(s); extraction may be partial
+warning: /Users/udhayakumar/Workspace/03-Parcadei-Ecosystem/tldr-code/crates/tldr-core/src/callgraph/var_types.rs parsed with 2 tree-sitter ERROR node(s); extraction may be partial
+{
+  "status": "ok",
+  "files": 512,
+  "edges": 6288,
+  "languages": [
+    "python",
+    "rust"
+  ],
+  "cache_path": ".tldr/store/project.redb"
+}
+real 1670.38
+user 14555.62
+sys 104.12
+          1618542592  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+              156520  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+              168958  voluntary context switches
+            10970925  involuntary context switches
+        269212693172  instructions retired
+         76334623064  cycles elapsed
+           419103632  peak memory footprint

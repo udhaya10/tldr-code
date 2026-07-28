@@ -1,0 +1,82 @@
+{
+  "duration_ms": 1670008,
+  "files": 512,
+  "semantic": {
+    "duration_ms": 1665439,
+    "chunks_total": 15061,
+    "chunks_cached": 5,
+    "chunks_embedded": 15056,
+    "inference_calls": 1052,
+    "windows": 118,
+    "tokens": 3912542,
+    "peak_rss_bytes": 1618411520,
+    "process_peak_bytes": 1618542592,
+    "phases": [
+      {
+        "name": "chunk",
+        "duration_ms": 0,
+        "rss_bytes_at_end": 26296320
+      },
+      {
+        "name": "model_load",
+        "duration_ms": 440,
+        "rss_bytes_at_end": 655114240
+      },
+      {
+        "name": "streaming_pipeline",
+        "duration_ms": 1663802,
+        "rss_bytes_at_end": 1553285120
+      },
+      {
+        "name": "semantic_planning",
+        "duration_ms": 160720,
+        "rss_bytes_at_end": null
+      },
+      {
+        "name": "cache_lookup",
+        "duration_ms": 0,
+        "rss_bytes_at_end": null
+      },
+      {
+        "name": "inference",
+        "duration_ms": 1411622,
+        "rss_bytes_at_end": null
+      },
+      {
+        "name": "cache_write",
+        "duration_ms": 76590,
+        "rss_bytes_at_end": null
+      },
+      {
+        "name": "vector_assembly",
+        "duration_ms": 11756,
+        "rss_bytes_at_end": null
+      },
+      {
+        "name": "generation_stage_and_records",
+        "duration_ms": 785,
+        "rss_bytes_at_end": 1401847808
+      },
+      {
+        "name": "verification",
+        "duration_ms": 269,
+        "rss_bytes_at_end": 1401847808
+      },
+      {
+        "name": "activation",
+        "duration_ms": 24,
+        "rss_bytes_at_end": 1401847808
+      },
+      {
+        "name": "publication",
+        "duration_ms": 1079,
+        "rss_bytes_at_end": 1401847808
+      }
+    ],
+    "throughput": {
+      "chunks_per_second": 9.043261266248718,
+      "embeddings_per_second": 10.665744795703098
+    },
+    "limitations": []
+  }
+}

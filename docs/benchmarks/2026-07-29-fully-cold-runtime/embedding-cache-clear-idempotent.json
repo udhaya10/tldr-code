@@ -1,0 +1,9 @@
+{
+  "status": "ok",
+  "cache_dir": "/Users/udhayakumar/Library/Caches/tldr/embeddings",
+  "files_removed": 0,
+  "bytes_freed": 0,
+  "size_freed_human": "0 B",
+  "model_cache_preserved": true,
+  "message": "No global embedding cache found; downloaded model weights were preserved"
+}

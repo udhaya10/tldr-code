@@ -1,0 +1,70 @@
+{
+  "status": "running",
+  "uptime": 99.510638166,
+  "uptime_human": "0h 1m 39s",
+  "files": 512,
+  "project": "/Users/udhayakumar/Workspace/03-Parcadei-Ecosystem/tldr-code",
+  "salsa_stats": {
+    "hits": 0,
+    "misses": 5,
+    "invalidations": 0,
+    "recomputations": 0
+  },
+  "liveness": {
+    "presence_age_secs": {
+      "cli_poke": 0.0,
+      "internal": 98.887,
+      "socket": 0.0,
+      "watcher": 0.48
+    },
+    "busy": [],
+    "idle_timeout_secs": 1800,
+    "idle_shutdown_in_secs": 1800.0
+  },
+  "semantic_index": {
+    "state": "warm",
+    "vectors": 15061,
+    "runners": [
+      {
+        "workload": "query",
+        "state": "ready",
+        "model": "Snowflake/snowflake-arctic-embed-m",
+        "sessions_built": 1,
+        "requests": 10,
+        "failures": 0,
+        "exact_shapes": [
+          [
+            1,
+            128
+          ]
+        ]
+      },
+      {
+        "workload": "delta",
+        "state": "cold",
+        "sessions_built": 0,
+        "requests": 0,
+        "failures": 0
+      },
+      {
+        "workload": "bulk",
+        "state": "ready",
+        "model": "Snowflake/snowflake-arctic-embed-m",
+        "sessions_built": 1,
+        "requests": 1,
+        "failures": 0
+      }
+    ]
+  },
+  "memory": {
+    "rss_bytes": 1015660544,
+    "peak_rss_bytes": 1015840768
+  },
+  "artifact_store": {
+    "state": "ready",
+    "active_generation": 3,
+    "files": 512,
+    "parse_errors": 4,
+    "redb_bytes": 134746112
+  }
+}

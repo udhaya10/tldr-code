@@ -1,0 +1,20 @@
+{
+  "artifact_store": {
+    "state": "ready",
+    "active_generation": 6,
+    "files": 512,
+    "parse_errors": 4,
+    "redb_bytes": 134746112
+  },
+  "salsa_stats": {
+    "hits": 0,
+    "misses": 5,
+    "invalidations": 0,
+    "recomputations": 0
+  },
+  "cache_files": {
+    "file_count": 1,
+    "total_bytes": 134746112,
+    "total_size_human": "128.5 MB"
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "status": "ok",
+  "cache_dir": "/Users/udhayakumar/Library/Caches/tldr/embeddings",
+  "files_removed": 1,
+  "bytes_freed": 71356416,
+  "size_freed_human": "68.1 MB",
+  "model_cache_preserved": true,
+  "message": "Global embedding cache cleared: 1 file(s) removed; downloaded model weights preserved"
+}
