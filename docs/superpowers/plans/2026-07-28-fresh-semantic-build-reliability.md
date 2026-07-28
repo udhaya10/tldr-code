@@ -5,158 +5,130 @@
 > superpowers:executing-plans to implement this plan task-by-task. Steps use
 > checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Make an empty-state semantic build correct, bounded, observable,
-resumable, cleanly cancellable, and fast enough to publish within 30 minutes on
-the documented 558-file M2 Max benchmark.
+**Goal:** Make a fresh semantic build finish predictably, expose useful live
+progress, and restart without repeating completed inference.
 
-**Architecture:** Replace the corpus-sized `0/1` worker transaction with a
-versioned stable recipe, an up-front deterministic plan, bounded durable batches,
-staged generation records, and live progress events. Treat every existing
-one-batch job as incompatible disposable state; correctness of a clean rebuild is
-more important than recovering it. Publish only a fully verified generation, but
-retain every completed bounded batch across crashes.
+**Architecture:** Keep the existing embedding cache as the durable record of
+completed inference. Walk the corpus in deterministic fixed-size windows, reuse
+cache hits, embed and immediately cache only misses, and rebuild the usearch
+generation from those cached vectors. Job counters are advisory progress, not a
+second source of vector truth; the new generation becomes visible only through
+the existing verified atomic publication path.
 
-**Tech Stack:** Rust, redb, rkyv, usearch, Tokio, JSONL worker IPC, existing
-`tldr-contract-tests` scenario runner, macOS launchd lifecycle tests.
+**Tech Stack:** Rust, existing redb embedding cache/job ledger, usearch, Tokio,
+JSONL worker IPC, existing `tldr-contract-tests` runner.
 
 ---
 
-## File responsibility map
+## Design constraints
 
-- `crates/tldr-core/src/semantic/worker_protocol.rs`: stable recipe and versioned
-  progress/event wire types.
-- `crates/tldr-core/src/semantic/redb_store.rs`: durable job plan, batch
-  checkpoints, staged vector identities, invalidation reason, and schema checks.
-- `crates/tldr-core/src/semantic/vector_store.rs`: deterministic planning,
-  bounded batch execution, cache reconciliation, and phase telemetry.
-- `crates/tldr-core/src/semantic/generation.rs`: reconstruct and publish a
-  verified generation from committed staged batches.
-- `crates/tldr-core/src/semantic/build_metrics.rs`: stage timing and throughput
-  fields shared by benchmarks and status.
-- `crates/tldr-cli/src/bin/tldr_embed_worker.rs`: real batch loop and durable
-  event acknowledgement.
-- `crates/tldr-cli/src/commands/daemon/bulk_worker.rs`: concurrent child event
-  reader, cancellation, process reaping, and final report.
-- `crates/tldr-cli/src/commands/daemon/index_manager.rs`: shared live progress
-  snapshot and resident publication.
-- `crates/tldr-cli/src/commands/daemon/status.rs`: JSON/compact operator
-  progress surface.
-- `crates/tldr-cli/src/commands/daemon/daemon.rs`: cancellation ownership and
-  generation join.
-- `crates/tldr-cli/src/commands/init.rs`: launchd stop/unload contract.
-- `crates/tldr-contract-tests/src/main.rs`: shared smoke/certification lifecycle
-  scenarios.
-- `crates/tldr-contract-tests/fixtures/semantic-build/`: small deterministic
-  semantic corpus and expected identities.
-- `docs/FRESH_INSTALL_BENCHMARK_2026-07-28.md`: before/after benchmark evidence.
+This plan intentionally does not add:
 
-## Task 1: Specify the state machine and compatibility policy (`TLDR-bjux.9`)
+- a second `BuildRecipe` model alongside `ManifestId` and
+  `EmbeddingRecipeId`;
+- a transaction spanning the job ledger, embedding cache, staged vectors, and
+  generation publication;
+- a persisted whole-corpus plan solely to calculate an exact percentage;
+- a time-based checkpoint rule in addition to a fixed window size;
+- preselected tokenizer memoization, parallel planning, or inference tuning
+  before profiling identifies the bottleneck;
+- launchd lifecycle changes on the semantic-build critical path.
 
-**Files:**
-
-- Create: `docs/SEMANTIC_BUILD_STATE_MACHINE.md`
-- Modify: `docs/DAEMON_SEMANTIC_ARCHITECTURE.md`
-
-- [ ] **Step 1: Document the stable recipe**
-
-Define this exact logical shape and specify canonical encoding:
-
-```rust
-pub struct BuildRecipe {
-    pub schema_version: u32,
-    pub artifact_generation: u64,
-    pub artifact_digest: [u8; 32],
-    pub model_id: String,
-    pub model_revision: String,
-    pub tokenizer_revision: String,
-    pub pipeline_version: String,
-    pub chunking_version: String,
-    pub token_budget_version: String,
-    pub enrichment_version: String,
-}
-```
-
-State explicitly that temp paths, retry limits, PID, timestamps, IPC paths, and
-launch configuration are not recipe fields.
-
-- [ ] **Step 2: Document state transitions**
+The simple recovery rule is:
 
 ```text
-Unplanned -> Planned -> Running -> Verifying -> Published
-                    \-> Cancelled
-                    \-> RetryableFailure -> Running
-Incompatible(any non-Published state) -> Invalidated -> Unplanned
+deterministic window
+  -> look up every document in the embedding cache
+  -> embed and immediately cache only misses
+  -> report reconciled counters
+  -> continue
+  -> verify the complete vector set
+  -> atomically publish the usearch generation
 ```
 
-Specify the atomic boundary: vector/cache identities and `next_batch` become
-durable in one transaction or neither does.
+After a crash, planning and cache lookup may repeat. Successful model inference
+must not repeat when its cache record is compatible and intact.
 
-- [ ] **Step 3: Freeze the legacy policy**
+## File responsibility map
 
-Document that worker protocol/job schema versions preceding this epic are
-invalidated and rebuilt from zero. They do not consume retry budget and are not
-migrated.
+- `crates/tldr-core/src/semantic/lineage.rs`: existing
+  `EmbeddingRecipeId`, which identifies compatible vector values.
+- `crates/tldr-core/src/semantic/cache.rs`: durable vector cache and cache
+  lookup/write behavior.
+- `crates/tldr-core/src/semantic/store_search.rs`: existing `ManifestId`
+  construction from source and build inputs.
+- `crates/tldr-core/src/semantic/vector_store.rs`: deterministic streaming
+  windows, cache reconciliation, and final vector-store construction.
+- `crates/tldr-core/src/semantic/generation.rs`: verified atomic generation
+  publication.
+- `crates/tldr-core/src/semantic/worker_protocol.rs`: stable request identity
+  projection and small progress event schema.
+- `crates/tldr-cli/src/bin/tldr_embed_worker.rs`: window loop and progress
+  emission.
+- `crates/tldr-cli/src/commands/daemon/bulk_worker.rs`: live stdout consumption
+  and advisory job snapshot updates.
+- `crates/tldr-cli/src/commands/daemon/index_manager.rs`: current build
+  progress snapshot.
+- `crates/tldr-cli/src/commands/daemon/status.rs`: operator-facing progress.
+- `crates/tldr-contract-tests/src/main.rs`: baseline, crash, restart, and
+  installed-build scenarios using the shared runner.
+- `docs/FRESH_INSTALL_BENCHMARK_2026-07-28.md`: before/after measurements.
 
-- [ ] **Step 4: Review the document against all eight problem issues**
-
-Run:
-
-```bash
-bd show TLDR-bjux
-bd dep tree TLDR-bjux
-```
-
-Expected: every problem issue maps to a named state, invariant, or status field.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add docs/SEMANTIC_BUILD_STATE_MACHINE.md docs/DAEMON_SEMANTIC_ARCHITECTURE.md
-git commit -m "docs(semantic): define durable build state machine"
-```
-
-## Task 2: Add the profiling and fault harness (`TLDR-bjux.10`)
+## Task 1: Baseline and freeze the simple contract (`TLDR-bjux.9`)
 
 **Files:**
 
+- Create: `docs/SEMANTIC_BUILD_RECOVERY.md`
+- Modify: `docs/DAEMON_SEMANTIC_ARCHITECTURE.md`
 - Modify: `crates/tldr-contract-tests/src/main.rs`
-- Create: `crates/tldr-contract-tests/fixtures/semantic-build/lib.rs`
-- Create: `crates/tldr-contract-tests/fixtures/semantic-build/query.toml`
-- Modify: `Cargo.toml`
 
-- [ ] **Step 1: Add a failing current-defect scenario**
+- [ ] **Step 1: Add a failing baseline scenario**
 
-Add a scenario whose assertion includes:
-
-```rust
-ensure(report.planned_batches > 1, "corpus must use bounded batches")?;
-ensure(report.completed_vectors > 0, "first checkpoint must retain vectors")?;
-ensure(report.progress_events > 1, "progress must be observable before exit")?;
-```
-
-- [ ] **Step 2: Add deterministic termination controls**
-
-Extend the shared runner with:
+Add one isolated small-corpus scenario to the existing contract runner. It must
+record the first run's cache misses and progress events, kill the worker after a
+completed window, restart it with the same source and recipe, and assert:
 
 ```rust
-enum SemanticFault {
-    KillBeforeBatch(u64),
-    KillAfterBatch(u64),
-    CancelDuringBatch(u64),
-    FailPublication(PublicationBoundary),
-}
+ensure(first.cache_misses > 0, "baseline must perform inference")?;
+ensure(first.progress_events > 0, "progress must arrive before worker exit")?;
+ensure(
+    resumed.cache_hits >= first.completed_vectors,
+    "restart must recover completed inference from cache",
+)?;
+ensure(
+    resumed.new_inference < uninterrupted.new_inference,
+    "restart must not repeat compatible cached inference",
+)?;
 ```
 
-Use the existing scenario runner and isolated temporary state; do not create a
-second test harness.
+- [ ] **Step 2: Capture the current cold-build baseline**
 
-- [ ] **Step 3: Emit one machine-readable benchmark record**
+Run the existing fresh-state benchmark protocol once and write one
+machine-readable record containing:
 
-The record must contain recipe, corpus identity, phase timings, planned and
-completed counts, cache hits/misses, CPU/RSS samples, retries, checkpoint age,
-publication generation, and query result.
+```text
+commit, machine, corpus_digest, model, phase, files_seen, cache_hits,
+cache_misses, new_vectors, elapsed_ms, peak_rss_bytes, publication_generation,
+query_result
+```
 
-- [ ] **Step 4: Prove the test initially fails**
+Do not require an up-front exact chunk count. Do not add a second harness.
+
+- [ ] **Step 3: Document the recovery contract**
+
+`docs/SEMANTIC_BUILD_RECOVERY.md` must state:
+
+```text
+Vector truth: compatible records in the embedding cache.
+Progress truth: current scan counters reconciled from cache hits and new writes.
+Publication truth: the verified active usearch generation.
+Job ledger: advisory status/retry metadata only.
+Restart: repeat scan/lookup; do not repeat compatible cached inference.
+Incompatibility: discard the job record and start a new scan without spending
+retry budget; normal cache-key compatibility decides which vectors are reusable.
+```
+
+- [ ] **Step 4: Prove the baseline exposes the current defects**
 
 Run:
 
@@ -164,335 +136,271 @@ Run:
 cargo tldr-certification -- semantic-build
 ```
 
-Expected: failure showing `total_batches=1` or no live progress event.
+Expected before implementation: failure because progress is buffered until exit,
+the job reports one corpus-sized batch, or restart cannot account for retained
+cache vectors.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add Cargo.toml crates/tldr-contract-tests
-git commit -m "test(semantic): add cold-build fault harness"
+git add docs/SEMANTIC_BUILD_RECOVERY.md \
+  docs/DAEMON_SEMANTIC_ARCHITECTURE.md \
+  crates/tldr-contract-tests/src/main.rs
+git commit -m "test(semantic): freeze cache-backed recovery contract"
 ```
 
-## Task 3: Implement stable recipe identity (`TLDR-bjux.11`)
+## Task 2: Reuse stable semantic identities (`TLDR-bjux.11`)
 
 **Files:**
 
 - Modify: `crates/tldr-core/src/semantic/worker_protocol.rs`
 - Modify: `crates/tldr-core/src/semantic/lineage.rs`
+- Modify: `crates/tldr-core/src/semantic/store_search.rs`
 - Modify: `crates/tldr-cli/src/bin/tldr_embed_worker.rs`
 - Modify: `crates/tldr-cli/src/commands/daemon/bulk_worker.rs`
 
-- [ ] **Step 1: Write recipe identity tests**
+- [ ] **Step 1: Write identity regression tests**
+
+Test that two requests which differ only in their temporary artifact export
+path, PID, retry count, timestamp, or transport details select the same
+`ManifestId`/`EmbeddingRecipeId` pair. Also test that changing source digest,
+model, embedding schema, or output-affecting chunk configuration changes the
+appropriate existing identity.
 
 ```rust
-#[test]
-fn recipe_ignores_transport_and_retry_fields() {
-    let left = request("/tmp/export-a", 1);
-    let right = request("/tmp/export-b", 9);
-    assert_eq!(left.build_recipe().fingerprint(), right.build_recipe().fingerprint());
-}
-
-#[test]
-fn recipe_changes_when_output_input_changes() {
-    assert_ne!(recipe_for_model(ArcticM), recipe_for_model(ArcticL));
-}
+assert_eq!(
+    semantic_identity(request("/tmp/export-a", 1)),
+    semantic_identity(request("/tmp/export-b", 9)),
+);
+assert_ne!(
+    semantic_identity(request_for_model(ArcticM)),
+    semantic_identity(request_for_model(ArcticL)),
+);
 ```
 
-- [ ] **Step 2: Add `BuildRecipe` and canonical fingerprinting**
+- [ ] **Step 2: Replace full-request hashing with an identity projection**
 
-Use length-delimited BLAKE3 fields, matching `EmbeddingRecipeId`; do not hash
-serialized `WorkerBuildRequest`.
+Derive worker compatibility from the source/artifact digest and the existing
+semantic identity types. Do not serialize or hash `WorkerBuildRequest` as the
+recipe, and do not introduce another public recipe structure.
 
-- [ ] **Step 3: Invalidate before model load**
+- [ ] **Step 3: Invalidate incompatible job metadata before model load**
 
-When protocol or recipe is incompatible, persist `Invalidated { reason }`,
-remove incomplete staged state for that job, create a new job, and leave retries
-unchanged.
+When the persisted worker protocol or projected identity does not match, record
+the reason, replace the advisory job record, and start scanning. Do not consume
+retry budget. Leave compatible cache entries available; their existing keys
+decide reuse safely.
 
 - [ ] **Step 4: Run focused tests**
 
 ```bash
-cargo test -p tldr-core worker_protocol
-cargo test -p tldr-cli recipe
+cargo test -p tldr-core lineage
+cargo test -p tldr-core store_search
+cargo test -p tldr-cli bulk_worker
 ```
 
-Expected: deterministic identity and incompatibility tests pass.
+Expected: transport-only changes preserve identity; output-affecting changes do
+not; incompatible job metadata restarts without a retry.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/tldr-core/src/semantic/worker_protocol.rs \
-  crates/tldr-core/src/semantic/lineage.rs \
+git add crates/tldr-core/src/semantic/{lineage.rs,store_search.rs,worker_protocol.rs} \
   crates/tldr-cli/src/bin/tldr_embed_worker.rs \
   crates/tldr-cli/src/commands/daemon/bulk_worker.rs
-git commit -m "fix(semantic): stabilize worker build identity"
+git commit -m "fix(semantic): stabilize worker compatibility identity"
 ```
 
-## Task 4: Implement bounded durable batches (`TLDR-bjux.12`)
+## Task 3: Stream cache-backed windows and live progress (`TLDR-bjux.12`)
 
 **Files:**
 
-- Modify: `crates/tldr-core/src/semantic/redb_store.rs`
+- Modify: `crates/tldr-core/src/semantic/cache.rs`
 - Modify: `crates/tldr-core/src/semantic/vector_store.rs`
 - Modify: `crates/tldr-core/src/semantic/generation.rs`
-- Modify: `crates/tldr-cli/src/bin/tldr_embed_worker.rs`
-
-- [ ] **Step 1: Add failing checkpoint tests**
-
-```rust
-assert_eq!(job.total_batches, 3);
-assert_eq!(job.next_batch, 1);
-assert_eq!(store.committed_vector_count(job.id)?, first_batch_vectors);
-```
-
-Test duplicate, gap, corrupt count, incompatible recipe, and kill before/after
-commit.
-
-- [ ] **Step 2: Persist the complete plan**
-
-Store ordered batch descriptors with stable document/vector identities before
-inference. Bound a batch at 128 vectors or 60 seconds of accumulated work.
-
-- [ ] **Step 3: Commit batch effects atomically**
-
-Replace empty calls such as:
-
-```rust
-ledger.commit_job_batch(&running, &[])?;
-```
-
-with a transaction containing the next checkpoint and exact staged
-embedding/vector identities.
-
-- [ ] **Step 4: Resume and reconstruct**
-
-Load committed staged vectors, begin at `next_batch`, reject gaps/duplicates,
-verify the final count/checksum, build usearch deterministically, then activate
-the generation.
-
-- [ ] **Step 5: Run kill-boundary certification**
-
-```bash
-cargo tldr-certification -- semantic-build,resume
-```
-
-Expected: every interruption converges to the uninterrupted checksum and query.
-
-- [ ] **Step 6: Commit**
-
-```bash
-git add crates/tldr-core/src/semantic/{redb_store.rs,vector_store.rs,generation.rs} \
-  crates/tldr-cli/src/bin/tldr_embed_worker.rs
-git commit -m "fix(semantic): checkpoint bounded vector batches"
-```
-
-## Task 5: Stream and expose progress (`TLDR-bjux.13`)
-
-**Files:**
-
 - Modify: `crates/tldr-core/src/semantic/worker_protocol.rs`
-- Modify: `crates/tldr-core/src/semantic/inference_runners.rs`
+- Modify: `crates/tldr-cli/src/bin/tldr_embed_worker.rs`
 - Modify: `crates/tldr-cli/src/commands/daemon/bulk_worker.rs`
 - Modify: `crates/tldr-cli/src/commands/daemon/index_manager.rs`
 - Modify: `crates/tldr-cli/src/commands/daemon/status.rs`
 
-- [ ] **Step 1: Define the versioned progress payload**
+- [ ] **Step 1: Add fixed-window restart tests**
+
+Use one constant maximum, initially:
+
+```rust
+const EMBEDDING_WINDOW_VECTORS: usize = 128;
+```
+
+Test a corpus larger than one window. Kill after the first window event and
+assert that restart observes those vectors as cache hits. Test a final partial
+window and a one-window corpus.
+
+- [ ] **Step 2: Make cache writes the durable work boundary**
+
+Keep deterministic source order. For each window, read compatible cache entries,
+embed only misses, and use the existing immediate cache writes in
+`flush_streaming_window`. A completed window event may be emitted only after all
+new records in that window are durable.
+
+Do not write a second staged-vector table. Do not require the job checkpoint and
+cache writes to share a cross-store transaction.
+
+- [ ] **Step 3: Reconcile advisory counters**
+
+At start and after each window, derive:
 
 ```rust
 pub struct BuildProgress {
     pub phase: BuildPhase,
-    pub planned_files: u64,
-    pub completed_files: u64,
-    pub planned_chunks: u64,
-    pub completed_chunks: u64,
-    pub total_batches: u64,
-    pub next_batch: u64,
-    pub completed_vectors: u64,
+    pub files_seen: u64,
+    pub files_total: Option<u64>,
     pub cache_hits: u64,
-    pub cache_misses: u64,
+    pub new_vectors: u64,
     pub elapsed_ms: u64,
-    pub checkpoint_age_ms: u64,
     pub retries: u32,
 }
 ```
 
-- [ ] **Step 2: Read events while the worker lives**
+If a cheap exact file denominator already exists, report it. Do not preplan the
+entire corpus for an exact chunk/vector percentage. Render percentage only when
+a truthful denominator exists.
 
-Move stdout reading to a dedicated bounded reader thread/channel before entering
-the `try_wait` loop. Update shared progress for every valid event.
+- [ ] **Step 4: Consume worker events while the child runs**
 
-- [ ] **Step 3: Render honest status**
+Start the bounded stdout reader before the `try_wait` loop in
+`bulk_worker.rs`. Validate the small versioned JSONL frames and update the shared
+snapshot on every event. Preserve a final completion/error event after process
+exit.
 
-Calculate percentage only when a nonzero denominator is known. Otherwise emit a
-phase plus `"percentage": null` and an explanatory reason.
+- [ ] **Step 5: Verify before atomic publication**
 
-- [ ] **Step 4: Test slow and malformed workers**
+Build the final `VectorStore` from the complete current scan, verify its expected
+manifest/count integrity with the existing generation code, and publish it
+atomically. A crash before publication leaves the old generation visible; the
+next run reuses compatible cache vectors.
 
-Run:
+- [ ] **Step 6: Run focused tests**
 
 ```bash
+cargo test -p tldr-core semantic::cache
+cargo test -p tldr-core semantic::vector_store
 cargo test -p tldr-cli bulk_worker
 cargo test -p tldr-cli daemon_status
+cargo tldr-certification -- semantic-build,resume
 ```
 
-Expected: progress is visible before exit; malformed/oversized frames fail
-without deadlock.
+Expected: live progress appears before child exit, every completed first-run
+vector becomes a restart cache hit, and only a fully verified generation becomes
+active.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
-git add crates/tldr-core/src/semantic/{worker_protocol.rs,inference_runners.rs} \
+git add crates/tldr-core/src/semantic/{cache.rs,generation.rs,vector_store.rs,worker_protocol.rs} \
+  crates/tldr-cli/src/bin/tldr_embed_worker.rs \
   crates/tldr-cli/src/commands/daemon/{bulk_worker.rs,index_manager.rs,status.rs}
-git commit -m "feat(semantic): stream live build progress"
+git commit -m "fix(semantic): resume builds from durable embedding cache"
 ```
 
-## Task 6: Meet the cold-build SLO (`TLDR-bjux.14`)
+## Task 4: Profile and fix only the dominant bottleneck (`TLDR-bjux.14`)
 
 **Files:**
 
-- Modify: `crates/tldr-core/src/semantic/structural_planner.rs`
-- Modify: `crates/tldr-core/src/semantic/vector_store.rs`
-- Modify: `crates/tldr-core/src/semantic/fixed_shape.rs`
-- Modify: `crates/tldr-core/src/semantic/fixed_shape_embedder.rs`
-- Modify: `crates/tldr-core/src/semantic/build_metrics.rs`
+- Modify only the measured bottleneck files under:
+  `crates/tldr-core/src/semantic/`
+- Modify: `crates/tldr-contract-tests/src/main.rs`
+- Modify: `docs/FRESH_INSTALL_BENCHMARK_2026-07-28.md`
 
-- [ ] **Step 1: Capture the phase baseline**
+- [ ] **Step 1: Measure the corrected pipeline**
 
-Run the Task 2 harness from empty cache and save the machine-readable record.
-Do not optimize until the record identifies planning, inference, or publication
-as the dominant stage.
+Run the Task 1 benchmark from empty state after Tasks 2 and 3. Record phase
+elapsed time, throughput, CPU utilization, and peak RSS. Identify one dominant
+phase before selecting a change.
 
-- [ ] **Step 2: Remove repeated token-fit work**
+- [ ] **Step 2: Set the first performance change from evidence**
 
-Memoize tokenizer results by `(recipe, document revision)` during planning and
-reuse composed candidates rather than retokenizing the same source prefix.
+Choose the smallest change matching the measurement:
 
-- [ ] **Step 3: Parallelize independent file plans**
-
-Use indexed parallel planning, then sort/flatten by original corpus ordinal so
-planned documents and chunk identities remain byte-identical.
-
-- [ ] **Step 4: Tune fixed-shape inference from measurements**
-
-Change batch/thread settings only when the harness shows better throughput
-without exceeding 4 GiB RSS or changing vectors beyond the frozen tolerance.
-
-- [ ] **Step 5: Enforce the gate**
-
-```bash
-cargo tldr-certification -- semantic-performance
+```text
+planning dominant  -> remove the measured repeated planning/tokenization work
+inference dominant -> tune the measured fixed-shape batch/thread setting
+publication dominant -> remove the measured duplicate materialization/write
 ```
 
-Expected on the documented M2 Max: fresh build and publication ≤30 minutes,
-peak RSS <4 GiB, successful semantic query, identical retrieval oracle.
+Parallel planning or a memoization layer is permitted only when the profile
+demonstrates enough benefit to justify its complexity.
+
+- [ ] **Step 3: Freeze equivalence before optimization**
+
+Record document identities, vector count, manifest identity, and retrieval
+results. The optimization must preserve them; numeric vector tolerance may be
+used only for an explicitly changed inference backend.
+
+- [ ] **Step 4: Implement and compare one change at a time**
+
+For each change, run the same benchmark command and retain it only when it
+materially improves the dominant phase without raising peak RSS above the
+baseline safety limit.
+
+- [ ] **Step 5: Evaluate the 30-minute target honestly**
+
+The 30-minute M2 Max result remains the target. First record a reproducible
+passing measurement; only then turn it into a mandatory platform gate. If the
+first simple fix does not meet the target, the benchmark record must identify
+the remaining dominant phase before another design is proposed.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add crates/tldr-core/src/semantic
-git commit -m "perf(semantic): bound fresh build latency"
+git add crates/tldr-core/src/semantic \
+  crates/tldr-contract-tests/src/main.rs \
+  docs/FRESH_INSTALL_BENCHMARK_2026-07-28.md
+git commit -m "perf(semantic): remove measured cold-build bottleneck"
 ```
 
-## Task 7: Correct cancellation and stop (`TLDR-bjux.15`)
-
-**Files:**
-
-- Modify: `crates/tldr-cli/src/commands/daemon/bulk_worker.rs`
-- Modify: `crates/tldr-cli/src/commands/daemon/daemon.rs`
-- Modify: `crates/tldr-cli/src/commands/init.rs`
-- Modify: `crates/tldr-core/src/semantic/worker_protocol.rs`
-
-- [ ] **Step 1: Add a busy-worker shutdown test**
-
-Assert the command does not report success until worker and daemon PIDs are gone
-and launchd no longer lists the service.
-
-- [ ] **Step 2: Implement cancellation acknowledgement**
-
-Persist `Cancelled`, send/observe cancellation, TERM the process group, wait a
-bounded grace period, KILL only the remaining exact child group, and reap it.
-
-- [ ] **Step 3: Align launchd state**
-
-An explicit managed stop must boot out the exact service label. Explicit
-start/init may bootstrap it again. Status must report registry, process, and
-launchd disagreement as an error.
-
-- [ ] **Step 4: Run lifecycle tests**
-
-```bash
-cargo test -p tldr-cli daemon_stop
-cargo tldr-certification -- semantic-cancel
-```
-
-Expected: no orphan or automatic respawn; completion within 5 seconds.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add crates/tldr-cli/src/commands/{init.rs,daemon} \
-  crates/tldr-core/src/semantic/worker_protocol.rs
-git commit -m "fix(daemon): stop semantic worker tree reliably"
-```
-
-## Task 8: Add the certification matrix (`TLDR-bjux.16`)
+## Task 5: Certify recovery and a fresh installed build (`TLDR-bjux.16`)
 
 **Files:**
 
 - Modify: `crates/tldr-contract-tests/src/main.rs`
-- Modify: `crates/tldr-contract-tests/fixtures/semantic-build/query.toml`
+- Modify: `docs/FRESH_INSTALL_BENCHMARK_2026-07-28.md`
+- Update: relevant Beads records
 
-- [ ] **Step 1: Add table rows for every owned boundary**
+- [ ] **Step 1: Add four recovery scenarios**
 
-Cover kill before/after batch commit, cache/checkpoint divergence, incompatible
-recipe, retryable crash, cancellation, stage/verify/activate publication faults,
-and daemon restart.
+Use the shared runner and cover exactly these semantic-owned boundaries:
 
-- [ ] **Step 2: Keep one implementation**
-
-Generate cold/warm, uninterrupted/resumed, and CLI/MCP projections from the same
-scenario and typed expectation. Do not create new test modules or fixture trees.
-
-- [ ] **Step 3: Run smoke and certification**
-
-```bash
-cargo tldr-smoke
-cargo tldr-certification
+```text
+1. kill before the first durable cache write;
+2. kill after a completed window but before final publication;
+3. restart with a compatible identity and retained cache;
+4. restart with an incompatible identity.
 ```
 
-Expected: smoke contains one fast resume case; certification covers all
-boundaries and leaves no process or temporary state.
+Expected in every case: the old generation remains visible until a complete new
+one publishes; compatible cached inference is reused; incompatible job metadata
+does not spend retry budget.
 
-- [ ] **Step 4: Run repository quality gates**
+- [ ] **Step 2: Run repository quality gates**
 
 ```bash
 cargo fmt --all --check
 CARGO_INCREMENTAL=0 cargo clippy --workspace --all-targets -- -D warnings
 CARGO_INCREMENTAL=0 cargo test --workspace
+cargo tldr-smoke
+cargo tldr-certification -- semantic-build,resume
 ```
 
-Expected: all commands pass.
+Expected: all new semantic scenarios pass. Pre-existing unrelated failures must
+be linked to their existing Beads issue rather than hidden.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 3: Remove only inventoried tldr-owned state**
 
-```bash
-git add crates/tldr-contract-tests
-git commit -m "test(semantic): certify crash-safe fresh builds"
-```
-
-## Task 9: Run clean-install release certification (`TLDR-bjux.17`)
-
-**Files:**
-
-- Modify: `docs/FRESH_INSTALL_BENCHMARK_2026-07-28.md`
-- Modify: relevant Beads epic/task records
-
-- [ ] **Step 1: Remove only verified tldr-owned state**
-
-Inventory exact paths and hashes first. Do not attempt to resume the old
+Follow the benchmark cleanup inventory. Do not resume the historical
 `bulk-b7e8addadd3a5083d50936b3e9e1646a` job.
 
-- [ ] **Step 2: Build and install current HEAD**
+- [ ] **Step 4: Build and install current HEAD**
 
 ```bash
 cargo build --release --locked -p tldr-cli --bins
@@ -501,22 +409,21 @@ cargo install --path crates/tldr-cli --locked --force
 
 Record source commit and installed/release binary hashes.
 
-- [ ] **Step 3: Run one fresh init/warm**
+- [ ] **Step 5: Run one fresh build and installed query**
 
-Capture progress snapshots, phase timings, checkpoint cadence, CPU/RSS and disk
-until the index reaches warm. Do not issue a second init/warm concurrently.
+Capture live progress snapshots, cache hits/new vectors, phase timings, CPU/RSS,
+disk, final generation, and query result. Do not start a second concurrent
+semantic build.
 
-- [ ] **Step 4: Validate installed surfaces**
+- [ ] **Step 6: Update evidence and close only proven work**
 
-Run structural queries, semantic query, hook injection, session stats, MCP
-initialize/tools-list, cancellation, stop, and explicit restart.
+Update the benchmark and all linked Beads problems with exact results. The epic
+closes only when the installed fresh build publishes, queries successfully,
+recovery certification passes, and the measured completion target is satisfied.
+Daemon/launchd stop behavior remains tracked by `TLDR-cxa.3` and does not block
+this semantic-build epic.
 
-- [ ] **Step 5: Update evidence and close only proven work**
-
-Update the benchmark and Beads records with exact measurements. Close the epic
-only when every acceptance gate passes from empty state.
-
-- [ ] **Step 6: Commit and push**
+- [ ] **Step 7: Commit and push**
 
 ```bash
 git pull --rebase fork main
@@ -529,13 +436,17 @@ Expected: Git and Beads are pushed; branch is clean and synchronized.
 
 ## Self-review
 
-- Spec coverage: all eight problem issues map to Tasks 3–7; harness,
-  certification, and clean rerun are Tasks 2, 8, and 9.
-- Compatibility: the plan explicitly discards old one-batch jobs; no task is
-  dedicated to salvaging the current benchmark state.
-- Correctness order: state machine and harness precede implementation;
-  certification precedes clean release rerun.
-- No duplicate persistence owner: redb remains authoritative; usearch remains a
-  rebuildable published artifact.
-- No duplicate test architecture: all scenarios extend the existing shared
-  `tldr-contract-tests` runner.
+- Spec coverage: stable identity is Task 2; bounded cache-backed restart and live
+  progress are Task 3; measured performance is Task 4; crash and clean-install
+  evidence are Task 5.
+- Simplicity: no duplicate recipe, vector ledger, staged-vector store, global
+  transaction, whole-corpus preplan, or dual count/time checkpoint policy.
+- Correctness: durable compatible cache records prevent repeated inference;
+  existing generation verification/publication prevents partial visibility.
+- Observability: phase, files, cache hits, new vectors, elapsed time, and retries
+  answer whether work is advancing without pretending an unknown denominator is
+  known.
+- Scope: launchd cancellation remains in the lifecycle epic and is not a
+  semantic publication dependency.
+- Complexity gate: optimization follows a measured bottleneck; it is not chosen
+  in advance.
