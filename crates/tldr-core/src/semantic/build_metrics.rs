@@ -29,6 +29,7 @@
 //! These limits are recorded verbatim in every emitted report's `limitations`.
 
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -37,10 +38,13 @@ use crate::semantic::embedder::EMBED_BATCH_SIZE;
 use crate::semantic::index::BuildOptions;
 use crate::util;
 
+use crate::build_timing::UnitTimingCollector;
+pub use crate::build_timing::{SlowUnit, UnitSummary};
+
 /// Metrics report schema version. Bump when the serialized shape of
-/// [`MetricsReport`] changes in a way that breaks consumers. (`5` = bounded
-/// streaming-stage telemetry.)
-pub const METRICS_SCHEMA_VERSION: u32 = 5;
+/// [`MetricsReport`] changes in a way that breaks consumers. (`6` = correlated
+/// process roles and bounded atomic-unit timing.)
+pub const METRICS_SCHEMA_VERSION: u32 = 6;
 
 /// Default RSS sampling interval for the timeline.
 const DEFAULT_RSS_SAMPLE_INTERVAL_MS: u64 = 500;
@@ -57,6 +61,11 @@ pub struct MetricsReport {
     /// Run identifier (`<unix-millis start>-<pid>`). Collides only for
     /// same-millisecond starts within one process, i.e. effectively never.
     pub run_id: String,
+    /// Parent run when this report belongs to a daemon-spawned worker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_run_id: Option<String>,
+    /// Process role (`foreground`, `daemon`, or `semantic_worker`).
+    pub process_role: String,
     /// Resolved embedding model.
     pub model: ModelInfo,
     /// Repository-relative or absolute root as passed to the build.
@@ -72,6 +81,9 @@ pub struct MetricsReport {
     pub duration_ms: u64,
     /// Timed phase boundaries (`chunk`, `cache_lookup`, `model_load`, `embed`).
     pub phases: Vec<PhaseRecord>,
+    /// Bounded atomic-unit timing summaries.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub units: Vec<UnitSummary>,
     /// Total chunks (cached + embedded).
     pub chunks_total: usize,
     /// Chunks served from the content-addressed cache (Phase 1 hits).
@@ -259,6 +271,9 @@ pub struct BuildMetrics {
     options: BuildOptionsSummary,
     start: Instant,
     started_at_unix_ms: u64,
+    run_id: String,
+    parent_run_id: Option<String>,
+    process_role: String,
     phases: Vec<PhaseRecord>,
     current_phase: Option<(String, Instant)>,
     cache_hits: usize,
@@ -271,10 +286,12 @@ pub struct BuildMetrics {
     /// groups match the batches the session actually sees.
     input_lengths: Vec<usize>,
     fixed_executions: Vec<crate::semantic::FixedShapeExecution>,
+    fixed_execution_index: usize,
     embed_latency_ms: u64,
     /// Token-budget outcomes per input (TLDR-9bxa.2), accumulated into the report.
     token_stats: crate::semantic::token_budget::TokenStats,
     pipeline: Option<crate::semantic::PipelineTelemetry>,
+    units: UnitTimingCollector,
     rss_samples: Arc<Mutex<Vec<RssSample>>>,
     /// Condvar-based shutdown signal so the sampler wakes and exits promptly
     /// (sub-millisecond) on finalize/drop, instead of polling a flag every
@@ -301,6 +318,11 @@ impl BuildMetrics {
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
         let sample_interval_ms = DEFAULT_RSS_SAMPLE_INTERVAL_MS;
+        let run_id = std::env::var("TLDR_BUILD_RUN_ID")
+            .unwrap_or_else(|_| format!("{}-{}", started_at_unix_ms, std::process::id()));
+        let parent_run_id = std::env::var("TLDR_BUILD_PARENT_RUN_ID").ok();
+        let process_role =
+            std::env::var("TLDR_BUILD_PROCESS_ROLE").unwrap_or_else(|_| "foreground".into());
         let rss_samples = Arc::new(Mutex::new(Vec::new()));
         let signal = SamplerSignal::new();
         let sampler_handle = Some(spawn_sampler(
@@ -319,6 +341,9 @@ impl BuildMetrics {
             options: BuildOptionsSummary::from_options(options, enrich, backend),
             start,
             started_at_unix_ms,
+            run_id: run_id.clone(),
+            parent_run_id,
+            process_role: process_role.clone(),
             phases: Vec::new(),
             current_phase: None,
             cache_hits: 0,
@@ -326,9 +351,18 @@ impl BuildMetrics {
             cache_opened: false,
             input_lengths: Vec::new(),
             fixed_executions: Vec::new(),
+            fixed_execution_index: 0,
             embed_latency_ms: 0,
             token_stats: crate::semantic::token_budget::TokenStats::default(),
             pipeline: None,
+            units: UnitTimingCollector::new(
+                run_id.clone(),
+                process_role.clone(),
+                std::env::var_os("TLDR_BUILD_METRICS_DETAIL")
+                    .as_deref()
+                    .map(Path::new),
+            )
+            .unwrap_or_else(|_| UnitTimingCollector::aggregate(&run_id, &process_role)),
             rss_samples,
             signal,
             sampler_handle,
@@ -382,7 +416,25 @@ impl BuildMetrics {
         &mut self,
         executions: Vec<crate::semantic::FixedShapeExecution>,
     ) {
+        for execution in &executions {
+            self.record_unit(
+                "inference_batch",
+                self.fixed_execution_index.to_string(),
+                execution.latency_ms.ceil() as u64,
+            );
+            self.fixed_execution_index += 1;
+        }
         self.fixed_executions.extend(executions);
+    }
+
+    /// Record one atomic unit in a bounded distribution.
+    pub fn record_unit(
+        &mut self,
+        kind: impl Into<String>,
+        identity: impl Into<String>,
+        duration_ms: u64,
+    ) {
+        self.units.record(kind, None, identity, duration_ms);
     }
 
     /// Set the token-budget stats from the Embedder's accumulated checks
@@ -412,6 +464,7 @@ impl BuildMetrics {
         // sampler join must NOT be counted in duration.
         self.end_phase();
         let duration_ms = self.start.elapsed().as_millis() as u64;
+        let _ = self.units.finish();
         self.stop_sampler();
         let mut timeline = self
             .rss_samples
@@ -462,16 +515,39 @@ impl BuildMetrics {
             chunks_per_second: ms_per_sec(duration_ms, chunks_total),
             embeddings_per_second: ms_per_sec(self.embed_latency_ms, chunks_embedded),
         };
+        let units = self.units.summaries();
+        let mut phases = self.phases.clone();
+        for (unit_kind, phase_name) in [
+            ("semantic_file_plan", "semantic_planning"),
+            ("cache_lookup_window", "cache_lookup"),
+            ("inference_window", "inference"),
+            ("cache_write_window", "cache_write"),
+            ("vector_assembly_window", "vector_assembly"),
+        ] {
+            if let Some(summary) = units
+                .iter()
+                .find(|summary| summary.kind == unit_kind && summary.group.is_none())
+            {
+                phases.push(PhaseRecord {
+                    name: phase_name.into(),
+                    duration_ms: summary.total_duration_ms,
+                    rss_bytes_at_end: None,
+                });
+            }
+        }
         MetricsReport {
             schema_version: METRICS_SCHEMA_VERSION,
-            run_id: format!("{}-{}", self.started_at_unix_ms, std::process::id()),
+            run_id: self.run_id.clone(),
+            parent_run_id: self.parent_run_id.clone(),
+            process_role: self.process_role.clone(),
             model: self.model.clone(),
             root: self.root.clone(),
             corpus_digest: self.corpus_digest,
             options: self.options.clone(),
             started_at_unix_ms: self.started_at_unix_ms,
             duration_ms,
-            phases: self.phases.clone(),
+            phases,
+            units,
             chunks_total,
             chunks_cached: self.cache_hits,
             chunks_embedded,

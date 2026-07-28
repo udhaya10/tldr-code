@@ -196,6 +196,12 @@ impl VectorStore {
         self.build_metrics.as_ref()
     }
 
+    pub(crate) fn build_metrics_mut(
+        &mut self,
+    ) -> Option<&mut crate::semantic::build_metrics::MetricsReport> {
+        self.build_metrics.as_mut()
+    }
+
     /// The build-time corpus digest persisted with this store (TLDR-kkt). Compare
     /// against [`compute_corpus_digest`] over the current root to detect source
     /// drift (added/removed file, or any file's mtime/size change). 0 for stores
@@ -501,6 +507,9 @@ const CURRENT_MAGIC: u32 = 0x544C_4452;
 /// Generations retained by GC (the active one + rollback headroom). Keeps a
 /// concurrent reader's snapshot alive across a few saves (design doc §7.1).
 const KEEP_GENS: u64 = 3;
+/// Maximum number of vectors whose cache lookup/inference is grouped into one
+/// durable semantic-build progress window.
+pub const EMBEDDING_WINDOW_VECTORS: usize = 128;
 
 /// What kind of filesystem object a tracked path was at index time — lets
 /// reconcile (§7.3) detect file↔dir/type swaps, not just content changes.
@@ -1470,15 +1479,22 @@ impl VectorStore {
             keys.insert(*key);
         }
         let (mtime, size, file_type) = stat_signal(&chunks[0].file_path);
-        self.set_file_record(
-            file_rel,
-            FileRecord {
-                keys,
-                mtime,
-                size,
-                file_type,
-            },
-        );
+        if let Some(existing) = self.files.get_mut(&file_rel) {
+            existing.keys.extend(keys);
+            existing.mtime = mtime;
+            existing.size = size;
+            existing.file_type = file_type;
+        } else {
+            self.set_file_record(
+                file_rel,
+                FileRecord {
+                    keys,
+                    mtime,
+                    size,
+                    file_type,
+                },
+            );
+        }
         Ok(())
     }
 
@@ -1542,6 +1558,7 @@ impl VectorStore {
             pipeline_config,
             cancellation,
             None,
+            None,
         )
     }
 
@@ -1562,6 +1579,27 @@ impl VectorStore {
             crate::semantic::StreamingBuildConfig::default(),
             crate::semantic::BuildCancellation::default(),
             Some(source_chunks),
+            None,
+        )
+    }
+
+    /// Build from shared artifacts while reporting durable window progress.
+    pub fn build_from_artifacts_with_progress(
+        root: &Path,
+        options: &BuildOptions,
+        cache_config: Option<CacheConfig>,
+        source_chunks: Vec<CodeChunk>,
+        observer: &mut dyn FnMut(crate::semantic::BuildProgress) -> TldrResult<()>,
+    ) -> TldrResult<Self> {
+        build_streaming_store(
+            root,
+            options,
+            cache_config,
+            crate::semantic::DocumentEmbeddingBackend::from_env()?,
+            crate::semantic::StreamingBuildConfig::default(),
+            crate::semantic::BuildCancellation::default(),
+            Some(source_chunks),
+            Some(observer),
         )
     }
 }
@@ -1570,6 +1608,13 @@ struct PendingStreamFile {
     path: PathBuf,
     chunks: Vec<CodeChunk>,
     documents: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WindowOutcome {
+    cache_hits: usize,
+    new_vectors: usize,
+    duration_ms: u64,
 }
 
 enum StreamingEmbedder {
@@ -1626,11 +1671,13 @@ fn build_streaming_store(
     pipeline_config: crate::semantic::StreamingBuildConfig,
     cancellation: crate::semantic::BuildCancellation,
     source_artifacts: Option<Vec<CodeChunk>>,
+    mut observer: Option<&mut dyn FnMut(crate::semantic::BuildProgress) -> TldrResult<()>>,
 ) -> TldrResult<VectorStore> {
     use crate::semantic::build_pipeline::{BuildPipelineError, PipelineStage};
     use crate::semantic::cache::EmbeddingCache;
     use crate::semantic::enrichment::enrich_chunks;
     use crate::semantic::index::{BYTES_PER_CHUNK, MAX_INDEX_SIZE, MAX_MEMORY_BYTES};
+    let build_started = std::time::Instant::now();
     let capacities = pipeline_config.capacities().map_err(pipeline_error)?;
     let corpus_digest = compute_corpus_digest(root);
     let enrich = std::env::var("TLDR_ENRICH")
@@ -1679,6 +1726,21 @@ fn build_streaming_store(
             crate::Language::from_path(file).is_some_and(|language| languages.contains(&language))
         });
     }
+    let files_total = files.len() as u64;
+    emit_progress(
+        &mut observer,
+        crate::semantic::BuildProgress {
+            phase: crate::semantic::BuildPhase::Planning,
+            files_seen: 0,
+            files_total: Some(files_total),
+            windows_completed: 0,
+            cache_hits: 0,
+            new_vectors: 0,
+            last_window_duration_ms: None,
+            elapsed_ms: build_started.elapsed().as_millis() as u64,
+            retries: 0,
+        },
+    )?;
     if let Some(metrics) = metrics.as_mut() {
         metrics.end_phase();
     }
@@ -1694,6 +1756,20 @@ fn build_streaming_store(
     }
 
     cancellation.check().map_err(pipeline_error)?;
+    emit_progress(
+        &mut observer,
+        crate::semantic::BuildProgress {
+            phase: crate::semantic::BuildPhase::ModelLoad,
+            files_seen: 0,
+            files_total: Some(files_total),
+            windows_completed: 0,
+            cache_hits: 0,
+            new_vectors: 0,
+            last_window_duration_ms: None,
+            elapsed_ms: build_started.elapsed().as_millis() as u64,
+            retries: 0,
+        },
+    )?;
     if let Some(metrics) = metrics.as_mut() {
         metrics.begin_phase("model_load");
     }
@@ -1742,10 +1818,10 @@ fn build_streaming_store(
     let mut window = Vec::<PendingStreamFile>::new();
     let mut window_items = 0usize;
     let mut window_bytes = 0usize;
-    // Reserve one quarter of the budget/capacity for the next complete file so
-    // parsing/composition cannot push a full window over its declared bound.
-    let max_file_items = (capacities.chunks / 4).max(1);
-    let max_window_items = capacities.chunks.saturating_sub(max_file_items).max(1);
+    let mut cache_hits = 0usize;
+    let mut new_vectors = 0usize;
+    let mut last_window_duration_ms = None;
+    let max_window_items = capacities.chunks.clamp(1, EMBEDDING_WINDOW_VECTORS);
     let max_file_bytes = (pipeline_config.memory_budget_bytes / 4).max(1);
     let max_window_bytes = pipeline_config
         .memory_budget_bytes
@@ -1753,6 +1829,7 @@ fn build_streaming_store(
         .max(1);
 
     while let Some(file) = producer.recv() {
+        let file_started = std::time::Instant::now();
         cancellation.check().map_err(pipeline_error)?;
         telemetry.files_seen += 1;
         let mut source_files = if let Some(artifacts) = artifact_files.as_mut() {
@@ -1793,18 +1870,6 @@ fn build_streaming_store(
         if chunks.is_empty() {
             continue;
         }
-        if chunks.len() > max_file_items {
-            return Err(pipeline_error(
-                BuildPipelineError::new(
-                    PipelineStage::Parse,
-                    format!(
-                        "one file produced {} chunks; per-file bound is {max_file_items}",
-                        chunks.len()
-                    ),
-                )
-                .at_file(&file),
-            ));
-        }
         let documents = if enrich {
             enrich_chunks(&chunks, root)
                 .iter()
@@ -1831,70 +1896,91 @@ fn build_streaming_store(
                 BuildPipelineError::new(PipelineStage::Compose, error.to_string()).at_file(&file),
             )
         })?;
-        let payload_bytes = chunks
-            .iter()
-            .zip(&documents)
-            .map(|(chunk, document)| {
-                chunk.content.len() * 2
-                    + document.len()
-                    + options.model.dimensions() * std::mem::size_of::<f32>()
-            })
-            .sum::<usize>();
-        if payload_bytes > max_file_bytes {
-            return Err(pipeline_error(
-                BuildPipelineError::new(
-                    PipelineStage::Compose,
-                    format!(
-                        "one file needs {payload_bytes} bytes; per-file bound is {max_file_bytes}"
-                    ),
-                )
-                .at_file(&file),
-            ));
+        if let Some(metrics) = metrics.as_mut() {
+            metrics.record_unit(
+                "semantic_file_plan",
+                root_relative(root, &file),
+                file_started.elapsed().as_millis() as u64,
+            );
         }
-        if !window.is_empty()
-            && (window_items + chunks.len() > max_window_items
-                || window_bytes + payload_bytes > max_window_bytes)
-        {
-            flush_streaming_window(
-                &mut window,
-                &mut store,
-                root,
-                &mut embedder,
-                &mut cache,
-                &cache_recipe,
-                metrics.as_mut(),
-                &mut token_stats,
-                &mut telemetry,
-                &cancellation,
-                &mut lineage_allocator,
-            )?;
-            window_items = 0;
-            window_bytes = 0;
-        }
-        window_items += chunks.len();
-        window_bytes += payload_bytes;
-        telemetry.observe_window(window_items, window_bytes);
-        window.push(PendingStreamFile {
-            path: file,
-            chunks,
-            documents,
-        });
-        total_chunks += window.last().expect("just pushed").chunks.len();
-        if total_chunks > MAX_INDEX_SIZE {
-            return Err(TldrError::IndexTooLarge {
-                count: total_chunks,
-                max: MAX_INDEX_SIZE,
+        for (chunk, document) in chunks.into_iter().zip(documents) {
+            let payload_bytes = chunk.content.len() * 2
+                + document.len()
+                + options.model.dimensions() * std::mem::size_of::<f32>();
+            if payload_bytes > max_file_bytes {
+                return Err(pipeline_error(
+                    BuildPipelineError::new(
+                        PipelineStage::Compose,
+                        format!(
+                            "one chunk needs {payload_bytes} bytes; per-unit bound is {max_file_bytes}"
+                        ),
+                    )
+                    .at_file(&file),
+                ));
+            }
+            if !window.is_empty()
+                && (window_items + 1 > max_window_items
+                    || window_bytes + payload_bytes > max_window_bytes)
+            {
+                let outcome = flush_streaming_window(
+                    &mut window,
+                    &mut store,
+                    root,
+                    &mut embedder,
+                    &mut cache,
+                    &cache_recipe,
+                    metrics.as_mut(),
+                    &mut token_stats,
+                    &mut telemetry,
+                    &cancellation,
+                    &mut lineage_allocator,
+                )?
+                .expect("non-empty streaming window");
+                cache_hits += outcome.cache_hits;
+                new_vectors += outcome.new_vectors;
+                last_window_duration_ms = Some(outcome.duration_ms);
+                emit_progress(
+                    &mut observer,
+                    crate::semantic::BuildProgress {
+                        phase: crate::semantic::BuildPhase::Embedding,
+                        files_seen: telemetry.files_seen as u64,
+                        files_total: Some(files_total),
+                        windows_completed: telemetry.windows_completed as u64,
+                        cache_hits: cache_hits as u64,
+                        new_vectors: new_vectors as u64,
+                        last_window_duration_ms,
+                        elapsed_ms: build_started.elapsed().as_millis() as u64,
+                        retries: 0,
+                    },
+                )?;
+                window_items = 0;
+                window_bytes = 0;
+            }
+            window_items += 1;
+            window_bytes += payload_bytes;
+            telemetry.observe_window(window_items, window_bytes);
+            window.push(PendingStreamFile {
+                path: file.clone(),
+                chunks: vec![chunk],
+                documents: vec![document],
             });
-        }
-        let estimated_memory = total_chunks * BYTES_PER_CHUNK;
-        if estimated_memory > MAX_MEMORY_BYTES {
-            return Err(TldrError::MemoryLimitExceeded {
-                estimated_mb: estimated_memory / (1024 * 1024),
-                max_mb: MAX_MEMORY_BYTES / (1024 * 1024),
-            });
+            total_chunks += 1;
+            if total_chunks > MAX_INDEX_SIZE {
+                return Err(TldrError::IndexTooLarge {
+                    count: total_chunks,
+                    max: MAX_INDEX_SIZE,
+                });
+            }
+            let estimated_memory = total_chunks * BYTES_PER_CHUNK;
+            if estimated_memory > MAX_MEMORY_BYTES {
+                return Err(TldrError::MemoryLimitExceeded {
+                    estimated_mb: estimated_memory / (1024 * 1024),
+                    max_mb: MAX_MEMORY_BYTES / (1024 * 1024),
+                });
+            }
         }
     }
-    flush_streaming_window(
+    let final_outcome = flush_streaming_window(
         &mut window,
         &mut store,
         root,
@@ -1907,15 +1993,48 @@ fn build_streaming_store(
         &cancellation,
         &mut lineage_allocator,
     )?;
+    if let Some(outcome) = final_outcome {
+        cache_hits += outcome.cache_hits;
+        new_vectors += outcome.new_vectors;
+        last_window_duration_ms = Some(outcome.duration_ms);
+        emit_progress(
+            &mut observer,
+            crate::semantic::BuildProgress {
+                phase: crate::semantic::BuildPhase::Embedding,
+                files_seen: telemetry.files_seen as u64,
+                files_total: Some(files_total),
+                windows_completed: telemetry.windows_completed as u64,
+                cache_hits: cache_hits as u64,
+                new_vectors: new_vectors as u64,
+                last_window_duration_ms,
+                elapsed_ms: build_started.elapsed().as_millis() as u64,
+                retries: 0,
+            },
+        )?;
+    }
     telemetry.producer_backpressure_events = producer.finish().map_err(pipeline_error)?;
     build_stats.chunks_created = total_chunks;
     store.corpus_digest = corpus_digest;
     store.build_stats = build_stats;
     if let Some(mut metrics) = metrics {
         metrics.set_token_stats(token_stats);
-        metrics.set_pipeline_telemetry(telemetry);
+        metrics.set_pipeline_telemetry(telemetry.clone());
         store.build_metrics = Some(metrics.finalize(total_chunks));
     }
+    emit_progress(
+        &mut observer,
+        crate::semantic::BuildProgress {
+            phase: crate::semantic::BuildPhase::Verifying,
+            files_seen: telemetry.files_seen as u64,
+            files_total: Some(files_total),
+            windows_completed: telemetry.windows_completed as u64,
+            cache_hits: cache_hits as u64,
+            new_vectors: new_vectors as u64,
+            last_window_duration_ms,
+            elapsed_ms: build_started.elapsed().as_millis() as u64,
+            retries: 0,
+        },
+    )?;
     Ok(store)
 }
 
@@ -1932,11 +2051,12 @@ fn flush_streaming_window(
     telemetry: &mut crate::semantic::PipelineTelemetry,
     cancellation: &crate::semantic::BuildCancellation,
     lineage_allocator: &mut ChunkIdAllocator,
-) -> TldrResult<()> {
+) -> TldrResult<Option<WindowOutcome>> {
     use crate::semantic::build_pipeline::{BuildPipelineError, PipelineStage};
     if window.is_empty() {
-        return Ok(());
+        return Ok(None);
     }
+    let window_started = std::time::Instant::now();
     cancellation.check().map_err(pipeline_error)?;
     let total = window.iter().map(|file| file.chunks.len()).sum::<usize>();
     let mut cache_chunks = Vec::with_capacity(total);
@@ -1951,6 +2071,7 @@ fn flush_streaming_window(
     }
     let mut vectors = vec![None; total];
     let mut misses = Vec::new();
+    let cache_lookup_started = std::time::Instant::now();
     for (index, (chunk, document)) in cache_chunks.iter().zip(&document_refs).enumerate() {
         match cache
             .as_mut()
@@ -1959,6 +2080,13 @@ fn flush_streaming_window(
             Some(vector) => vectors[index] = Some(vector),
             None => misses.push(index),
         }
+    }
+    if let Some(metrics) = metrics.as_mut() {
+        metrics.record_unit(
+            "cache_lookup_window",
+            telemetry.windows_completed.to_string(),
+            cache_lookup_started.elapsed().as_millis() as u64,
+        );
     }
     if let Some(metrics) = metrics.as_mut() {
         metrics.record_cache(total - misses.len(), misses.len());
@@ -1984,7 +2112,13 @@ fn flush_streaming_window(
             ))
         })?;
         if let Some(metrics) = metrics.as_mut() {
-            metrics.record_embed_latency_ms(started.elapsed().as_millis() as u64);
+            let inference_ms = started.elapsed().as_millis() as u64;
+            metrics.record_embed_latency_ms(inference_ms);
+            metrics.record_unit(
+                "inference_window",
+                telemetry.windows_completed.to_string(),
+                inference_ms,
+            );
             metrics.record_fixed_executions(embedder.take_fixed_executions());
         }
         for (index, vector) in embedded {
@@ -1999,6 +2133,7 @@ fn flush_streaming_window(
             }
         }
     }
+    let cache_write_started = std::time::Instant::now();
     let vectors = vectors
         .into_iter()
         .enumerate()
@@ -2032,6 +2167,14 @@ fn flush_streaming_window(
             ))
         })?;
     }
+    if let Some(metrics) = metrics.as_mut() {
+        metrics.record_unit(
+            "cache_write_window",
+            telemetry.windows_completed.to_string(),
+            cache_write_started.elapsed().as_millis() as u64,
+        );
+    }
+    let assembly_started = std::time::Instant::now();
     let mut offset = 0;
     for file in window.iter() {
         let end = offset + file.chunks.len();
@@ -2051,9 +2194,38 @@ fn flush_streaming_window(
             })?;
         offset = end;
     }
+    if let Some(metrics) = metrics.as_mut() {
+        metrics.record_unit(
+            "vector_assembly_window",
+            telemetry.windows_completed.to_string(),
+            assembly_started.elapsed().as_millis() as u64,
+        );
+    }
     telemetry.windows_completed += 1;
+    let duration_ms = window_started.elapsed().as_millis() as u64;
+    if let Some(metrics) = metrics.as_mut() {
+        metrics.record_unit(
+            "embedding_window",
+            telemetry.windows_completed.saturating_sub(1).to_string(),
+            duration_ms,
+        );
+    }
     window.clear();
-    Ok(())
+    Ok(Some(WindowOutcome {
+        cache_hits: total - misses.len(),
+        new_vectors: misses.len(),
+        duration_ms,
+    }))
+}
+
+fn emit_progress(
+    observer: &mut Option<&mut dyn FnMut(crate::semantic::BuildProgress) -> TldrResult<()>>,
+    progress: crate::semantic::BuildProgress,
+) -> TldrResult<()> {
+    match observer.as_deref_mut() {
+        Some(observer) => observer(progress),
+        None => Ok(()),
+    }
 }
 
 fn pipeline_error(error: crate::semantic::BuildPipelineError) -> TldrError {

@@ -607,6 +607,15 @@ pub enum DaemonCommand {
         /// Optional language filter
         #[serde(default)]
         language: Option<String>,
+        /// Optional final correlated metrics report.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        metrics_path: Option<PathBuf>,
+        /// Optional exact per-unit JSONL stream.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        metrics_detail_path: Option<PathBuf>,
+        /// Owning build run identity.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        run_id: Option<String>,
     },
 
     /// Semantic search (if model loaded)
@@ -961,6 +970,9 @@ pub struct SemanticIndexStats {
     /// Workload-specific embedding session state.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub runners: Vec<InferenceRunnerStats>,
+    /// Latest reconciled semantic build progress.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress: Option<tldr_core::semantic::BuildProgress>,
 }
 
 /// One query, delta, or bulk inference runner in daemon status.

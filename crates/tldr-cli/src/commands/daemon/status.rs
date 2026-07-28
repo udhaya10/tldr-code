@@ -240,6 +240,9 @@ impl DaemonStatusArgs {
                         }
                         if let Some(idx) = &semantic_index {
                             println!("Index:   {}", format_semantic_index(idx));
+                            if let Some(progress) = &idx.progress {
+                                println!("Progress: {}", format_build_progress(progress));
+                            }
                             if !idx.runners.is_empty() {
                                 println!("Runners: {}", format_inference_runners(&idx.runners));
                             }
@@ -366,6 +369,35 @@ fn format_semantic_index(idx: &SemanticIndexStats) -> String {
         ("cold", _) => "cold (run 'tldr warm')".to_string(),
         (state, _) => state.to_string(),
     }
+}
+
+fn format_build_progress(progress: &tldr_core::semantic::BuildProgress) -> String {
+    use tldr_core::semantic::BuildPhase;
+    let phase = match progress.phase {
+        BuildPhase::Planning => "planning",
+        BuildPhase::ModelLoad => "model_load",
+        BuildPhase::Embedding => "embedding",
+        BuildPhase::Verifying => "verifying",
+        BuildPhase::Publishing => "publishing",
+        BuildPhase::Completed => "completed",
+    };
+    let files = match progress.files_total {
+        Some(total) => format!("{}/{} files", progress.files_seen, total),
+        None => format!("{} files", progress.files_seen),
+    };
+    let window = progress
+        .last_window_duration_ms
+        .map(|duration| format!(" last_window={}ms", duration))
+        .unwrap_or_default();
+    format!(
+        "{phase} {files} windows={} cache_hits={} new_vectors={} elapsed={}ms retries={}{}",
+        progress.windows_completed,
+        progress.cache_hits,
+        progress.new_vectors,
+        progress.elapsed_ms,
+        progress.retries,
+        window
+    )
 }
 
 fn format_inference_runners(runners: &[InferenceRunnerStats]) -> String {

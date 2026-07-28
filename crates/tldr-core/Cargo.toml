@@ -143,3 +143,6 @@ semantic = [
 ]
 # Experimental V2 call graph builder with parallel processing (Phase 14)
 experimental_callgraph = []
+
+[dev-dependencies]
+tempfile = { workspace = true }

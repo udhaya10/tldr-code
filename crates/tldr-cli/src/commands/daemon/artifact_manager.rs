@@ -7,7 +7,7 @@ use arc_swap::ArcSwapOption;
 use tldr_core::artifact_store::{
     schema::STORE_FILE, ArtifactKey, ArtifactKind, ArtifactStore, ArtifactSubject, FileFacts,
     FunctionArtifactCoordinator, GenerationSnapshot, IngestionEngine, IngestionReport,
-    IngestionScope, ProducerId, ProjectId, RedbArtifactStore,
+    IngestionScope, IngestionTimingOptions, ProducerId, ProjectId, RedbArtifactStore,
 };
 use tldr_core::{CfgInfo, DfgInfo, Language, TldrError};
 
@@ -154,13 +154,21 @@ impl ArtifactManager {
 
     /// Start or resume a full generation, reusing unchanged file artifacts.
     pub fn warm(&self) -> tldr_core::TldrResult<IngestionReport> {
-        self.ingest(IngestionScope::Project)
+        self.ingest(IngestionScope::Project, None)
+    }
+
+    /// Warm with a correlated run identity and optional exact unit output.
+    pub fn warm_with_timing(
+        &self,
+        timing: IngestionTimingOptions,
+    ) -> tldr_core::TldrResult<IngestionReport> {
+        self.ingest(IngestionScope::Project, Some(timing))
     }
 
     /// Submit a canonical source change through the same resumable engine.
     pub fn apply_delta(&self, file: &Path) -> tldr_core::TldrResult<IngestionReport> {
         let relative = delta_relative(&self.project, file)?;
-        self.ingest(IngestionScope::Files(vec![relative]))
+        self.ingest(IngestionScope::Files(vec![relative]), None)
     }
 
     /// Current storage and resident-view footprint.
@@ -203,14 +211,23 @@ impl ArtifactManager {
             .set_vector_generation(generation, vector_generation)
     }
 
-    fn ingest(&self, scope: IngestionScope) -> tldr_core::TldrResult<IngestionReport> {
+    fn ingest(
+        &self,
+        scope: IngestionScope,
+        timing: Option<IngestionTimingOptions>,
+    ) -> tldr_core::TldrResult<IngestionReport> {
         let _writer = self.writer.lock().expect("artifact writer poisoned");
         let target_generation = self.store.active_generation()?.unwrap_or(0) + 1;
         *self.state.write().expect("artifact state poisoned") =
             ArtifactState::Building { target_generation };
 
-        let result = IngestionEngine::new(&self.project, self.store.clone())
-            .and_then(|engine| engine.ingest(scope));
+        let result =
+            IngestionEngine::new(&self.project, self.store.clone()).and_then(
+                |engine| match timing {
+                    Some(timing) => engine.ingest_with_timing(scope, timing),
+                    None => engine.ingest(scope),
+                },
+            );
         match result {
             Ok(report) => {
                 let snapshot = Arc::new(GenerationSnapshot::load(

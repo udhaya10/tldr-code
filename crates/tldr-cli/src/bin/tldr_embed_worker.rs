@@ -5,7 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context, Result};
 use tldr_core::semantic::{
-    decode_worker_message, encode_worker_message, load_or_build_store_from_artifacts,
+    decode_worker_message, encode_worker_message, load_or_build_store_from_artifacts_with_progress,
     GenerationManager, JobRecord, JobState, RedbStore, WorkerBuildRequest, WorkerEvent,
     DEFAULT_REDB_CACHE_BYTES, MAX_WORKER_MESSAGE_BYTES, WORKER_PROTOCOL_VERSION,
 };
@@ -18,13 +18,28 @@ fn main() -> Result<()> {
         .context("read worker request")?;
     let request: WorkerBuildRequest = decode_worker_message(&input)?;
     request.validate()?;
-    let recipe = request_recipe(&request)?;
+    let recipe = request.compatibility_fingerprint()?;
     let ledger_path = request.store_dir.join("worker-jobs.redb");
     let ledger = RedbStore::open(&ledger_path, DEFAULT_REDB_CACHE_BYTES)?;
-    let previous = ledger.get_job(&request.job_id)?;
+    let mut previous = ledger.get_job(&request.job_id)?;
+    if let Some(record) = previous.as_ref() {
+        if record.protocol_version != WORKER_PROTOCOL_VERSION || record.recipe != recipe {
+            let reason = format!(
+                "discarded incompatible worker metadata: protocol={} recipe_match={}",
+                record.protocol_version,
+                record.recipe == recipe
+            );
+            ledger.remove_job(&request.job_id)?;
+            emit(&WorkerEvent::Invalidated {
+                reason: reason.clone(),
+            })?;
+            previous = None;
+        }
+    }
     if previous
         .as_ref()
         .is_some_and(|record| record.state == JobState::Completed)
+        && !request.options.collect_metrics
     {
         let identity =
             tldr_core::semantic::store_search::manifest_id_for(&request.project, &request.options);
@@ -33,23 +48,31 @@ fn main() -> Result<()> {
             vectors: store.len(),
         });
     }
-    let attempt = previous
-        .as_ref()
-        .map_or(1, |record| record.retries.saturating_add(1));
-    if attempt > request.max_retries {
+    let retries = previous.as_ref().map_or(0, |record| {
+        record
+            .retries
+            .saturating_add(u32::from(record.state == JobState::Running))
+    });
+    if retries >= request.max_retries {
         emit(&WorkerEvent::Failed {
             message: "finite worker retry budget exhausted".into(),
-            retries: previous.map_or(0, |record| record.retries),
+            retries,
         })?;
         return Err(anyhow!("finite worker retry budget exhausted"));
     }
-    let running = JobRecord {
+    if previous.is_some() {
+        // The ledger is advisory. Reconcile it from the new scan while the
+        // embedding cache independently preserves completed inference.
+        ledger.remove_job(&request.job_id)?;
+    }
+    let attempt = retries.saturating_add(1);
+    let mut running = JobRecord {
         id: request.job_id.clone(),
         protocol_version: WORKER_PROTOCOL_VERSION,
         recipe,
         next_batch: 0,
         total_batches: 1,
-        retries: attempt,
+        retries,
         max_retries: request.max_retries,
         state: JobState::Running,
         updated_at: now(),
@@ -64,23 +87,61 @@ fn main() -> Result<()> {
     let source_file = std::fs::File::open(source_path).context("open semantic source export")?;
     let source_chunks: Vec<tldr_core::semantic::CodeChunk> =
         ciborium::de::from_reader(source_file).context("decode semantic source export")?;
-    match load_or_build_store_from_artifacts(
+    let mut latest_progress = None;
+    let result = load_or_build_store_from_artifacts_with_progress(
         &request.project,
         &request.store_dir,
         &request.options,
         request.cache_config,
         source_chunks,
-    ) {
+        &mut |mut progress| {
+            progress.retries = retries;
+            if progress.windows_completed > running.next_batch {
+                running.next_batch = progress.windows_completed;
+                running.total_batches = running.next_batch.saturating_add(1);
+                running.updated_at = now();
+                ledger.commit_job_batch(&running, &[])?;
+                emit(&WorkerEvent::BatchCommitted {
+                    batch: running.next_batch - 1,
+                })
+                .map_err(|error| tldr_core::TldrError::Embedding(error.to_string()))?;
+            }
+            latest_progress = Some(progress.clone());
+            emit(&WorkerEvent::Progress { progress })
+                .map_err(|error| tldr_core::TldrError::Embedding(error.to_string()))
+        },
+    );
+    match result {
         Ok(store) => {
+            if let Some(metrics_path) = request.metrics_output.as_ref() {
+                let write_result = store
+                    .build_metrics()
+                    .ok_or_else(|| {
+                        anyhow!("worker metrics were requested but the build produced no report")
+                    })
+                    .and_then(|report| {
+                        let file = std::fs::File::create(metrics_path).with_context(|| {
+                            format!("create metrics {}", metrics_path.display())
+                        })?;
+                        serde_json::to_writer_pretty(file, report)
+                            .context("write semantic worker metrics")
+                    });
+                if let Err(error) = write_result {
+                    eprintln!("[tldr-warn] semantic metrics output failed: {error}");
+                }
+            }
+            let completed_batches = latest_progress
+                .as_ref()
+                .map_or(running.next_batch, |progress| progress.windows_completed);
             let completed = JobRecord {
-                next_batch: 1,
+                next_batch: completed_batches,
+                total_batches: completed_batches,
                 state: JobState::Completed,
                 updated_at: now(),
                 ..running
             };
             // The generation is durable before this checkpoint and acknowledgement.
             ledger.commit_job_batch(&completed, &[])?;
-            emit(&WorkerEvent::BatchCommitted { batch: 0 })?;
             emit(&WorkerEvent::Completed {
                 vectors: store.len(),
             })
@@ -92,6 +153,7 @@ fn main() -> Result<()> {
                 } else {
                     JobState::Pending
                 },
+                retries: attempt,
                 updated_at: now(),
                 ..running
             };
@@ -111,15 +173,6 @@ fn emit(event: &WorkerEvent) -> Result<()> {
     stdout.write_all(&bytes)?;
     stdout.flush()?;
     Ok(())
-}
-
-fn request_recipe(request: &WorkerBuildRequest) -> Result<[u8; 32]> {
-    let bytes = serde_json::to_vec(request)?;
-    let digest = md5::compute(bytes);
-    let mut recipe = [0_u8; 32];
-    recipe[..16].copy_from_slice(&digest.0);
-    recipe[16..].copy_from_slice(&digest.0);
-    Ok(recipe)
 }
 
 fn now() -> u64 {

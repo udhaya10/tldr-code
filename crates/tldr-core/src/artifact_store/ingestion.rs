@@ -3,9 +3,12 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use rayon::prelude::*;
+use serde::{Deserialize, Serialize};
 
+use crate::build_timing::{PhaseTiming, UnitSummary, UnitTimingCollector};
 use crate::walker::ProjectWalker;
 use crate::{Language, TldrError, TldrResult};
 
@@ -21,8 +24,20 @@ const FILE_FACTS_PRODUCER: &str = "file-facts";
 const FILE_FACTS_VERSION: u32 = 7;
 
 /// Summary of a completed or resumed ingestion.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IngestionReport {
+    /// Correlation identifier shared with semantic workers.
+    pub run_id: String,
+    /// Component role that produced this report.
+    pub process_role: String,
+    /// Invocation start time, unix epoch milliseconds.
+    pub started_at_unix_ms: u64,
+    /// End-to-end ingestion wall time.
+    pub duration_ms: u64,
+    /// Major structural wall-time phases.
+    pub phases: Vec<PhaseTiming>,
+    /// Bounded atomic-unit timing distributions.
+    pub units: Vec<UnitSummary>,
     /// Published generation.
     pub generation: u64,
     /// Number of source files parsed during this invocation.
@@ -31,6 +46,28 @@ pub struct IngestionReport {
     pub artifacts: usize,
     /// Whether an existing durable checkpoint was resumed.
     pub resumed: bool,
+}
+
+/// Timing controls for one ingestion invocation.
+#[derive(Clone, Debug)]
+pub struct IngestionTimingOptions {
+    /// Correlation identifier shared by the owning build.
+    pub run_id: String,
+    /// Process/component role.
+    pub process_role: String,
+    /// Optional exact per-unit JSONL output.
+    pub detail_path: Option<PathBuf>,
+}
+
+impl Default for IngestionTimingOptions {
+    fn default() -> Self {
+        let started_at_unix_ms = unix_millis();
+        Self {
+            run_id: format!("{started_at_unix_ms}-{}", std::process::id()),
+            process_role: "artifact_producer".into(),
+            detail_path: None,
+        }
+    }
 }
 
 /// Coordinates discovery, parallel derivation, bounded commits, and publication.
@@ -54,7 +91,16 @@ impl IngestionEngine {
 
     /// Build or resume either the complete project or a file subset.
     pub fn ingest(&self, scope: IngestionScope) -> TldrResult<IngestionReport> {
-        self.ingest_with_batch_limit(scope, None)
+        self.ingest_with_timing(scope, IngestionTimingOptions::default())
+    }
+
+    /// Build with an explicit run identity and optional raw unit output.
+    pub fn ingest_with_timing(
+        &self,
+        scope: IngestionScope,
+        timing: IngestionTimingOptions,
+    ) -> TldrResult<IngestionReport> {
+        self.ingest_with_batch_limit(scope, None, timing)
     }
 
     /// Certification hook that interrupts after a fixed number of durable
@@ -65,17 +111,35 @@ impl IngestionEngine {
         scope: IngestionScope,
         committed_batches: usize,
     ) -> TldrResult<IngestionReport> {
-        self.ingest_with_batch_limit(scope, Some(committed_batches))
+        self.ingest_with_batch_limit(
+            scope,
+            Some(committed_batches),
+            IngestionTimingOptions::default(),
+        )
     }
 
     fn ingest_with_batch_limit(
         &self,
         scope: IngestionScope,
         batch_limit: Option<usize>,
+        timing: IngestionTimingOptions,
     ) -> TldrResult<IngestionReport> {
+        let invocation_started = Instant::now();
+        let started_at_unix_ms = unix_millis();
+        let mut phases = Vec::new();
+        let mut units = UnitTimingCollector::new(
+            timing.run_id.clone(),
+            timing.process_role.clone(),
+            timing.detail_path.as_deref(),
+        )?;
         let scope = normalize_scope(scope);
+        let discovery_started = Instant::now();
         let all_files = discover(&self.root);
         let (source_revision, revisions) = source_manifest(&self.root, &all_files)?;
+        phases.push(PhaseTiming {
+            name: "source_discovery".into(),
+            duration_ms: elapsed_ms(discovery_started),
+        });
         let active = self.store.active_generation()?.unwrap_or(0);
         let generation = active.saturating_add(1);
         let revision_tag = source_revision.0[..8]
@@ -154,10 +218,26 @@ impl IngestionEngine {
             .cloned()
             .collect::<Vec<_>>();
         let parser = FileFactsParser::default();
-        let facts = remaining
+        let parse_started = Instant::now();
+        let timed_facts = remaining
             .par_iter()
-            .map(|path| parser.parse(&self.root, path))
+            .map(|path| {
+                let started = Instant::now();
+                let facts = parser.parse(&self.root, path)?;
+                Ok((facts, relative(&self.root, path), elapsed_ms(started)))
+            })
             .collect::<TldrResult<Vec<_>>>()?;
+        phases.push(PhaseTiming {
+            name: "ast_parse".into(),
+            duration_ms: elapsed_ms(parse_started),
+        });
+        let facts = timed_facts
+            .into_iter()
+            .map(|(facts, path, duration_ms)| {
+                units.record_grouped("ast_parse", facts.language.clone(), path, duration_ms);
+                facts
+            })
+            .collect::<Vec<_>>();
         let parsed_files = parser.invocations() as usize;
 
         let regenerated = match &scope {
@@ -210,8 +290,10 @@ impl IngestionEngine {
             );
         }
 
+        let artifact_started = Instant::now();
         let mut committed_artifacts = 0usize;
         for (offset, chunk) in facts.chunks(BATCH_FILES).enumerate() {
+            let batch_started = Instant::now();
             let index = next_batch + offset as u64;
             let mut artifacts = chunk
                 .iter()
@@ -240,13 +322,24 @@ impl IngestionEngine {
                 },
                 &job,
             )?;
+            units.record(
+                "artifact_batch",
+                None,
+                index.to_string(),
+                elapsed_ms(batch_started),
+            );
             if batch_limit.is_some_and(|limit| offset + 1 >= limit) {
                 return Err(ingestion_error("certification interruption"));
             }
         }
+        phases.push(PhaseTiming {
+            name: "artifact_write".into(),
+            duration_ms: elapsed_ms(artifact_started),
+        });
         manifest_keys.sort_by_key(artifact_order);
         manifest_keys.dedup();
 
+        let callgraph_started = Instant::now();
         let call_dependencies = manifest_keys
             .iter()
             .filter(|key| key.kind == ArtifactKind::FileFacts)
@@ -272,6 +365,7 @@ impl IngestionEngine {
         }
         let mut project_calls = Vec::new();
         for (language, irs) in file_irs {
+            let language_started = Instant::now();
             let config = crate::callgraph::BuildConfig {
                 language: language.clone(),
                 use_type_resolution: true,
@@ -287,7 +381,17 @@ impl IngestionEngine {
                 callee: edge.dst_func,
                 call_type: call_type_name(edge.call_type).into(),
             }));
+            units.record_grouped(
+                "callgraph_compose",
+                language.clone(),
+                language,
+                elapsed_ms(language_started),
+            );
         }
+        phases.push(PhaseTiming {
+            name: "callgraph_compose".into(),
+            duration_ms: elapsed_ms(callgraph_started),
+        });
         let graph_key = ArtifactKey {
             project: self.project,
             revision: source_revision,
@@ -304,6 +408,7 @@ impl IngestionEngine {
         manifest_keys.retain(|key| key.kind != ArtifactKind::CallGraph);
         manifest_keys.push(graph_key);
 
+        let publication_started = Instant::now();
         let validation_job = IngestionJob {
             id: job_id.clone(),
             target_generation: generation,
@@ -339,7 +444,18 @@ impl IngestionEngine {
             },
             &published_job,
         )?;
+        phases.push(PhaseTiming {
+            name: "publication".into(),
+            duration_ms: elapsed_ms(publication_started),
+        });
+        units.finish()?;
         Ok(IngestionReport {
+            run_id: timing.run_id,
+            process_role: timing.process_role,
+            started_at_unix_ms,
+            duration_ms: invocation_started.elapsed().as_millis() as u64,
+            phases,
+            units: units.summaries(),
             generation,
             parsed_files,
             artifacts: committed_artifacts,
@@ -386,6 +502,17 @@ impl IngestionEngine {
         );
         Ok(vec![facts_artifact, symbols, references, calls, chunks])
     }
+}
+
+fn elapsed_ms(started: Instant) -> u64 {
+    started.elapsed().as_millis() as u64
+}
+
+fn unix_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 fn discover(root: &Path) -> Vec<PathBuf> {

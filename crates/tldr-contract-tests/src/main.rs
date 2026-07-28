@@ -12,7 +12,11 @@ use tldr_core::artifact_store::{
     IngestionScope, ProducerId, ProjectId, RedbArtifactStore,
 };
 use tldr_core::semantic::vector_store::{ChunkMeta, VectorStore};
-use tldr_core::semantic::{ChunkId, ChunkRevision, StructuralAnchor};
+use tldr_core::semantic::{
+    BuildOptions, CacheConfig, ChunkId, ChunkRevision, CodeChunk, EmbeddingCache, EmbeddingModel,
+    EmbeddingRecipeId, GenerationManager, JobRecord, JobState, RedbStore, StructuralAnchor,
+    DEFAULT_REDB_CACHE_BYTES, WORKER_PROTOCOL_VERSION,
+};
 use tldr_core::Language;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -42,6 +46,26 @@ const SCENARIOS: &[Scenario] = &[
         name: "resume_after_checkpoint",
         smoke: false,
         run: resume_after_checkpoint,
+    },
+    Scenario {
+        name: "semantic_kill_before_first_cache_write",
+        smoke: false,
+        run: semantic_kill_before_first_cache_write,
+    },
+    Scenario {
+        name: "semantic_kill_after_completed_window",
+        smoke: false,
+        run: semantic_kill_after_completed_window,
+    },
+    Scenario {
+        name: "semantic_compatible_restart",
+        smoke: false,
+        run: semantic_compatible_restart,
+    },
+    Scenario {
+        name: "semantic_incompatible_restart",
+        smoke: false,
+        run: semantic_incompatible_restart,
     },
     Scenario {
         name: "generation_monotonicity",
@@ -138,6 +162,22 @@ fn artifact_lifecycle() -> Result<(), String> {
         cold.generation == 1 && cold.parsed_files == 2,
         "cold build counters",
     )?;
+    ensure(
+        cold.phases.iter().any(|phase| phase.name == "ast_parse"),
+        "cold build omitted AST wall time",
+    )?;
+    ensure(
+        cold.units
+            .iter()
+            .any(|unit| unit.kind == "ast_parse" && unit.group.is_none() && unit.count == 2),
+        "cold build omitted aggregate AST unit timing",
+    )?;
+    ensure(
+        cold.units.iter().any(|unit| {
+            unit.kind == "ast_parse" && unit.group.as_deref() == Some("python") && unit.count == 2
+        }),
+        "cold build omitted per-language AST timing",
+    )?;
     let first = GenerationSnapshot::active(store.as_ref())
         .map_err(display)?
         .ok_or("cold build did not publish")?;
@@ -165,7 +205,7 @@ fn artifact_lifecycle() -> Result<(), String> {
         revision: facts.revision,
         subject: ArtifactSubject::File("helper.py".into()),
         kind: ArtifactKind::FileFacts,
-        producer: ProducerId::new("file-facts", 5),
+        producer: ProducerId::new("file-facts", 7),
     };
     let optional = ArtifactKey {
         project: project_id,
@@ -296,6 +336,149 @@ fn resume_after_checkpoint() -> Result<(), String> {
         .map_err(display)?
         .ok_or("resume did not publish")?;
     ensure(snapshot.file_count() == 40, "resumed manifest coverage")
+}
+
+fn semantic_kill_before_first_cache_write() -> Result<(), String> {
+    let project = tempfile::tempdir().map_err(display)?;
+    let store_dir = project.path().join("vectors");
+    let options = semantic_build_options();
+    let identity = tldr_core::semantic::store_search::manifest_id_for(project.path(), &options);
+    let manager = GenerationManager::open(&store_dir).map_err(display)?;
+    let mut old = VectorStore::new(options.model.dimensions(), 1).map_err(display)?;
+    let mut vector = vec![0.0; options.model.dimensions()];
+    vector[0] = 1.0;
+    old.add(1, &vector, meta(1, "old.rs", "old"))
+        .map_err(display)?;
+    let old_generation = manager.publish(&old, &identity).map_err(display)?;
+
+    let cache_config = semantic_cache_config(project.path());
+    let mut cache = EmbeddingCache::open(cache_config).map_err(display)?;
+    let recipe = semantic_recipe(options.model);
+    let chunk = semantic_chunk(project.path(), 0);
+    ensure(
+        cache
+            .get_document(&chunk, &chunk.content, &recipe)
+            .is_none(),
+        "empty cache unexpectedly contained inference",
+    )?;
+    drop(cache); // deterministic kill boundary: no cache write and no publication
+
+    ensure(
+        manager.active_generation().map_err(display)? == Some(old_generation),
+        "kill before the first cache write changed active generation",
+    )
+}
+
+fn semantic_kill_after_completed_window() -> Result<(), String> {
+    const WINDOW: usize = 128;
+    let project = tempfile::tempdir().map_err(display)?;
+    let options = semantic_build_options();
+    let recipe = semantic_recipe(options.model);
+    let mut cache = EmbeddingCache::open(semantic_cache_config(project.path())).map_err(display)?;
+    for index in 0..WINDOW {
+        let chunk = semantic_chunk(project.path(), index);
+        cache.put_document(
+            &chunk,
+            &chunk.content,
+            semantic_vector(options.model, index),
+            &recipe,
+        );
+    }
+    cache.flush().map_err(display)?;
+    drop(cache); // kill after the durable window, before generation publication
+
+    let mut reopened =
+        EmbeddingCache::open(semantic_cache_config(project.path())).map_err(display)?;
+    let hits = (0..WINDOW)
+        .filter(|index| {
+            let chunk = semantic_chunk(project.path(), *index);
+            reopened
+                .get_document(&chunk, &chunk.content, &recipe)
+                .is_some()
+        })
+        .count();
+    ensure(
+        hits == WINDOW,
+        "completed window was not durable on restart",
+    )
+}
+
+fn semantic_compatible_restart() -> Result<(), String> {
+    const WINDOW_AND_PARTIAL: usize = 131;
+    let project = tempfile::tempdir().map_err(display)?;
+    let options = semantic_build_options();
+    let recipe = semantic_recipe(options.model);
+    let config = semantic_cache_config(project.path());
+    let mut first = EmbeddingCache::open(config.clone()).map_err(display)?;
+    for index in 0..WINDOW_AND_PARTIAL {
+        let chunk = semantic_chunk(project.path(), index);
+        first.put_document(
+            &chunk,
+            &chunk.content,
+            semantic_vector(options.model, index),
+            &recipe,
+        );
+    }
+    first.flush().map_err(display)?;
+    drop(first);
+
+    let mut resumed = EmbeddingCache::open(config).map_err(display)?;
+    let misses = (0..WINDOW_AND_PARTIAL)
+        .filter(|index| {
+            let chunk = semantic_chunk(project.path(), *index);
+            resumed
+                .get_document(&chunk, &chunk.content, &recipe)
+                .is_none()
+        })
+        .count();
+    ensure(
+        misses == 0,
+        "compatible restart repeated completed inference",
+    )
+}
+
+fn semantic_incompatible_restart() -> Result<(), String> {
+    let project = tempfile::tempdir().map_err(display)?;
+    let ledger = RedbStore::open(
+        &project.path().join("worker-jobs.redb"),
+        DEFAULT_REDB_CACHE_BYTES,
+    )
+    .map_err(display)?;
+    let old = JobRecord {
+        id: "job".into(),
+        protocol_version: WORKER_PROTOCOL_VERSION,
+        recipe: [1; 32],
+        next_batch: 1,
+        total_batches: 2,
+        retries: 2,
+        max_retries: 3,
+        state: JobState::Running,
+        updated_at: 1,
+    };
+    ledger.commit_job_batch(&old, &[]).map_err(display)?;
+
+    // Worker startup discards incompatible advisory metadata before retry
+    // accounting. The replacement begins a new scan at the same retry count.
+    ledger.remove_job("job").map_err(display)?;
+    let replacement = JobRecord {
+        recipe: [2; 32],
+        next_batch: 0,
+        total_batches: 1,
+        state: JobState::Running,
+        updated_at: 2,
+        ..old
+    };
+    ledger
+        .commit_job_batch(&replacement, &[])
+        .map_err(display)?;
+    let persisted = ledger
+        .get_job("job")
+        .map_err(display)?
+        .ok_or("job missing")?;
+    ensure(
+        persisted.retries == 2 && persisted.recipe == [2; 32],
+        "incompatible restart consumed retry budget or retained old identity",
+    )
 }
 
 fn generation_monotonicity() -> Result<(), String> {
@@ -675,6 +858,47 @@ fn language_matrix() -> Result<(), String> {
         observed.len() == cases.len(),
         "language identities collapsed",
     )
+}
+
+fn semantic_build_options() -> BuildOptions {
+    BuildOptions {
+        model: EmbeddingModel::ArcticXS,
+        use_cache: true,
+        ..Default::default()
+    }
+}
+
+fn semantic_cache_config(project: &Path) -> CacheConfig {
+    CacheConfig {
+        cache_dir: project.join("embedding-cache"),
+        max_size_mb: 32,
+        ttl_days: 30,
+    }
+}
+
+fn semantic_recipe(model: EmbeddingModel) -> EmbeddingRecipeId {
+    EmbeddingRecipeId::for_document(model, "raw-v3-structural")
+}
+
+fn semantic_chunk(project: &Path, index: usize) -> CodeChunk {
+    let content = format!("fn semantic_{index}() -> usize {{ {index} }}");
+    CodeChunk {
+        file_path: project.join(format!("semantic_{index}.rs")),
+        function_name: Some(format!("semantic_{index}")),
+        class_name: None,
+        line_start: 1,
+        line_end: 1,
+        content_hash: format!("{:x}", md5::compute(content.as_bytes())),
+        content,
+        language: Language::Rust,
+        structure: Default::default(),
+    }
+}
+
+fn semantic_vector(model: EmbeddingModel, index: usize) -> Vec<f32> {
+    let mut vector = vec![0.0; model.dimensions()];
+    vector[index % model.dimensions()] = 1.0;
+    vector
 }
 
 fn meta(id: u128, file: &str, function: &str) -> ChunkMeta {

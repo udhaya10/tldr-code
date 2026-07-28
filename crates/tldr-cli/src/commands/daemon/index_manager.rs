@@ -15,12 +15,13 @@ use tldr_core::semantic::vector_store::{
     stat_signal, VectorStore,
 };
 use tldr_core::semantic::{
-    query_store_with_vector, store_dir_for, BuildCancellation, BuildOptions, BulkInferenceRunner,
-    CacheConfig, ChunkGranularity, EmbeddingModel, FixedShapeInferenceRunner, GenerationManager,
-    GenerationSelection, IndexSearchOptions, InferenceRunnerSnapshot,
+    query_store_with_vector, store_dir_for, BuildCancellation, BuildOptions, BuildProgress,
+    BulkInferenceRunner, CacheConfig, ChunkGranularity, EmbeddingModel, FixedShapeInferenceRunner,
+    GenerationManager, GenerationSelection, IndexSearchOptions, InferenceRunnerSnapshot,
+    MetricsReport, WorkerEvent,
 };
 
-use super::bulk_worker::BulkWorker;
+use super::bulk_worker::{BulkWorker, WorkerMetricsConfig};
 
 /// Why a semantic query could not be served (TLDR-7xz.1/.2).
 ///
@@ -83,6 +84,16 @@ pub enum DeltaOutcome {
     NeedsRebuild,
 }
 
+/// Outcome of a semantic warm, including optional worker instrumentation.
+pub struct SemanticWarmResult {
+    /// Whether a replacement generation was built.
+    pub built: bool,
+    /// Correlated semantic worker report when requested.
+    pub metrics: Option<MetricsReport>,
+    /// Diagnostic output failure that did not invalidate the published store.
+    pub metrics_error: Option<String>,
+}
+
 pub struct IndexManager {
     store: RwLock<Option<(EmbeddingModel, VectorStore)>>,
     /// Batch-one query session. Never shared with document workloads.
@@ -91,6 +102,9 @@ pub struct IndexManager {
     delta_runner: FixedShapeInferenceRunner,
     /// Serialized full-build boundary. Epic 10 moves this into a child process.
     bulk_runner: BulkInferenceRunner,
+    /// Latest reconciled worker progress, retained after completion for
+    /// postmortem/status inspection.
+    progress: RwLock<Option<BuildProgress>>,
 }
 
 impl Default for IndexManager {
@@ -106,6 +120,7 @@ impl IndexManager {
             query_runner: FixedShapeInferenceRunner::query(),
             delta_runner: FixedShapeInferenceRunner::delta(),
             bulk_runner: BulkInferenceRunner::default(),
+            progress: RwLock::new(None),
         }
     }
 
@@ -214,28 +229,51 @@ impl IndexManager {
         model: EmbeddingModel,
         source_chunks: Vec<tldr_core::semantic::CodeChunk>,
     ) -> Result<bool, String> {
-        if self
-            .store
-            .read()
-            .as_ref()
-            .is_some_and(|(resident_model, _)| *resident_model == model)
-        {
-            return Ok(false);
-        }
-        self.bulk_runner.run(model, || {
-            // Re-check after serializing competing warm calls.
-            if self
+        self.warm_with_metrics(project, model, source_chunks, None)
+            .map(|result| result.built)
+    }
+
+    /// Warm and optionally force an instrumented replacement build.
+    pub fn warm_with_metrics(
+        &self,
+        project: &Path,
+        model: EmbeddingModel,
+        source_chunks: Vec<tldr_core::semantic::CodeChunk>,
+        metrics: Option<WorkerMetricsConfig>,
+    ) -> Result<SemanticWarmResult, String> {
+        if metrics.is_none()
+            && self
                 .store
                 .read()
                 .as_ref()
                 .is_some_and(|(resident_model, _)| *resident_model == model)
+        {
+            return Ok(SemanticWarmResult {
+                built: false,
+                metrics: None,
+                metrics_error: None,
+            });
+        }
+        self.bulk_runner.run(model, || {
+            // Re-check after serializing competing warm calls.
+            if metrics.is_none()
+                && self
+                    .store
+                    .read()
+                    .as_ref()
+                    .is_some_and(|(resident_model, _)| *resident_model == model)
             {
-                return Ok(false);
+                return Ok(SemanticWarmResult {
+                    built: false,
+                    metrics: None,
+                    metrics_error: None,
+                });
             }
             let build_opts = BuildOptions {
                 model,
                 show_progress: false,
                 use_cache: true,
+                collect_metrics: metrics.is_some(),
                 ..Default::default()
             };
             let store_dir = store_dir_for(project);
@@ -243,14 +281,32 @@ impl IndexManager {
                 std::env::var("TLDR_SEMANTIC_GENERATION").unwrap_or_else(|_| "active".into());
             let selection = GenerationSelection::parse(&requested)?;
             let worker = BulkWorker::installed()?;
-            worker.build(
+            *self.progress.write() = None;
+            worker.build_with_progress_and_metrics(
                 project,
                 &store_dir,
                 &build_opts,
                 Some(CacheConfig::default()),
                 &BuildCancellation::default(),
                 &source_chunks,
+                metrics.clone(),
+                |event| {
+                    if let WorkerEvent::Progress { progress } = event {
+                        *self.progress.write() = Some(progress.clone());
+                    }
+                },
             )?;
+            let (metrics_report, metrics_error) = match metrics.as_ref() {
+                Some(config) => match std::fs::File::open(&config.report_path)
+                    .map_err(|error| error.to_string())
+                    .and_then(|file| {
+                        serde_json::from_reader(file).map_err(|error| error.to_string())
+                    }) {
+                    Ok(report) => (Some(report), None),
+                    Err(error) => (None, Some(error)),
+                },
+                None => (None, None),
+            };
             let identity = tldr_core::semantic::store_search::manifest_id_for(project, &build_opts);
             let manager = GenerationManager::open(&store_dir).map_err(|error| error.to_string())?;
             let replacement = match selection {
@@ -270,7 +326,11 @@ impl IndexManager {
             // Publication alone takes the write lock; an existing generation
             // continues serving while the replacement is built.
             *self.store.write() = Some((model, replacement));
-            Ok(true)
+            Ok(SemanticWarmResult {
+                built: true,
+                metrics: metrics_report,
+                metrics_error,
+            })
         })
     }
 
@@ -506,6 +566,11 @@ impl IndexManager {
             self.delta_runner.snapshot(),
             self.bulk_runner.snapshot(),
         ]
+    }
+
+    /// Latest semantic build progress for daemon status.
+    pub fn build_progress(&self) -> Option<BuildProgress> {
+        self.progress.read().clone()
     }
 
     /// Number of vectors in the resident store, or `None` if cold. A delta's

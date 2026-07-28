@@ -37,6 +37,7 @@
 
 /// Shared generation-aware structural and semantic artifact persistence.
 pub mod artifact_store;
+pub mod build_timing;
 pub mod config;
 pub mod error;
 pub mod git;

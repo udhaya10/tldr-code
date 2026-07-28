@@ -203,6 +203,98 @@ pub fn load_or_build_store_from_artifacts(
     Ok(built)
 }
 
+/// Build and publish from shared artifacts while streaming reconciled progress.
+pub fn load_or_build_store_from_artifacts_with_progress(
+    root: &Path,
+    store_dir: &Path,
+    build_options: &BuildOptions,
+    cache_config: Option<CacheConfig>,
+    source_chunks: Vec<crate::semantic::CodeChunk>,
+    observer: &mut dyn FnMut(crate::semantic::BuildProgress) -> TldrResult<()>,
+) -> TldrResult<VectorStore> {
+    let workflow_started = Instant::now();
+    let id = manifest_id_for(root, build_options);
+    let current_digest = compute_corpus_digest(root);
+    let generations = super::GenerationManager::open(store_dir)?;
+    if let Ok(store) = generations.load(&id) {
+        if store.corpus_digest() == current_digest && !build_options.collect_metrics {
+            observer(crate::semantic::BuildProgress {
+                phase: crate::semantic::BuildPhase::Completed,
+                files_seen: 0,
+                files_total: None,
+                windows_completed: 0,
+                cache_hits: store.len() as u64,
+                new_vectors: 0,
+                last_window_duration_ms: None,
+                elapsed_ms: 0,
+                retries: 0,
+            })?;
+            return Ok(store);
+        }
+    }
+
+    let mut latest = None;
+    let mut built = {
+        let mut relay = |progress: crate::semantic::BuildProgress| {
+            latest = Some(progress.clone());
+            observer(progress)
+        };
+        VectorStore::build_from_artifacts_with_progress(
+            root,
+            build_options,
+            cache_config,
+            source_chunks,
+            &mut relay,
+        )?
+    };
+    let mut progress = latest.unwrap_or(crate::semantic::BuildProgress {
+        phase: crate::semantic::BuildPhase::Verifying,
+        files_seen: 0,
+        files_total: None,
+        windows_completed: 0,
+        cache_hits: 0,
+        new_vectors: built.len() as u64,
+        last_window_duration_ms: None,
+        elapsed_ms: 0,
+        retries: 0,
+    });
+    progress.phase = crate::semantic::BuildPhase::Publishing;
+    progress.elapsed_ms = workflow_started.elapsed().as_millis() as u64;
+    observer(progress.clone())?;
+    let publication_started = Instant::now();
+    let (_, publication) = generations.publish_measured(&built, &id)?;
+    let publication_ms = publication_started.elapsed().as_millis() as u64;
+    if let Some(metrics) = built.build_metrics_mut() {
+        for (name, duration_ms) in [
+            (
+                "generation_stage_and_records",
+                publication.stage_and_records_ms,
+            ),
+            ("verification", publication.verification_ms),
+            ("activation", publication.activation_ms),
+            ("publication", publication_ms),
+        ] {
+            metrics
+                .phases
+                .push(crate::semantic::build_metrics::PhaseRecord {
+                    name: name.into(),
+                    duration_ms,
+                    rss_bytes_at_end: crate::util::current_rss_bytes(),
+                });
+        }
+        metrics.duration_ms = workflow_started.elapsed().as_millis() as u64;
+        metrics.throughput.chunks_per_second = if metrics.duration_ms == 0 {
+            0.0
+        } else {
+            metrics.chunks_total as f64 * 1000.0 / metrics.duration_ms as f64
+        };
+    }
+    progress.phase = crate::semantic::BuildPhase::Completed;
+    progress.elapsed_ms = workflow_started.elapsed().as_millis() as u64;
+    observer(progress)?;
+    Ok(built)
+}
+
 /// Search an already-loaded store — the daemon reuse entry point.
 ///
 /// Takes a [`VectorStore`] reference (the daemon holds this resident in its

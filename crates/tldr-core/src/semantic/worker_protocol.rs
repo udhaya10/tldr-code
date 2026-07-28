@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use super::{BuildOptions, CacheConfig};
+use super::{BuildOptions, BuildProgress, CacheConfig};
 use crate::{TldrError, TldrResult};
 
 /// Wire compatibility version. A mismatch fails before model loading.
@@ -38,6 +38,16 @@ pub struct WorkerBuildRequest {
     pub source_artifacts: Option<PathBuf>,
     /// Finite retry limit shared with the durable job record.
     pub max_retries: u32,
+    /// Optional worker-local semantic metrics report. This is diagnostic
+    /// transport metadata and never participates in semantic compatibility.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metrics_output: Option<PathBuf>,
+    /// Optional exact per-unit JSONL output for this worker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metrics_detail_output: Option<PathBuf>,
+    /// Correlated owning run for diagnostic reports.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metrics_parent_run_id: Option<String>,
 }
 
 impl WorkerBuildRequest {
@@ -59,6 +69,9 @@ impl WorkerBuildRequest {
             cache_config,
             source_artifacts: None,
             max_retries: DEFAULT_WORKER_ATTEMPTS,
+            metrics_output: None,
+            metrics_detail_output: None,
+            metrics_parent_run_id: None,
         }
     }
 
@@ -93,6 +106,29 @@ impl WorkerBuildRequest {
         }
         Ok(())
     }
+
+    /// Stable compatibility fingerprint for durable worker metadata.
+    ///
+    /// The existing manifest identity owns all output-affecting semantic
+    /// inputs. Process-local request fields such as the temporary artifact
+    /// export, store path, retry policy, and transport details are deliberately
+    /// excluded.
+    pub fn compatibility_fingerprint(&self) -> TldrResult<[u8; 32]> {
+        let manifest = super::store_search::manifest_id_for(&self.project, &self.options);
+        let manifest = serde_json::to_vec(&manifest).map_err(protocol_error)?;
+        let mut hasher = blake3::Hasher::new();
+        let protocol_version = self.protocol_version.to_le_bytes();
+        for field in [
+            protocol_version.as_slice(),
+            self.pipeline_version.as_bytes(),
+            self.job_id.as_bytes(),
+            manifest.as_slice(),
+        ] {
+            hasher.update(&(field.len() as u64).to_le_bytes());
+            hasher.update(field);
+        }
+        Ok(*hasher.finalize().as_bytes())
+    }
 }
 
 /// Acknowledgements emitted only after their represented state is durable.
@@ -103,6 +139,16 @@ pub enum WorkerEvent {
     Started {
         /// Attempt number, starting at one.
         attempt: u32,
+    },
+    /// Live reconciled progress emitted while the worker is running.
+    Progress {
+        /// Current phase and scan/cache counters.
+        progress: BuildProgress,
+    },
+    /// Incompatible advisory job metadata was discarded before model load.
+    Invalidated {
+        /// Stable reason suitable for logs and postmortems.
+        reason: String,
     },
     /// One bounded work unit and its checkpoint are durable.
     BatchCommitted {
@@ -149,4 +195,80 @@ pub fn decode_message<T: for<'de> Deserialize<'de>>(bytes: &[u8]) -> TldrResult<
 
 fn protocol_error(error: impl std::fmt::Display) -> TldrError {
     TldrError::Embedding(format!("bulk worker protocol: {error}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::semantic::{ChunkGranularity, EmbeddingModel};
+
+    fn request(root: &std::path::Path) -> WorkerBuildRequest {
+        WorkerBuildRequest::new(
+            "stable-source-job".into(),
+            root.to_path_buf(),
+            root.join("store-a"),
+            BuildOptions {
+                model: EmbeddingModel::ArcticXS,
+                granularity: ChunkGranularity::Function,
+                ..Default::default()
+            },
+            None,
+        )
+    }
+
+    #[test]
+    fn transport_and_diagnostic_fields_do_not_change_compatibility() {
+        let root = tempfile::tempdir().unwrap();
+        let mut left = request(root.path());
+        left.source_artifacts = Some(root.path().join("export-a.cbor"));
+        left.max_retries = 2;
+        let mut right = left.clone();
+        right.store_dir = root.path().join("store-b");
+        right.source_artifacts = Some(root.path().join("export-b.cbor"));
+        right.max_retries = 9;
+        right.metrics_output = Some(root.path().join("metrics.json"));
+        right.metrics_detail_output = Some(root.path().join("units.jsonl"));
+        right.metrics_parent_run_id = Some("parent".into());
+
+        assert_eq!(
+            left.compatibility_fingerprint().unwrap(),
+            right.compatibility_fingerprint().unwrap()
+        );
+    }
+
+    #[test]
+    fn output_affecting_identity_changes_compatibility() {
+        let root = tempfile::tempdir().unwrap();
+        let base = request(root.path());
+        let mut different_model = base.clone();
+        different_model.options.model = EmbeddingModel::ArcticL;
+        let mut different_granularity = base.clone();
+        different_granularity.options.granularity = ChunkGranularity::File;
+        let mut different_source = base.clone();
+        different_source.job_id = "different-source-job".into();
+
+        let identity = base.compatibility_fingerprint().unwrap();
+        assert_ne!(
+            identity,
+            different_model.compatibility_fingerprint().unwrap()
+        );
+        assert_ne!(
+            identity,
+            different_granularity.compatibility_fingerprint().unwrap()
+        );
+        assert_ne!(
+            identity,
+            different_source.compatibility_fingerprint().unwrap()
+        );
+    }
+
+    #[test]
+    fn protocol_frames_reject_oversized_input() {
+        let oversized = vec![b'x'; MAX_WORKER_MESSAGE_BYTES + 1];
+        assert!(decode_message::<WorkerEvent>(&oversized).is_err());
+        let event = WorkerEvent::Invalidated {
+            reason: "x".repeat(MAX_WORKER_MESSAGE_BYTES),
+        };
+        assert!(encode_message(&event).is_err());
+    }
 }

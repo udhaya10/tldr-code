@@ -26,10 +26,12 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command as StdCommand;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use crate::output::OutputFormat;
-use clap::Args;
+use clap::{Args, ValueEnum};
 use serde::{Deserialize, Serialize};
+use tldr_core::artifact_store::{IngestionReport, IngestionTimingOptions};
 
 use super::error::{DaemonError, DaemonResult};
 use super::ipc::{check_socket_alive, send_command};
@@ -49,7 +51,22 @@ pub struct WarmArgs {
     /// Run warming in background process
     #[arg(long, short = 'b')]
     pub background: bool,
+
+    /// Write one correlated artifact + semantic build report as JSON.
+    #[arg(long)]
+    pub metrics: Option<PathBuf>,
+
+    /// Stream exact atomic-unit timings beside the report.
+    #[arg(long, value_enum, requires = "metrics")]
+    pub metrics_detail: Option<MetricsDetail>,
     // Note: Use global --lang to specify language, or auto-detect if not specified
+}
+
+/// Optional detail level for build timing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum MetricsDetail {
+    /// Stream every measured atomic unit to JSONL.
+    Units,
 }
 
 // =============================================================================
@@ -69,6 +86,37 @@ pub struct WarmOutput {
     pub languages: Vec<String>,
     /// Path to the cache file
     pub cache_path: PathBuf,
+}
+
+/// One correlated report for the full warm workflow.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WarmMetricsReport {
+    /// Report schema version.
+    pub schema_version: u32,
+    /// Shared build correlation identifier.
+    pub run_id: String,
+    /// Process role coordinating the component reports.
+    pub orchestrator_role: String,
+    /// Project being built.
+    pub project: PathBuf,
+    /// Run start, unix epoch milliseconds.
+    pub started_at_unix_ms: u64,
+    /// End-to-end warm wall time.
+    pub duration_ms: u64,
+    /// Structural ingestion and AST timing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact: Option<IngestionReport>,
+    /// Semantic worker report, when the semantic feature/build was available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic: Option<serde_json::Value>,
+    /// Exact unit stream, when requested.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit_detail_path: Option<PathBuf>,
+    /// Component failures retained in an incomplete report.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub errors: Vec<String>,
+    /// Clarifies why summed concurrent unit work may exceed wall time.
+    pub concurrency_note: String,
 }
 
 // =============================================================================
@@ -117,6 +165,14 @@ impl WarmArgs {
         let exe = std::env::current_exe()?;
         let mut cmd = StdCommand::new(exe);
         cmd.arg("warm").arg(project.to_str().unwrap_or("."));
+        if let Some(metrics) = self.metrics.as_ref() {
+            cmd.arg("--metrics").arg(absolute_output(metrics)?);
+        }
+        if let Some(detail) = self.metrics_detail {
+            cmd.arg("--metrics-detail").arg(match detail {
+                MetricsDetail::Units => "units",
+            });
+        }
 
         // Language auto-detection happens in the background process
 
@@ -164,8 +220,20 @@ impl WarmArgs {
         format: OutputFormat,
         quiet: bool,
     ) -> anyhow::Result<()> {
+        let metrics_path = self
+            .metrics
+            .as_ref()
+            .map(|path| absolute_output(path))
+            .transpose()?;
+        let metrics_detail_path = metrics_path
+            .as_ref()
+            .filter(|_| self.metrics_detail == Some(MetricsDetail::Units))
+            .map(|path| unit_detail_path(path));
         let cmd = DaemonCommand::Warm {
             language: None, // Auto-detect
+            metrics_path,
+            metrics_detail_path,
+            run_id: self.metrics.as_ref().map(|_| new_run_id()),
         };
 
         let response = send_command(project, &cmd)
@@ -212,7 +280,30 @@ impl WarmArgs {
         }
 
         let manager = super::artifact_manager::ArtifactManager::open(project)?;
-        let report = manager.warm()?;
+        let metrics_started = Instant::now();
+        let metrics_started_at_unix_ms = unix_millis();
+        let run_id = self.metrics.as_ref().map(|_| new_run_id());
+        let metrics_path = self
+            .metrics
+            .as_ref()
+            .map(|path| absolute_output(path))
+            .transpose()?;
+        let detail_path = metrics_path
+            .as_ref()
+            .filter(|_| self.metrics_detail == Some(MetricsDetail::Units))
+            .map(|path| unit_detail_path(path));
+        if let Some(path) = detail_path.as_ref() {
+            std::fs::File::create(path)?;
+        }
+        let report = if let Some(run_id) = run_id.as_ref() {
+            manager.warm_with_timing(IngestionTimingOptions {
+                run_id: run_id.clone(),
+                process_role: "artifact_producer".into(),
+                detail_path: detail_path.clone(),
+            })?
+        } else {
+            manager.warm()?
+        };
         let snapshot = manager
             .snapshot()
             .map_err(|state| anyhow::anyhow!("artifact generation is not ready: {state:?}"))?;
@@ -224,6 +315,64 @@ impl WarmArgs {
         languages.dedup();
         let files = snapshot.file_count();
         let edges = snapshot.intra_file_call_graph().edge_count();
+
+        #[cfg(feature = "semantic")]
+        let (semantic_metrics, metrics_errors) =
+            if let (Some(run_id), Some(metrics_path)) = (run_id.as_ref(), metrics_path.as_ref()) {
+                use tldr_core::config::TldrConfig;
+                use tldr_core::semantic::EmbeddingModel;
+
+                let config = TldrConfig::resolve(Some(project));
+                let model = EmbeddingModel::resolve(None, &config).map_err(anyhow::Error::msg)?;
+                let source_chunks = snapshot.semantic_source_chunks(project);
+                let parent = metrics_path.parent().unwrap_or_else(|| Path::new("."));
+                let semantic_file = tempfile::NamedTempFile::new_in(parent)?;
+                let semantic_path = semantic_file.path().to_path_buf();
+                let index = super::index_manager::IndexManager::new();
+                let result = index
+                    .warm_with_metrics(
+                        project,
+                        model,
+                        source_chunks,
+                        Some(super::bulk_worker::WorkerMetricsConfig {
+                            parent_run_id: run_id.clone(),
+                            report_path: semantic_path,
+                            detail_path: detail_path.clone(),
+                        }),
+                    )
+                    .map_err(anyhow::Error::msg)?;
+                (
+                    result.metrics.map(serde_json::to_value).transpose()?,
+                    result
+                        .metrics_error
+                        .map(|error| vec![format!("semantic_metrics: {error}")])
+                        .unwrap_or_default(),
+                )
+            } else {
+                (None, Vec::new())
+            };
+        #[cfg(not(feature = "semantic"))]
+        let (semantic_metrics, metrics_errors): (Option<serde_json::Value>, Vec<String>) =
+            (None, Vec::new());
+
+        if let (Some(metrics_path), Some(run_id)) = (metrics_path.as_ref(), run_id) {
+            write_metrics_report(
+                metrics_path,
+                &WarmMetricsReport {
+                    schema_version: 1,
+                    run_id,
+                    orchestrator_role: "foreground".into(),
+                    project: project.to_path_buf(),
+                    started_at_unix_ms: metrics_started_at_unix_ms,
+                    duration_ms: metrics_started.elapsed().as_millis() as u64,
+                    artifact: Some(report.clone()),
+                    semantic: semantic_metrics,
+                    unit_detail_path: detail_path,
+                    errors: metrics_errors,
+                    concurrency_note: "phase durations are wall time; atomic-unit totals are summed work and may exceed wall time when units run concurrently".into(),
+                },
+            )?;
+        }
 
         // Output result
         let output = WarmOutput {
@@ -256,6 +405,42 @@ impl WarmArgs {
 
         Ok(())
     }
+}
+
+pub(super) fn write_metrics_report(path: &Path, report: &WarmMetricsReport) -> anyhow::Result<()> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+    serde_json::to_writer_pretty(temporary.as_file_mut(), report)?;
+    temporary.as_file_mut().sync_all()?;
+    temporary.persist(path).map_err(|error| error.error)?;
+    Ok(())
+}
+
+fn absolute_output(path: &Path) -> anyhow::Result<PathBuf> {
+    if path.is_absolute() {
+        Ok(path.to_path_buf())
+    } else {
+        Ok(std::env::current_dir()?.join(path))
+    }
+}
+
+pub(super) fn unit_detail_path(report: &Path) -> PathBuf {
+    let file_name = report
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("tldr-build");
+    report.with_file_name(format!("{file_name}.units.jsonl"))
+}
+
+pub(super) fn new_run_id() -> String {
+    format!("{}-{}", unix_millis(), std::process::id())
+}
+
+pub(super) fn unix_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 // =============================================================================

@@ -514,6 +514,24 @@ impl RedbStore {
         Ok(Some(job))
     }
 
+    /// Remove incompatible advisory worker metadata.
+    ///
+    /// Embedding records are intentionally untouched: their own recipe and
+    /// document identities independently determine whether they can be reused.
+    pub fn remove_job(&self, id: &str) -> TldrResult<bool> {
+        let mut transaction = self.database.begin_write().map_err(redb_error)?;
+        transaction
+            .set_durability(Durability::Immediate)
+            .map_err(redb_error)?;
+        let removed = {
+            let mut jobs = transaction.open_table(JOBS).map_err(redb_error)?;
+            let removed = jobs.remove(id).map_err(redb_error)?.is_some();
+            removed
+        };
+        transaction.commit().map_err(redb_error)?;
+        Ok(removed)
+    }
+
     /// Persist a job transition atomically with all completed batch embeddings.
     pub fn commit_job_batch(
         &self,
@@ -1018,4 +1036,42 @@ where
 
 fn store_error(message: impl Into<String>) -> TldrError {
     TldrError::Embedding(format!("semantic redb store: {}", message.into()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn incompatible_advisory_job_can_be_removed_without_touching_embeddings() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = RedbStore::open(&directory.path().join("semantic.redb"), 1024 * 1024).unwrap();
+        let job = JobRecord {
+            id: "job".into(),
+            protocol_version: 1,
+            recipe: [1; 32],
+            next_batch: 1,
+            total_batches: 2,
+            retries: 0,
+            max_retries: 3,
+            state: JobState::Running,
+            updated_at: 1,
+        };
+        store.commit_job_batch(&job, &[]).unwrap();
+        let key = [7; 64];
+        store
+            .put_embedding(EmbeddingWrite {
+                key: &key,
+                recipe: [2; 32],
+                vector: &[0.25, 0.75],
+                cached_at: 1,
+                file_mtime: None,
+            })
+            .unwrap();
+
+        store.remove_job("job").unwrap();
+
+        assert!(store.get_job("job").unwrap().is_none());
+        assert!(store.get_embedding(&key, [2; 32], 2).unwrap().is_some());
+    }
 }

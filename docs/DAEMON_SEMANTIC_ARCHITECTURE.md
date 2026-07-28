@@ -66,6 +66,25 @@ The heart of the branch. A `VectorStore` is a `usearch` index mapping a stable
 `u64` key to an `f32` vector, plus a metadata sidecar that holds everything
 usearch does not (file path, function name, line range, content hash).
 
+### 3.4 Fresh-build recovery and observability
+
+Bulk embedding runs in a disposable worker and uses bounded 128-vector windows.
+Each window reconciles the existing content-addressed cache, infers only misses,
+flushes new cache records, and only then sends live progress to the daemon. A
+restart repeats deterministic planning and cache lookup rather than maintaining
+a second staged-vector store.
+
+The daemon reads bounded JSONL events while the child is running and exposes the
+latest phase and counters through `daemon status`. The worker builds privately;
+the existing generation manager remains the only publication boundary, so a
+failed replacement cannot expose a partial index.
+
+`tldr warm --metrics <report.json>` correlates artifact ingestion, AST parsing,
+semantic planning/inference, and publication under one run identity. Add
+`--metrics-detail units` only when exact per-file/window JSONL is needed. See
+`SEMANTIC_BUILD_RECOVERY.md` for the ownership, retry, progress, and timing
+contracts.
+
 ### 3.1 Public surface (selected)
 
 | Method | Purpose |

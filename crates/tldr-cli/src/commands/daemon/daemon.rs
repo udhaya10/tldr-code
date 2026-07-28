@@ -188,20 +188,44 @@ struct WarmJob {
     /// the ack); the semantic step is skipped.
     #[cfg(feature = "semantic")]
     model: Option<EmbeddingModel>,
+    metrics_path: Option<PathBuf>,
+    metrics_detail_path: Option<PathBuf>,
+    run_id: Option<String>,
 }
 
 impl WarmJob {
     /// Run all warm steps; returns (warmed, errors) for the daemon log. Same
     /// steps as the old inline handler — only the execution context changed.
     async fn run(self) -> (Vec<&'static str>, Vec<String>) {
+        let started = Instant::now();
+        let started_at_unix_ms = super::warm::unix_millis();
         let mut warmed = Vec::new();
         let mut errors = Vec::new();
+        let mut artifact_report = None;
+        let mut semantic_report = None;
+        if let Some(path) = self.metrics_detail_path.as_ref() {
+            if let Err(error) = std::fs::File::create(path) {
+                errors.push(format!("metrics_detail: {error}"));
+            }
+        }
 
         // 1. Build or resume the authoritative shared generation. This step
         // reuses unchanged revisions and is the only structural ingestion
         // entry point used by both startup and watcher deltas.
         let manager = Arc::clone(&self.artifact_manager);
-        match tokio::task::spawn_blocking(move || manager.warm()).await {
+        let timing =
+            self.run_id
+                .as_ref()
+                .map(|run_id| tldr_core::artifact_store::IngestionTimingOptions {
+                    run_id: run_id.clone(),
+                    process_role: "artifact_producer".into(),
+                    detail_path: self.metrics_detail_path.clone(),
+                });
+        match tokio::task::spawn_blocking(move || {
+            timing.map_or_else(|| manager.warm(), |timing| manager.warm_with_timing(timing))
+        })
+        .await
+        {
             Ok(Ok(report)) => {
                 *self.indexed_files.write().await = self.artifact_manager.stats().hot_files;
                 if report.parsed_files == 0 {
@@ -211,6 +235,7 @@ impl WarmJob {
                 } else {
                     warmed.push("artifact_store");
                 }
+                artifact_report = Some(report);
             }
             Ok(Err(error)) => errors.push(format!("artifact_store: {error}")),
             Err(error) => errors.push(format!("artifact_store: {error}")),
@@ -225,26 +250,58 @@ impl WarmJob {
             let mgr = Arc::clone(&self.semantic_store);
             let artifacts = Arc::clone(&self.artifact_manager);
             let project = self.project.clone();
+            let worker_metrics = match (self.run_id.as_ref(), self.metrics_path.as_ref()) {
+                (Some(run_id), Some(metrics_path)) => {
+                    let parent = metrics_path
+                        .parent()
+                        .unwrap_or_else(|| std::path::Path::new("."));
+                    match tempfile::NamedTempFile::new_in(parent) {
+                        Ok(file) => Some((file, run_id.clone(), self.metrics_detail_path.clone())),
+                        Err(error) => {
+                            errors.push(format!("semantic_metrics: {error}"));
+                            None
+                        }
+                    }
+                }
+                _ => None,
+            };
+            let worker_config = worker_metrics.as_ref().map(|(file, run_id, detail_path)| {
+                super::bulk_worker::WorkerMetricsConfig {
+                    parent_run_id: run_id.clone(),
+                    report_path: file.path().to_path_buf(),
+                    detail_path: detail_path.clone(),
+                }
+            });
             let res = tokio::task::spawn_blocking(move || {
                 let snapshot = artifacts
                     .snapshot()
                     .map_err(|state| format!("artifact generation is not ready: {state:?}"))?;
                 let artifact_generation = snapshot.generation();
                 let source_chunks = snapshot.semantic_source_chunks(&project);
-                let built = mgr.warm(&project, model, source_chunks)?;
+                let result =
+                    mgr.warm_with_metrics(&project, model, source_chunks, worker_config)?;
                 let vector_generation = mgr.active_generation(&project)?;
-                Ok::<_, String>((built, artifact_generation, vector_generation))
+                Ok::<_, String>((result, artifact_generation, vector_generation))
             })
             .await;
             match res {
-                Ok(Ok((built, artifact_generation, Some(vector_generation)))) => {
+                Ok(Ok((result, artifact_generation, Some(vector_generation)))) => {
+                    semantic_report = result
+                        .metrics
+                        .map(serde_json::to_value)
+                        .transpose()
+                        .ok()
+                        .flatten();
+                    if let Some(error) = result.metrics_error {
+                        errors.push(format!("semantic_metrics: {error}"));
+                    }
                     if let Err(error) = self
                         .artifact_manager
                         .attach_vector_generation(artifact_generation, vector_generation)
                     {
                         self.semantic_store.invalidate();
                         errors.push(format!("semantic_generation_join: {error}"));
-                    } else if built {
+                    } else if result.built {
                         warmed.push("semantic_store");
                     } else {
                         warmed.push("semantic_store (cached)");
@@ -255,6 +312,25 @@ impl WarmJob {
                 }
                 Ok(Err(e)) => errors.push(format!("semantic_store: {}", e)),
                 Err(e) => errors.push(format!("semantic_store: {}", e)),
+            }
+        }
+
+        if let (Some(path), Some(run_id)) = (self.metrics_path.as_ref(), self.run_id.as_ref()) {
+            let report = super::warm::WarmMetricsReport {
+                schema_version: 1,
+                run_id: run_id.clone(),
+                orchestrator_role: "daemon".into(),
+                project: self.project.clone(),
+                started_at_unix_ms,
+                duration_ms: started.elapsed().as_millis() as u64,
+                artifact: artifact_report,
+                semantic: semantic_report,
+                unit_detail_path: self.metrics_detail_path.clone(),
+                errors: errors.clone(),
+                concurrency_note: "phase durations are wall time; atomic-unit totals are summed work and may exceed wall time when units run concurrently".into(),
+            };
+            if let Err(error) = super::warm::write_metrics_report(path, &report) {
+                errors.push(format!("metrics_report: {error}"));
             }
         }
 
@@ -450,7 +526,7 @@ impl TLDRDaemon {
         // itself short-circuits cached graph/structure/tree/semantic steps.
         {
             let lang = resolve_language(None);
-            let _ = self.start_warm_build(lang);
+            let _ = self.start_warm_build(lang, None, None, None);
             eprintln!("[lifecycle] ensure-warm queued (warm-if-cold on start)");
         }
 
@@ -664,10 +740,15 @@ impl TLDRDaemon {
                 cost_usd,
             ),
 
-            DaemonCommand::Warm { language } => {
+            DaemonCommand::Warm {
+                language,
+                metrics_path,
+                metrics_detail_path,
+                run_id,
+            } => {
                 let parsed = language.as_deref().and_then(|l| l.parse::<Language>().ok());
                 let lang = resolve_language(parsed);
-                self.start_warm_build(lang)
+                self.start_warm_build(lang, metrics_path, metrics_detail_path, run_id)
             }
 
             #[cfg(feature = "semantic")]
@@ -1551,7 +1632,16 @@ impl TLDRDaemon {
     /// send" while the daemon kept building. Now the ack returns in
     /// microseconds and the client is pointed at `tldr daemon status`
     /// (busy `warm-build` + semantic_index state, TLDR-qzc) for progress.
-    fn start_warm_build(&self, _lang: Language) -> DaemonResponse {
+    fn start_warm_build(
+        &self,
+        _lang: Language,
+        metrics_path: Option<PathBuf>,
+        metrics_detail_path: Option<PathBuf>,
+        run_id: Option<String>,
+    ) -> DaemonResponse {
+        let run_id = metrics_path
+            .as_ref()
+            .map(|_| run_id.unwrap_or_else(super::warm::new_run_id));
         // Single-flight: a second Warm during a build is answered honestly
         // instead of stacking a duplicate build behind the store write lock.
         if self
@@ -1586,6 +1676,9 @@ impl TLDRDaemon {
             semantic_store: Arc::clone(&self.semantic_store),
             #[cfg(feature = "semantic")]
             model,
+            metrics_path,
+            metrics_detail_path,
+            run_id,
         };
 
         // Busy guard created BEFORE the ack (no status-misses-busy window)
@@ -1685,16 +1778,19 @@ impl TLDRDaemon {
                 state: "warm".to_string(),
                 vectors: Some(vectors),
                 runners,
+                progress: self.semantic_store.build_progress(),
             },
             IndexState::Building => super::types::SemanticIndexStats {
                 state: "building".to_string(),
                 vectors: None,
                 runners,
+                progress: self.semantic_store.build_progress(),
             },
             IndexState::Cold => super::types::SemanticIndexStats {
                 state: "cold".to_string(),
                 vectors: None,
                 runners,
+                progress: self.semantic_store.build_progress(),
             },
         })
     }
@@ -1853,7 +1949,7 @@ impl TLDRDaemon {
         #[cfg(feature = "semantic")]
         self.semantic_store.invalidate();
 
-        match self.start_warm_build(resolve_language(None)) {
+        match self.start_warm_build(resolve_language(None), None, None, None) {
             DaemonResponse::Status {
                 status,
                 message: Some(message),

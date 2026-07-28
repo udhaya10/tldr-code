@@ -263,6 +263,8 @@ fn ensure_warm(project: &std::path::Path) -> String {
     let args = WarmArgs {
         path: project.to_path_buf(),
         background: false,
+        metrics: None,
+        metrics_detail: None,
     };
     match args.run(OutputFormat::Json, true) {
         Ok(()) => "queued_or_ok".to_string(),

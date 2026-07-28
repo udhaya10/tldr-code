@@ -90,8 +90,8 @@ pub use inference_runners::{
 
 pub mod build_pipeline;
 pub use build_pipeline::{
-    BuildCancellation, BuildPipelineError, PipelineStage, PipelineTelemetry, StageCapacities,
-    StreamingBuildConfig,
+    BuildCancellation, BuildPhase, BuildPipelineError, BuildProgress, PipelineStage,
+    PipelineTelemetry, StageCapacities, StreamingBuildConfig,
 };
 
 pub mod fixed_shape_benchmark;
@@ -219,6 +219,7 @@ pub use lineage::{
 // No SemanticIndex fallback. VectorStore works or the user gets an error.
 pub mod store_search;
 pub use store_search::{
-    empty_search_report, load_or_build_store, load_or_build_store_from_artifacts, query_store,
-    query_store_with_vector, search_with_store,
+    empty_search_report, load_or_build_store, load_or_build_store_from_artifacts,
+    load_or_build_store_from_artifacts_with_progress, query_store, query_store_with_vector,
+    search_with_store,
 };

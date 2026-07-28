@@ -103,6 +103,51 @@ pub enum PipelineStage {
     Cancelled,
 }
 
+/// User-visible phase of one fresh semantic build.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BuildPhase {
+    /// Source artifacts are being enumerated and planned.
+    Planning,
+    /// The embedding model and tokenizer are loading.
+    ModelLoad,
+    /// Cache lookup and missing-vector inference are running.
+    Embedding,
+    /// The complete in-memory vector set is being checked.
+    Verifying,
+    /// The verified generation is being published atomically.
+    Publishing,
+    /// The generation is durable and active.
+    Completed,
+}
+
+/// Reconciled progress for one semantic build.
+///
+/// Cache hits and new vectors describe the current scan. They are advisory
+/// counters; compatible cache records remain the durable source of completed
+/// inference.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BuildProgress {
+    /// Current build phase.
+    pub phase: BuildPhase,
+    /// Candidate files consumed so far.
+    pub files_seen: u64,
+    /// Exact candidate-file total when cheaply known.
+    pub files_total: Option<u64>,
+    /// Durable embedding windows completed by this scan.
+    pub windows_completed: u64,
+    /// Compatible vectors reused from the embedding cache.
+    pub cache_hits: u64,
+    /// Missing vectors inferred and durably cached by this scan.
+    pub new_vectors: u64,
+    /// Duration of the most recently completed embedding window.
+    pub last_window_duration_ms: Option<u64>,
+    /// Wall time since this worker build started.
+    pub elapsed_ms: u64,
+    /// Failed attempts consumed before the current attempt.
+    pub retries: u32,
+}
+
 /// Error with the exact stage and optional file/chunk identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuildPipelineError {

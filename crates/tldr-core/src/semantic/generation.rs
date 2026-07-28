@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use fs2::FileExt;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
@@ -43,6 +44,13 @@ pub struct GenerationManager {
     ledger: RedbStore,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PublicationTimings {
+    pub stage_and_records_ms: u64,
+    pub verification_ms: u64,
+    pub activation_ms: u64,
+}
+
 impl GenerationManager {
     /// Open the ledger stored beside the derived usearch files.
     pub fn open(directory: &Path) -> TldrResult<Self> {
@@ -60,21 +68,42 @@ impl GenerationManager {
 
     /// Stage, verify, and atomically publish a new generation.
     pub fn publish(&self, store: &VectorStore, identity: &ManifestId) -> TldrResult<u64> {
-        self.publish_with_fault(store, identity, None)
+        self.publish_measured(store, identity)
+            .map(|(generation, _)| generation)
     }
 
+    pub(crate) fn publish_measured(
+        &self,
+        store: &VectorStore,
+        identity: &ManifestId,
+    ) -> TldrResult<(u64, PublicationTimings)> {
+        self.publish_with_fault_measured(store, identity, None)
+    }
+
+    #[allow(dead_code)]
     pub(crate) fn publish_with_fault(
         &self,
         store: &VectorStore,
         identity: &ManifestId,
         fault: Option<PublicationFault>,
     ) -> TldrResult<u64> {
+        self.publish_with_fault_measured(store, identity, fault)
+            .map(|(generation, _)| generation)
+    }
+
+    fn publish_with_fault_measured(
+        &self,
+        store: &VectorStore,
+        identity: &ManifestId,
+        fault: Option<PublicationFault>,
+    ) -> TldrResult<(u64, PublicationTimings)> {
         let lock = std::fs::OpenOptions::new()
             .create(true)
             .write(true)
             .truncate(false)
             .open(self.directory.join("lock"))?;
         lock.lock_exclusive()?;
+        let stage_started = Instant::now();
         let mut generation = next_generation(&self.directory)?;
         while self.ledger.generation(generation)?.is_some() {
             generation = generation
@@ -111,15 +140,27 @@ impl GenerationManager {
         })?;
         self.flush(generation, store.dimensions(), &batch)?;
         inject(fault, PublicationFault::Records)?;
+        let stage_and_records_ms = stage_started.elapsed().as_millis() as u64;
 
+        let verification_started = Instant::now();
         self.write_artifact(store, identity, generation)?;
         inject(fault, PublicationFault::Artifact)?;
+        let verification_ms = verification_started.elapsed().as_millis() as u64;
+        let activation_started = Instant::now();
         self.ledger.complete_and_activate_generation(generation)?;
         inject(fault, PublicationFault::Activation)?;
 
         // Backward-compatible mirror only. Readers in this module trust redb.
         activate_current(&self.directory, generation)?;
-        Ok(generation)
+        let activation_ms = activation_started.elapsed().as_millis() as u64;
+        Ok((
+            generation,
+            PublicationTimings {
+                stage_and_records_ms,
+                verification_ms,
+                activation_ms,
+            },
+        ))
     }
 
     fn flush(&self, generation: u64, dimensions: usize, batch: &[OwnedVector]) -> TldrResult<()> {

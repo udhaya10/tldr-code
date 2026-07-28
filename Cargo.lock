@@ -3534,6 +3534,7 @@ version = "0.4.0"
 dependencies = [
  "anyhow",
  "arc-swap",
+ "blake3",
  "bumpalo",
  "chrono",
  "ciborium",
@@ -3597,6 +3598,7 @@ name = "tldr-contract-tests"
 version = "0.4.0"
 dependencies = [
  "ciborium",
+ "md5",
  "tempfile",
  "tldr-cli",
  "tldr-core",
@@ -3635,6 +3637,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "tempfile",
  "thiserror 1.0.69",
  "tokenizers",
  "tree-sitter",

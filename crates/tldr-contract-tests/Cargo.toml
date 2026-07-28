@@ -12,6 +12,7 @@ test = false
 
 [dependencies]
 ciborium = { workspace = true }
+md5 = { workspace = true }
 tempfile = { workspace = true }
 tldr-cli = { path = "../tldr-cli" }
 tldr-core = { path = "../tldr-core", features = ["semantic"] }

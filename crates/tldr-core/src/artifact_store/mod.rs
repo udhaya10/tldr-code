@@ -15,7 +15,7 @@ pub use file_facts::{
 };
 pub use function_artifacts::FunctionArtifactCoordinator;
 pub use graph_snapshot::{FuncId, FunctionNode, GraphSnapshot};
-pub use ingestion::{IngestionEngine, IngestionReport};
+pub use ingestion::{IngestionEngine, IngestionReport, IngestionTimingOptions};
 pub use projections::GenerationSnapshot;
 pub use redb::{ArtifactStore, RedbArtifactStore};
 pub use types::{
