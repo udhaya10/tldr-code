@@ -5,15 +5,17 @@
 > superpowers:executing-plans to implement this plan task-by-task. Steps use
 > checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Make a fresh semantic build finish predictably, expose useful live
-progress, and restart without repeating completed inference.
+**Goal:** Make a fresh semantic build finish predictably, explain where its time
+was spent, expose useful live progress, and restart without repeating completed
+inference.
 
 **Architecture:** Keep the existing embedding cache as the durable record of
 completed inference. Walk the corpus in deterministic fixed-size windows, reuse
 cache hits, embed and immediately cache only misses, and rebuild the usearch
 generation from those cached vectors. Job counters are advisory progress, not a
 second source of vector truth; the new generation becomes visible only through
-the existing verified atomic publication path.
+the existing verified atomic publication path. Extend the existing build metrics
+with correlated structural, semantic, process, and atomic-unit timings.
 
 **Tech Stack:** Rust, existing redb embedding cache/job ledger, usearch, Tokio,
 JSONL worker IPC, existing `tldr-contract-tests` runner.
@@ -32,6 +34,9 @@ This plan intentionally does not add:
 - a time-based checkpoint rule in addition to a fixed window size;
 - preselected tokenizer memoization, parallel planning, or inference tuning
   before profiling identifies the bottleneck;
+- a second tracing framework alongside the existing `BuildMetrics` and
+  `PhaseRecord` types;
+- unbounded per-file or per-batch timing records in default operation;
 - launchd lifecycle changes on the semantic-build critical path.
 
 The simple recovery rule is:
@@ -53,6 +58,8 @@ must not repeat when its cache record is compatible and intact.
 
 - `crates/tldr-core/src/semantic/lineage.rs`: existing
   `EmbeddingRecipeId`, which identifies compatible vector values.
+- `crates/tldr-core/src/semantic/build_metrics.rs`: shared run, process, phase,
+  and bounded atomic-unit timing report.
 - `crates/tldr-core/src/semantic/cache.rs`: durable vector cache and cache
   lookup/write behavior.
 - `crates/tldr-core/src/semantic/store_search.rs`: existing `ManifestId`
@@ -61,6 +68,10 @@ must not repeat when its cache record is compatible and intact.
   windows, cache reconciliation, and final vector-store construction.
 - `crates/tldr-core/src/semantic/generation.rs`: verified atomic generation
   publication.
+- `crates/tldr-core/src/callgraph/builder_v2.rs`: existing AST
+  scan/parse/compose timers, adapted into the shared report.
+- `crates/tldr-core/src/artifact_store/ingestion.rs`: artifact-ingestion phase
+  and per-file parse timing source.
 - `crates/tldr-core/src/semantic/worker_protocol.rs`: stable request identity
   projection and small progress event schema.
 - `crates/tldr-cli/src/bin/tldr_embed_worker.rs`: window loop and progress
@@ -70,6 +81,8 @@ must not repeat when its cache record is compatible and intact.
 - `crates/tldr-cli/src/commands/daemon/index_manager.rs`: current build
   progress snapshot.
 - `crates/tldr-cli/src/commands/daemon/status.rs`: operator-facing progress.
+- `crates/tldr-cli/src/commands/daemon/warm.rs`: documented metrics output and
+  optional atomic-unit detail controls.
 - `crates/tldr-contract-tests/src/main.rs`: baseline, crash, restart, and
   installed-build scenarios using the shared runner.
 - `docs/FRESH_INSTALL_BENCHMARK_2026-07-28.md`: before/after measurements.
@@ -109,7 +122,7 @@ machine-readable record containing:
 ```text
 commit, machine, corpus_digest, model, phase, files_seen, cache_hits,
 cache_misses, new_vectors, elapsed_ms, peak_rss_bytes, publication_generation,
-query_result
+query_result, process_timings, component_timings, unit_summaries
 ```
 
 Do not require an up-front exact chunk count. Do not add a second harness.
@@ -126,6 +139,8 @@ Job ledger: advisory status/retry metadata only.
 Restart: repeat scan/lookup; do not repeat compatible cached inference.
 Incompatibility: discard the job record and start a new scan without spending
 retry budget; normal cache-key compatibility decides which vectors are reusable.
+Timing: one run_id correlates process roles; phases report wall time; atomic-unit
+summaries are bounded by default and raw unit records require explicit opt-in.
 ```
 
 - [ ] **Step 4: Prove the baseline exposes the current defects**
@@ -303,7 +318,124 @@ git add crates/tldr-core/src/semantic/{cache.rs,generation.rs,vector_store.rs,wo
 git commit -m "fix(semantic): resume builds from durable embedding cache"
 ```
 
-## Task 4: Profile and fix only the dominant bottleneck (`TLDR-bjux.14`)
+## Task 4: Unify component and atomic-unit timing (`TLDR-bjux.19`)
+
+**Files:**
+
+- Modify: `crates/tldr-core/src/semantic/build_metrics.rs`
+- Modify: `crates/tldr-core/src/callgraph/builder_v2.rs`
+- Modify: `crates/tldr-core/src/artifact_store/ingestion.rs`
+- Modify: `crates/tldr-core/src/semantic/vector_store.rs`
+- Modify: `crates/tldr-core/src/semantic/worker_protocol.rs`
+- Modify: `crates/tldr-cli/src/bin/tldr_embed_worker.rs`
+- Modify: `crates/tldr-cli/src/commands/daemon/bulk_worker.rs`
+- Modify: `crates/tldr-cli/src/commands/daemon/warm.rs`
+
+- [ ] **Step 1: Add timing-schema tests**
+
+Extend the existing metrics schema with these logical levels:
+
+```rust
+pub struct ProcessTiming {
+    pub run_id: String,
+    pub parent_run_id: Option<String>,
+    pub role: ProcessRole,
+    pub wall_duration_ms: u64,
+    pub phases: Vec<PhaseRecord>,
+    pub units: Vec<UnitSummary>,
+}
+
+pub struct UnitSummary {
+    pub kind: UnitKind,
+    pub count: u64,
+    pub total_duration_ms: u64,
+    pub min_duration_ms: u64,
+    pub p50_duration_ms: u64,
+    pub p95_duration_ms: u64,
+    pub max_duration_ms: u64,
+    pub slowest: Vec<SlowUnit>,
+}
+```
+
+Use a bounded reservoir/histogram suitable for the existing metrics module and a
+fixed slowest-N list. Tests must cover empty, one-unit, repeated-unit and
+concurrent-process reports. Summed unit work may exceed wall time when work is
+parallel; document and test that distinction.
+
+- [ ] **Step 2: Fold the existing AST timer into the report**
+
+Replace the isolated `TLDR_PHASE_TIMING` stderr-only ownership with shared phase
+records for `scan`, `ast_parse`, and `compose`. Preserve the environment flag
+temporarily for compatibility, but make the structured metrics path canonical.
+Record AST atomic units by language and source-relative file identity.
+
+Default output keeps:
+
+```text
+language, file_count, total/min/p50/p95/max parse_ms, slowest-N files
+```
+
+It must not retain every file identity unless detailed output was requested.
+
+- [ ] **Step 3: Instrument the remaining build boundaries**
+
+Record process roles and wall-time phases for:
+
+```text
+daemon orchestration
+artifact scan -> AST parse -> artifact write
+semantic plan/chunk -> cache lookup -> model load -> inference
+vector assembly -> verify -> publish
+```
+
+Record atomic units for file parse, semantic window, and inference batch. Reuse
+the existing batch latency and pipeline telemetry rather than measuring the same
+operation twice.
+
+- [ ] **Step 4: Add a documented user surface**
+
+Extend `tldr warm` with:
+
+```text
+tldr warm <path> --metrics <report.json>
+tldr warm <path> --metrics <report.json> --metrics-detail units
+```
+
+Aggregate mode writes one bounded JSON report. Detailed mode additionally
+streams raw unit records as JSONL beside the report and references that file
+from the report. Both daemon and foreground warm paths must use the same schema.
+
+- [ ] **Step 5: Verify AST timing answers**
+
+On a mixed-language fixture, assert the report can answer:
+
+```text
+How much wall time did AST parsing take?
+How many files were parsed for each language?
+What were p50/p95/max parse times?
+Which bounded set of files were slowest?
+How much time belonged to each process and semantic phase?
+How long did each window/batch take in detailed mode?
+```
+
+- [ ] **Step 6: Measure observer overhead**
+
+Compare timings disabled, aggregate, and detailed on the fixed corpus. Aggregate
+mode must add less than 1% wall time or record a reviewed alternative bound.
+Memory is bounded by phase count, unit kinds, histogram state, and slowest-N.
+Detailed mode is explicitly opt-in and streams rather than accumulating records.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add crates/tldr-core/src/{artifact_store/ingestion.rs,callgraph/builder_v2.rs} \
+  crates/tldr-core/src/semantic/{build_metrics.rs,vector_store.rs,worker_protocol.rs} \
+  crates/tldr-cli/src/bin/tldr_embed_worker.rs \
+  crates/tldr-cli/src/commands/daemon/{bulk_worker.rs,warm.rs}
+git commit -m "feat(metrics): correlate structural and semantic build timing"
+```
+
+## Task 5: Profile and fix only the dominant bottleneck (`TLDR-bjux.14`)
 
 **Files:**
 
@@ -314,9 +446,9 @@ git commit -m "fix(semantic): resume builds from durable embedding cache"
 
 - [ ] **Step 1: Measure the corrected pipeline**
 
-Run the Task 1 benchmark from empty state after Tasks 2 and 3. Record phase
-elapsed time, throughput, CPU utilization, and peak RSS. Identify one dominant
-phase before selecting a change.
+Run the Task 1 benchmark from empty state after Tasks 2–4. Record process,
+component, and atomic-unit timing plus throughput, CPU utilization, and peak RSS.
+Identify one dominant phase before selecting a change.
 
 - [ ] **Step 2: Set the first performance change from evidence**
 
@@ -359,7 +491,7 @@ git add crates/tldr-core/src/semantic \
 git commit -m "perf(semantic): remove measured cold-build bottleneck"
 ```
 
-## Task 5: Certify recovery and a fresh installed build (`TLDR-bjux.16`)
+## Task 6: Certify recovery and a fresh installed build (`TLDR-bjux.16`)
 
 **Files:**
 
@@ -412,8 +544,8 @@ Record source commit and installed/release binary hashes.
 - [ ] **Step 5: Run one fresh build and installed query**
 
 Capture live progress snapshots, cache hits/new vectors, phase timings, CPU/RSS,
-disk, final generation, and query result. Do not start a second concurrent
-semantic build.
+disk, correlated process/component timings, bounded atomic-unit summaries, final
+generation, and query result. Do not start a second concurrent semantic build.
 
 - [ ] **Step 6: Update evidence and close only proven work**
 
@@ -437,8 +569,8 @@ Expected: Git and Beads are pushed; branch is clean and synchronized.
 ## Self-review
 
 - Spec coverage: stable identity is Task 2; bounded cache-backed restart and live
-  progress are Task 3; measured performance is Task 4; crash and clean-install
-  evidence are Task 5.
+  progress are Task 3; correlated timing is Task 4; measured performance is Task
+  5; crash and clean-install evidence are Task 6.
 - Simplicity: no duplicate recipe, vector ledger, staged-vector store, global
   transaction, whole-corpus preplan, or dual count/time checkpoint policy.
 - Correctness: durable compatible cache records prevent repeated inference;
@@ -446,6 +578,8 @@ Expected: Git and Beads are pushed; branch is clean and synchronized.
 - Observability: phase, files, cache hits, new vectors, elapsed time, and retries
   answer whether work is advancing without pretending an unknown denominator is
   known.
+- Timing: a normal bounded report answers component and AST costs; opt-in JSONL
+  answers exact per-file/window/batch questions without burdening normal builds.
 - Scope: launchd cancellation remains in the lifecycle epic and is not a
   semantic publication dependency.
 - Complexity gate: optimization follows a measured bottleneck; it is not chosen
