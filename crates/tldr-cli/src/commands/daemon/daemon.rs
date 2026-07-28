@@ -549,6 +549,7 @@ impl TLDRDaemon {
 
     /// Signal the daemon to shut down gracefully.
     pub fn shutdown(&self) {
+        self.semantic_store.cancel_build();
         self.stopping.store(true, Ordering::SeqCst);
         let _ = self.shutdown_tx.send(true);
     }

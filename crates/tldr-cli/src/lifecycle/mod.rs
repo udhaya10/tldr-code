@@ -8,8 +8,8 @@ pub mod project;
 pub mod service_state;
 
 pub use launchd::{
-    default_path_env, install_launch_agent, remove_launch_agent, resolve_tldr_bin, LaunchdInstall,
-    LaunchdVars,
+    default_path_env, install_launch_agent, remove_launch_agent, resolve_tldr_bin,
+    unload_launch_agent, LaunchdInstall, LaunchdVars,
 };
 pub use project::{ensure_project_files, resolve_project_root, DEFAULT_CONFIG_JSON};
 pub use service_state::{

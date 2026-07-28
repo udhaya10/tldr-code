@@ -92,13 +92,27 @@ pub fn install_launch_agent(vars: &LaunchdVars, logs: &ServiceLogs) -> Result<La
 
     let plist_path = agents_dir.join(format!("{}.plist", vars.label));
     let body = render_plist(vars);
+    let uid = get_uid();
+    let domain_label = format!("gui/{uid}/{}", vars.label);
+    let definition_unchanged =
+        fs::read_to_string(&plist_path).is_ok_and(|existing| existing == body);
+    let service_loaded = Command::new("launchctl")
+        .args(["print", &domain_label])
+        .output()
+        .is_ok_and(|output| output.status.success());
+
+    if definition_unchanged && service_loaded {
+        return Ok(LaunchdInstall {
+            label: vars.label.clone(),
+            plist_path,
+            logs: logs.clone(),
+        });
+    }
+
     fs::write(&plist_path, body)
         .with_context(|| format!("failed to write {}", plist_path.display()))?;
 
-    let uid = get_uid();
-    let domain_label = format!("gui/{uid}/{}", vars.label);
-
-    // Best-effort unload of previous job.
+    // Reload only when the definition changed or the service is not loaded.
     let _ = Command::new("launchctl")
         .args(["bootout", &domain_label])
         .output();
@@ -153,12 +167,27 @@ pub fn install_launch_agent(vars: &LaunchdVars, logs: &ServiceLogs) -> Result<La
 }
 
 #[cfg(target_os = "macos")]
-pub fn remove_launch_agent(label: &str, plist_path: Option<&Path>) -> Result<()> {
+pub fn unload_launch_agent(label: &str) -> Result<()> {
     let uid = get_uid();
     let domain_label = format!("gui/{uid}/{label}");
-    let _ = Command::new("launchctl")
+    let output = Command::new("launchctl")
         .args(["bootout", &domain_label])
-        .output();
+        .output()
+        .with_context(|| format!("failed to unload launch agent {label}"))?;
+    // launchctl returns a non-zero status when the service is already
+    // unloaded. That is the desired end state, so keep stop idempotent.
+    let _ = output;
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn unload_launch_agent(_label: &str) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+pub fn remove_launch_agent(label: &str, plist_path: Option<&Path>) -> Result<()> {
+    unload_launch_agent(label)?;
     if let Some(p) = plist_path {
         if p.exists() {
             fs::remove_file(p)

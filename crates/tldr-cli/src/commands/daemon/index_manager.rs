@@ -105,6 +105,12 @@ pub struct IndexManager {
     /// Latest reconciled worker progress, retained after completion for
     /// postmortem/status inspection.
     progress: RwLock<Option<BuildProgress>>,
+    /// Daemon-lifetime cancellation shared with the active bulk worker.
+    ///
+    /// The daemon is not reused after shutdown, so one token is sufficient:
+    /// shutdown cancels the active build and prevents a late build from
+    /// starting while the runtime is draining.
+    bulk_cancellation: BuildCancellation,
 }
 
 impl Default for IndexManager {
@@ -121,7 +127,13 @@ impl IndexManager {
             delta_runner: FixedShapeInferenceRunner::delta(),
             bulk_runner: BulkInferenceRunner::default(),
             progress: RwLock::new(None),
+            bulk_cancellation: BuildCancellation::default(),
         }
+    }
+
+    /// Cancel any active or not-yet-started bulk build.
+    pub fn cancel_build(&self) {
+        self.bulk_cancellation.cancel();
     }
 
     /// Serve a semantic query from the WARM resident store, or say honestly why
@@ -287,7 +299,7 @@ impl IndexManager {
                 &store_dir,
                 &build_opts,
                 Some(CacheConfig::default()),
-                &BuildCancellation::default(),
+                &self.bulk_cancellation,
                 &source_chunks,
                 metrics.clone(),
                 |event| {
@@ -599,4 +611,17 @@ fn deleted_file_rel(project: &Path, file: &Path) -> String {
         }
     }
     root_relative(project, file)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn daemon_cancellation_reaches_bulk_build_token() {
+        let manager = IndexManager::new();
+        assert!(!manager.bulk_cancellation.is_cancelled());
+        manager.cancel_build();
+        assert!(manager.bulk_cancellation.is_cancelled());
+    }
 }
