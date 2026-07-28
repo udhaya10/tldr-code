@@ -35,8 +35,9 @@
 //! ```
 
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
-use ignore::{DirEntry, WalkBuilder};
+use ignore::{DirEntry, IncrementalIgnore, WalkBuilder};
 
 /// The conventional tldr-specific ignore filename, honored alongside
 /// `.gitignore` by every project walk (TLDR-1j2 / TLDR-vti, epic TLDR-bpf).
@@ -47,102 +48,101 @@ use ignore::{DirEntry, WalkBuilder};
 /// same engine that already powers `.gitignore` support.
 pub const TLDRIGNORE_FILE: &str = ".tldrignore";
 
-/// An opaque, thread-safe `.tldrignore`/`.gitignore` matcher for per-path
-/// ignore checks, returned by [`build_path_ignore_matcher`].
+/// An opaque, thread-safe matcher for per-path ignore checks, returned by
+/// [`build_path_ignore_matcher`].
 ///
-/// Wraps the `ignore` crate's [`ignore::gitignore::Gitignore`] so callers
-/// (e.g. the `tldr-cli` daemon watcher) get the matching semantics without
-/// taking a direct dependency on the `ignore` crate.
+/// Git's standard ignore sources and `.tldrignore` are intentionally compiled
+/// into independent incremental matchers. A path is ignored when either
+/// matcher excludes it, so `.tldrignore` may reopen one of its own earlier
+/// rules but can never reopen a path excluded by Git.
 #[derive(Debug, Clone)]
 pub struct PathIgnoreMatcher {
-    gitignore: Option<ignore::gitignore::Gitignore>,
-    tldrignore: Option<ignore::gitignore::Gitignore>,
+    git: Option<Arc<Mutex<IncrementalIgnore>>>,
+    tldr: Arc<Mutex<IncrementalIgnore>>,
 }
 
 impl PathIgnoreMatcher {
-    /// Returns `true` when `path` is excluded by the loaded `.tldrignore` /
-    /// `.gitignore` patterns. Uses `matched_path_or_any_parents` so a
-    /// directory pattern (e.g. `vendored/`) also excludes files nested under
-    /// it — essential for the watcher's vanished-path (delete) branch, where
-    /// only the parent dir pattern can be consulted. `is_dir` should be
-    /// `false` for a path that no longer exists.
+    /// Returns `true` when `path` is excluded by Git or `.tldrignore`.
+    ///
+    /// The incremental matchers load nested ignore files along the queried
+    /// path, so this works for both existing files and vanished watcher paths.
+    /// `is_dir` should be `false` for a path that no longer exists.
     pub fn is_ignored(&self, path: &Path, is_dir: bool) -> bool {
-        self.gitignore.as_ref().is_some_and(|matcher| {
-            matcher
-                .matched_path_or_any_parents(path, is_dir)
-                .is_ignore()
-        }) || self.tldrignore.as_ref().is_some_and(|matcher| {
-            matcher
-                .matched_path_or_any_parents(path, is_dir)
-                .is_ignore()
-        })
+        self.git
+            .as_ref()
+            .is_some_and(|matcher| incremental_matcher_ignores(matcher, path, is_dir))
+            || incremental_matcher_ignores(&self.tldr, path, is_dir)
     }
 }
 
-/// Build a standalone gitignore-semantics matcher for per-path ignore checks
-/// where a full [`WalkBuilder`] traversal isn't available — notably the
-/// in-daemon watcher's vanished-path (delete) branch, which cannot walk a path
-/// that no longer exists on disk (TLDR-1j2).
+fn incremental_matcher_ignores(
+    matcher: &Mutex<IncrementalIgnore>,
+    path: &Path,
+    is_dir: bool,
+) -> bool {
+    let mut matcher = matcher
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Some(relative) = matcher.normalize(path) else {
+        return false;
+    };
+    matcher.matched(relative, is_dir).is_ignore()
+}
+
+fn build_incremental_matcher(builder: &WalkBuilder) -> Option<IncrementalIgnore> {
+    let mut matcher = builder.build_matchers().into_iter().next()?;
+    // Materialize root-level rules immediately. This gives watcher snapshots
+    // stable semantics even though nested directory rules remain lazy.
+    let _ = matcher.matched(Path::new(".tldr-ignore-snapshot-probe"), false);
+    Some(matcher)
+}
+
+/// Build the canonical per-path ignore matcher.
 ///
-/// Honors `<root>/.tldrignore` and, when `include_gitignore` is set, also
-/// `<root>/.gitignore` (to drop deleted gitignored files before a wasted
-/// reindex hop). Returns `None` when neither file contributes a usable pattern,
-/// in which case callers treat every path as non-ignored.
+/// With `include_gitignore`, the first matcher covers `.ignore`,
+/// `.gitignore`, parent Git rules, the global Git ignore file, and
+/// `.git/info/exclude`. The second matcher covers only `.tldrignore`, at every
+/// directory level. Keeping those matchers independent makes Git exclusions an
+/// immutable deny floor while preserving normal negation within
+/// `.tldrignore`.
 ///
-/// This is the single shared `.tldrignore` matcher loader for the matcher-only
-/// callers (epic TLDR-bpf / TLDR-9w8 direction); the walker paths register the
-/// filename on their `WalkBuilder` directly. Root-level only by design — nested
-/// `.tldrignore`/`.gitignore` files are covered by the full walkers
-/// ([`ProjectWalker`], `is_corpus_file`) for paths that still exist.
+/// The matcher is incremental rather than traversal-based, so it also
+/// classifies deleted paths. Callers must rebuild it after an ignore file
+/// changes because directory matchers are cached lazily.
 pub fn build_path_ignore_matcher(
     root: &Path,
     include_gitignore: bool,
 ) -> Option<PathIgnoreMatcher> {
-    use ignore::gitignore::GitignoreBuilder;
+    let git = if include_gitignore {
+        let mut builder = WalkBuilder::new(root);
+        builder
+            .hidden(false)
+            .ignore(true)
+            .git_ignore(true)
+            .git_global(true)
+            .git_exclude(true)
+            .parents(true)
+            .follow_links(false);
+        Some(build_incremental_matcher(&builder)?)
+    } else {
+        None
+    };
 
-    let mut gitignore = None;
-    let mut tldrignore = None;
+    let mut tldr_builder = WalkBuilder::new(root);
+    tldr_builder
+        .hidden(false)
+        .ignore(false)
+        .git_ignore(false)
+        .git_global(false)
+        .git_exclude(false)
+        .parents(true)
+        .follow_links(false);
+    tldr_builder.add_custom_ignore_filename(TLDRIGNORE_FILE);
+    let tldr = build_incremental_matcher(&tldr_builder)?;
 
-    let tldrignore_path = root.join(TLDRIGNORE_FILE);
-    if tldrignore_path.is_file() {
-        let mut builder = GitignoreBuilder::new(root);
-        let mut valid = true;
-        if let Ok(contents) = std::fs::read_to_string(&tldrignore_path) {
-            for line in contents.lines() {
-                let line = line.trim();
-                if line.is_empty() || line.starts_with('#') {
-                    continue;
-                }
-                let deny_pattern = line.strip_prefix('!').unwrap_or(line);
-                if builder.add_line(None, deny_pattern).is_err() {
-                    valid = false;
-                    break;
-                }
-            }
-        } else {
-            valid = false;
-        }
-        if valid {
-            tldrignore = builder.build().ok();
-        }
-    }
-
-    if include_gitignore {
-        let gitignore_path = root.join(".gitignore");
-        if gitignore_path.is_file() {
-            let mut builder = GitignoreBuilder::new(root);
-            if builder.add(&gitignore_path).is_none() {
-                gitignore = builder.build().ok();
-            }
-        }
-    }
-
-    if gitignore.is_none() && tldrignore.is_none() {
-        return None;
-    }
     Some(PathIgnoreMatcher {
-        gitignore,
-        tldrignore,
+        git: git.map(|matcher| Arc::new(Mutex::new(matcher))),
+        tldr: Arc::new(Mutex::new(tldr)),
     })
 }
 
@@ -441,20 +441,17 @@ impl ProjectWalker {
     /// Classify a single path the way this walker would treat it during a
     /// walk — without performing one.
     ///
-    /// Cheap (pure-path): no `stat()` or file read. Resolves `Hidden`,
-    /// `Ignored` (root-level `.gitignore`/`.tldrignore` only), `Generated`,
-    /// and `Unsupported` (extension). Use [`classify_content`] to resolve the
-    /// remaining `Binary`/`Oversized`/`Eligible` cases on a file the caller
-    /// actually intends to process.
+    /// Cheap (no file-content read). Resolves `Hidden`, `Ignored`,
+    /// `Generated`, and `Unsupported` (extension). Ignore classification uses
+    /// the same nested Git and `.tldrignore` sources as [`Self::iter`]. Use
+    /// [`classify_content`] to resolve the remaining
+    /// `Binary`/`Oversized`/`Eligible` cases on a file the caller intends to
+    /// process.
     ///
     /// # Faithfulness notes
     ///
-    /// - `Hidden`, `Generated` and `Unsupported` are authoritative here.
-    /// - `Ignored` is a **best-effort under-approximation**: it reflects the
-    ///   root-level ignore files only. The `ignore` crate's in-walk engine
-    ///   (per-directory `.gitignore`, parent traversal) is richer and remains
-    ///   authoritative during [`Self::iter`]. For the authoritative
-    ///   high-throughput walk, use [`Self::iter`].
+    /// - `Hidden`, `Ignored`, `Generated` and `Unsupported` are authoritative
+    ///   for the supplied path.
     /// - The auto JS/TS-dominance heuristic ([`root_is_js_ts_dominated`]) is
     ///   an `iter`-time optimisation and is NOT consulted here; only an
     ///   explicit [`Self::lang_hint`] relaxes the generated-dir list.
@@ -472,7 +469,7 @@ impl ProjectWalker {
         }
 
         // Explicit walk filters — applied only when `iter` would install its
-        // `filter_entry` (i.e. `default_ignore` OR a root-level ignore file).
+        // `filter_entry` (i.e. `default_ignore` OR ignore matching is enabled).
         let deny = if self.respect_gitignore {
             build_path_ignore_matcher(&self.root, true)
         } else {
@@ -532,8 +529,8 @@ pub(crate) fn dir_has_generated_sentinel(dir: &Path) -> bool {
 /// `filter_entry` and [`ProjectWalker::classify_path`].
 ///
 /// Encodes ONLY the filters the walker applies explicitly (not the `ignore`
-/// crate's in-walk `hidden(true)` / per-directory-`.gitignore` engine):
-/// - root-level `.gitignore` + `.tldrignore` via `deny` (when present);
+/// crate's in-walk hidden-file engine):
+/// - additive Git + `.tldrignore` policy via `deny` (when present);
 /// - generated/vendored directory names ([`DEFAULT_EXCLUDE_DIRS`], subject to
 ///   the JS/TS-preserved subset when `preserve_js_ts_dirs`);
 /// - generator-output sentinel files ([`dir_has_generated_sentinel`]).
@@ -582,15 +579,9 @@ fn classify_explicit_path(
 /// hidden-file filtering, `.gitignore` / global gitignore / `.git/info/exclude`
 /// / parent traversal, `.tldrignore` registration, and `follow_links(false)`.
 ///
-/// This is the single config shared by [`ProjectWalker::iter`] and the
-/// single-file corpus gate (`CorpusPolicy::accepts_path` →
-/// `is_corpus_file_impl` in `semantic/chunker.rs`), so the two cannot drift on
-/// *which* ignore sources they honour — only the *config* is shared.
-///
-/// Callers still own their own `filter_entry`: [`ProjectWalker::iter`] applies
-/// [`DEFAULT_EXCLUDE_DIRS`] + generated-dir sentinels (via
-/// [`classify_explicit_path`]); the single-file gate additionally prunes the
-/// walk to the target file's ancestor chain.
+/// [`ProjectWalker::iter`] supplements this combined traversal engine with
+/// [`PathIgnoreMatcher`]. The supplemental matcher is what prevents a custom
+/// `.tldrignore` whitelist from overriding an independent Git exclusion.
 ///
 /// # Why `.tldrignore` rides the `respect_gitignore` gate
 ///
@@ -645,6 +636,15 @@ pub(crate) fn root_is_js_ts_dominated(dir: &Path) -> bool {
         .parents(true)
         .follow_links(false);
     walker.add_custom_ignore_filename(TLDRIGNORE_FILE);
+    let additive_ignore = build_path_ignore_matcher(dir, true);
+    if additive_ignore.is_some() {
+        walker.filter_entry(move |entry| {
+            !additive_ignore.as_ref().is_some_and(|matcher| {
+                let is_dir = entry.file_type().is_some_and(|kind| kind.is_dir());
+                matcher.is_ignored(entry.path(), is_dir)
+            })
+        });
+    }
     for entry in walker.build().flatten() {
         if inspected >= CAP {
             break;

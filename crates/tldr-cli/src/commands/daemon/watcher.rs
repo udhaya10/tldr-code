@@ -167,11 +167,12 @@ impl LiveIgnoreMatcher {
     }
 
     fn reload_for_paths(&self, paths: &[PathBuf]) -> bool {
-        let tldrignore = self.project.join(TLDRIGNORE_FILE);
-        let gitignore = self.project.join(".gitignore");
-        let reload = paths
-            .iter()
-            .any(|path| path == &tldrignore || path == &gitignore);
+        let reload = paths.iter().any(|path| {
+            matches!(
+                path.file_name().and_then(|name| name.to_str()),
+                Some(TLDRIGNORE_FILE | ".gitignore" | ".ignore")
+            ) || path.ends_with(Path::new(".git/info/exclude"))
+        });
         if reload {
             *self.matcher.write() = build_path_ignore_matcher(&self.project, true);
         }
@@ -495,6 +496,7 @@ mod tests {
     #[test]
     fn ignore_policy_reloads_during_a_live_session() {
         let project = tempfile::tempdir().expect("project");
+        std::fs::create_dir(project.path().join(".git")).expect("git metadata directory");
         let ignored = project.path().join("generated/file.rs");
         let policy = project.path().join(".tldrignore");
         let live = LiveIgnoreMatcher::new(project.path());
@@ -526,6 +528,34 @@ mod tests {
 
         assert!(!live.reload_for_paths(&[project.path().join("src/lib.rs")]));
         assert!(!live.is_ignored(&project.path().join("generated/file.rs"), false));
+    }
+
+    #[test]
+    fn nested_ignore_policy_reloads_during_a_live_session() {
+        let project = tempfile::tempdir().expect("project");
+        std::fs::create_dir(project.path().join(".git")).expect("git metadata directory");
+        let nested = project.path().join("nested");
+        std::fs::create_dir_all(&nested).expect("nested directory");
+        let policy = nested.join(".tldrignore");
+        let ignored = nested.join("generated.rs");
+        let live = LiveIgnoreMatcher::new(project.path());
+
+        std::fs::write(&policy, "generated.rs\n").expect("write nested policy");
+        assert!(live.reload_for_paths(std::slice::from_ref(&policy)));
+        assert!(live.is_ignored(&ignored, false));
+
+        std::fs::remove_file(&policy).expect("remove nested policy");
+        assert!(live.reload_for_paths(&[policy]));
+        assert!(!live.is_ignored(&ignored, false));
+
+        let git_policy = nested.join(".gitignore");
+        std::fs::write(&git_policy, "generated.rs\n").expect("write nested git policy");
+        assert!(live.reload_for_paths(std::slice::from_ref(&git_policy)));
+        assert!(live.is_ignored(&ignored, false));
+
+        std::fs::remove_file(&git_policy).expect("remove nested git policy");
+        assert!(live.reload_for_paths(&[git_policy]));
+        assert!(!live.is_ignored(&ignored, false));
     }
 
     #[test]

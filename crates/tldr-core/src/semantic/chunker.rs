@@ -474,18 +474,18 @@ fn chunk_directory<P: AsRef<Path>>(path: P, options: &ChunkOptions) -> TldrResul
 /// the file is indexable. Used by the delta path (TLDR-ac0.6) as the first
 /// gate before `chunk_file`, so a Notify for a non-corpus file is a no-op.
 ///
-/// Implementation: builds a `WalkBuilder` rooted at `root` with the same
-/// config as `ProjectWalker`, but prunes every directory that is NOT an
-/// ancestor of `file` — so the walk visits only the O(depth) ancestor chain
-/// plus the target file's siblings at the leaf level. The file is in the
-/// corpus iff the walker yields it AND it passes `is_binary_or_hidden`.
+/// Implementation: applies the same independent Git and `.tldrignore`
+/// matchers as `ProjectWalker`, then checks the target's O(depth) ancestor
+/// chain for hidden, generated, and default-excluded directories. No subtree
+/// walk is required.
 pub fn is_corpus_file(root: &Path, file: &Path) -> bool {
     CorpusPolicy::accepts_path(root, file)
 }
 
 fn is_corpus_file_impl(root: &Path, file: &Path) -> bool {
-    use crate::walker::{dir_has_generated_sentinel, DEFAULT_EXCLUDE_DIRS};
-    use ignore::WalkBuilder;
+    use crate::walker::{
+        build_path_ignore_matcher, dir_has_generated_sentinel, DEFAULT_EXCLUDE_DIRS,
+    };
 
     let canonical_file = match file.canonicalize() {
         Ok(p) => p,
@@ -506,18 +506,12 @@ fn is_corpus_file_impl(root: &Path, file: &Path) -> bool {
         return false;
     }
 
-    // Collect the ancestor chain from root to the file's parent so we can
-    // prune the walk to only descend into these directories.
-    let ancestors: std::collections::HashSet<std::path::PathBuf> = {
-        let mut set = std::collections::HashSet::new();
-        set.insert(canonical_root.clone());
-        let mut cur = canonical_root.clone();
-        for component in rel.parent().into_iter().flat_map(|p| p.components()) {
-            cur = cur.join(component);
-            set.insert(cur.clone());
-        }
-        set
+    let Some(ignore_matcher) = build_path_ignore_matcher(&canonical_root, true) else {
+        return false;
     };
+    if ignore_matcher.is_ignored(&canonical_file, false) {
+        return false;
+    }
 
     let preserve_js_ts_dirs = crate::walker::root_is_js_ts_dominated(&canonical_root);
     let js_ts_preserved: &[&str] = if preserve_js_ts_dirs {
@@ -526,56 +520,26 @@ fn is_corpus_file_impl(root: &Path, file: &Path) -> bool {
         &[]
     };
 
-    let mut builder = WalkBuilder::new(&canonical_root);
-    // Shared canonical walk config (hidden, gitignore family, `.tldrignore`,
-    // follow_links) — kept in lockstep with `ProjectWalker::iter` via
-    // [`crate::walker::apply_canonical_walk_config`] so the single-file gate
-    // agrees with `enumerate_corpus_files` on which ignore sources it honours.
-    crate::walker::apply_canonical_walk_config(&mut builder, true, true);
-    builder.max_depth(Some(rel.components().count()));
-
-    builder.filter_entry(move |entry| {
-        let is_dir = entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
-        if is_dir {
-            // Only descend into ancestors of the target file.
-            let entry_canon = entry
-                .path()
-                .canonicalize()
-                .unwrap_or_else(|_| entry.path().to_path_buf());
-            if !ancestors.contains(&entry_canon) {
+    let mut ancestor = canonical_root;
+    for component in rel.parent().into_iter().flat_map(Path::components) {
+        ancestor.push(component);
+        if ignore_matcher.is_ignored(&ancestor, true) {
+            return false;
+        }
+        if let Some(name) = ancestor.file_name().and_then(|name| name.to_str()) {
+            if name.starts_with('.') {
                 return false;
             }
-            if let Some(name) = entry.file_name().to_str() {
-                if js_ts_preserved.contains(&name) {
-                    // preserved for JS/TS — defer to .gitignore
-                } else if DEFAULT_EXCLUDE_DIRS.contains(&name) {
-                    return false;
-                }
-            }
-            if dir_has_generated_sentinel(entry.path()) {
+            if !js_ts_preserved.contains(&name) && DEFAULT_EXCLUDE_DIRS.contains(&name) {
                 return false;
             }
         }
-        true
-    });
-
-    for res in builder.build() {
-        let Ok(entry) = res else { continue };
-        let Some(ft) = entry.file_type() else {
-            continue;
-        };
-        if !ft.is_file() {
-            continue;
-        }
-        let entry_canon = match entry.path().canonicalize() {
-            Ok(p) => p,
-            Err(_) => continue,
-        };
-        if entry_canon == canonical_file {
-            return true;
+        if dir_has_generated_sentinel(&ancestor) {
+            return false;
         }
     }
-    false
+
+    true
 }
 
 /// Enumerate the candidate source files under `root` — the **pre-parse** corpus

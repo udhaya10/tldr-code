@@ -695,19 +695,36 @@ fn full_project_deletion() -> Result<(), String> {
 
 fn ignore_matcher_unification() -> Result<(), String> {
     use tldr_core::callgraph::filter_tldrignored;
+    use tldr_core::semantic::chunker::is_corpus_file;
+    use tldr_core::walker::{build_path_ignore_matcher, ProjectWalker};
 
     let project = tempfile::tempdir().map_err(display)?;
+    fs::create_dir(project.path().join(".git")).map_err(display)?;
     let root_ignored = project.path().join("corpus/root.py");
     let nested_kept = project.path().join("nested/corpus/kept.py");
+    let nested_ignored = project.path().join("nested/corpus/drop.py");
+    let git_ignored = project.path().join("nested/git-secret.py");
     fs::create_dir_all(root_ignored.parent().ok_or("root parent missing")?).map_err(display)?;
     fs::create_dir_all(nested_kept.parent().ok_or("nested parent missing")?).map_err(display)?;
     fs::write(&root_ignored, "def root(): pass\n").map_err(display)?;
     fs::write(&nested_kept, "def nested(): pass\n").map_err(display)?;
+    fs::write(&nested_ignored, "def dropped(): pass\n").map_err(display)?;
+    fs::write(&git_ignored, "SECRET = True\n").map_err(display)?;
     fs::write(project.path().join(".tldrignore"), "/corpus/\n").map_err(display)?;
+    fs::write(
+        project.path().join("nested/.tldrignore"),
+        "corpus/*.py\n!corpus/kept.py\n!git-secret.py\n",
+    )
+    .map_err(display)?;
+    fs::write(project.path().join("nested/.gitignore"), "git-secret.py\n").map_err(display)?;
 
     let filtered = filter_tldrignored(
         project.path(),
-        vec![root_ignored.clone(), nested_kept.clone()],
+        vec![
+            root_ignored.clone(),
+            nested_kept.clone(),
+            nested_ignored.clone(),
+        ],
     );
     ensure(
         !filtered.contains(&root_ignored),
@@ -715,7 +732,28 @@ fn ignore_matcher_unification() -> Result<(), String> {
     )?;
     ensure(
         filtered.contains(&nested_kept),
-        "root-anchored ignore matched a nested directory",
+        "nested .tldrignore negation did not reopen its own exclusion",
+    )?;
+    ensure(
+        !filtered.contains(&nested_ignored),
+        "nested .tldrignore exclusion was not honored",
+    )?;
+
+    let matcher =
+        build_path_ignore_matcher(project.path(), true).ok_or("ignore matcher missing")?;
+    ensure(
+        matcher.is_ignored(&git_ignored, false),
+        ".tldrignore reopened a Git-ignored path",
+    )?;
+    ensure(
+        !ProjectWalker::new(project.path())
+            .iter()
+            .any(|entry| entry.path() == git_ignored),
+        "recursive traversal reopened a Git-ignored path",
+    )?;
+    ensure(
+        !is_corpus_file(project.path(), &git_ignored),
+        "single-file corpus gate reopened a Git-ignored path",
     )
 }
 
