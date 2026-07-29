@@ -1,0 +1,20 @@
+# tldr ignore patterns (gitignore syntax)
+
+# Repository material that is not product source code
+/docs/
+/continuum/
+/bench/
+
+# Retired CLI implementations that are not connected to the active module tree
+/crates/tldr-cli/src/commands/archived/
+
+# Defensive exclusions for local credentials and private key material
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+credentials.*
+secrets.*

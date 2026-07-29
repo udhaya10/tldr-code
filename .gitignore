@@ -21,7 +21,8 @@ build/
 .firecrawl/
 .fastembed_cache/
 .tldr/
-.tldrignore
+**/.tldrignore
+!/.tldrignore
 benchmark_results.json
 libdaemon_tests.rlib
 coverage.lcov
