@@ -5,9 +5,6 @@
 /continuum/
 /bench/
 
-# Retired CLI implementations that are not connected to the active module tree
-/crates/tldr-cli/src/commands/archived/
-
 # Defensive exclusions for local credentials and private key material
 .env
 .env.*

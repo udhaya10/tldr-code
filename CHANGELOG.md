@@ -26,6 +26,12 @@
   statistics cache files were removed. The remaining bounded hot response
   cache is process-local and non-durable.
 
+### Removed
+
+- Deleted the disconnected `crates/tldr-cli/src/commands/archived/` quarantine.
+  Its 17 retired command implementations were not compiled or routed by the
+  active CLI; Git history remains the authoritative archive.
+
 ### Tests
 
 - Replaced the complete legacy first-party Rust test tree with one shared
