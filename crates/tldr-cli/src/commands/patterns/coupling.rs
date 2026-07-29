@@ -1947,8 +1947,16 @@ fn run_pair_mode(args: &CouplingArgs, format: OutputFormat) -> Result<()> {
 
 /// Run project-wide mode: scan a directory for all coupling pairs.
 fn run_project_mode(args: &CouplingArgs, format: OutputFormat) -> Result<()> {
+    // When tests are excluded, retrieve the complete ranked list before
+    // filtering. Truncating first can select only test pairs and incorrectly
+    // return an empty default report even when production pairs exist.
+    let retrieval_max_pairs = if args.include_tests {
+        args.max_pairs
+    } else {
+        usize::MAX
+    };
     let (mut pairwise_report, mut martin_report) = if is_oneshot() {
-        let pairwise = core_analyze_coupling(&args.path_a, args.lang, Some(args.max_pairs))
+        let pairwise = core_analyze_coupling(&args.path_a, args.lang, Some(retrieval_max_pairs))
             .map_err(|e| anyhow::anyhow!("coupling analysis failed: {}", e))?;
         let martin_options = MartinOptions {
             top: args.top,
@@ -1963,7 +1971,7 @@ fn run_project_mode(args: &CouplingArgs, format: OutputFormat) -> Result<()> {
         let params = serde_json::json!({
             "path": args.path_a,
             "language": args.lang,
-            "max_pairs": args.max_pairs,
+            "max_pairs": retrieval_max_pairs,
             "martin_top": args.top,
             "cycles_only": args.cycles_only,
         });
@@ -1989,6 +1997,12 @@ fn run_project_mode(args: &CouplingArgs, format: OutputFormat) -> Result<()> {
         pairwise_report
             .top_pairs
             .retain(|pair| !is_test_file(&pair.source) && !is_test_file(&pair.target));
+        let visible_pairs = pairwise_report.top_pairs.len();
+        pairwise_report.top_pairs.truncate(args.max_pairs);
+        let shown_pairs = pairwise_report.top_pairs.len();
+        pairwise_report.truncated = (visible_pairs > shown_pairs).then_some(true);
+        pairwise_report.total_pairs = (visible_pairs > shown_pairs).then_some(visible_pairs);
+        pairwise_report.shown_pairs = (visible_pairs > shown_pairs).then_some(shown_pairs);
     }
 
     // Filter test files by default (--include-tests to keep them)
