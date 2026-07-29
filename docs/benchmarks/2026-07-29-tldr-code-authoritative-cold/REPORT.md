@@ -88,5 +88,27 @@ index for 517 documents.
 - Warm hybrid probe: 5 results in 0.05s.
 - Bulk and query runners each reported one healthy session and zero failures.
 
-The completed index and ArtifactStore were intentionally left warm for normal
-development use.
+## Final repository state
+
+A later upstream-safety check briefly checked out a historical commit while the
+daemon watcher was live. That commit predated the tracked root `.tldrignore`,
+so the watcher began indexing the transient checkout. The rebase was aborted
+without rewriting `main`, but the transient project index was discarded rather
+than trusted.
+
+The daemon was stopped and only the project cache was cleared (eight files /
+2.1 GiB). The valid reusable embeddings produced by the cold benchmark were
+retained. A corrective rebuild under the committed ignore policy then
+completed with:
+
+- 517 ArtifactStore and semantic files;
+- 15,163 stored vectors;
+- 15,163 reusable-cache hits and zero newly inferred vectors;
+- 119 windows in 258.432s (4m18.432s);
+- zero retries/failures; and
+- a successful five-result hybrid probe after the query runner warmed.
+
+This corrective run is not included in the cold comparison. It demonstrates
+the separate persistent-embedding advantage when the project indexes alone
+must be reconstructed. The canonical index and ArtifactStore are now warm for
+normal development use.
