@@ -54,31 +54,6 @@ pub fn handle_session_stats(args: Value) -> ToolsCallResult {
     )
 }
 
-#[cfg(test)]
-mod session_tests {
-    use super::*;
-
-    #[test]
-    fn session_stats_selects_requested_persisted_session() {
-        let project = tempfile::tempdir().expect("project");
-        let directory = project.path().join(".tldr");
-        std::fs::create_dir_all(&directory).expect("ledger directory");
-        std::fs::write(
-            directory.join("session-context.json"),
-            r#"[{"session_id":"wanted","input_tokens":12},{"session_id":"other","input_tokens":99}]"#,
-        )
-        .expect("ledger");
-        let result = handle_session_stats(serde_json::json!({
-            "path": project.path(),
-            "session": "wanted"
-        }));
-        assert_ne!(result.is_error, Some(true));
-        let text = &result.content[0].text;
-        assert!(text.contains("\"session_id\": \"wanted\""));
-        assert!(!text.contains("\"session_id\": \"other\""));
-    }
-}
-
 /// Handle tldr_context tool call
 pub fn handle_context(args: Value) -> ToolsCallResult {
     let path = match get_required_string(&args, "path") {
@@ -428,4 +403,29 @@ pub fn handle_todo(args: Value) -> ToolsCallResult {
         })
         .to_string(),
     )
+}
+
+#[cfg(test)]
+mod session_tests {
+    use super::*;
+
+    #[test]
+    fn session_stats_selects_requested_persisted_session() {
+        let project = tempfile::tempdir().expect("project");
+        let directory = project.path().join(".tldr");
+        std::fs::create_dir_all(&directory).expect("ledger directory");
+        std::fs::write(
+            directory.join("session-context.json"),
+            r#"[{"session_id":"wanted","input_tokens":12},{"session_id":"other","input_tokens":99}]"#,
+        )
+        .expect("ledger");
+        let result = handle_session_stats(serde_json::json!({
+            "path": project.path(),
+            "session": "wanted"
+        }));
+        assert_ne!(result.is_error, Some(true));
+        let text = &result.content[0].text;
+        assert!(text.contains("\"session_id\": \"wanted\""));
+        assert!(!text.contains("\"session_id\": \"other\""));
+    }
 }
