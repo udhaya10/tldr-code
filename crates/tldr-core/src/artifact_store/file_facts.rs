@@ -50,6 +50,25 @@ pub struct CallFact {
     pub callee: String,
 }
 
+/// One classified identifier occurrence retained for reference queries.
+#[derive(
+    Archive, Clone, Debug, Deserialize, PartialEq, RkyvDeserialize, RkyvSerialize, Serialize,
+)]
+pub struct ReferenceFact {
+    /// Identifier text.
+    pub name: String,
+    /// One-indexed source line.
+    pub line: u32,
+    /// One-indexed start column.
+    pub column: u32,
+    /// One-indexed exclusive end column.
+    pub end_column: u32,
+    /// Stable lowercase reference-kind label.
+    pub kind: String,
+    /// Bounded source line used for output context.
+    pub context: String,
+}
+
 /// Project-level stored call edge with stable file identities.
 #[derive(
     Archive, Clone, Debug, Deserialize, PartialEq, RkyvDeserialize, RkyvSerialize, Serialize,
@@ -169,6 +188,8 @@ pub struct FileFacts {
     pub path: String,
     /// Exact source revision.
     pub revision: RevisionId,
+    /// Exact source text used by resident lexical and regex projections.
+    pub source: String,
     /// Stable lowercase language label.
     pub language: String,
     /// Lossless extracted module used by exact structural projections.
@@ -181,6 +202,8 @@ pub struct FileFacts {
     pub imports: Vec<ImportFact>,
     /// Intra-file call edges.
     pub calls: Vec<CallFact>,
+    /// Classified identifier occurrences.
+    pub references: Vec<ReferenceFact>,
     /// Identifier occurrence counts used by generation-resident dead-code
     /// analysis. Counts are file-local and folded only for the requested
     /// language/scope.
@@ -218,6 +241,7 @@ impl FileFactsParser {
         tag_framework_directive_functions(&mut module, &source, &path);
         let (identifier_counts, python_dotted_strings) =
             count_identifiers_and_python_dotted_strings(&tree, source.as_bytes(), language);
+        let references = collect_reference_facts(&tree, &source, language);
         let mut identifier_counts = identifier_counts
             .into_iter()
             .map(|(name, count)| (name, u32::try_from(count).unwrap_or(u32::MAX)))
@@ -311,6 +335,7 @@ impl FileFactsParser {
         Ok(FileFacts {
             path: relative,
             revision: RevisionId::for_bytes(source.as_bytes()),
+            source: source.clone(),
             language: language.to_string(),
             definitions,
             module: StoredModuleInfo {
@@ -343,6 +368,7 @@ impl FileFactsParser {
                 })
                 .collect(),
             calls,
+            references,
             identifier_counts,
             python_dotted_strings,
             semantic_chunks,
@@ -355,6 +381,69 @@ impl FileFactsParser {
     pub fn invocations(&self) -> u64 {
         self.invocations.load(Ordering::Relaxed)
     }
+}
+
+fn collect_reference_facts(
+    tree: &tree_sitter::Tree,
+    source: &str,
+    language: Language,
+) -> Vec<ReferenceFact> {
+    let identifier_types = crate::analysis::refcount::identifier_node_types(language);
+    let lines = source.lines().collect::<Vec<_>>();
+    let mut facts = Vec::new();
+    let mut cursor = tree.walk();
+    let mut reached_root = false;
+    loop {
+        let node = cursor.node();
+        if identifier_types.contains(&node.kind()) {
+            if let Ok(name) = node.utf8_text(source.as_bytes()) {
+                if !name.is_empty() {
+                    let start = node.start_position();
+                    let end = node.end_position();
+                    let context = lines
+                        .get(start.row)
+                        .copied()
+                        .unwrap_or_default()
+                        .chars()
+                        .take(200)
+                        .collect();
+                    facts.push(ReferenceFact {
+                        name: name.to_string(),
+                        line: (start.row + 1) as u32,
+                        column: (start.column + 1) as u32,
+                        end_column: (end.column + 1) as u32,
+                        kind: crate::analysis::references::classify_reference_kind(
+                            &node,
+                            source.as_bytes(),
+                            language,
+                        )
+                        .as_str()
+                        .to_string(),
+                        context,
+                    });
+                }
+            }
+        }
+        if cursor.goto_first_child() {
+            continue;
+        }
+        if cursor.goto_next_sibling() {
+            continue;
+        }
+        loop {
+            if !cursor.goto_parent() {
+                reached_root = true;
+                break;
+            }
+            if cursor.goto_next_sibling() {
+                break;
+            }
+        }
+        if reached_root {
+            break;
+        }
+    }
+    facts
 }
 
 fn tag_framework_directive_functions(module: &mut crate::ModuleInfo, source: &str, path: &Path) {

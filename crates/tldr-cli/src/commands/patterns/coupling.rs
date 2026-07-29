@@ -42,6 +42,7 @@ use tldr_core::types::Language as TldrLanguage;
 use super::error::{PatternsError, PatternsResult};
 use super::types::{CouplingReport, CouplingVerdict, CrossCall, CrossCalls};
 use super::validation::{read_file_safe, validate_file_path, validate_file_path_in_project};
+use crate::commands::daemon_router::{is_oneshot, route_for_path};
 use crate::output::{common_path_prefix, strip_prefix_display, OutputFormat};
 
 // =============================================================================
@@ -1946,9 +1947,42 @@ fn run_pair_mode(args: &CouplingArgs, format: OutputFormat) -> Result<()> {
 
 /// Run project-wide mode: scan a directory for all coupling pairs.
 fn run_project_mode(args: &CouplingArgs, format: OutputFormat) -> Result<()> {
-    // Existing pairwise coupling analysis
-    let mut pairwise_report = core_analyze_coupling(&args.path_a, None, Some(args.max_pairs))
-        .map_err(|e| anyhow::anyhow!("coupling analysis failed: {}", e))?;
+    let (mut pairwise_report, mut martin_report) = if is_oneshot() {
+        let pairwise = core_analyze_coupling(&args.path_a, args.lang, Some(args.max_pairs))
+            .map_err(|e| anyhow::anyhow!("coupling analysis failed: {}", e))?;
+        let martin_options = MartinOptions {
+            top: args.top,
+            cycles_only: args.cycles_only,
+        };
+        let martin = match analyze_dependencies(&args.path_a, &DepsOptions::default()) {
+            Ok(deps_report) => compute_martin_metrics_from_deps(&deps_report, &martin_options),
+            Err(_) => MartinMetricsReport::default(),
+        };
+        (pairwise, martin)
+    } else {
+        let params = serde_json::json!({
+            "path": args.path_a,
+            "language": args.lang,
+            "max_pairs": args.max_pairs,
+            "martin_top": args.top,
+            "cycles_only": args.cycles_only,
+        });
+        let value: serde_json::Value =
+            route_for_path(&args.path_a, "coupling", params).into_hit_or_bail("coupling")?;
+        let pairwise = serde_json::from_value(
+            value
+                .get("pairwise_coupling")
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("daemon omitted pairwise coupling"))?,
+        )?;
+        let martin = serde_json::from_value(
+            value
+                .get("martin_metrics")
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("daemon omitted Martin metrics"))?,
+        )?;
+        (pairwise, martin)
+    };
 
     // Filter test files from pairwise by default
     if !args.include_tests {
@@ -1956,16 +1990,6 @@ fn run_project_mode(args: &CouplingArgs, format: OutputFormat) -> Result<()> {
             .top_pairs
             .retain(|pair| !is_test_file(&pair.source) && !is_test_file(&pair.target));
     }
-
-    // Martin metrics: compute from dependency graph
-    let martin_options = MartinOptions {
-        top: args.top,
-        cycles_only: args.cycles_only,
-    };
-    let mut martin_report = match analyze_dependencies(&args.path_a, &DepsOptions::default()) {
-        Ok(deps_report) => compute_martin_metrics_from_deps(&deps_report, &martin_options),
-        Err(_) => MartinMetricsReport::default(), // no source files or unsupported language
-    };
 
     // Filter test files by default (--include-tests to keep them)
     if !args.include_tests {

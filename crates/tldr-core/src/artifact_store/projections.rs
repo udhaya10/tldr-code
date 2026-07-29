@@ -5,6 +5,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::analysis::dead::dead_code_analysis_refcount;
+use crate::analysis::references::{
+    Definition, DefinitionKind, Reference, ReferenceKind, ReferenceStats, ReferencesOptions,
+    ReferencesReport,
+};
 use crate::types::{CallEdge, DeadCodeReport, ModuleInfo, ProjectCallGraph};
 use crate::{
     collect_all_functions, dead_code_analysis, CodeStructure, Language, TldrError, TldrResult,
@@ -222,6 +226,165 @@ impl GenerationSnapshot {
                 .iter()
                 .map(move |chunk| (facts.path.as_str(), chunk))
         })
+    }
+
+    /// Materialize one lexical document per stored source file.
+    ///
+    /// The result is deterministic and contains no filesystem reads.
+    pub fn lexical_documents(&self, language: Language) -> Vec<(String, String)> {
+        let mut documents = self
+            .files
+            .values()
+            .filter(|facts| facts.module.language == language)
+            .filter(|facts| !facts.source.is_empty())
+            .map(|facts| (facts.path.clone(), facts.source.clone()))
+            .collect::<Vec<_>>();
+        documents.sort_by(|left, right| left.0.cmp(&right.0));
+        documents
+    }
+
+    /// Project stored definitions into the enriched-search lookup.
+    pub fn search_structure_lookup(&self, language: Language) -> crate::search::StructureLookup {
+        let by_file = self
+            .files
+            .values()
+            .filter(|facts| facts.module.language == language)
+            .map(|facts| {
+                (
+                    PathBuf::from(&facts.path),
+                    facts.structure.definitions.clone(),
+                )
+            })
+            .collect();
+        crate::search::StructureLookup { by_file }
+    }
+
+    /// Project stored call edges into forward/reverse symbol lookups.
+    pub fn search_callgraph_lookup(&self, language: Language) -> crate::search::CallGraphLookup {
+        let mut forward = HashMap::<String, Vec<String>>::new();
+        let mut reverse = HashMap::<String, Vec<String>>::new();
+        for edge in self.call_edges(Some(language)) {
+            forward
+                .entry(edge.caller.clone())
+                .or_default()
+                .push(edge.callee.clone());
+            reverse
+                .entry(edge.callee.clone())
+                .or_default()
+                .push(edge.caller.clone());
+        }
+        for values in forward.values_mut().chain(reverse.values_mut()) {
+            values.sort();
+            values.dedup();
+        }
+        crate::search::CallGraphLookup { forward, reverse }
+    }
+
+    /// Answer a workspace reference query entirely from stored occurrences.
+    pub fn references_report(
+        &self,
+        symbol: &str,
+        options: &ReferencesOptions,
+        path_prefix: Option<&Path>,
+    ) -> ReferencesReport {
+        let started = std::time::Instant::now();
+        let language = options
+            .language
+            .as_deref()
+            .and_then(|value| value.parse::<Language>().ok());
+        let selected = self
+            .files
+            .values()
+            .filter(|facts| language.is_none_or(|value| facts.module.language == value))
+            .filter(|facts| {
+                path_prefix.is_none_or(|prefix| Path::new(&facts.path).starts_with(prefix))
+            })
+            .collect::<Vec<_>>();
+
+        let definitions = selected
+            .iter()
+            .flat_map(|facts| {
+                facts
+                    .definitions
+                    .iter()
+                    .filter(move |definition| definition.name == symbol)
+                    .map(move |definition| Definition {
+                        file: PathBuf::from(&facts.path),
+                        line: definition.line_start as usize,
+                        column: 1,
+                        kind: definition_kind(&definition.kind),
+                        signature: Some(definition.signature.clone()),
+                    })
+            })
+            .collect::<Vec<_>>();
+
+        let lua_bare = language
+            .filter(|value| matches!(value, Language::Lua | Language::Luau))
+            .and_then(|_| symbol.rsplit_once('.').map(|(_, bare)| bare));
+        let mut references = selected
+            .iter()
+            .flat_map(|facts| {
+                facts.references.iter().filter_map(move |reference| {
+                    let exact = reference.name == symbol;
+                    let alias_call = lua_bare.is_some_and(|bare| {
+                        reference.name == bare
+                            && (reference.context.contains(&format!(".{bare}("))
+                                || reference.context.contains(&format!(".{bare} (")))
+                    });
+                    if !exact && !alias_call {
+                        return None;
+                    }
+                    let kind = ReferenceKind::parse(&reference.kind).unwrap_or_default();
+                    if options
+                        .kinds
+                        .as_ref()
+                        .is_some_and(|kinds| !kinds.contains(&kind))
+                    {
+                        return None;
+                    }
+                    Some(Reference {
+                        file: PathBuf::from(&facts.path),
+                        line: reference.line as usize,
+                        column: reference.column as usize,
+                        kind,
+                        context: reference.context.clone(),
+                        confidence: Some(1.0),
+                        end_column: Some(reference.end_column as usize),
+                    })
+                })
+            })
+            .collect::<Vec<_>>();
+        references.sort_by(|left, right| {
+            left.file
+                .cmp(&right.file)
+                .then_with(|| left.line.cmp(&right.line))
+                .then_with(|| left.column.cmp(&right.column))
+        });
+        references.dedup_by(|left, right| {
+            left.file == right.file && left.line == right.line && left.column == right.column
+        });
+        let total_references = references.len();
+        let truncated = options.limit.is_some_and(|limit| total_references > limit);
+        if let Some(limit) = options.limit {
+            references.truncate(limit);
+        }
+        let shown_references = references.len();
+        ReferencesReport {
+            symbol: symbol.to_string(),
+            definition: definitions.first().cloned(),
+            definitions,
+            references,
+            total_references,
+            shown_references,
+            truncated,
+            search_scope: options.scope,
+            stats: ReferenceStats {
+                files_searched: selected.len(),
+                candidates_found: total_references,
+                verified_references: total_references,
+                search_time_ms: started.elapsed().as_millis() as u64,
+            },
+        }
     }
 
     /// Restore the semantic planner's complete source inputs without walking or
@@ -463,6 +626,20 @@ impl GenerationSnapshot {
                 language.is_none_or(|language| label.as_str() == language.as_str())
             })
             .flat_map(|(_, nodes)| nodes.iter().map(String::as_str))
+    }
+}
+
+fn definition_kind(kind: &str) -> DefinitionKind {
+    match kind {
+        "function" => DefinitionKind::Function,
+        "method" => DefinitionKind::Method,
+        "class" | "struct" => DefinitionKind::Class,
+        "constant" => DefinitionKind::Constant,
+        "type" | "enum" | "trait" | "interface" => DefinitionKind::Type,
+        "module" => DefinitionKind::Module,
+        "property" | "field" => DefinitionKind::Property,
+        "variable" => DefinitionKind::Variable,
+        _ => DefinitionKind::Other,
     }
 }
 

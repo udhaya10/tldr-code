@@ -7,7 +7,8 @@ use serde_json::Value;
 use std::collections::HashSet;
 
 use super::{
-    get_optional_int, get_optional_string, get_optional_string_array, get_required_string, to_path,
+    get_optional_bool, get_optional_int, get_optional_string, get_optional_string_array,
+    get_required_string, to_path,
 };
 
 /// Handle tldr_search tool call (regex search)
@@ -94,40 +95,73 @@ pub fn handle_bm25(args: Value) -> ToolsCallResult {
             Err(e) => return ToolsCallResult::error(e),
         }
     } else {
-        // Default to Python for directory searches
-        tldr_core::Language::Python
+        tldr_core::Language::from_directory(&path).unwrap_or(tldr_core::Language::Python)
     };
 
-    // Build BM25 index from project
-    let index = match tldr_core::Bm25Index::from_project(&path, lang) {
-        Ok(idx) => idx,
-        Err(e) => return ToolsCallResult::error(format!("Error building index: {}", e)),
-    };
-
-    let results = index.search(&query, top_k);
-
-    match serde_json::to_string_pretty(&serde_json::json!({
+    let command = serde_json::json!({
+        "cmd": "search",
         "query": query,
-        "total_results": results.len(),
-        "results": results
-    })) {
+        "path": path,
+        "language": lang,
+        "top_k": top_k,
+        "include_callgraph": true,
+        "regex": false
+    });
+    let report = match tldr_core::daemon_client::request(&path, &command) {
+        Ok(report) => report,
+        Err(error) => {
+            return ToolsCallResult::error(format!(
+                "{error} — start and warm it with `tldr daemon start` then `tldr warm`"
+            ))
+        }
+    };
+
+    match serde_json::to_string_pretty(&report) {
         Ok(json) => ToolsCallResult::text(json),
         Err(e) => ToolsCallResult::error(format!("Serialization error: {}", e)),
     }
 }
 
-/// Handle tldr_semantic tool call — PARKED in this version (TLDR-7xz.5).
-///
-/// The old implementation cold-built a `SemanticIndex` (full corpus embed +
-/// ONNX model load) on EVERY agent tool call — the worst silent-slow-path
-/// offender in the codebase. tldr-mcp has no daemon IPC client today, so it
-/// cannot reach the warm resident store; the tool stays listed (parked, not
-/// silently removed) and fails fast with a structured isError an agent can
-/// relay. Returns at full warm quality with the MCP daemon client (TLDR-utj.5).
-/// `tldr_search` (regex) and `tldr_bm25` (keyword) remain fully available.
-pub fn handle_semantic(_args: Value) -> ToolsCallResult {
-    ToolsCallResult::error(
-        "not available in this version, semantic search is moving to the warm daemon engine (it cold-built an index per call) — use tldr_search or tldr_bm25 instead"
-            .to_string(),
-    )
+/// Handle semantic search through the same authoritative resident daemon.
+pub fn handle_semantic(args: Value) -> ToolsCallResult {
+    let query = match get_required_string(&args, "query") {
+        Ok(query) => query,
+        Err(error) => return ToolsCallResult::error(error),
+    };
+    let path = match get_required_string(&args, "path") {
+        Ok(path) => to_path(&path),
+        Err(error) => return ToolsCallResult::error(error),
+    };
+    if !path.exists() {
+        return ToolsCallResult::error(format!("Path not found: {}", path.display()));
+    }
+    let top_k = get_optional_int(&args, "top_k").unwrap_or(10) as usize;
+    let hybrid = get_optional_bool(&args, "hybrid").unwrap_or(false);
+    let languages = get_optional_string(&args, "language")
+        .map(|language| language.parse::<tldr_core::Language>())
+        .transpose();
+    let languages = match languages {
+        Ok(Some(language)) => vec![language],
+        Ok(None) => Vec::new(),
+        Err(error) => return ToolsCallResult::error(error),
+    };
+    let command = serde_json::json!({
+        "cmd": "semantic",
+        "query": query,
+        "top_k": top_k,
+        "hybrid": hybrid,
+        "languages": languages,
+    });
+    let report = match tldr_core::daemon_client::request(&path, &command) {
+        Ok(report) => report,
+        Err(error) => {
+            return ToolsCallResult::error(format!(
+                "{error} — start and warm it with `tldr daemon start` then `tldr warm`"
+            ))
+        }
+    };
+    match serde_json::to_string_pretty(&report) {
+        Ok(json) => ToolsCallResult::text(json),
+        Err(error) => ToolsCallResult::error(format!("Serialization error: {error}")),
+    }
 }

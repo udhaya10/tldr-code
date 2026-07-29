@@ -9,8 +9,11 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::Args;
 
-use tldr_core::{enriched_search, EnrichedSearchOptions, Language, SearchMode};
+use tldr_core::{
+    enriched_search, EnrichedSearchOptions, EnrichedSearchReport, Language, SearchMode,
+};
 
+use crate::commands::daemon_router::{is_oneshot, route_for_path};
 use crate::output::{format_enriched_search_text, OutputFormat, OutputWriter};
 
 /// Enriched search: BM25 search with function-level context cards.
@@ -105,8 +108,22 @@ impl SmartSearchArgs {
             search_mode,
         };
 
-        // Run enriched search
-        let report = enriched_search(&self.query, &self.path, language, options)?;
+        // ADR-10: resident daemon search is authoritative. Local index
+        // construction is available only through the explicit --oneshot path.
+        let report: EnrichedSearchReport = if is_oneshot() {
+            enriched_search(&self.query, &self.path, language, options)?
+        } else {
+            let params = serde_json::json!({
+                "query": self.query,
+                "path": self.path,
+                "language": language,
+                "top_k": self.top_k,
+                "include_callgraph": !self.no_callgraph,
+                "regex": self.regex,
+                "filter": self.filter,
+            });
+            route_for_path(&self.path, "search", params).into_hit_or_bail("search")?
+        };
 
         // Output based on format
         if writer.is_text() {

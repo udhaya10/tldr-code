@@ -220,6 +220,5 @@ pub use lineage::{
 pub mod store_search;
 pub use store_search::{
     empty_search_report, load_or_build_store, load_or_build_store_from_artifacts,
-    load_or_build_store_from_artifacts_with_progress, query_store, query_store_with_vector,
-    search_with_store,
+    load_or_build_store_from_artifacts_with_progress, query_store_with_vector,
 };

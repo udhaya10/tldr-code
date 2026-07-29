@@ -8,13 +8,8 @@
 //! search, the error propagates with a detailed message so the user can fix it.
 //! A tool should run at 100% performance or tell you why it can't.
 //!
-//! ## Two entry points
-//!
-//! - [`search_with_store`] — cold CLI one-shot: loads or builds the store,
-//!   checks freshness, embeds the query, searches. One call does everything.
-//! - [`query_store`] — daemon reuse: takes an already-loaded [`VectorStore`]
-//!   reference, embeds the query, searches. No load/build/freshness overhead
-//!   per query — the daemon manages the resident store and freshness separately.
+//! Query serving accepts a precomputed query vector from the resident daemon;
+//! store construction remains an explicit warm/embed mutation.
 //!
 //! ## Freshness gate (TLDR-kkt)
 //!
@@ -54,7 +49,6 @@
 use std::path::Path;
 use std::time::Instant;
 
-use crate::semantic::embedder::Embedder;
 use crate::semantic::index::{make_snippet, BuildOptions, SearchOptions};
 use crate::semantic::types::{
     CacheConfig, EmbeddingModel, SemanticSearchReport, SemanticSearchResult,
@@ -96,39 +90,6 @@ pub fn manifest_id_for(root: &Path, options: &BuildOptions) -> ManifestId {
         root,
         &chunk_params_tag(options),
         CHUNK_WALKER_VERSION,
-    )
-}
-
-/// Run a semantic query through the usearch store, building+persisting it on a
-/// miss. Returns a [`SemanticSearchReport`].
-///
-/// This is the cold CLI entry point — loads or builds the store, checks
-/// freshness, embeds the query, searches. For the daemon (resident store),
-/// use [`query_store`] instead.
-///
-/// There is NO fallback (TLDR-lx7). If the store cannot load, build, save,
-/// or search, the error propagates so the user can diagnose and fix it.
-pub fn search_with_store(
-    root: &Path,
-    store_dir: &Path,
-    query: &str,
-    search_options: &SearchOptions,
-    build_options: &BuildOptions,
-    cache_config: Option<CacheConfig>,
-) -> TldrResult<SemanticSearchReport> {
-    if query.trim().is_empty() {
-        return Ok(empty_search_report(query, build_options.model));
-    }
-
-    let start = Instant::now();
-    let store = load_or_build_store(root, store_dir, build_options, cache_config)?;
-    query_store(
-        &store,
-        root,
-        query,
-        search_options,
-        build_options.model,
-        start,
     )
 }
 
@@ -295,42 +256,12 @@ pub fn load_or_build_store_from_artifacts_with_progress(
     Ok(built)
 }
 
-/// Search an already-loaded store — the daemon reuse entry point.
-///
-/// Takes a [`VectorStore`] reference (the daemon holds this resident in its
-/// state), embeds the query, and searches. No load/build/freshness overhead —
-/// the caller is responsible for store lifecycle and freshness checks.
-///
-/// `start` is the caller's timing anchor (pass `Instant::now()` if you don't
-/// care about including load time in the latency).
-pub fn query_store(
-    store: &VectorStore,
-    root: &Path,
-    query: &str,
-    search_options: &SearchOptions,
-    model: EmbeddingModel,
-    start: Instant,
-) -> TldrResult<SemanticSearchReport> {
-    // Cold-CLI path: no resident embedder, so construct a one-shot one and embed
-    // here. The daemon (resident embedder — TLDR-ac0.5) embeds the query against
-    // its warm `IndexManager` embedder and calls `query_store_with_vector` instead,
-    // skipping this per-query `Embedder::new` (ONNX reload).
-    if query.trim().is_empty() {
-        return Ok(empty_search_report(query, model));
-    }
-    let mut embedder = Embedder::new(model)?;
-    let qv = embedder.embed_query(query)?;
-    query_store_with_vector(store, root, query, &qv, search_options, model, start)
-}
-
 /// Search an already-loaded store with a PRE-COMPUTED query vector — the daemon's
 /// resident-embedder path (TLDR-ac0.5).
 ///
-/// Identical to [`query_store`] except the caller supplies `query_vector` (already
-/// run through [`Embedder::embed_query`], i.e. WITH the model's asymmetric query
-/// prefix), so the daemon reuses one warm embedder across queries instead of
-/// reloading ONNX per search. `query` is still passed for the empty-query guard
-/// and to echo back in the report.
+/// The caller supplies `query_vector` (already run through the model's
+/// asymmetric query prefix), so the daemon reuses one warm embedder across
+/// queries instead of reloading ONNX per search.
 pub fn query_store_with_vector(
     store: &VectorStore,
     root: &Path,

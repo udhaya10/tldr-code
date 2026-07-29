@@ -10,11 +10,7 @@ LLM-friendly answers about source code. It is exposed through three main entry
 points:
 
 - `tldr-cli`: command-line interface and user-facing command routing. Also
-  hosts the live resident daemon under `src/commands/daemon/` (the in-process
-  query cache, FileIR memo, salsa cache, and filesystem watcher that serve
-  warm queries).
-- `tldr-daemon`: the older standalone axum-over-Unix-socket HTTP server. NOT
-  the daemon that backs the warm CLI/MCP path — that lives in `tldr-cli`.
+  hosts the one supported resident daemon under `src/commands/daemon/`.
 - `tldr-mcp`: MCP protocol server exposing analysis tools to agents.
 - `tldr-core`: reusable analysis engine shared by the other crates.
 
@@ -87,10 +83,12 @@ JSON, DOT, and SARIF for selected commands.
 
 ### Daemon
 
-The live daemon (in `tldr-cli/src/commands/daemon/`, not the `tldr-daemon`
-crate) keeps analysis state alive between commands. It caches expensive
-queries and serves requests over a local IPC/socket path. Recent debugging added
-persistent daemon logging to `.tldr/daemon.log`.
+The live daemon in `tldr-cli/src/commands/daemon/` owns the filesystem watcher,
+immutable redb `ArtifactStore` generations, generation-pinned graph projections,
+resident BM25 indexes, and the resident vector store. CLI and MCP clients use
+the same bounded local IPC protocol. Project-wide queries fail closed when the
+required generation/index is cold or mismatched; `--oneshot` is the explicit
+local-compute escape hatch where it is supported.
 
 ### MCP server
 

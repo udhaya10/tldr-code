@@ -3,8 +3,8 @@
 ## Host and ownership
 
 The canonical server is the Unix-socket daemon implemented in
-`tldr-cli/src/commands/daemon`. The separate Axum `tldr-daemon` crate is not the
-CLI serve path.
+`tldr-cli/src/commands/daemon`. The obsolete standalone Axum daemon and wrapper
+binary were removed; `tldr daemon ...` is the only lifecycle surface.
 
 `ArtifactStore` remains the only durable source of truth. Each successful bulk
 or delta ingestion publishes one immutable generation. `GenerationSnapshot`
@@ -46,6 +46,12 @@ generation:
 | `dead` | stored module/reference facts or stored V2 edges |
 | `hubs` | generation call edges and stored definition lines |
 | `structure` | stored file-structure projections |
+| `search` | generation-pinned per-language BM25 plus stored structure/calls |
+| `semantic --hybrid` | same-generation BM25 and dense ranks fused with RRF |
+| `references` (workspace) | stored classified identifier occurrences |
+| `definition` (global phase) | stored definitions after file-local resolution |
+| `deps` | stored import facts |
+| `coupling` (project mode) | stored modules, imports, and call edges |
 
 `--oneshot` builds an equivalent local projection and remains the explicit
 escape hatch. `dead --no-default-ignore` is intentionally oneshot-only because
@@ -53,8 +59,9 @@ the resident generation has one canonical ignore policy; the daemon returns a
 loud error instead of a weaker answer.
 
 Cycle and definition consumers use the snapshot's SCC and symbol-addressing
-primitives. There are currently no separate public `cycles` or `definition`
-CLI commands to route.
+primitives. Cursor/function-local definition work and coupling pair mode remain
+intentionally local because they are bounded analyses rather than project-wide
+projections.
 
 Whole-project answer blobs are no longer in the hot path for the commands
 above. The socket still uses the repository's established JSON request/response

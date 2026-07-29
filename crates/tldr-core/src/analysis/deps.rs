@@ -655,6 +655,152 @@ pub fn analyze_dependencies(path: &Path, options: &DepsOptions) -> TldrResult<De
     })
 }
 
+/// Build a dependency report from generation-pinned stored imports.
+///
+/// `files_and_imports` uses root-relative paths and exact `ImportInfo` records
+/// produced during artifact ingestion. This path performs no source walk or
+/// source parsing.
+pub fn analyze_dependencies_from_imports(
+    root: &Path,
+    language: Language,
+    files_and_imports: Vec<(PathBuf, Vec<ImportInfo>)>,
+    options: &DepsOptions,
+) -> TldrResult<DepsReport> {
+    let root = dunce::canonicalize(root)
+        .map_err(|_| crate::error::TldrError::PathNotFound(root.to_path_buf()))?;
+    let files = files_and_imports
+        .iter()
+        .map(|(path, _)| root.join(path))
+        .collect::<Vec<_>>();
+    if files.is_empty() {
+        return Ok(DepsReport {
+            root,
+            language: language.as_str().to_string(),
+            ..DepsReport::default()
+        });
+    }
+
+    let module_index = build_module_index(&root, &files, language);
+    let mut internal_dependencies = BTreeMap::<PathBuf, Vec<PathBuf>>::new();
+    let mut external_dependencies = BTreeMap::<PathBuf, Vec<String>>::new();
+    let mut total_internal_deps = 0;
+    for (relative_path, imports) in &files_and_imports {
+        let file_path = root.join(relative_path);
+        let mut internal = Vec::new();
+        let mut external = Vec::new();
+        for import in imports {
+            match classify_import(import, &root, &file_path, &module_index, language) {
+                DepKind::Internal => {
+                    if let Some(target) =
+                        resolve_import(import, &root, &file_path, &module_index, language)
+                    {
+                        let target = make_relative_path(&target, &root);
+                        if target != *relative_path && !internal.contains(&target) {
+                            internal.push(target);
+                            total_internal_deps += 1;
+                        }
+                    }
+                }
+                DepKind::External | DepKind::Stdlib if options.include_external => {
+                    let module = import.module.split('.').next().unwrap_or(&import.module);
+                    let module = module
+                        .trim_start_matches("./")
+                        .trim_start_matches("../")
+                        .to_string();
+                    if !external.contains(&module) {
+                        external.push(module);
+                    }
+                }
+                _ => {}
+            }
+        }
+        internal.sort();
+        external.sort();
+        internal_dependencies.insert(relative_path.clone(), internal);
+        if options.include_external && !external.is_empty() {
+            external_dependencies.insert(relative_path.clone(), external);
+        }
+    }
+
+    if language == Language::Go {
+        let mut packages = HashMap::<PathBuf, Vec<PathBuf>>::new();
+        for (path, _) in &files_and_imports {
+            packages
+                .entry(path.parent().unwrap_or_else(|| Path::new("")).to_path_buf())
+                .or_default()
+                .push(path.clone());
+        }
+        for package_files in packages.values() {
+            for source in package_files {
+                for target in package_files {
+                    if source != target {
+                        let dependencies = internal_dependencies.entry(source.clone()).or_default();
+                        if !dependencies.contains(target) {
+                            dependencies.push(target.clone());
+                            total_internal_deps += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let total_files = files.len();
+    let total_external_deps = external_dependencies
+        .values()
+        .flatten()
+        .collect::<HashSet<_>>()
+        .len();
+    let mut incoming_count = HashMap::<&PathBuf, usize>::new();
+    for dependency in internal_dependencies.values().flatten() {
+        *incoming_count.entry(dependency).or_insert(0) += 1;
+    }
+    let leaf_files = internal_dependencies
+        .values()
+        .filter(|dependencies| dependencies.is_empty())
+        .count();
+    let root_files = internal_dependencies
+        .keys()
+        .filter(|path| !incoming_count.contains_key(path))
+        .count();
+    let final_dependencies = if options.collapse_packages {
+        collapse_to_packages(&internal_dependencies, &root)
+    } else {
+        internal_dependencies
+    };
+    let circular_dependencies =
+        detect_cycles(&final_dependencies, options.max_cycle_length.unwrap_or(10));
+    let (max_depth, collapsed_leaf_files, collapsed_root_files) =
+        calculate_depth_stats(&final_dependencies);
+
+    Ok(DepsReport {
+        root,
+        language: language.as_str().to_string(),
+        internal_dependencies: final_dependencies,
+        external_dependencies,
+        stats: DepStats {
+            total_files,
+            total_internal_deps,
+            total_external_deps,
+            max_depth,
+            cycles_found: circular_dependencies.len(),
+            leaf_files: if options.collapse_packages {
+                collapsed_leaf_files
+            } else {
+                leaf_files
+            },
+            root_files: if options.collapse_packages {
+                collapsed_root_files
+            } else {
+                root_files
+            },
+        },
+        circular_dependencies,
+        files_skipped: 0,
+        warnings: Vec::new(),
+    })
+}
+
 /// Partition candidate files under the central oversize policy, soft-skipping
 /// files that exceed the configured size cap (M-Z11).
 ///

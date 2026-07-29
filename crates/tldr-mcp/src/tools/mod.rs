@@ -655,7 +655,7 @@ impl ToolRegistry {
         self.register(
             ToolDefinition {
                 name: "tldr_semantic".to_string(),
-                description: "[PARKED] Not available in this version — semantic search is moving to the warm daemon engine. Use tldr_search (regex) or tldr_bm25 (keyword) instead."
+                description: "Semantic search through the warm resident daemon, with optional BM25+dense RRF fusion."
                     .to_string(),
                 input_schema: json!({
                     "type": "object",
@@ -675,6 +675,10 @@ impl ToolRegistry {
                         "top_k": {
                             "type": "integer",
                             "description": "Number of results (default: 10)"
+                        },
+                        "hybrid": {
+                            "type": "boolean",
+                            "description": "Fuse resident BM25 and dense rankings with RRF"
                         }
                     },
                     "required": ["query", "path"]

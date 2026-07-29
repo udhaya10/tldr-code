@@ -18,11 +18,9 @@ pub mod tokenizer;
 // Re-export main types and functions
 pub use bm25::{Bm25Index, Bm25Result};
 pub use enriched::{
-    enriched_search, enriched_search_with_callgraph_cache, enriched_search_with_index,
-    enriched_search_with_structure_cache, read_callgraph_cache, read_structure_cache,
-    search_with_inner, write_structure_cache, CallGraphLookup, EnrichedResult,
+    enriched_search, enriched_search_with_artifacts, CallGraphLookup, EnrichedResult,
     EnrichedSearchOptions, EnrichedSearchReport, SearchMode, StructureLookup,
 };
-pub use hybrid::{hybrid_search, HybridResult, HybridSearchReport, SemanticResult};
+pub use hybrid::{hybrid_search_with_results, HybridResult, HybridSearchReport, SemanticResult};
 pub use text::{search, SearchMatch};
 pub use tokenizer::Tokenizer;

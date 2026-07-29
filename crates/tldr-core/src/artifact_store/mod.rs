@@ -11,7 +11,7 @@ mod types;
 
 pub use file_facts::{
     CallFact, DefinitionFact, FileFacts, FileFactsParser, ImportFact, ProjectCallEdgeFact,
-    SemanticChunkFact, StoredFileStructure, StoredModuleInfo,
+    ReferenceFact, SemanticChunkFact, StoredFileStructure, StoredModuleInfo,
 };
 pub use function_artifacts::FunctionArtifactCoordinator;
 pub use graph_snapshot::{FuncId, FunctionNode, GraphSnapshot};

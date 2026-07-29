@@ -22,14 +22,10 @@
 //   so this module stays feature-agnostic while fusing REAL dense results.
 //   Empty slice => BM25-only (the honest degraded mode).
 
-use std::collections::HashMap;
-use std::path::Path;
-
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
-use super::bm25::{Bm25Index, Bm25Result};
-use crate::types::Language;
-use crate::TldrResult;
+use super::bm25::Bm25Result;
 
 /// One dense (embedding) search hit, as fed into RRF fusion.
 ///
@@ -100,59 +96,18 @@ pub struct HybridSearchReport {
     pub fallback_mode: Option<String>,
 }
 
-/// Perform hybrid search combining BM25 and semantic search
+/// Fuse already-resident lexical and dense rankings without constructing an index.
 ///
-/// # Arguments
-/// * `query` - Search query string
-/// * `root` - Project root directory
-/// * `language` - Programming language to search
-/// * `top_k` - Number of results to return
-/// * `k_constant` - RRF k constant (default 60)
-/// * `semantic_results` - Dense hits from the caller's `SemanticIndex`, already
-///   reduced to file granularity (best chunk per file). Empty => BM25-only.
-///
-/// # Returns
-/// HybridSearchReport containing fused results
-///
-/// # Example
-/// ```ignore
-/// use tldr_core::search::hybrid::{hybrid_search, SemanticResult};
-///
-/// // Caller (with the `semantic` feature) builds a SemanticIndex, searches it,
-/// // and converts the dense hits into `SemanticResult`s keyed by file path.
-/// let dense: Vec<SemanticResult> = /* from SemanticIndex::search */ vec![];
-/// let report = hybrid_search(
-///     "process data",
-///     Path::new("src/"),
-///     Language::Python,
-///     10,
-///     60.0,
-///     &dense,
-/// )?;
-/// ```
-pub fn hybrid_search(
+/// The authoritative daemon calls this after readiness and generation checks,
+/// so an empty dense ranking is a genuine result rather than a cold fallback.
+pub fn hybrid_search_with_results(
     query: &str,
-    root: &Path,
-    language: Language,
+    bm25_results: &[Bm25Result],
+    semantic_results: &[SemanticResult],
     top_k: usize,
     k_constant: f64,
-    semantic_results: &[SemanticResult],
-) -> TldrResult<HybridSearchReport> {
-    // Build BM25 index and search
-    let bm25_index = Bm25Index::from_project(root, language)?;
-    let bm25_results = bm25_index.search(query, top_k * 2); // Get more for RRF
-
-    // Dense side is supplied by the caller (from the in-process SemanticIndex).
-    // Empty => honest BM25-only degradation (e.g. `semantic` feature off).
-    let fallback_mode = if semantic_results.is_empty() {
-        Some("bm25_only".to_string())
-    } else {
-        None
-    };
-
-    // Fuse results using RRF
-    let fused = fuse_rrf(&bm25_results, semantic_results, k_constant, top_k);
-
+) -> HybridSearchReport {
+    let fused = fuse_rrf(bm25_results, semantic_results, k_constant, top_k);
     // Calculate statistics
     let bm25_files: std::collections::HashSet<_> = bm25_results
         .iter()
@@ -165,15 +120,15 @@ pub fn hybrid_search(
     let bm25_only = bm25_files.len() - overlap;
     let dense_only = dense_files.len() - overlap;
 
-    Ok(HybridSearchReport {
+    HybridSearchReport {
         results: fused,
         query: query.to_string(),
         total_candidates: bm25_files.len() + dense_files.len() - overlap,
         bm25_only,
         dense_only,
         overlap,
-        fallback_mode,
-    })
+        fallback_mode: None,
+    }
 }
 
 // NOTE (TLDR-7xz.7): `hybrid_search_with_index` — the per-call cold path that
@@ -266,4 +221,45 @@ fn fuse_rrf(
 /// * `k` - RRF constant
 pub fn calculate_rrf_score(ranks: &[(usize, usize)], k: f64) -> f64 {
     ranks.iter().map(|(_, rank)| 1.0 / (k + *rank as f64)).sum()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{hybrid_search_with_results, SemanticResult, DEFAULT_K_CONSTANT};
+    use crate::Bm25Result;
+    use std::path::PathBuf;
+
+    #[test]
+    fn resident_rrf_rewards_overlap_without_fallback() {
+        let lexical = vec![
+            Bm25Result {
+                file_path: PathBuf::from("lexical.rs"),
+                score: 3.0,
+                line_start: 1,
+                line_end: 1,
+                snippet: "lexical".to_string(),
+                matched_terms: vec!["risk".to_string()],
+            },
+            Bm25Result {
+                file_path: PathBuf::from("overlap.rs"),
+                score: 2.0,
+                line_start: 2,
+                line_end: 2,
+                snippet: "overlap".to_string(),
+                matched_terms: vec!["risk".to_string()],
+            },
+        ];
+        let dense = vec![SemanticResult {
+            doc_id: "overlap.rs".to_string(),
+            score: 0.9,
+            line_start: 2,
+            line_end: 2,
+            snippet: "dense overlap".to_string(),
+        }];
+
+        let report = hybrid_search_with_results("risk", &lexical, &dense, 10, DEFAULT_K_CONSTANT);
+        assert_eq!(report.results[0].file_path, PathBuf::from("overlap.rs"));
+        assert_eq!(report.overlap, 1);
+        assert_eq!(report.fallback_mode, None);
+    }
 }

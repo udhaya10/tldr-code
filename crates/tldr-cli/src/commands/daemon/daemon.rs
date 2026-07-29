@@ -27,6 +27,7 @@ use super::artifact_manager::ArtifactManager;
 use super::error::{DaemonError, DaemonResult};
 use super::hot_cache::{hash_path, HotQueryKey, HotResponseCache};
 use super::ipc::{read_command, send_response, IpcListener, IpcStream};
+use super::search_index_manager::SearchIndexManager;
 use super::types::{
     AllSessionsSummary, ContextPack, DaemonCommand, DaemonConfig, DaemonResponse, DaemonStatus,
     HookStats, SalsaCacheStats, SessionStats, HOOK_FLUSH_THRESHOLD,
@@ -43,8 +44,8 @@ use tldr_core::{
     detect_smells_with_walker_opts, SmellsWalkerOpts,
 };
 use tldr_core::{
-    architecture_analysis, change_impact, detect_or_parse_language, find_importers, get_file_tree,
-    get_relevant_context, get_slice, search as tldr_search, Language, SliceDirection,
+    detect_or_parse_language, enriched_search_with_artifacts, find_importers, get_file_tree,
+    get_relevant_context, EnrichedSearchOptions, Language, SearchMode,
 };
 
 // =============================================================================
@@ -156,9 +157,8 @@ fn apply_semantic_delta_batch(
 
 /// Resolve the effective `Language` for a daemon-handler invocation.
 ///
-/// v031-cluster-M2: M1 added `language: Option<Language>` to seven
-/// DaemonCommand variants (Context, Calls, Impact, Dead, Arch, Importers,
-/// ChangeImpact). The handler arms that consume those variants previously
+/// v031-cluster-M2: M1 added `language: Option<Language>` to daemon command
+/// variants. The handler arms that consume those variants previously
 /// passed a hardcoded `Language::Python` to `tldr-core` regardless of what
 /// the client supplied — a forgotten-thread bug. This helper centralises the
 /// `Some(lang) | None -> default` resolution so every handler arm threads
@@ -245,6 +245,7 @@ impl Drop for ClearWarmStateOnDrop {
 struct WarmJob {
     project: PathBuf,
     artifact_manager: Arc<ArtifactManager>,
+    search_index: Arc<SearchIndexManager>,
     indexed_files: Arc<RwLock<usize>>,
     #[cfg(feature = "semantic")]
     semantic_store: Arc<IndexManager>,
@@ -305,7 +306,31 @@ impl WarmJob {
             Err(error) => errors.push(format!("artifact_store: {error}")),
         }
 
-        // 2. Warm the vector store: load from disk (near-instant if fresh)
+        // 2. Publish resident lexical indexes from the same immutable
+        // generation. This is deliberately outside every query path.
+        let artifacts = Arc::clone(&self.artifact_manager);
+        let search_index = Arc::clone(&self.search_index);
+        match tokio::task::spawn_blocking(move || match artifacts.snapshot() {
+            Ok(snapshot) => Ok(search_index.refresh(&snapshot)),
+            Err(state) => {
+                search_index.invalidate();
+                Err(format!("artifact generation is not ready: {state:?}"))
+            }
+        })
+        .await
+        {
+            Ok(Ok(stats)) => {
+                warmed.push("bm25");
+                eprintln!(
+                    "[warm] resident BM25 generation {}: {} languages, {} documents",
+                    stats.generation, stats.languages, stats.documents
+                );
+            }
+            Ok(Err(error)) => errors.push(format!("bm25: {error}")),
+            Err(error) => errors.push(format!("bm25: {error}")),
+        }
+
+        // 3. Warm the vector store: load from disk (near-instant if fresh)
         //    or build+save on miss. Uses the project-config model so a later
         //    query with the same model hits the resident store
         //    (TLDR-atc / TLDR-zxb).
@@ -428,6 +453,8 @@ pub struct TLDRDaemon {
     /// Salsa-style query cache. Behind `Arc` so the detached warm-build task
     /// (TLDR-utj.7) can own a handle without holding the whole daemon.
     cache: Arc<HotResponseCache>,
+    /// Generation-pinned resident lexical indexes built only on publication.
+    search_index: Arc<SearchIndexManager>,
     /// Per-session statistics
     sessions: DashMap<String, SessionStats>,
     /// Per-hook activity statistics
@@ -460,11 +487,16 @@ impl TLDRDaemon {
     /// The daemon starts in `Initializing` status and must have `run()` called
     /// to begin accepting connections.
     pub fn new(project: PathBuf, config: DaemonConfig) -> DaemonResult<Self> {
+        let project = dunce::canonicalize(&project).unwrap_or(project);
         let (shutdown_tx, _shutdown_rx) = watch::channel(false);
         let artifact_manager = Arc::new(
             ArtifactManager::open(&project)
                 .map_err(|error| DaemonError::ArtifactStore(error.to_string()))?,
         );
+        let search_index = Arc::new(SearchIndexManager::new());
+        if let Ok(snapshot) = artifact_manager.snapshot() {
+            search_index.refresh(&snapshot);
+        }
 
         let sessions = DashMap::new();
         for session in super::session_context::load_sessions(&project) {
@@ -477,6 +509,7 @@ impl TLDRDaemon {
             status: Arc::new(RwLock::new(DaemonStatus::Initializing)),
             artifact_manager,
             cache: Arc::new(HotResponseCache::with_defaults()),
+            search_index,
             sessions,
             hooks: DashMap::new(),
             dirty_files: Arc::new(RwLock::new(HashSet::new())),
@@ -822,6 +855,8 @@ impl TLDRDaemon {
                 top_k,
                 model,
                 threshold,
+                hybrid,
+                languages,
             } => {
                 let model = match self.resolve_semantic_model(model.as_deref()) {
                     Ok(m) => m,
@@ -833,16 +868,116 @@ impl TLDRDaemon {
                     }
                 };
 
+                let lexical_indexes = if hybrid {
+                    let snapshot = match self.artifact_manager.snapshot() {
+                        Ok(snapshot) => snapshot,
+                        Err(state) => {
+                            return DaemonResponse::Error {
+                                status: "not_ready".to_string(),
+                                error: format!(
+                                    "artifact generation is not ready ({state:?}) — run tldr warm"
+                                ),
+                            };
+                        }
+                    };
+                    let languages = if languages.is_empty() {
+                        let mut published = snapshot
+                            .files()
+                            .map(|facts| facts.module.language)
+                            .collect::<HashSet<_>>()
+                            .into_iter()
+                            .collect::<Vec<_>>();
+                        published.sort_by_key(|language| language.as_str());
+                        published
+                    } else {
+                        languages
+                    };
+                    if languages.is_empty() {
+                        return DaemonResponse::Error {
+                            status: "not_ready".to_string(),
+                            error: "resident BM25 has no published languages — run tldr warm"
+                                .to_string(),
+                        };
+                    }
+                    let mut indexes = Vec::with_capacity(languages.len());
+                    for language in languages {
+                        match self.search_index.index(snapshot.generation(), language) {
+                            Ok(index) => indexes.push((language, index)),
+                            Err(error) => {
+                                return DaemonResponse::Error {
+                                    status: "not_ready".to_string(),
+                                    error,
+                                };
+                            }
+                        }
+                    }
+                    indexes
+                } else {
+                    Vec::new()
+                };
+
                 let mgr = Arc::clone(&self.semantic_store);
                 let project = self.project.clone();
                 let join = tokio::task::spawn_blocking(move || {
                     let search_opts = IndexSearchOptions {
-                        top_k,
+                        top_k: if hybrid { top_k * 2 } else { top_k },
                         threshold: threshold.unwrap_or(0.0),
                         include_snippet: true,
                         snippet_lines: 5,
                     };
-                    mgr.query(&project, &query, &search_opts, model)
+                    let value = mgr.query(&project, &query, &search_opts, model)?;
+                    if !hybrid {
+                        return Ok(value);
+                    }
+
+                    let dense_report: tldr_core::semantic::SemanticSearchReport =
+                        serde_json::from_value(value).map_err(|error| {
+                            super::index_manager::QueryError::Internal(error.to_string())
+                        })?;
+                    let language_set = lexical_indexes
+                        .iter()
+                        .map(|(language, _)| *language)
+                        .collect::<HashSet<_>>();
+                    let dense = dense_report
+                        .results
+                        .into_iter()
+                        .filter(|result| {
+                            Language::from_path(&result.file_path)
+                                .is_some_and(|language| language_set.contains(&language))
+                        })
+                        .map(|result| tldr_core::SemanticResult {
+                            doc_id: result
+                                .file_path
+                                .strip_prefix(&project)
+                                .unwrap_or(&result.file_path)
+                                .to_string_lossy()
+                                .replace('\\', "/"),
+                            score: result.score,
+                            line_start: result.line_start,
+                            line_end: result.line_end,
+                            snippet: result.snippet,
+                        })
+                        .collect::<Vec<_>>();
+                    let mut lexical = lexical_indexes
+                        .iter()
+                        .flat_map(|(_, index)| index.search(&query, top_k * 2))
+                        .collect::<Vec<_>>();
+                    lexical.sort_by(|left, right| {
+                        right
+                            .score
+                            .partial_cmp(&left.score)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                            .then_with(|| left.file_path.cmp(&right.file_path))
+                    });
+                    lexical.truncate(top_k * 2);
+                    serde_json::to_value(tldr_core::hybrid_search_with_results(
+                        &query,
+                        &lexical,
+                        &dense,
+                        top_k,
+                        tldr_core::search::hybrid::DEFAULT_K_CONSTANT,
+                    ))
+                    .map_err(|error| super::index_manager::QueryError::Internal(error.to_string()))
                 })
                 .await;
 
@@ -876,34 +1011,592 @@ impl TLDRDaemon {
                 error: "Semantic search requires the 'semantic' feature".to_string(),
             },
 
-            // Pass-through analysis commands with Salsa cache integration
+            // Generation-pinned resident lexical search.
             DaemonCommand::Search {
-                pattern,
-                max_results,
+                query,
+                path,
+                language,
+                top_k,
+                include_callgraph,
+                regex,
+                filter,
             } => {
-                let max = max_results.unwrap_or(100);
-                // Search is regex-based and language-agnostic; tag with the
-                // resolve_language default so HotQueryKey is well-formed without
-                // discriminating across languages.
-                let key = HotQueryKey::new(
-                    "search",
-                    hash_str_args(&[&pattern, &max.to_string()]),
-                    resolve_language(None),
-                );
-                if let Some(cached) = self.cache.get::<serde_json::Value>(&key) {
-                    return DaemonResponse::Result(cached);
-                }
-                match tldr_search(&pattern, &self.project, None, 2, max, 1000) {
-                    Ok(result) => {
-                        let val = serde_json::to_value(&result).unwrap_or_default();
-                        // TLDR-fct freshness: search scans self.project — register
-                        // the project hash so process_dirty_file evicts on any edit.
-                        self.cache.insert(key, &val, vec![hash_path(&self.project)]);
-                        DaemonResponse::Result(val)
+                let requested = path.unwrap_or_else(|| self.project.clone());
+                let requested = match requested.canonicalize() {
+                    Ok(path) => path,
+                    Err(error) => {
+                        return DaemonResponse::Error {
+                            status: "error".to_string(),
+                            error: format!(
+                                "cannot resolve search path {}: {error}",
+                                requested.display()
+                            ),
+                        };
                     }
-                    Err(e) => DaemonResponse::Error {
+                };
+                let scope = match requested.strip_prefix(&self.project) {
+                    Ok(scope) => scope.to_path_buf(),
+                    Err(_) => {
+                        return DaemonResponse::Error {
+                            status: "error".to_string(),
+                            error: format!(
+                                "search path {} is outside daemon project {}",
+                                requested.display(),
+                                self.project.display()
+                            ),
+                        };
+                    }
+                };
+                let snapshot = match self.artifact_manager.snapshot() {
+                    Ok(snapshot) => snapshot,
+                    Err(state) => {
+                        return DaemonResponse::Error {
+                            status: "not_ready".to_string(),
+                            error: format!(
+                                "artifact generation is not ready ({state:?}) — run tldr warm"
+                            ),
+                        };
+                    }
+                };
+                let index = match self.search_index.index(snapshot.generation(), language) {
+                    Ok(index) => index,
+                    Err(error) => {
+                        return DaemonResponse::Error {
+                            status: "not_ready".to_string(),
+                            error,
+                        };
+                    }
+                };
+                let requested_top_k = top_k;
+                let scoped_files = index.document_count_under(&scope);
+                let search_mode = if regex {
+                    SearchMode::Regex(query.clone())
+                } else if let Some(pattern) = filter {
+                    SearchMode::Hybrid {
+                        query: query.clone(),
+                        pattern,
+                    }
+                } else {
+                    SearchMode::Bm25
+                };
+                let options = EnrichedSearchOptions {
+                    // Search the complete resident language projection before
+                    // applying a subdirectory scope, so a scoped request never
+                    // loses a valid result to whole-project ranking truncation.
+                    top_k: if scope.as_os_str().is_empty() {
+                        requested_top_k
+                    } else {
+                        index.document_count()
+                    },
+                    include_callgraph,
+                    search_mode,
+                };
+                let structures = snapshot.search_structure_lookup(language);
+                let calls = snapshot.search_callgraph_lookup(language);
+                match enriched_search_with_artifacts(
+                    &query,
+                    &self.project,
+                    language,
+                    options,
+                    &index,
+                    &structures,
+                    &calls,
+                ) {
+                    Ok(mut report) => {
+                        if !scope.as_os_str().is_empty() {
+                            report
+                                .results
+                                .retain(|result| result.file.starts_with(&scope));
+                            for result in &mut report.results {
+                                result.file = result
+                                    .file
+                                    .strip_prefix(&scope)
+                                    .unwrap_or(&result.file)
+                                    .to_path_buf();
+                            }
+                            report.results.truncate(requested_top_k);
+                            report.total_results = report.results.len();
+                            report.total_files_searched = scoped_files;
+                        }
+                        serde_json::to_value(report)
+                            .map(DaemonResponse::Result)
+                            .unwrap_or_else(|error| DaemonResponse::Error {
+                                status: "error".to_string(),
+                                error: error.to_string(),
+                            })
+                    }
+                    Err(error) => DaemonResponse::Error {
                         status: "error".to_string(),
-                        error: e.to_string(),
+                        error: error.to_string(),
+                    },
+                }
+            }
+
+            DaemonCommand::References {
+                symbol,
+                path,
+                language,
+                kinds,
+                scope,
+                limit,
+                include_definition,
+            } => {
+                if scope != tldr_core::analysis::references::SearchScope::Workspace {
+                    return DaemonResponse::Error {
+                        status: "error".to_string(),
+                        error: "local/file reference scopes are intentional --oneshot analyses"
+                            .to_string(),
+                    };
+                }
+                let requested = path.unwrap_or_else(|| self.project.clone());
+                let requested = match requested.canonicalize() {
+                    Ok(path) => path,
+                    Err(error) => {
+                        return DaemonResponse::Error {
+                            status: "error".to_string(),
+                            error: format!(
+                                "cannot resolve references path {}: {error}",
+                                requested.display()
+                            ),
+                        };
+                    }
+                };
+                let prefix = match requested.strip_prefix(&self.project) {
+                    Ok(prefix) => prefix,
+                    Err(_) => {
+                        return DaemonResponse::Error {
+                            status: "error".to_string(),
+                            error: format!(
+                                "references path {} is outside daemon project {}",
+                                requested.display(),
+                                self.project.display()
+                            ),
+                        };
+                    }
+                };
+                let snapshot = match self.artifact_manager.snapshot() {
+                    Ok(snapshot) => snapshot,
+                    Err(state) => {
+                        return DaemonResponse::Error {
+                            status: "not_ready".to_string(),
+                            error: format!(
+                                "artifact generation is not ready ({state:?}) — run tldr warm"
+                            ),
+                        };
+                    }
+                };
+                let options = tldr_core::analysis::references::ReferencesOptions {
+                    include_definition,
+                    kinds: (!kinds.is_empty()).then_some(kinds),
+                    scope,
+                    language: language.map(|value| value.as_str().to_string()),
+                    limit: Some(limit),
+                    definition_file: None,
+                    context_lines: 0,
+                };
+                let mut report = snapshot.references_report(&symbol, &options, Some(prefix));
+                for definition in &mut report.definitions {
+                    definition.file = self.project.join(&definition.file);
+                }
+                report.definition = report.definitions.first().cloned();
+                for reference in &mut report.references {
+                    reference.file = self.project.join(&reference.file);
+                }
+                serde_json::to_value(report)
+                    .map(DaemonResponse::Result)
+                    .unwrap_or_else(|error| DaemonResponse::Error {
+                        status: "error".to_string(),
+                        error: error.to_string(),
+                    })
+            }
+
+            DaemonCommand::Definition {
+                symbol,
+                path,
+                language,
+            } => {
+                use crate::commands::remaining::{
+                    DefinitionResult, Location, SymbolInfo, SymbolKind,
+                };
+
+                let requested = path.unwrap_or_else(|| self.project.clone());
+                let requested = match requested.canonicalize() {
+                    Ok(path) => path,
+                    Err(error) => {
+                        return DaemonResponse::Error {
+                            status: "error".to_string(),
+                            error: format!(
+                                "cannot resolve definition path {}: {error}",
+                                requested.display()
+                            ),
+                        };
+                    }
+                };
+                let prefix = match requested.strip_prefix(&self.project) {
+                    Ok(prefix) => prefix,
+                    Err(_) => {
+                        return DaemonResponse::Error {
+                            status: "error".to_string(),
+                            error: format!(
+                                "definition path {} is outside daemon project {}",
+                                requested.display(),
+                                self.project.display()
+                            ),
+                        };
+                    }
+                };
+                let snapshot = match self.artifact_manager.snapshot() {
+                    Ok(snapshot) => snapshot,
+                    Err(state) => {
+                        return DaemonResponse::Error {
+                            status: "not_ready".to_string(),
+                            error: format!(
+                                "artifact generation is not ready ({state:?}) — run tldr warm"
+                            ),
+                        };
+                    }
+                };
+                let mut matches = snapshot
+                    .definitions()
+                    .filter(|(file, definition)| {
+                        definition.name == symbol
+                            && PathBuf::from(file).starts_with(prefix)
+                            && snapshot.file(file).is_some_and(|facts| {
+                                language.is_none_or(|value| facts.module.language == value)
+                            })
+                    })
+                    .collect::<Vec<_>>();
+                matches.sort_by(|left, right| {
+                    left.0
+                        .cmp(right.0)
+                        .then_with(|| left.1.line_start.cmp(&right.1.line_start))
+                });
+                let Some((file, definition)) = matches.first() else {
+                    return DaemonResponse::Error {
+                        status: "error".to_string(),
+                        error: format!("symbol '{symbol}' not found in {}", requested.display()),
+                    };
+                };
+                let file = self.project.join(file);
+                let location = Location {
+                    file: file.to_string_lossy().into_owned(),
+                    line: definition.line_start,
+                    column: 0,
+                    end_line: Some(definition.line_end),
+                    end_column: None,
+                };
+                let kind = match definition.kind.as_str() {
+                    "function" => SymbolKind::Function,
+                    "method" => SymbolKind::Method,
+                    "class" | "struct" => SymbolKind::Class,
+                    "constant" => SymbolKind::Constant,
+                    "variable" => SymbolKind::Variable,
+                    "module" => SymbolKind::Module,
+                    "interface" => SymbolKind::Interface,
+                    "property" | "field" => SymbolKind::Property,
+                    "type" | "enum" | "trait" => SymbolKind::Type,
+                    _ => SymbolKind::Unknown,
+                };
+                let result = DefinitionResult {
+                    symbol: SymbolInfo {
+                        name: symbol,
+                        kind,
+                        location: Some(location.clone()),
+                        type_annotation: None,
+                        docstring: None,
+                        is_builtin: false,
+                        module: None,
+                    },
+                    definition: Some(location),
+                    type_definition: None,
+                };
+                serde_json::to_value(result)
+                    .map(DaemonResponse::Result)
+                    .unwrap_or_else(|error| DaemonResponse::Error {
+                        status: "error".to_string(),
+                        error: error.to_string(),
+                    })
+            }
+
+            DaemonCommand::Deps {
+                path,
+                language,
+                include_external,
+                collapse_packages,
+                max_depth,
+                show_cycles_only,
+                max_cycle_length,
+            } => {
+                use tldr_core::analysis::deps::{analyze_dependencies_from_imports, DepsOptions};
+
+                let requested = path.unwrap_or_else(|| self.project.clone());
+                let requested = match requested.canonicalize() {
+                    Ok(path) => path,
+                    Err(error) => {
+                        return DaemonResponse::Error {
+                            status: "error".to_string(),
+                            error: format!(
+                                "cannot resolve deps path {}: {error}",
+                                requested.display()
+                            ),
+                        };
+                    }
+                };
+                let prefix = match requested.strip_prefix(&self.project) {
+                    Ok(prefix) => prefix.to_path_buf(),
+                    Err(_) => {
+                        return DaemonResponse::Error {
+                            status: "error".to_string(),
+                            error: format!(
+                                "deps path {} is outside daemon project {}",
+                                requested.display(),
+                                self.project.display()
+                            ),
+                        };
+                    }
+                };
+                let snapshot = match self.artifact_manager.snapshot() {
+                    Ok(snapshot) => snapshot,
+                    Err(state) => {
+                        return DaemonResponse::Error {
+                            status: "not_ready".to_string(),
+                            error: format!(
+                                "artifact generation is not ready ({state:?}) — run tldr warm"
+                            ),
+                        };
+                    }
+                };
+                let selected_language = language.or_else(|| {
+                    let mut counts = HashMap::<Language, usize>::new();
+                    for facts in snapshot
+                        .files()
+                        .filter(|facts| PathBuf::from(&facts.path).starts_with(&prefix))
+                    {
+                        *counts.entry(facts.module.language).or_default() += 1;
+                    }
+                    counts
+                        .into_iter()
+                        .max_by(|left, right| {
+                            left.1
+                                .cmp(&right.1)
+                                .then_with(|| left.0.as_str().cmp(right.0.as_str()))
+                        })
+                        .map(|(language, _)| language)
+                });
+                let Some(language) = selected_language else {
+                    return DaemonResponse::Error {
+                        status: "error".to_string(),
+                        error: format!("no source files found in {}", requested.display()),
+                    };
+                };
+                let files_and_imports = snapshot
+                    .files()
+                    .filter(|facts| {
+                        facts.module.language == language
+                            && PathBuf::from(&facts.path).starts_with(&prefix)
+                    })
+                    .filter_map(|facts| {
+                        PathBuf::from(&facts.path)
+                            .strip_prefix(&prefix)
+                            .ok()
+                            .map(|relative| (relative.to_path_buf(), facts.module.imports.clone()))
+                    })
+                    .collect::<Vec<_>>();
+                let options = DepsOptions {
+                    include_external,
+                    collapse_packages,
+                    max_depth,
+                    show_cycles_only,
+                    max_cycle_length: Some(max_cycle_length),
+                    language: Some(language.as_str().to_string()),
+                };
+                match tokio::task::spawn_blocking(move || {
+                    analyze_dependencies_from_imports(
+                        &requested,
+                        language,
+                        files_and_imports,
+                        &options,
+                    )
+                })
+                .await
+                {
+                    Ok(Ok(report)) => serde_json::to_value(report)
+                        .map(DaemonResponse::Result)
+                        .unwrap_or_else(|error| DaemonResponse::Error {
+                            status: "error".to_string(),
+                            error: error.to_string(),
+                        }),
+                    Ok(Err(error)) => DaemonResponse::Error {
+                        status: "error".to_string(),
+                        error: error.to_string(),
+                    },
+                    Err(error) => DaemonResponse::Error {
+                        status: "error".to_string(),
+                        error: format!("deps task failed: {error}"),
+                    },
+                }
+            }
+
+            DaemonCommand::Coupling {
+                path,
+                language,
+                max_pairs,
+                martin_top,
+                cycles_only,
+            } => {
+                use tldr_core::analysis::deps::{analyze_dependencies_from_imports, DepsOptions};
+                use tldr_core::quality::coupling::{
+                    analyze_coupling_with_module_infos, compute_martin_metrics_from_deps,
+                    CouplingOptions, MartinOptions,
+                };
+                use tldr_core::{CallEdge, ProjectCallGraph};
+
+                let requested = path.unwrap_or_else(|| self.project.clone());
+                let requested = match requested.canonicalize() {
+                    Ok(path) => path,
+                    Err(error) => {
+                        return DaemonResponse::Error {
+                            status: "error".to_string(),
+                            error: format!(
+                                "cannot resolve coupling path {}: {error}",
+                                requested.display()
+                            ),
+                        };
+                    }
+                };
+                let prefix = match requested.strip_prefix(&self.project) {
+                    Ok(prefix) => prefix.to_path_buf(),
+                    Err(_) => {
+                        return DaemonResponse::Error {
+                            status: "error".to_string(),
+                            error: format!(
+                                "coupling path {} is outside daemon project {}",
+                                requested.display(),
+                                self.project.display()
+                            ),
+                        };
+                    }
+                };
+                let snapshot = match self.artifact_manager.snapshot() {
+                    Ok(snapshot) => snapshot,
+                    Err(state) => {
+                        return DaemonResponse::Error {
+                            status: "not_ready".to_string(),
+                            error: format!(
+                                "artifact generation is not ready ({state:?}) — run tldr warm"
+                            ),
+                        };
+                    }
+                };
+                let selected_language = language.or_else(|| {
+                    let mut counts = HashMap::<Language, usize>::new();
+                    for facts in snapshot
+                        .files()
+                        .filter(|facts| PathBuf::from(&facts.path).starts_with(&prefix))
+                    {
+                        *counts.entry(facts.module.language).or_default() += 1;
+                    }
+                    counts
+                        .into_iter()
+                        .max_by(|left, right| {
+                            left.1
+                                .cmp(&right.1)
+                                .then_with(|| left.0.as_str().cmp(right.0.as_str()))
+                        })
+                        .map(|(language, _)| language)
+                });
+                let Some(language) = selected_language else {
+                    return DaemonResponse::Error {
+                        status: "error".to_string(),
+                        error: format!("no source files found in {}", requested.display()),
+                    };
+                };
+                let selected = snapshot
+                    .files()
+                    .filter(|facts| {
+                        facts.module.language == language
+                            && PathBuf::from(&facts.path).starts_with(&prefix)
+                    })
+                    .filter_map(|facts| {
+                        let relative = PathBuf::from(&facts.path)
+                            .strip_prefix(&prefix)
+                            .ok()?
+                            .to_path_buf();
+                        let mut module = facts.module.to_module_info();
+                        module.file_path = relative.clone();
+                        Some((relative, module))
+                    })
+                    .collect::<HashMap<_, _>>();
+                let edges = snapshot
+                    .call_edges(Some(language))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                match tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
+                    let mut graph = ProjectCallGraph::new();
+                    for edge in edges {
+                        let source = PathBuf::from(&edge.source_file);
+                        let destination = PathBuf::from(&edge.destination_file);
+                        if !source.starts_with(&prefix) || !destination.starts_with(&prefix) {
+                            continue;
+                        }
+                        let Ok(source) = source.strip_prefix(&prefix) else {
+                            continue;
+                        };
+                        let Ok(destination) = destination.strip_prefix(&prefix) else {
+                            continue;
+                        };
+                        graph.add_edge(CallEdge {
+                            src_file: source.to_path_buf(),
+                            src_func: edge.caller,
+                            dst_file: destination.to_path_buf(),
+                            dst_func: edge.callee,
+                        });
+                    }
+                    let pairwise = analyze_coupling_with_module_infos(
+                        &graph,
+                        selected.clone(),
+                        &CouplingOptions {
+                            max_pairs,
+                            ..CouplingOptions::default()
+                        },
+                    );
+                    let imports = selected
+                        .into_iter()
+                        .map(|(path, module)| (path, module.imports))
+                        .collect();
+                    let deps_options = DepsOptions {
+                        language: Some(language.as_str().to_string()),
+                        ..DepsOptions::default()
+                    };
+                    let dependencies = analyze_dependencies_from_imports(
+                        &requested,
+                        language,
+                        imports,
+                        &deps_options,
+                    )
+                    .map_err(|error| error.to_string())?;
+                    let martin = compute_martin_metrics_from_deps(
+                        &dependencies,
+                        &MartinOptions {
+                            top: martin_top,
+                            cycles_only,
+                        },
+                    );
+                    Ok(serde_json::json!({
+                        "martin_metrics": martin,
+                        "pairwise_coupling": pairwise,
+                    }))
+                })
+                .await
+                {
+                    Ok(Ok(value)) => DaemonResponse::Result(value),
+                    Ok(Err(error)) => DaemonResponse::Error {
+                        status: "error".to_string(),
+                        error,
+                    },
+                    Err(error) => DaemonResponse::Error {
+                        status: "error".to_string(),
+                        error: format!("coupling task failed: {error}"),
                     },
                 }
             }
@@ -1104,94 +1797,6 @@ impl TLDRDaemon {
                 }
             }
 
-            DaemonCommand::Cfg { file, function } => {
-                let language = match detect_or_parse_language(None, &file) {
-                    Ok(l) => l,
-                    Err(e) => {
-                        return DaemonResponse::Error {
-                            status: "error".to_string(),
-                            error: e.to_string(),
-                        }
-                    }
-                };
-                match self.artifact_manager.cfg(&file, &function, language) {
-                    Ok(result) => {
-                        let val = serde_json::to_value(&result).unwrap_or_default();
-                        DaemonResponse::Result(val)
-                    }
-                    Err(e) => DaemonResponse::Error {
-                        status: "error".to_string(),
-                        error: e.to_string(),
-                    },
-                }
-            }
-
-            DaemonCommand::Dfg { file, function } => {
-                let language = match detect_or_parse_language(None, &file) {
-                    Ok(l) => l,
-                    Err(e) => {
-                        return DaemonResponse::Error {
-                            status: "error".to_string(),
-                            error: e.to_string(),
-                        }
-                    }
-                };
-                match self.artifact_manager.dfg(&file, &function, language) {
-                    Ok(result) => {
-                        let val = serde_json::to_value(&result).unwrap_or_default();
-                        DaemonResponse::Result(val)
-                    }
-                    Err(e) => DaemonResponse::Error {
-                        status: "error".to_string(),
-                        error: e.to_string(),
-                    },
-                }
-            }
-
-            DaemonCommand::Slice {
-                file,
-                function,
-                line,
-            } => {
-                let file_str = file.to_string_lossy().to_string();
-                let language = match detect_or_parse_language(None, &file) {
-                    Ok(l) => l,
-                    Err(e) => {
-                        return DaemonResponse::Error {
-                            status: "error".to_string(),
-                            error: e.to_string(),
-                        }
-                    }
-                };
-                let key = HotQueryKey::new(
-                    "slice",
-                    hash_str_args(&[&file_str, &function, &line.to_string()]),
-                    language,
-                );
-                if let Some(cached) = self.cache.get::<serde_json::Value>(&key) {
-                    return DaemonResponse::Result(cached);
-                }
-                let file_hash = super::hot_cache::hash_path(&file);
-                match get_slice(
-                    &file_str,
-                    &function,
-                    line as u32,
-                    SliceDirection::Backward,
-                    None,
-                    language,
-                ) {
-                    Ok(result) => {
-                        let val = serde_json::to_value(&result).unwrap_or_default();
-                        self.cache.insert(key, &val, vec![file_hash]);
-                        DaemonResponse::Result(val)
-                    }
-                    Err(e) => DaemonResponse::Error {
-                        status: "error".to_string(),
-                        error: e.to_string(),
-                    },
-                }
-            }
-
             DaemonCommand::Calls {
                 path,
                 language,
@@ -1370,38 +1975,6 @@ impl TLDRDaemon {
                 }
             }
 
-            DaemonCommand::Arch { path, language } => {
-                let root = path.unwrap_or_else(|| self.project.clone());
-                let _language = language;
-                if root != self.project {
-                    return DaemonResponse::Error {
-                        status: "error".to_string(),
-                        error: "artifact architecture query requires the daemon project"
-                            .to_string(),
-                    };
-                }
-                let snapshot = match self.artifact_manager.snapshot() {
-                    Ok(snapshot) => snapshot,
-                    Err(state) => {
-                        return DaemonResponse::Error {
-                            status: "not_ready".to_string(),
-                            error: format!("artifact generation is not ready: {state:?}"),
-                        }
-                    }
-                };
-                let graph = snapshot.intra_file_call_graph();
-                match architecture_analysis(&graph) {
-                    Ok(result) => {
-                        let val = serde_json::to_value(&result).unwrap_or_default();
-                        DaemonResponse::Result(val)
-                    }
-                    Err(e) => DaemonResponse::Error {
-                        status: "error".to_string(),
-                        error: e.to_string(),
-                    },
-                }
-            }
-
             DaemonCommand::Imports { file, language } => {
                 // Mirror imports.rs: explicit --lang wins; otherwise detect.
                 let language =
@@ -1456,51 +2029,6 @@ impl TLDRDaemon {
                                 vec![hash_path(&root), hash_path(&self.project)],
                             );
                         }
-                        DaemonResponse::Result(val)
-                    }
-                    Err(e) => DaemonResponse::Error {
-                        status: "error".to_string(),
-                        error: e.to_string(),
-                    },
-                }
-            }
-
-            DaemonCommand::Diagnostics { path, project: _ } => DaemonResponse::Error {
-                status: "error".to_string(),
-                error: format!(
-                    "Diagnostics requires external tool orchestration; \
-                         use CLI directly: tldr diagnostics {}",
-                    path.display()
-                ),
-            },
-
-            DaemonCommand::ChangeImpact {
-                files,
-                session: _,
-                git: _,
-                language,
-            } => {
-                let lang = resolve_language(language);
-                let files_str = files
-                    .as_ref()
-                    .map(|v| {
-                        v.iter()
-                            .map(|p| p.to_string_lossy().to_string())
-                            .collect::<Vec<_>>()
-                            .join(",")
-                    })
-                    .unwrap_or_default();
-                let key = HotQueryKey::new("change_impact", hash_str_args(&[&files_str]), lang);
-                if let Some(cached) = self.cache.get::<serde_json::Value>(&key) {
-                    return DaemonResponse::Result(cached);
-                }
-                let changed: Option<Vec<PathBuf>> = files;
-                match change_impact(&self.project, changed.as_deref(), lang) {
-                    Ok(result) => {
-                        let val = serde_json::to_value(&result).unwrap_or_default();
-                        // TLDR-fct freshness: change-impact spans self.project —
-                        // register the project hash so edits evict it.
-                        self.cache.insert(key, &val, vec![hash_path(&self.project)]);
                         DaemonResponse::Result(val)
                     }
                     Err(e) => DaemonResponse::Error {
@@ -1737,6 +2265,7 @@ impl TLDRDaemon {
         let job = WarmJob {
             project: self.project.clone(),
             artifact_manager: Arc::clone(&self.artifact_manager),
+            search_index: Arc::clone(&self.search_index),
             indexed_files: Arc::clone(&self.indexed_files),
             #[cfg(feature = "semantic")]
             semantic_store: Arc::clone(&self.semantic_store),
@@ -1954,6 +2483,7 @@ impl TLDRDaemon {
                     .replace('\\', "/")
             })
             .collect::<Vec<_>>();
+        let lexical_paths = relative_files.iter().map(PathBuf::from).collect::<Vec<_>>();
         for mut session in self.sessions.iter_mut() {
             session.touch_context(
                 relative_files.iter().map(String::as_str),
@@ -1990,6 +2520,7 @@ impl TLDRDaemon {
             .invalidate_by_input(super::hot_cache::hash_path(&self.project));
 
         let artifacts = Arc::clone(&self.artifact_manager);
+        let search_index = Arc::clone(&self.search_index);
         #[cfg(feature = "semantic")]
         let mgr = Arc::clone(&self.semantic_store);
         #[cfg(feature = "semantic")]
@@ -1998,6 +2529,12 @@ impl TLDRDaemon {
         let _ = tokio::task::spawn_blocking(move || {
             let _busy = busy;
             let applied = apply_artifact_delta_batch(&artifacts, files);
+            match artifacts.snapshot() {
+                Ok(snapshot) => {
+                    search_index.refresh_paths(&snapshot, &lexical_paths);
+                }
+                Err(_) => search_index.invalidate(),
+            }
 
             #[cfg(feature = "semantic")]
             apply_semantic_delta_batch(&artifacts, &mgr, &project, applied);
@@ -2033,6 +2570,7 @@ impl TLDRDaemon {
             .request_full_rebuild();
         #[cfg(feature = "semantic")]
         self.semantic_store.invalidate();
+        self.search_index.invalidate();
 
         match self.start_warm_build(resolve_language(None), None, None, None) {
             DaemonResponse::Status {
@@ -2291,7 +2829,9 @@ pub async fn wait_for_daemon(project: &std::path::Path, timeout_secs: u64) -> Da
 #[cfg(test)]
 mod tests {
     use super::{ClearWarmStateOnDrop, DaemonConfig, TLDRDaemon, WarmBuildState};
+    use crate::commands::daemon::{DaemonCommand, DaemonResponse};
     use std::sync::{Arc, Mutex};
+    use tldr_core::{EnrichedSearchReport, Language};
 
     #[test]
     fn pending_full_rebuild_is_coalesced_and_runs_after_active_warm() {
@@ -2388,6 +2928,315 @@ mod tests {
             snapshot.semantic_source_chunks_for(&root, [std::path::Path::new("changed.rs")]);
         assert!(!selected.is_empty());
         assert!(selected.iter().all(|chunk| chunk.file_path == changed));
+    }
+
+    #[tokio::test]
+    async fn resident_search_tracks_published_artifact_generations() {
+        let project = tempfile::tempdir().expect("temp project");
+        let root = project.path().canonicalize().expect("canonical root");
+        let source_dir = root.join("src");
+        std::fs::create_dir(&source_dir).expect("create source directory");
+        let source = source_dir.join("risk.rs");
+        std::fs::write(
+            &source,
+            "pub fn enforce_order_risk_limit() -> bool { true }\n",
+        )
+        .expect("write source");
+
+        let daemon = TLDRDaemon::new(root.clone(), DaemonConfig::default()).expect("create daemon");
+        daemon
+            .artifact_manager
+            .warm()
+            .expect("publish baseline generation");
+        let baseline = daemon
+            .artifact_manager
+            .snapshot()
+            .expect("baseline snapshot");
+        daemon.search_index.refresh(&baseline);
+
+        let response = daemon
+            .handle_command(DaemonCommand::Search {
+                query: "order risk limit".to_string(),
+                path: Some(source_dir.clone()),
+                language: Language::Rust,
+                top_k: 10,
+                include_callgraph: false,
+                regex: false,
+                filter: None,
+            })
+            .await;
+        let DaemonResponse::Result(value) = response else {
+            panic!("resident search did not return a result");
+        };
+        let report: EnrichedSearchReport =
+            serde_json::from_value(value).expect("decode search report");
+        assert_eq!(report.total_files_searched, 1);
+        assert!(report
+            .results
+            .iter()
+            .any(|result| result.file == std::path::Path::new("risk.rs")));
+        assert!(report.search_mode.contains("cached-structure"));
+
+        std::fs::write(
+            &source,
+            "pub fn enforce_position_exposure_ceiling() -> bool { true }\n",
+        )
+        .expect("edit source");
+        daemon.process_dirty_files(vec![source.clone()]).await;
+
+        let response = daemon
+            .handle_command(DaemonCommand::Search {
+                query: "position exposure ceiling".to_string(),
+                path: Some(source_dir.clone()),
+                language: Language::Rust,
+                top_k: 10,
+                include_callgraph: false,
+                regex: false,
+                filter: None,
+            })
+            .await;
+        let DaemonResponse::Result(value) = response else {
+            panic!("refreshed resident search did not return a result");
+        };
+        let report: EnrichedSearchReport =
+            serde_json::from_value(value).expect("decode refreshed search report");
+        assert!(report
+            .results
+            .iter()
+            .any(|result| result.file == std::path::Path::new("risk.rs")));
+
+        std::fs::remove_file(&source).expect("delete source");
+        daemon.process_dirty_files(vec![source.clone()]).await;
+        let response = daemon
+            .handle_command(DaemonCommand::Search {
+                query: "position exposure ceiling".to_string(),
+                path: Some(source_dir.clone()),
+                language: Language::Rust,
+                top_k: 10,
+                include_callgraph: false,
+                regex: false,
+                filter: None,
+            })
+            .await;
+        let DaemonResponse::Error { status, error } = response else {
+            panic!("empty-language search must fail explicitly after deletion");
+        };
+        assert_eq!(status, "not_ready");
+        assert!(error.contains("no documents for language"));
+
+        let renamed = source_dir.join("limits.rs");
+        std::fs::write(
+            &renamed,
+            "pub fn enforce_position_exposure_ceiling() -> bool { true }\n",
+        )
+        .expect("write renamed source");
+        daemon.process_dirty_files(vec![renamed.clone()]).await;
+        let response = daemon
+            .handle_command(DaemonCommand::Search {
+                query: "position exposure ceiling".to_string(),
+                path: Some(source_dir.clone()),
+                language: Language::Rust,
+                top_k: 10,
+                include_callgraph: false,
+                regex: false,
+                filter: None,
+            })
+            .await;
+        let DaemonResponse::Result(value) = response else {
+            panic!("resident search after rename did not return a report");
+        };
+        let report: EnrichedSearchReport =
+            serde_json::from_value(value).expect("decode rename search report");
+        assert!(report
+            .results
+            .iter()
+            .any(|result| result.file == std::path::Path::new("limits.rs")));
+
+        std::fs::write(root.join(".tldrignore"), "src/limits.rs\n").expect("write ignore policy");
+        daemon
+            .artifact_manager
+            .warm()
+            .expect("publish ignore-policy generation");
+        let ignored = daemon
+            .artifact_manager
+            .snapshot()
+            .expect("ignore-policy snapshot");
+        daemon.search_index.refresh(&ignored);
+        let response = daemon
+            .handle_command(DaemonCommand::Search {
+                query: "position exposure ceiling".to_string(),
+                path: Some(source_dir),
+                language: Language::Rust,
+                top_k: 10,
+                include_callgraph: false,
+                regex: false,
+                filter: None,
+            })
+            .await;
+        let DaemonResponse::Error { status, error } = response else {
+            panic!("ignored empty-language search must fail explicitly");
+        };
+        assert_eq!(status, "not_ready");
+        assert!(error.contains("no documents for language"));
+    }
+
+    #[test]
+    fn resident_references_match_local_workspace_locations() {
+        use tldr_core::analysis::references::{find_references, ReferencesOptions, SearchScope};
+
+        let project = tempfile::tempdir().expect("temp project");
+        let root = project.path().canonicalize().expect("canonical root");
+        std::fs::write(
+            root.join("risk.rs"),
+            "pub fn risk_limit() -> bool { true }\npub fn submit() { risk_limit(); }\n",
+        )
+        .expect("write source");
+        let daemon = TLDRDaemon::new(root.clone(), DaemonConfig::default()).expect("create daemon");
+        daemon.artifact_manager.warm().expect("publish generation");
+        let snapshot = daemon.artifact_manager.snapshot().expect("snapshot");
+        let options = ReferencesOptions {
+            language: Some("rust".to_string()),
+            scope: SearchScope::Workspace,
+            limit: Some(20),
+            ..ReferencesOptions::default()
+        };
+
+        let resident = snapshot.references_report("risk_limit", &options, None);
+        let local = find_references("risk_limit", &root, &options).expect("local references");
+        let resident_locations = resident
+            .references
+            .iter()
+            .map(|reference| (&reference.file, reference.line, reference.kind))
+            .collect::<Vec<_>>();
+        let local_locations = local
+            .references
+            .iter()
+            .map(|reference| {
+                (
+                    reference
+                        .file
+                        .strip_prefix(&root)
+                        .expect("local result beneath root")
+                        .to_path_buf(),
+                    reference.line,
+                    reference.kind,
+                )
+            })
+            .collect::<Vec<_>>();
+        let resident_locations = resident_locations
+            .into_iter()
+            .map(|(file, line, kind)| (file.clone(), line, kind))
+            .collect::<Vec<_>>();
+        assert_eq!(resident_locations, local_locations);
+        assert_eq!(resident.stats.files_searched, 1);
+    }
+
+    #[tokio::test]
+    async fn resident_definition_uses_published_definitions() {
+        let project = tempfile::tempdir().expect("temp project");
+        let root = project.path().canonicalize().expect("canonical root");
+        std::fs::write(
+            root.join("orders.rs"),
+            "pub fn submit_order() -> bool { true }\n",
+        )
+        .expect("write source");
+        let daemon = TLDRDaemon::new(root.clone(), DaemonConfig::default()).expect("create daemon");
+        daemon.artifact_manager.warm().expect("publish generation");
+
+        let response = daemon
+            .handle_command(DaemonCommand::Definition {
+                symbol: "submit_order".to_string(),
+                path: Some(root.clone()),
+                language: Some(Language::Rust),
+            })
+            .await;
+        let DaemonResponse::Result(value) = response else {
+            panic!("resident definition did not return a result");
+        };
+        let result: crate::commands::remaining::DefinitionResult =
+            serde_json::from_value(value).expect("decode definition");
+        let location = result.definition.expect("definition location");
+        assert_eq!(location.file, root.join("orders.rs").to_string_lossy());
+        assert_eq!(location.line, 1);
+    }
+
+    #[test]
+    fn resident_dependencies_match_local_import_graph() {
+        use tldr_core::analysis::deps::{
+            analyze_dependencies, analyze_dependencies_from_imports, DepsOptions,
+        };
+
+        let project = tempfile::tempdir().expect("temp project");
+        let root = project.path().canonicalize().expect("canonical root");
+        std::fs::write(root.join("orders.py"), "import risk\n").expect("write orders");
+        std::fs::write(root.join("risk.py"), "LIMIT = 10\n").expect("write risk");
+        let daemon = TLDRDaemon::new(root.clone(), DaemonConfig::default()).expect("create daemon");
+        daemon.artifact_manager.warm().expect("publish generation");
+        let snapshot = daemon.artifact_manager.snapshot().expect("snapshot");
+        let options = DepsOptions {
+            language: Some("python".to_string()),
+            ..DepsOptions::default()
+        };
+        let stored = snapshot
+            .files()
+            .filter(|facts| facts.module.language == Language::Python)
+            .map(|facts| {
+                (
+                    std::path::PathBuf::from(&facts.path),
+                    facts.module.imports.clone(),
+                )
+            })
+            .collect();
+
+        let resident = analyze_dependencies_from_imports(&root, Language::Python, stored, &options)
+            .expect("resident dependencies");
+        let local = analyze_dependencies(&root, &options).expect("local dependencies");
+        assert_eq!(resident.internal_dependencies, local.internal_dependencies);
+        assert_eq!(resident.circular_dependencies, local.circular_dependencies);
+        assert_eq!(resident.stats.total_internal_deps, 1);
+    }
+
+    #[test]
+    fn resident_coupling_matches_local_project_pairs() {
+        use tldr_core::quality::coupling::{
+            analyze_coupling, analyze_coupling_with_module_infos, CouplingOptions,
+        };
+
+        let project = tempfile::tempdir().expect("temp project");
+        let root = project.path().canonicalize().expect("canonical root");
+        std::fs::write(
+            root.join("orders.py"),
+            "from risk import check_risk\n\ndef submit():\n    return check_risk()\n",
+        )
+        .expect("write orders");
+        std::fs::write(root.join("risk.py"), "def check_risk():\n    return True\n")
+            .expect("write risk");
+        let daemon = TLDRDaemon::new(root.clone(), DaemonConfig::default()).expect("create daemon");
+        daemon.artifact_manager.warm().expect("publish generation");
+        let snapshot = daemon.artifact_manager.snapshot().expect("snapshot");
+        let modules = snapshot
+            .files()
+            .filter(|facts| facts.module.language == Language::Python)
+            .map(|facts| {
+                let path = std::path::PathBuf::from(&facts.path);
+                let mut module = facts.module.to_module_info();
+                module.file_path = path.clone();
+                (path, module)
+            })
+            .collect();
+        let resident = analyze_coupling_with_module_infos(
+            &snapshot.call_graph(Some(Language::Python)),
+            modules,
+            &CouplingOptions::default(),
+        );
+        let local =
+            analyze_coupling(&root, Some(Language::Python), Some(10)).expect("local coupling");
+        assert_eq!(
+            resident.total_cross_file_pairs,
+            local.total_cross_file_pairs
+        );
+        assert_eq!(resident.pairs_analyzed, local.pairs_analyzed);
+        assert_eq!(resident.top_pairs.len(), local.top_pairs.len());
     }
 
     #[tokio::test]

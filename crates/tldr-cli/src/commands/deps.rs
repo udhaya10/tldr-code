@@ -22,10 +22,11 @@ use anyhow::Result;
 use clap::Args;
 
 use tldr_core::analysis::deps::{
-    analyze_dependencies, format_deps_dot, format_deps_text, DepsOptions,
+    analyze_dependencies, format_deps_dot, format_deps_text, DepsOptions, DepsReport,
 };
 use tldr_core::Language;
 
+use crate::commands::daemon_router::{is_oneshot, route_for_path};
 use crate::output::{OutputFormat, OutputWriter};
 
 /// Analyze module dependencies
@@ -172,8 +173,20 @@ impl DepsArgs {
             self.path.display()
         ));
 
-        // Run analysis
-        let report = analyze_dependencies(&self.path, &options)?;
+        let report: DepsReport = if is_oneshot() {
+            analyze_dependencies(&self.path, &options)?
+        } else {
+            let params = serde_json::json!({
+                "path": self.path,
+                "language": self.lang,
+                "include_external": self.include_external,
+                "collapse_packages": self.collapse_packages,
+                "max_depth": self.depth,
+                "show_cycles_only": self.show_cycles,
+                "max_cycle_length": self.max_cycle_length,
+            });
+            route_for_path(&self.path, "deps", params).into_hit_or_bail("deps")?
+        };
 
         // Output based on effective format
         match effective {

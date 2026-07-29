@@ -5,9 +5,9 @@
 //!
 //! # Design
 //!
-//! Each command can call `try_daemon_route()` before doing direct compute.
-//! If the daemon is running and responds successfully, the cached result is returned.
-//! Otherwise, the command falls back to computing the result directly.
+//! Supported daemon-owned commands route strictly through `DaemonRoute`.
+//! Local computation is entered only through an explicit command contract
+//! such as `--oneshot`.
 //!
 //! # Performance
 //!
@@ -24,125 +24,13 @@ use crate::commands::daemon::ipc::{
 };
 
 // =============================================================================
-// Core Router Function
-// =============================================================================
-
-/// Try to route a command through the daemon.
-///
-/// Returns `Some(result)` if the daemon is running and responds successfully.
-/// Returns `None` if the daemon is not running or an error occurs (caller should fallback).
-///
-/// # Arguments
-///
-/// * `project` - Project root directory (used to find the correct daemon)
-/// * `endpoint` - Command name (e.g., "calls", "impact", "structure")
-/// * `params` - Additional JSON parameters for the command
-///
-/// # Example
-///
-/// ```ignore
-/// if let Some(result) = try_daemon_route::<CallGraphOutput>(
-///     &self.path,
-///     "calls",
-///     json!({"language": language.to_string()})
-/// ) {
-///     return writer.write(&result);
-/// }
-/// // Fallback to direct compute...
-/// ```
-pub fn try_daemon_route<T: DeserializeOwned>(
-    project: &Path,
-    endpoint: &str,
-    params: serde_json::Value,
-) -> Option<T> {
-    // Use blocking runtime for sync commands
-    let runtime = match tokio::runtime::Runtime::new() {
-        Ok(rt) => rt,
-        Err(_) => return None,
-    };
-
-    runtime.block_on(try_daemon_route_async(project, endpoint, params))
-}
-
-/// Async version of try_daemon_route.
-///
-/// Used internally and can be called directly from async contexts.
-pub async fn try_daemon_route_async<T: DeserializeOwned>(
-    project: &Path,
-    endpoint: &str,
-    params: serde_json::Value,
-) -> Option<T> {
-    // Resolve project path to absolute
-    let project = project.canonicalize().unwrap_or_else(|_| {
-        std::env::current_dir()
-            .unwrap_or_else(|_| PathBuf::from("."))
-            .join(project)
-    });
-
-    // Build command JSON
-    let mut cmd_obj = serde_json::json!({
-        "cmd": endpoint.to_lowercase()
-    });
-
-    // Merge additional parameters
-    if let serde_json::Value::Object(params_obj) = params {
-        if let serde_json::Value::Object(ref mut cmd_map) = cmd_obj {
-            for (key, value) in params_obj {
-                cmd_map.insert(key, value);
-            }
-        }
-    }
-
-    let command_json = match serde_json::to_string(&cmd_obj) {
-        Ok(json) => json,
-        Err(_) => return None,
-    };
-
-    // Send to daemon
-    let response = match send_raw_command(&project, &command_json).await {
-        Ok(resp) => resp,
-        Err(DaemonError::NotRunning) => return None,
-        Err(DaemonError::ConnectionRefused) => return None,
-        Err(_) => return None,
-    };
-
-    // Parse response - check for error response first
-    let response_value: serde_json::Value = match serde_json::from_str(&response) {
-        Ok(v) => v,
-        Err(_) => return None,
-    };
-
-    // Check if response is an error
-    if let Some(status) = response_value.get("status") {
-        if status == "error" {
-            return None;
-        }
-    }
-
-    // If the response has a "result" field, extract it (daemon wraps results)
-    let result_value = if response_value.get("result").is_some() {
-        response_value
-            .get("result")
-            .cloned()
-            .unwrap_or(response_value)
-    } else {
-        response_value
-    };
-
-    // Deserialize to target type
-    serde_json::from_value(result_value).ok()
-}
-
-// =============================================================================
 // Semantic Router (require-warm, TLDR-7xz.1)
 // =============================================================================
 
 /// Outcome of routing a semantic query to the daemon.
 ///
-/// Unlike [`try_daemon_route`] (whose `None` means "fall back to cold
-/// compute"), semantic has NO cold fallback: the caller must surface each
-/// non-hit honestly. The four states are machine-distinguishable so the CLI
-/// can print the right guidance for each.
+/// Semantic routing keeps every non-hit machine-distinguishable so the CLI can
+/// print the right guidance without falling back to cold computation.
 #[derive(Debug)]
 pub enum SemanticRoute<T> {
     /// Warm daemon served the query at full quality.
@@ -162,8 +50,7 @@ pub enum SemanticRoute<T> {
 /// TLDR-7xz.1: `tldr semantic` has exactly two modes — served warm at full
 /// quality, or an honest explanation. This is the routing primitive for the
 /// first mode; every non-`Hit` variant maps to an explanation, never to a
-/// silent cold serve. Kept separate from [`try_daemon_route`] so the ~20
-/// cheap AST commands keep their legitimate compute-cold-on-miss behavior.
+/// silent cold serve.
 pub fn route_semantic<T: DeserializeOwned>(
     project: &Path,
     params: serde_json::Value,
@@ -263,8 +150,7 @@ pub async fn is_daemon_running_async(project: &Path) -> bool {
 // =============================================================================
 //
 // Generalizes `SemanticRoute` to every daemon-capable command. Unlike
-// `try_daemon_route` (whose `None` collapses "daemon down" and "daemon errored"
-// into the same silent-fallback signal), `DaemonRoute` keeps the states
+// `DaemonRoute` keeps daemon-down and daemon-error states
 // machine-distinguishable so the CLI can fail LOUDLY and honestly — the daemon
 // is the only serve path, with `--oneshot` as the sole explicit local escape.
 
@@ -279,8 +165,8 @@ pub fn is_oneshot() -> bool {
 /// Outcome of routing a command to the daemon.
 ///
 /// `DaemonDown` and `Error` are deliberately separate (the whole point of this
-/// type vs `try_daemon_route`): "no daemon" is an onboarding/UX state, while a
-/// real daemon error is a failure to surface. `NotReady` is reserved for
+/// "No daemon" is an onboarding/UX state, while a real daemon error is a
+/// failure to surface. `NotReady` is reserved for
 /// index-backed commands (e.g. semantic) whose store must be warmed first;
 /// compute-on-miss commands never produce it.
 #[derive(Debug)]

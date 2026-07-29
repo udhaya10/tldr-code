@@ -5,7 +5,6 @@
 members = [
     "crates/tldr-core",
     "crates/tldr-cli",
-    "crates/tldr-daemon",
     "crates/tldr-mcp",
     "crates/tldr-contract-tests",
 ]

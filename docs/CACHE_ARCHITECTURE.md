@@ -1,12 +1,13 @@
 # Cache Architecture
 
-> **Note (2026-06-06):** this document describes the **current** caching
-> behavior. A replacement layered architecture is designed and ratified — see
-> [CACHE_LAYERS_DESIGN.md](./CACHE_LAYERS_DESIGN.md). Under that design the
-> `QueryCache` described below is **retired** (answer-blob memoization is
-> replaced by a resident snapshot + content-addressed fact layers). The new
-> design is gated behind the measurement issue `TLDR-rfz`; until it ships,
-> this document remains accurate.
+> **Historical note (updated 2026-07-29):** the `QueryCache`, Salsa answer-blob,
+> JSON structure/callgraph cache, and duplicate daemon design described below
+> have been retired. The current architecture is the redb `ArtifactStore` plus
+> immutable `GenerationSnapshot` projections, resident graph/BM25/vector
+> indexes, and strict typed daemon routes. See
+> [RESIDENT_GRAPH_SNAPSHOT.md](./RESIDENT_GRAPH_SNAPSHOT.md) and
+> [CACHE_LAYERS_DESIGN.md](./CACHE_LAYERS_DESIGN.md). The remainder is retained
+> only as migration history and must not be used to choose a new command path.
 
 This document describes how caching currently works in `tldr-code`, with a
 focus on daemon warm-up, query memoization, invalidation, and the search

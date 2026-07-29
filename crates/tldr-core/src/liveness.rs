@@ -70,15 +70,32 @@ pub fn poke_path_for(socket_path: &Path) -> PathBuf {
 
 /// Minimal read-only view of a registry entry — just what a sender needs.
 #[derive(Debug, Deserialize)]
-struct SenderEntry {
-    project: PathBuf,
-    socket: PathBuf,
+pub struct DaemonEndpoint {
+    /// Canonical project root owned by the daemon.
+    pub project: PathBuf,
+    /// Stream socket recorded by the daemon at registration time.
+    pub socket: PathBuf,
 }
 
 #[derive(Debug, Default, Deserialize)]
 struct SenderRegistry {
     #[serde(default)]
-    daemons: Vec<SenderEntry>,
+    daemons: Vec<DaemonEndpoint>,
+}
+
+/// Find the most specific registered daemon covering `path`.
+///
+/// This read-only lookup is shared by non-CLI clients such as `tldr_mcp`;
+/// the registry's owning daemon remains responsible for pruning stale entries.
+pub fn daemon_endpoint_for(path: &Path) -> Option<DaemonEndpoint> {
+    let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let registry: SenderRegistry =
+        serde_json::from_str(&std::fs::read_to_string(registry_file_path()).ok()?).ok()?;
+    registry
+        .daemons
+        .into_iter()
+        .filter(|entry| path == entry.project || path.starts_with(&entry.project))
+        .max_by_key(|entry| entry.project.components().count())
 }
 
 /// Fire-and-forget liveness poke: defer idle shutdown of every registered

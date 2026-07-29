@@ -29,6 +29,7 @@ use tldr_core::analysis::references::{
 };
 use tldr_core::Language;
 
+use crate::commands::daemon_router::{is_oneshot, route_for_path};
 use crate::output::{common_path_prefix, strip_prefix_display, OutputFormat, OutputWriter};
 
 /// Find all references to a symbol
@@ -139,8 +140,25 @@ impl ReferencesArgs {
             self.path.display()
         ));
 
-        // Run analysis
-        let mut report = find_references(&self.symbol, &self.path, &options)?;
+        // Workspace lookup is a pinned ArtifactStore projection. Function/file
+        // scopes remain explicit local analyses because they depend on a
+        // caller-selected lexical scope rather than the project index.
+        let local_analysis = is_oneshot() || scope != SearchScope::Workspace;
+        let mut report = if local_analysis {
+            find_references(&self.symbol, &self.path, &options)?
+        } else {
+            let params = serde_json::json!({
+                "symbol": self.symbol,
+                "path": self.path,
+                "language": cli_lang,
+                "kinds": options.kinds.clone().unwrap_or_default(),
+                "scope": scope,
+                "limit": self.limit,
+                "include_definition": self.include_definition,
+            });
+            route_for_path::<ReferencesReport>(&self.path, "references", params)
+                .into_hit_or_bail("references")?
+        };
 
         // sibling-resolver-gaps-v1 (P14.AGG14-13): when the user
         // searches for `m.reset` in a Lua project, the call-graph
@@ -154,7 +172,7 @@ impl ReferencesArgs {
         // accepting hits whose context is `\.<method>(`. Apply the
         // same enrichment here so `references` agrees with `explain`.
         let resolved_lang = cli_lang.or_else(|| Language::from_directory(&self.path));
-        if matches!(resolved_lang, Some(Language::Lua) | Some(Language::Luau)) {
+        if local_analysis && matches!(resolved_lang, Some(Language::Lua) | Some(Language::Luau)) {
             enrich_lua_alias_callers(&mut report, &self.symbol, &self.path, resolved_lang);
         }
 

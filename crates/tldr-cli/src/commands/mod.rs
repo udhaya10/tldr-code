@@ -36,6 +36,7 @@ pub mod doctor;
 pub mod inheritance;
 pub mod patterns;
 pub mod references;
+pub mod route_contract;
 // ssa, dominators, live_vars, alias, abstract_interp: archived (T5 deep analysis)
 pub mod available;
 pub mod reaching_defs;
@@ -154,7 +155,7 @@ pub use daemon_router::{
     params_with_entry_depth, params_with_file, params_with_file_function,
     params_with_file_function_lang, params_with_file_function_line, params_with_func_depth,
     params_with_module, params_with_path, params_with_path_lang, params_with_pattern, route,
-    route_async, route_for_path, try_daemon_route, try_daemon_route_async, DaemonRoute,
+    route_async, route_for_path, DaemonRoute,
 };
 
 // API Surface command Args

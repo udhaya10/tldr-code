@@ -66,6 +66,7 @@ pub mod pid;
 pub mod poke;
 pub mod query;
 pub(crate) mod rss;
+pub mod search_index_manager;
 mod session_context;
 pub mod start;
 pub mod stats;

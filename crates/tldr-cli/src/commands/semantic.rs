@@ -6,9 +6,9 @@
 //! one-line explanation of why it can't serve — there is NO silent cold
 //! fallback (the old `search_with_store` fallthrough is gone).
 //!
-//! Parked surfaces (`--hybrid`, `--langs`, `--no-cache`) keep their flags but
-//! fail fast with the standardized "not available in this version" message —
-//! they return at full warm quality with the new engine (TLDR-utj).
+//! Hybrid search is fused inside the same warm daemon from its resident BM25
+//! and vector rankings. `--no-cache` remains intentionally unsupported because
+//! cold query-time index construction is not a supported execution owner.
 
 use std::path::PathBuf;
 
@@ -42,8 +42,7 @@ pub struct SemanticArgs {
     #[arg(short = 't', long, default_value = "0.0")]
     pub threshold: f64,
 
-    /// [parked] BM25 + dense fusion — not available in this version
-    /// (returning with the new warm engine).
+    /// Fuse resident BM25 and dense rankings using reciprocal-rank fusion.
     #[arg(long)]
     pub hybrid: bool,
 
@@ -51,8 +50,7 @@ pub struct SemanticArgs {
     #[arg(short, long)]
     pub model: Option<String>,
 
-    /// [parked] Language filter — not available in this version
-    /// (returning with the new warm engine).
+    /// Language filters for hybrid retrieval.
     #[arg(long = "langs", value_delimiter = ',')]
     pub langs: Option<Vec<String>>,
 
@@ -67,18 +65,8 @@ impl SemanticArgs {
     pub fn run(&self, format: OutputFormat, quiet: bool) -> Result<()> {
         let writer = OutputWriter::new(format, quiet);
 
-        // Parked surfaces (TLDR-7xz.3): keep the flags, fail fast with the
-        // standardized message — never a silent cold serve, never a silently
-        // removed argument. Checked FIRST so a parked flag never half-runs.
-        if self.hybrid {
-            anyhow::bail!(
-                "not available in this version, hybrid (BM25 + dense) search is moving into the warm daemon engine"
-            );
-        }
-        if self.langs.is_some() {
-            anyhow::bail!(
-                "not available in this version, language filtering needs a daemon-side filter (the resident index covers all languages)"
-            );
+        if self.langs.is_some() && !self.hybrid {
+            anyhow::bail!("--langs currently scopes hybrid retrieval; combine it with --hybrid");
         }
         if self.no_cache {
             anyhow::bail!(
@@ -104,17 +92,38 @@ impl SemanticArgs {
             "query": self.query,
             "top_k": self.top,
             "threshold": self.threshold,
+            "hybrid": self.hybrid,
         });
         if let Some(m) = &self.model {
             params["model"] = serde_json::Value::String(m.clone());
         }
 
-        match route_semantic::<tldr_core::semantic::SemanticSearchReport>(&self.path, params) {
-            SemanticRoute::Hit(report) => {
-                if writer.is_text() {
-                    writer.write_text(&format_semantic_text(&report, self.threshold))?;
+        if let Some(languages) = &self.langs {
+            let parsed = languages
+                .iter()
+                .map(|language| language.parse::<tldr_core::Language>())
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(anyhow::Error::msg)?;
+            params["languages"] = serde_json::to_value(parsed)?;
+        }
+
+        match route_semantic::<serde_json::Value>(&self.path, params) {
+            SemanticRoute::Hit(value) => {
+                if self.hybrid {
+                    let report: tldr_core::HybridSearchReport = serde_json::from_value(value)?;
+                    if writer.is_text() {
+                        writer.write_text(&format_hybrid_text(&report))?;
+                    } else {
+                        writer.write(&report)?;
+                    }
                 } else {
-                    writer.write(&report)?;
+                    let report: tldr_core::semantic::SemanticSearchReport =
+                        serde_json::from_value(value)?;
+                    if writer.is_text() {
+                        writer.write_text(&format_semantic_text(&report, self.threshold))?;
+                    } else {
+                        writer.write(&report)?;
+                    }
                 }
                 Ok(())
             }
@@ -125,6 +134,31 @@ impl SemanticArgs {
             SemanticRoute::Error(e) => anyhow::bail!("semantic search failed: {e}"),
         }
     }
+}
+
+fn format_hybrid_text(report: &tldr_core::HybridSearchReport) -> String {
+    let mut output = format!(
+        "Hybrid search: \"{}\"\nCandidates: {} | overlap: {}\n\n",
+        report.query, report.total_candidates, report.overlap
+    );
+    for (index, result) in report.results.iter().enumerate() {
+        output.push_str(&format!(
+            "{}. {} (rrf: {:.6}, bm25: {}, dense: {})\n",
+            index + 1,
+            result.file_path.display(),
+            result.rrf_score,
+            result
+                .bm25_rank
+                .map_or_else(|| "-".to_string(), |rank| rank.to_string()),
+            result
+                .dense_rank
+                .map_or_else(|| "-".to_string(), |rank| rank.to_string()),
+        ));
+        if !result.snippet.is_empty() {
+            output.push_str(&format!("   {}\n", result.snippet));
+        }
+    }
+    output
 }
 
 /// Format semantic search report for text output

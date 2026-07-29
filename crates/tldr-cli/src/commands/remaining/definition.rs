@@ -26,6 +26,7 @@ use tree_sitter::Node;
 
 use super::error::{RemainingError, RemainingResult};
 use super::types::{DefinitionResult, Location, SymbolInfo, SymbolKind};
+use crate::commands::daemon_router::{is_oneshot, route_for_path};
 use crate::output::OutputWriter;
 
 use tldr_core::ast::parser::PARSER_POOL;
@@ -246,7 +247,26 @@ impl DefinitionArgs {
             };
             let effective_project = self.project.as_deref().or(auto_project.as_deref());
 
-            find_definition_by_name(symbol_name, file, effective_project, &lang_hint)?
+            if is_oneshot() {
+                find_definition_by_name(symbol_name, file, effective_project, &lang_hint)?
+            } else if let Some(project) = effective_project {
+                match find_definition_by_name(symbol_name, file, None, &lang_hint) {
+                    Ok(result) => result,
+                    Err(RemainingError::SymbolNotFound { .. }) => {
+                        let language = lang.or_else(|| Language::from_path(file));
+                        let params = serde_json::json!({
+                            "symbol": symbol_name,
+                            "path": project,
+                            "language": language,
+                        });
+                        route_for_path::<DefinitionResult>(file, "definition", params)
+                            .into_hit_or_bail("definition")?
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+            } else {
+                find_definition_by_name(symbol_name, file, None, &lang_hint)?
+            }
         } else {
             // Position-based mode
             let file = self

@@ -36,8 +36,7 @@ TLDR intentionally avoids LSP integration to maintain speed and token efficiency
 tldr-code/
 ├── crates/
 │   ├── tldr-core/        # Analysis engine
-│   ├── tldr-cli/         # CLI application
-│   ├── tldr-daemon/      # Background daemon
+│   ├── tldr-cli/         # CLI application + authoritative daemon
 │   └── tldr-mcp/         # MCP server integration
 ├── docs/                 # Documentation
 └── target/               # Build output
@@ -63,17 +62,22 @@ commands/
 ├── quality/        # smells, complexity, health
 ├── security/       # taint, vuln, api-check
 ├── patterns/       # design pattern detection
-├── daemon/        # Daemon client (IPC)
+├── daemon/        # Authoritative resident daemon
+├── daemon_router.rs # Strict typed IPC client routing
+├── route_contract.rs # Executable command/protocol ownership registry
 └── ...
 ```
 
-### tldr-daemon (`crates/tldr-daemon/`)
+### Resident daemon (`crates/tldr-cli/src/commands/daemon/`)
 
-Background caching daemon using `axum` HTTP server:
+The single supported per-project daemon:
 
-- Unix socket on macOS/Linux
-- TCP socket on Windows
-- LRU cache for analysis results
+- publishes immutable redb `ArtifactStore` generations;
+- serves graph/definition/reference/import projections pinned to one generation;
+- owns one resident BM25 index per language and the resident vector store;
+- refreshes derived indexes only when a full or delta generation publishes;
+- serves CLI and MCP over bounded local newline-JSON IPC;
+- fails closed on cold or generation-mismatched state.
 
 ### tldr-mcp (`crates/tldr-mcp/`)
 

@@ -39,6 +39,7 @@
 pub mod artifact_store;
 pub mod build_timing;
 pub mod config;
+pub mod daemon_client;
 pub mod error;
 pub mod git;
 pub mod liveness;
@@ -129,11 +130,10 @@ pub use pdg::{get_pdg_context, get_slice, get_slice_rich, RichSlice, SliceEdge, 
 
 // Re-export Layer 6 (Search) functions for convenience
 pub use search::{
-    enriched_search, enriched_search_with_callgraph_cache, enriched_search_with_index,
-    enriched_search_with_structure_cache, hybrid_search, read_callgraph_cache,
-    read_structure_cache, search, search_with_inner, write_structure_cache, Bm25Index, Bm25Result,
-    CallGraphLookup, EnrichedResult, EnrichedSearchOptions, EnrichedSearchReport, HybridResult,
-    HybridSearchReport, SearchMatch, SearchMode, SemanticResult, StructureLookup, Tokenizer,
+    enriched_search, enriched_search_with_artifacts, hybrid_search_with_results, search, Bm25Index,
+    Bm25Result, CallGraphLookup, EnrichedResult, EnrichedSearchOptions, EnrichedSearchReport,
+    HybridResult, HybridSearchReport, SearchMatch, SearchMode, SemanticResult, StructureLookup,
+    Tokenizer,
 };
 
 /// Result type alias for all TLDR operations

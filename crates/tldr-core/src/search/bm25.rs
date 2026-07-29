@@ -22,6 +22,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use super::tokenizer::Tokenizer;
+use crate::error::TldrError;
 use crate::types::Language;
 use crate::TldrResult;
 
@@ -133,6 +134,30 @@ impl Bm25Index {
         // Update average document length in O(1) instead of O(n)
         self.total_doc_length += length;
         self.avg_doc_length = self.total_doc_length as f64 / self.documents.len() as f64;
+    }
+
+    /// Build an index from already-materialized documents.
+    ///
+    /// This is the authoritative constructor for resident search. Callers can
+    /// project `(root-relative path, source)` from an ArtifactStore generation
+    /// without walking or reading the filesystem on the query path.
+    pub fn from_documents(documents: impl IntoIterator<Item = (String, String)>) -> Self {
+        let mut index = Self::default();
+        for (path, content) in documents {
+            index.add_document(&path, &content);
+        }
+        index
+    }
+
+    /// Count indexed documents beneath a root-relative path prefix.
+    pub fn document_count_under(&self, prefix: &Path) -> usize {
+        if prefix.as_os_str().is_empty() {
+            return self.documents.len();
+        }
+        self.documents
+            .iter()
+            .filter(|document| Path::new(&document.id).starts_with(prefix))
+            .count()
     }
 
     /// Search the index for relevant documents
@@ -254,6 +279,46 @@ impl Bm25Index {
             .collect()
     }
 
+    /// Search the exact source retained by this resident index with a regex.
+    ///
+    /// This keeps `search --regex`, hybrid filters, and BM25's literal
+    /// fallback on the same generation-pinned corpus as lexical ranking.
+    /// No filesystem walk or source read occurs here.
+    pub fn regex_search(&self, pattern: &str, max_results: usize) -> TldrResult<Vec<Bm25Result>> {
+        let regex = regex::Regex::new(pattern).map_err(|error| TldrError::ParseError {
+            file: PathBuf::from("<pattern>"),
+            line: None,
+            message: format!("Invalid regex: {error}"),
+        })?;
+
+        let mut matches = Vec::new();
+        for document in &self.documents {
+            let matching_lines = document
+                .content
+                .lines()
+                .enumerate()
+                .filter(|(_, line)| regex.is_match(line))
+                .map(|(line, content)| (line as u32 + 1, content.to_string()))
+                .collect::<Vec<_>>();
+            let score = matching_lines.len() as f64;
+
+            for (line, snippet) in matching_lines {
+                if matches.len() >= max_results {
+                    return Ok(matches);
+                }
+                matches.push(Bm25Result {
+                    file_path: PathBuf::from(&document.id),
+                    score,
+                    line_start: line,
+                    line_end: line,
+                    snippet,
+                    matched_terms: Vec::new(),
+                });
+            }
+        }
+        Ok(matches)
+    }
+
     /// Build an index from all code files in a project directory
     ///
     /// # Arguments
@@ -340,4 +405,46 @@ fn extract_snippet(content: &str, matched_terms: &[String]) -> (u32, u32, String
     let snippet = lines[start..end].join("\n");
 
     ((start + 1) as u32, end as u32, snippet)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Bm25Index;
+
+    #[test]
+    fn prebuilt_documents_are_searchable_without_project_walk() {
+        let index = Bm25Index::from_documents([
+            (
+                "src/risk.rs".to_string(),
+                "fn check_order_execution_risk() {}".to_string(),
+            ),
+            (
+                "src/report.rs".to_string(),
+                "fn render_daily_report() {}".to_string(),
+            ),
+        ]);
+
+        let results = index.search("order execution risk check", 10);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].file_path.to_string_lossy(), "src/risk.rs");
+    }
+
+    #[test]
+    fn resident_regex_search_uses_materialized_source() {
+        let index = Bm25Index::from_documents([
+            (
+                "src/risk.rs".to_string(),
+                "fn check_order_risk() {\n    reject_order();\n}".to_string(),
+            ),
+            (
+                "src/report.rs".to_string(),
+                "fn render_daily_report() {}".to_string(),
+            ),
+        ]);
+
+        let results = index.regex_search(r"reject_\w+\(\)", 10).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].file_path.to_string_lossy(), "src/risk.rs");
+        assert_eq!(results[0].line_start, 2);
+    }
 }

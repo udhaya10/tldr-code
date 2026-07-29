@@ -51,10 +51,10 @@ pub use complexity::{
     FunctionComplexity,
 };
 pub use coupling::{
-    analyze_coupling, analyze_coupling_with_graph, build_cycle_membership, compute_ca_ce,
-    compute_instability, compute_martin_metrics_from_deps, CallSite, CouplingOptions,
-    CouplingReport, CouplingVerdict, MartinMetricsReport, MartinModuleMetrics, MartinOptions,
-    MartinSummary, ModuleCoupling,
+    analyze_coupling, analyze_coupling_with_graph, analyze_coupling_with_module_infos,
+    build_cycle_membership, compute_ca_ce, compute_instability, compute_martin_metrics_from_deps,
+    CallSite, CouplingOptions, CouplingReport, CouplingVerdict, MartinMetricsReport,
+    MartinModuleMetrics, MartinOptions, MartinSummary, ModuleCoupling,
 };
 pub use coverage::{
     detect_format, parse_cobertura, parse_coverage, parse_coverage_py_json, parse_lcov,

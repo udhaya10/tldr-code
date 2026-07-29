@@ -21,7 +21,7 @@ use super::bm25::{Bm25Index, Bm25Result};
 use super::text::{self, SearchMatch};
 use super::tokenizer::Tokenizer;
 use crate::ast::parser::parse_file;
-use crate::types::{CodeStructure, DefinitionInfo, Language};
+use crate::types::{DefinitionInfo, Language};
 use crate::TldrResult;
 
 /// Search mode selector for enriched search.
@@ -147,29 +147,6 @@ pub struct CallGraphLookup {
     pub reverse: HashMap<String, Vec<String>>,
 }
 
-/// Intermediate type for deserializing the warm.rs cache format.
-/// CRITICAL: Field names MUST match warm.rs JSON keys (from_file, to_file).
-/// Do NOT use types::CallEdge which has src_file/dst_file.
-#[derive(Debug, Clone, Deserialize)]
-struct WarmCallEdge {
-    #[allow(dead_code)]
-    from_file: PathBuf,
-    from_func: String,
-    #[allow(dead_code)]
-    to_file: PathBuf,
-    to_func: String,
-}
-
-/// Intermediate type for deserializing the warm.rs cache envelope.
-#[derive(Debug, Clone, Deserialize)]
-struct WarmCallGraphCache {
-    edges: Vec<WarmCallEdge>,
-    #[allow(dead_code)]
-    languages: Vec<String>,
-    #[allow(dead_code)]
-    timestamp: i64,
-}
-
 /// Maximum query length (bytes) for the symbol-name boost to engage.
 /// Picked at 30 to cover virtually every realistic identifier (Java's
 /// longest stdlib symbol `IllegalArgumentException` is 25 chars; Python
@@ -270,100 +247,11 @@ fn name_boost_multiplier(name: &str, needle: &str) -> f64 {
     }
 }
 
-/// Read a call graph cache file and build forward/reverse lookup maps.
-///
-/// The cache is produced by the daemon's `warm` command and uses
-/// different field names than core types. This function handles conversion.
-pub fn read_callgraph_cache(cache_path: &Path) -> TldrResult<CallGraphLookup> {
-    let content = std::fs::read_to_string(cache_path).map_err(crate::TldrError::IoError)?;
-    let cache: WarmCallGraphCache = serde_json::from_str(&content).map_err(|e| {
-        crate::TldrError::SerializationError(format!("Failed to parse call graph cache: {}", e))
-    })?;
-
-    let mut forward: HashMap<String, Vec<String>> = HashMap::new();
-    let mut reverse: HashMap<String, Vec<String>> = HashMap::new();
-
-    for edge in &cache.edges {
-        forward
-            .entry(edge.from_func.clone())
-            .or_default()
-            .push(edge.to_func.clone());
-        reverse
-            .entry(edge.to_func.clone())
-            .or_default()
-            .push(edge.from_func.clone());
-    }
-
-    Ok(CallGraphLookup { forward, reverse })
-}
-
-// =============================================================================
-// Structure Cache (mirrors callgraph cache pattern above)
-// =============================================================================
-
-/// Pre-built path -> definitions lookup from a structure cache.
+/// Pre-built path -> definitions lookup from a resident artifact generation.
 #[derive(Debug, Clone)]
 pub struct StructureLookup {
     /// File path (relative) -> definitions for that file
     pub by_file: HashMap<PathBuf, Vec<DefinitionInfo>>,
-}
-
-/// On-disk structure cache envelope (serialize + deserialize).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct StructureCacheEnvelope {
-    files: Vec<CachedFileEntry>,
-    timestamp: i64,
-}
-
-/// A single file entry in the structure cache.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct CachedFileEntry {
-    path: PathBuf,
-    definitions: Vec<DefinitionInfo>,
-}
-
-/// Write a structure cache to disk from a `CodeStructure`.
-///
-/// The cache uses a JSON envelope with a timestamp, mirroring the callgraph
-/// cache format. Only file paths and definitions are persisted.
-pub fn write_structure_cache(structure: &CodeStructure, cache_path: &Path) -> TldrResult<()> {
-    let envelope = StructureCacheEnvelope {
-        files: structure
-            .files
-            .iter()
-            .map(|f| CachedFileEntry {
-                path: f.path.clone(),
-                definitions: f.definitions.clone(),
-            })
-            .collect(),
-        timestamp: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as i64,
-    };
-    let json = serde_json::to_string_pretty(&envelope).map_err(|e| {
-        crate::TldrError::SerializationError(format!("Failed to serialize structure cache: {}", e))
-    })?;
-    if let Some(parent) = cache_path.parent() {
-        std::fs::create_dir_all(parent).map_err(crate::TldrError::IoError)?;
-    }
-    std::fs::write(cache_path, json).map_err(crate::TldrError::IoError)?;
-    Ok(())
-}
-
-/// Read a structure cache file and build a path -> definitions lookup.
-///
-/// Returns a `StructureLookup` with definitions indexed by relative file path.
-pub fn read_structure_cache(cache_path: &Path) -> TldrResult<StructureLookup> {
-    let content = std::fs::read_to_string(cache_path).map_err(crate::TldrError::IoError)?;
-    let envelope: StructureCacheEnvelope = serde_json::from_str(&content).map_err(|e| {
-        crate::TldrError::SerializationError(format!("Failed to parse structure cache: {}", e))
-    })?;
-    let mut by_file = HashMap::new();
-    for entry in envelope.files {
-        by_file.insert(entry.path, entry.definitions);
-    }
-    Ok(StructureLookup { by_file })
 }
 
 /// Convert regex `SearchMatch` results into `Bm25Result`-compatible structures
@@ -427,8 +315,11 @@ fn do_regex_search(
     // search-side counter agrees with what `chunk_code` would scan, instead
     // of re-running `ProjectWalker` here. `corpus_stats_for_language` honors
     // `.gitignore`/`.tldrignore` and the project's supported-extension set.
+    #[cfg(feature = "semantic")]
     let corpus_files =
         crate::semantic::chunker::corpus_stats_for_language(root, language).files_indexed;
+    #[cfg(not(feature = "semantic"))]
+    let corpus_files = unique_files.len();
     // Use at least the number of unique matched files (in case walk missed some)
     let total = corpus_files.max(unique_files.len());
     Ok((matches, total))
@@ -461,59 +352,25 @@ pub fn enriched_search(
     search_with_inner(query, root, language, options, None, None, None)
 }
 
-/// Perform enriched search using a pre-built call graph cache for enrichment.
-///
-/// This is the same pipeline as `enriched_search()` but uses a cached call graph
-/// (produced by the daemon's `warm` command) instead of rebuilding the full V2
-/// call graph from scratch. This reduces call graph enrichment from ~50s to ~1ms.
-///
-/// **Note:** This function always enriches with the call graph cache, regardless
-/// of `options.include_callgraph`. The cache path presence is the signal to enrich.
-///
-/// # Arguments
-/// * `query` - Search query string
-/// * `root` - Project root directory to search
-/// * `language` - Programming language
-/// * `options` - Search options (top_k, include_callgraph)
-/// * `cache_path` - Path to the call graph cache JSON file (.tldr/cache/call_graph.json)
-///
-/// # Returns
-/// An `EnrichedSearchReport` with callers/callees populated from the cache.
-pub fn enriched_search_with_callgraph_cache(
-    query: &str,
-    root: &Path,
-    language: Language,
-    options: EnrichedSearchOptions,
-    cache_path: &Path,
-) -> TldrResult<EnrichedSearchReport> {
-    search_with_inner(query, root, language, options, None, None, Some(cache_path))
-}
-
-/// Perform enriched search using a pre-built (cached) BM25 index.
-///
-/// This is the same pipeline as `enriched_search()` but skips
-/// `Bm25Index::from_project()` by accepting an already-built index.
-/// Use this when the caller can cache and reuse the BM25 index across queries.
-///
-/// # Arguments
-/// * `query` - Search query string
-/// * `root` - Project root directory (for tree-sitter parsing of result files)
-/// * `language` - Programming language
-/// * `options` - Search options (top_k, include_callgraph)
-/// * `index` - Pre-built BM25 index
-///
-/// # Returns
-/// An `EnrichedSearchReport` identical to what `enriched_search()` would produce.
-/// Note: When `options.search_mode` is `SearchMode::Regex`, the provided BM25 index
-/// is ignored -- the regex path does its own file scanning via `text::search()`.
-pub fn enriched_search_with_index(
+/// Perform enriched search entirely from generation-pinned resident artifacts.
+pub fn enriched_search_with_artifacts(
     query: &str,
     root: &Path,
     language: Language,
     options: EnrichedSearchOptions,
     index: &Bm25Index,
+    structure_lookup: &StructureLookup,
+    callgraph_lookup: &CallGraphLookup,
 ) -> TldrResult<EnrichedSearchReport> {
-    search_with_inner(query, root, language, options, Some(index), None, None)
+    search_with_inner(
+        query,
+        root,
+        language,
+        options,
+        Some(index),
+        Some(structure_lookup),
+        Some(callgraph_lookup),
+    )
 }
 
 /// Process a single file's BM25 results: parse with tree-sitter, find enclosing
@@ -783,45 +640,7 @@ fn enrich_and_deduplicate_with_cache(
     dedup.into_values().collect()
 }
 
-/// Perform enriched search using a pre-built structure cache for enrichment.
-///
-/// This is the same pipeline as `enriched_search()` but uses a cached set of
-/// definitions (produced by `write_structure_cache` / `read_structure_cache`)
-/// instead of parsing every result file with tree-sitter. Files missing from
-/// the cache fall back to tree-sitter parsing automatically.
-///
-/// # Arguments
-/// * `query` - Search query string
-/// * `root` - Project root directory to search
-/// * `language` - Programming language
-/// * `options` - Search options (top_k, include_callgraph, search_mode)
-/// * `structure_lookup` - Pre-built path -> definitions lookup
-///
-/// # Returns
-/// An `EnrichedSearchReport` with search_mode indicating "cached-structure".
-pub fn enriched_search_with_structure_cache(
-    query: &str,
-    root: &Path,
-    language: Language,
-    options: EnrichedSearchOptions,
-    structure_lookup: &StructureLookup,
-) -> TldrResult<EnrichedSearchReport> {
-    search_with_inner(
-        query,
-        root,
-        language,
-        options,
-        None,
-        Some(structure_lookup),
-        None,
-    )
-}
-
-/// Shared inner pipeline for all enriched search variants.
-///
-/// Consolidates the 7-stage enriched search pipeline that was previously
-/// duplicated across 4 public functions. Each public function becomes a
-/// thin wrapper that passes the appropriate cache arguments.
+/// Shared inner pipeline for local and resident search.
 ///
 /// # Arguments
 /// * `query` - Search query string (natural language or code terms)
@@ -830,23 +649,14 @@ pub fn enriched_search_with_structure_cache(
 /// * `options` - Search options (top_k, include_callgraph, search_mode)
 /// * `bm25_index` - Pre-built BM25 index to reuse, or None to build fresh
 /// * `structure_cache` - Pre-built structure lookup to skip tree-sitter, or None for live parsing
-/// * `callgraph_cache_path` - Path to call graph cache JSON, or None to use try_enrich / skip
-///
-/// # Call graph enrichment behavior
-/// * `callgraph_cache_path = Some(path)` -- always enriches from the cache file,
-///   ignoring `options.include_callgraph`.
-/// * `callgraph_cache_path = None` + `options.include_callgraph = true` -- builds
-///   live call graph via `try_enrich_with_callgraph`.
-/// * `callgraph_cache_path = None` + `options.include_callgraph = false` -- skips
-///   call graph enrichment entirely.
-pub fn search_with_inner(
+fn search_with_inner(
     query: &str,
     root: &Path,
     language: Language,
     options: EnrichedSearchOptions,
     bm25_index: Option<&Bm25Index>,
     structure_cache: Option<&StructureLookup>,
-    callgraph_cache_path: Option<&Path>,
+    callgraph_lookup: Option<&CallGraphLookup>,
 ) -> TldrResult<EnrichedSearchReport> {
     let top_k = options.top_k;
     let mode_prefix;
@@ -862,6 +672,19 @@ pub fn search_with_inner(
         && Tokenizer::new().tokenize(query).is_empty()
         && !query.trim().is_empty();
 
+    let regex_retrieval = |pattern: &str| -> TldrResult<(Vec<Bm25Result>, usize)> {
+        if let Some(index) = bm25_index {
+            let raw_limit = (top_k * 10).max(200);
+            Ok((
+                index.regex_search(pattern, raw_limit)?,
+                index.document_count(),
+            ))
+        } else {
+            let (matches, total) = do_regex_search(pattern, root, language, top_k)?;
+            Ok((regex_matches_to_bm25_results(&matches), total))
+        }
+    };
+
     // Stage 1 & 2: BM25/Regex dispatch -- get raw results
     let (raw_results, total_files) = match &options.search_mode {
         SearchMode::Bm25 if bm25_falls_back_to_literal => {
@@ -870,8 +693,8 @@ pub fn search_with_inner(
             // the report so downstream consumers can see what happened.
             mode_prefix = "literal-fallback";
             let escaped = regex::escape(query.trim());
-            let (matches, total) = do_regex_search(&escaped, root, language, top_k)?;
-            if matches.is_empty() {
+            let (results, total) = regex_retrieval(&escaped)?;
+            if results.is_empty() {
                 return Ok(EnrichedSearchReport {
                     query: query.to_string(),
                     results: Vec::new(),
@@ -884,7 +707,7 @@ pub fn search_with_inner(
                     },
                 });
             }
-            (regex_matches_to_bm25_results(&matches), total)
+            (results, total)
         }
         SearchMode::Bm25 => {
             mode_prefix = "bm25";
@@ -932,8 +755,8 @@ pub fn search_with_inner(
         }
         SearchMode::Regex(pattern) => {
             mode_prefix = "regex";
-            let (matches, total) = do_regex_search(pattern, root, language, top_k)?;
-            if matches.is_empty() {
+            let (results, total) = regex_retrieval(pattern)?;
+            if results.is_empty() {
                 return Ok(EnrichedSearchReport {
                     query: pattern.clone(),
                     results: Vec::new(),
@@ -946,7 +769,7 @@ pub fn search_with_inner(
                     },
                 });
             }
-            (regex_matches_to_bm25_results(&matches), total)
+            (results, total)
         }
         SearchMode::Hybrid {
             query: hybrid_query,
@@ -987,8 +810,8 @@ pub fn search_with_inner(
             };
 
             // --- Regex retrieval ---
-            let (regex_matches, _regex_total) = do_regex_search(pattern, root, language, top_k)?;
-            if regex_matches.is_empty() {
+            let (regex_results, _regex_total) = regex_retrieval(pattern)?;
+            if regex_results.is_empty() {
                 return Ok(EnrichedSearchReport {
                     query: hybrid_query.clone(),
                     results: Vec::new(),
@@ -997,7 +820,6 @@ pub fn search_with_inner(
                     search_mode: "hybrid(bm25+regex)".to_string(),
                 });
             }
-            let regex_results = regex_matches_to_bm25_results(&regex_matches);
 
             // --- Build rank maps (file_path -> 1-indexed rank) ---
             let bm25_ranks: HashMap<&Path, usize> = bm25_results
@@ -1235,10 +1057,8 @@ pub fn search_with_inner(
         "structure"
     };
 
-    match callgraph_cache_path {
-        Some(path) => {
-            // Always enrich from cache file (ignores include_callgraph option)
-            let lookup = read_callgraph_cache(path)?;
+    match callgraph_lookup {
+        Some(lookup) if options.include_callgraph => {
             for result in &mut sorted {
                 if result.kind == "module" {
                     continue;
@@ -1273,7 +1093,7 @@ pub fn search_with_inner(
                 search_mode: format!("{}+{}+callgraph", mode_prefix, structure_label),
             })
         }
-        None => {
+        _ => {
             // No call graph enrichment
             let total_results = sorted.len();
             Ok(EnrichedSearchReport {

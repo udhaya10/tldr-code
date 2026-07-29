@@ -470,9 +470,23 @@ pub fn analyze_coupling_with_graph(
 ) -> TldrResult<CouplingReport> {
     // Collect module info for import analysis
     let module_infos = collect_module_infos(path, language)?;
+    Ok(analyze_coupling_with_module_infos(
+        call_graph,
+        module_infos,
+        options,
+    ))
+}
 
+/// Analyze coupling from a stored call graph and stored module projections.
+///
+/// This is the resident ArtifactStore seam; it performs no source walk.
+pub fn analyze_coupling_with_module_infos(
+    call_graph: &ProjectCallGraph,
+    module_infos: HashMap<PathBuf, ModuleInfo>,
+    options: &CouplingOptions,
+) -> CouplingReport {
     if module_infos.is_empty() {
-        return Ok(CouplingReport::default());
+        return CouplingReport::default();
     }
 
     // Build import maps for each module
@@ -524,7 +538,7 @@ pub fn analyze_coupling_with_graph(
     let was_truncated = couplings.len() > options.max_pairs;
     couplings.truncate(options.max_pairs);
 
-    Ok(CouplingReport {
+    CouplingReport {
         modules_analyzed: module_infos.len(),
         pairs_analyzed: total_pairs,
         total_cross_file_pairs: call_pairs.len(),
@@ -542,7 +556,7 @@ pub fn analyze_coupling_with_graph(
         } else {
             None
         },
-    })
+    }
 }
 
 // =============================================================================

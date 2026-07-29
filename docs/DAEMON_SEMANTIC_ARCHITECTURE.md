@@ -348,15 +348,14 @@ answer:
 | Daemon up, index building | `index build in progress — retry when warm completes` |
 | Daemon up, index warm | full-quality ranked results (~3 ms serve) |
 
-Parked surfaces (capability exists but the warm path for it does not yet)
-answer with the standardized message
-`not available in this version, <reason>`:
+Resident retrieval surfaces:
 
 | Surface | Status | Un-parked by |
 | --- | --- | --- |
 | `tldr similar` | parked (seeded similarity needs a warm daemon API) | TLDR-utj.4 |
-| `tldr semantic --hybrid` | parked (BM25 fusion moving into the daemon) | TLDR-utj.3 |
-| MCP `tldr_semantic` | parked (MCP has no daemon client) | TLDR-utj.5 |
+| `tldr semantic --hybrid` | active; same-generation resident BM25 + dense RRF | TLDR-utj.3 |
+| MCP `tldr_semantic` | active through the shared bounded daemon client | TLDR-utj.3 |
+| MCP `tldr_bm25` | active through the same resident BM25 index as the CLI | TLDR-utj.3 |
 
 ### 11.2 The warm flow (the blessed sequence)
 

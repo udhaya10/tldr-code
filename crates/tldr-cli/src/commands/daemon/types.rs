@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+use tldr_core::analysis::references::{ReferenceKind, SearchScope};
 use tldr_core::{config::TldrConfig, Language, SmellType, ThresholdPreset};
 
 const MAX_SESSION_HOT_ITEMS: usize = 64;
@@ -637,13 +638,87 @@ pub enum DaemonCommand {
         /// silently hide correct top-ranked matches.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         threshold: Option<f64>,
+        /// Fuse the resident lexical and dense rankings with RRF.
+        #[serde(default)]
+        hybrid: bool,
+        /// Lexical/dense language scope for hybrid search.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        languages: Vec<Language>,
     },
 
     // Pass-through analysis commands
-    /// Search for patterns in files
+    /// Enriched lexical search over a generation-pinned resident index.
     Search {
-        pattern: String,
-        max_results: Option<usize>,
+        query: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<PathBuf>,
+        language: Language,
+        #[serde(default = "default_top_k")]
+        top_k: usize,
+        #[serde(default = "default_true")]
+        include_callgraph: bool,
+        #[serde(default)]
+        regex: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        filter: Option<String>,
+    },
+
+    /// Find references from stored identifier occurrences.
+    References {
+        symbol: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<PathBuf>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        language: Option<Language>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        kinds: Vec<ReferenceKind>,
+        #[serde(default)]
+        scope: SearchScope,
+        #[serde(default = "default_reference_limit")]
+        limit: usize,
+        #[serde(default)]
+        include_definition: bool,
+    },
+
+    /// Resolve a project-wide symbol definition from stored definitions.
+    Definition {
+        symbol: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<PathBuf>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        language: Option<Language>,
+    },
+
+    /// Build the import dependency graph from stored imports.
+    Deps {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<PathBuf>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        language: Option<Language>,
+        #[serde(default)]
+        include_external: bool,
+        #[serde(default)]
+        collapse_packages: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_depth: Option<usize>,
+        #[serde(default)]
+        show_cycles_only: bool,
+        #[serde(default = "default_cycle_length")]
+        max_cycle_length: usize,
+    },
+
+    /// Compute project-wide coupling from stored call edges and imports.
+    Coupling {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<PathBuf>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        language: Option<Language>,
+        #[serde(default = "default_max_pairs")]
+        max_pairs: usize,
+        #[serde(default)]
+        martin_top: usize,
+        #[serde(default)]
+        cycles_only: bool,
     },
 
     /// Extract file information
@@ -718,19 +793,6 @@ pub enum DaemonCommand {
         file: Option<PathBuf>,
     },
 
-    /// Get control flow graph
-    Cfg { file: PathBuf, function: String },
-
-    /// Get data flow graph
-    Dfg { file: PathBuf, function: String },
-
-    /// Get program slice
-    Slice {
-        file: PathBuf,
-        function: String,
-        line: usize,
-    },
-
     /// Get call graph
     Calls {
         path: Option<PathBuf>,
@@ -795,15 +857,6 @@ pub enum DaemonCommand {
         no_default_ignore: bool,
     },
 
-    /// Get architecture analysis
-    Arch {
-        path: Option<PathBuf>,
-        /// Optional language override. Falls back to auto-detection when
-        /// `None`. Accepts the legacy `lang` key for v0.2.x clients.
-        #[serde(default, alias = "lang", skip_serializing_if = "Option::is_none")]
-        language: Option<Language>,
-    },
-
     /// Get imports for a file
     Imports {
         file: PathBuf,
@@ -818,23 +871,6 @@ pub enum DaemonCommand {
     Importers {
         module: String,
         path: Option<PathBuf>,
-        /// Optional language override. Falls back to auto-detection when
-        /// `None`. Accepts the legacy `lang` key for v0.2.x clients.
-        #[serde(default, alias = "lang", skip_serializing_if = "Option::is_none")]
-        language: Option<Language>,
-    },
-
-    /// Run diagnostics
-    Diagnostics {
-        path: PathBuf,
-        project: Option<bool>,
-    },
-
-    /// Analyze change impact
-    ChangeImpact {
-        files: Option<Vec<PathBuf>>,
-        session: Option<bool>,
-        git: Option<bool>,
         /// Optional language override. Falls back to auto-detection when
         /// `None`. Accepts the legacy `lang` key for v0.2.x clients.
         #[serde(default, alias = "lang", skip_serializing_if = "Option::is_none")]
@@ -895,6 +931,18 @@ fn default_true() -> bool {
 }
 
 fn default_top_k() -> usize {
+    10
+}
+
+fn default_reference_limit() -> usize {
+    20
+}
+
+fn default_max_pairs() -> usize {
+    20
+}
+
+fn default_cycle_length() -> usize {
     10
 }
 
